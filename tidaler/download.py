@@ -1813,9 +1813,16 @@ class Download:
         path_out = path_file.with_name(path_file.stem + ".ds" + path_file.suffix)
         sample_fmt = "s16" if out_depth == 16 else "s32"
 
+        # soxr at precision=33 is libsoxr's "very high" preset (linear phase by
+        # default); triangular dither is TPDF, applied by swresample only when
+        # the format conversion actually reduces precision.
+        # equivalent to the redacted sox command `sox -S input.flac -R -G -b 16 output.flac rate -v -L 48000 dither`
+        # i dont really know much about dithering methods but i trust those guys
         output_kwargs: dict = {
-            "ar": out_rate,
-            "sample_fmt": sample_fmt,
+            "af": (
+                f"aresample=resampler=soxr:precision=33"
+                f":osr={out_rate}:osf={sample_fmt}:dither_method=triangular"
+            ),
             "acodec": "flac",
             "map_metadata": "0",
             "loglevel": "quiet",
