@@ -1,6 +1,8 @@
 # tidaler! (download from tidal)
 
-fork of tidal_dl_ng by exislow, their account and repo dissapeared. this is a personal fork with tweaks to metadata to better suit my preferences. also probably not gonna be maintaining the gui since i never use it
+fork of tidal_dl_ng by exislow (the original repo and account disappeared). this fork exists to maintain functionality, and add some targeted improvements.
+
+my main focus is the cli. gui support is still included, but i don’t use it, so gui fixes are lower priority. patches are welcome.
 
 [![Release](https://img.shields.io/github/v/release/maya-doshi/tidaler)](https://img.shields.io/github/v/release/maya-doshi/tidaler)
 [![Build status](https://img.shields.io/github/actions/workflow/status/maya-doshi/tidaler/release-or-test-build.yml)](https://github.com/maya-doshi/tidaler/actions/workflows/release-or-test-build.yml)
@@ -9,7 +11,7 @@ fork of tidal_dl_ng by exislow, their account and repo dissapeared. this is a pe
 
 This tool allows you to download songs and videos from TIDAL. Multithreaded and multi-chunked downloads are supported.
 
-⚠️ **Windows** Defender / **Anti Virus** software / web browser alerts, while you try to download the app binary: This is a **false positive**. Please read [this issue](https://github.com/maya-doshi/tidaler/issues/231), [PyInstaller (used by this project) statement](https://github.com/pyinstaller/pyinstaller/blob/develop/.github/ISSUE_TEMPLATE/antivirus.md) and [the alternative installation solution](https://github.com/maya-doshi/tidaler/?tab=readme-ov-file#-installation--upgrade).
+**Windows** Defender / **Anti Virus** software / web browser alerts, while you try to download the app binary: This is a **false positive**. Please read [this issue](https://github.com/maya-doshi/tidaler/issues/231), [PyInstaller (used by this project) statement](https://github.com/pyinstaller/pyinstaller/blob/develop/.github/ISSUE_TEMPLATE/antivirus.md) and [the alternative installation solution](https://github.com/maya-doshi/tidaler/?tab=readme-ov-file#-installation--upgrade).
 
 **A paid TIDAL plan is required!** Audio quality varies up to HiRes Lossless / TIDAL MAX 24-bit, 192 kHz depending on the song available. Dolby Atmos is supported. You can use the command line or GUI version of this tool.
 
@@ -37,7 +39,7 @@ $ tidaler --help
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## 💻 Installation / Upgrade
+## Installation / Upgrade
 
 **Requirements**: Python version 3.12 / 3.13 (other versions might work but are not tested!)
 
@@ -47,7 +49,7 @@ pip install --upgrade tidaler
 pip install --upgrade "tidaler[gui]"
 ```
 
-## ⌨️ Usage
+## Usage
 
 You can use the command line (CLI) version to download media by URL:
 
@@ -79,7 +81,7 @@ tidaler gui
 If you would like to use the GUI version as a binary, have a look at the
 [release page](https://github.com/maya-doshi/tidaler/releases) and download the correct version for your OS.
 
-## 🧁 Features
+## Features
 
 - Download tracks, videos, albums, playlists, your favorites etc.
 - Multithreaded and multi-chunked downloads
@@ -90,9 +92,9 @@ If you would like to use the GUI version as a binary, have a look at the
 - Creates playlist files
 - Can symlink tracks instead of having several copies, if added to different playlists
 
-## ▶️ Getting started with development
+## Getting started with development
 
-### 🚰 Install dependencies
+### Install dependencies
 
 Clone this repository and install the dependencies:
 
@@ -109,7 +111,7 @@ tidaler/cli.py
 tidaler/gui.py
 ```
 
-### 📺 GUI Builder
+### GUI Builder
 
 The GUI is built with `PySide6` using the [Qt Designer](https://doc.qt.io/qt-6/qtdesigner-manual.html):
 
@@ -125,7 +127,7 @@ pyside6-uic tidaler/ui/main.ui -o tidaler/ui/main.py
 
 This needs to be done for each created / modified `*.ui` file accordingly.
 
-### 🏗 Build the project
+### Build the project
 
 To build the project use this command:
 
@@ -150,7 +152,7 @@ To finalize the set-up for publishing to PyPi or Artifactory, see [here](https:/
 For activating the automatic documentation with MkDocs, see [here](https://fpgmaas.github.io/cookiecutter-poetry/features/mkdocs/#enabling-the-documentation-on-github).
 To enable the code coverage reports, see [here](https://fpgmaas.github.io/cookiecutter-poetry/features/codecov/).
 
-## ❓ FAQ
+## FAQ
 
 ### macOS Error Message: File/App is damaged and cannot be opened. You should move it to Trash
 
@@ -196,19 +198,17 @@ This is due to the Python `ffmpeg` library which is used and only happens on win
 
 You need to activate `download_dolby_atmos` in the settings. Then, if an item is available in Dolby Atmos, it will be downloaded as a Dolby Atmos file instead of a stereo audio file. Dolby Atmos is only available as 320kbps at TIDAL (you cannot adjust the quality for Dolby Atmos downloads). If an item is available in Dolby Atmos, the "Quality" column in the GUI will indicate this with `Dolby Atmos`.
 
-## ‼️ Disclaimer
+## Disclaimer
 
 - For educational purposes only. I am not liable and responsible for any damage that happens.
 - You should not use this method to distribute or pirate music.
 - It may be illegal to use this app in your country.
 
-## 🫂 Contributors
+## Contributors
 
 mainly exislow
 
 Thanks to all, who have contributed to this project!
-
-Special thanks goes out to [@orbittwz](https://github.com/orbittwz) for all his support in the issues section.
 
 <a href="https://github.com/maya-doshi/tidaler/graphs/contributors"><img src="https://contributors-img.web.app/image?repo=maya-doshi/tidaler" /></a>
 
