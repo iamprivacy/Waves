@@ -1810,40 +1810,52 @@ class Download:
             f"(target {target_depth}-bit/{target_rate} Hz)."
         )
 
-        path_out = path_file.with_name(path_file.stem + ".ds" + path_file.suffix)
+        # only run the format-conversion pieces of the filter when the
+        # corresponding dimension is actually changing. If only the rate is
+        # dropping, leave bit depth untouched (no osf, no dither). If only the
+        # depth is dropping, skip the resampler entirely.
         sample_fmt = "s16" if out_depth == 16 else "s32"
+        rate_changing = out_rate != src_rate
+        depth_changing = out_depth != src_depth
 
-        # soxr at precision=33 is libsoxr's "very high" preset (linear phase by
-        # default); triangular dither is TPDF, applied by swresample only when
-        # the format conversion actually reduces precision.
-        # equivalent to the redacted sox command `sox -S input.flac -R -G -b 16 output.flac rate -v -L 48000 dither`
+        # mostly equivalent to the redacted sox command but no clipping protection
+        # `sox -S input.flac -R -G -b 16 output.flac rate -v -L 48000 dither`
         # i dont really know much about dithering methods but i trust those guys
+        filter_parts = ["resampler=soxr", "precision=33"]
+        if rate_changing:
+            filter_parts.append(f"osr={out_rate}")
+        if depth_changing:
+            filter_parts.append(f"osf={sample_fmt}")
+            filter_parts.append("dither_method=triangular")
+        af = "aresample=" + ":".join(filter_parts)
+
         output_kwargs: dict = {
-            "af": (
-                f"aresample=resampler=soxr:precision=33"
-                f":osr={out_rate}:osf={sample_fmt}:dither_method=triangular"
-            ),
+            "af": af,
             "acodec": "flac",
             "map_metadata": "0",
-            "loglevel": "quiet",
+            "loglevel": "error",
         }
         if out_depth == 24:
             # ffmpeg's FLAC encoder needs s32 + an explicit bits_per_raw_sample
             # to mark the stream as 24-bit; otherwise it'll be tagged as 32-bit.
             output_kwargs["bits_per_raw_sample"] = 24
 
-        ffmpeg = (
-            FFmpeg(executable=self.settings.data.path_binary_ffmpeg)
-            .option("y")
-            .option("hide_banner")
-            .option("nostdin")
-            .input(url=path_file)
-            .output(url=path_out, **output_kwargs)
-        )
-        ffmpeg.execute()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
+            path_out = pathlib.Path(tmp_path_dir) / path_file.name
 
-        path_file.unlink()
-        return path_out
+            ffmpeg = (
+                FFmpeg(executable=self.settings.data.path_binary_ffmpeg)
+                .option("y")
+                .option("hide_banner")
+                .option("nostdin")
+                .input(url=path_file)
+                .output(url=path_out, **output_kwargs)
+            )
+            ffmpeg.execute()
+
+            shutil.move(path_out, path_file)
+
+        return path_file
 
     def _extract_video_stream(self, m3u8_variant: m3u8.M3U8, quality: int) -> tuple[m3u8.M3U8 | bool, str]:
         """Extract the best matching video stream from an m3u8 variant playlist.
