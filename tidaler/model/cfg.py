@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from dataclasses_json import dataclass_json
 from tidalapi import Quality
 
-from tidaler.constants import CoverDimensions, InitialKey, MetadataTargetUPC, QualityVideo
+from tidaler.constants import CoverDimensions, DownsampleTarget, InitialKey, MetadataTargetUPC, QualityVideo
 
 
 @dataclass_json
@@ -42,6 +42,8 @@ class Settings:
     mark_explicit: bool = False
     cover_album_file: bool = True
     extract_flac: bool = True
+    downsample_enabled: bool = False
+    downsample_target: DownsampleTarget = DownsampleTarget.BIT16_48
     downloads_simultaneous_per_track_max: int = 20
     download_delay_sec_min: float = 3.0
     download_delay_sec_max: float = 5.0
@@ -108,6 +110,16 @@ class HelpSettings:
     mark_explicit: str = "Mark explicit tracks with '🅴' in track title (only applies to metadata)."
     cover_album_file: str = "Save cover to 'cover.jpg', if an album is downloaded."
     extract_flac: str = "Extract FLAC audio tracks from MP4 containers and save them as `*.flac` (uses FFmpeg)."
+    downsample_enabled: str = (
+        "Downsample FLAC files toward a fixed target rate/bit-depth using ffmpeg. "
+        "Each dimension is reduced independently and never upsampled — a 24-bit/44.1 kHz "
+        "source with a 16/48 target becomes 16-bit/44.1 kHz; a 16-bit/44.1 kHz source is "
+        "left untouched. Useful for capping HI_RES_LOSSLESS downloads at a saner archive size."
+    )
+    downsample_target: str = (
+        "Downsample target when downsample_enabled is true: "
+        "'16_48' (16 bit / 48 kHz) or '24_48' (24 bit / 48 kHz)."
+    )
     downloads_simultaneous_per_track_max: str = "Maximum number of simultaneous chunk downloads per track."
     download_delay_sec_min: str = "Lower boundary for the calculation of the download delay in seconds."
     download_delay_sec_max: str = "Upper boundary for the calculation of the download delay in seconds."

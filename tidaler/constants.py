@@ -100,3 +100,16 @@ METADATA_LOOKUP_UPC: dict[str, dict[str, str]] = {
 class InitialKey(StrEnum):
     ALPHANUMERIC = "alphanumeric"
     CLASSIC = "classic"
+
+
+class DownsampleTarget(StrEnum):
+    BIT16_48 = "16_48"
+    BIT24_48 = "24_48"
+
+    @property
+    def sample_rate(self) -> int:
+        return 48000
+
+    @property
+    def bit_depth(self) -> int:
+        return 16 if self is DownsampleTarget.BIT16_48 else 24
