@@ -1,7 +1,7 @@
 [project]
 name = "tidaler"
 authors = [{ name = "Maya Doshi", email = "<maya-doshi@proton.me>" }]
-version = "0.1.4"
+version = "0.1.5"
 description = "TIDAL Downloader (fork of tidal-dl-ng)"
 readme = "README.md"
 license = "AGPL-3.0-only"
