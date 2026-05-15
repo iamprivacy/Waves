@@ -162,6 +162,9 @@ class Download:
         self.event_abort = event_abort
         self.event_run = event_run
 
+        if not self.settings.data.path_binary_ffmpeg:
+            self.settings.data.path_binary_ffmpeg = shutil.which('ffmpeg')
+
         if not self.settings.data.path_binary_ffmpeg and (
             self.settings.data.video_convert_mp4 or self.settings.data.extract_flac
         ):
@@ -169,9 +172,9 @@ class Download:
             self.settings.data.extract_flac = False
 
             self.fn_logger.error(
-                "FFmpeg path is not set. Videos can be downloaded but will not be processed. FLAC cannot be "
-                "extracted from MP4 containers. Make sure FFmpeg is installed. The path to the FFmpeg binary must "
-                "be set in (`path_binary_ffmpeg`)."
+                "FFmpeg path is not set and it is not in the path. Videos can be downloaded but will not be processed."
+                "FLAC cannot be extracted from MP4 containers. Make sure FFmpeg is installed. The path to the FFmpeg"
+                "binary must be set in (`path_binary_ffmpeg`) or just have it in the $PATH."
             )
 
     def _get_media_urls(
