@@ -52,7 +52,6 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from requests.exceptions import HTTPError
-from tidalapi.session import LinkLogin
 
 from tidaler import __version__, update_available
 from tidaler.dialog import DialogLogin, DialogPreferences, DialogVersion
@@ -214,21 +213,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             result = self.tidal.login_token()
 
             if not result:
-                hint: str = "After you have finished the TIDAL login via web browser click the 'OK' button."
+                hint: str = "Click the link, sign in on tidal, then paste the url here"
 
                 while not result:
-                    link_login: LinkLogin = self.tidal.session.get_link_login()
-                    expires_in = int(link_login.expires_in) if hasattr(link_login, "expires_in") else 0
+                    link_login: str = self.tidal.session.pkce_login_url()
+                    # expires_in = int(link_login.expires_in) if hasattr(link_login, "expires_in") else 0
                     d_login: DialogLogin = DialogLogin(
-                        url_login=link_login.verification_uri_complete,
+                        url_login=link_login,
                         hint=hint,
-                        expires_in=expires_in,
+                        # expires_in=expires_in,
                         parent=self,
                     )
 
                     if d_login.return_code == 1:
+                        redirect_url: str = d_login.redirect_url
+                        if not redirect_url:
+                            hint = "paste the redirect oops url after logging in over here"
+                            continue
                         try:
-                            self.tidal.session.process_link_login(link_login, until_expiry=False)
+                            token_json = self.tidal.session.pkce_get_auth_token(redirect_url)
+                            self.tidal.session.process_auth_token(token_json, is_pkce_token=True)
                             self.tidal.login_finalize()
 
                             result = True

@@ -72,7 +72,7 @@
        </font>
       </property>
       <property name="text">
-       <string>TIDAL Login (as Device)</string>
+       <string>TIDAL Login</string>
       </property>
      </widget>
     </item>
@@ -90,7 +90,7 @@
        </font>
       </property>
       <property name="text">
-       <string>Click the link below and login with your TIDAL credentials. TIDAL will ask you, if you like to add this app as a new device. You need to confirm this.</string>
+       <string>Click the link below and login with your TIDAL credentials. You will be redirected to a page, paste that URL here.</string>
       </property>
       <property name="wordWrap">
        <bool>true</bool>
@@ -108,30 +108,11 @@
      </widget>
     </item>
     <item>
-     <layout class="QHBoxLayout" name="horizontalLayout">
-      <item>
-       <widget class="QLabel" name="l_expires_description">
-        <property name="text">
-         <string>This link expires at:</string>
+      <widget class="QLineEdit" name="le_redirect_url">
+        <property name="placeholderText">
+          <string>Paste here!</string>
         </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="l_expires_date_time">
-        <property name="font">
-         <font>
-          <bold>true</bold>
-         </font>
-        </property>
-        <property name="text">
-         <string>COMPUTING</string>
-        </property>
-        <property name="alignment">
-         <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
-        </property>
-       </widget>
-      </item>
-     </layout>
+      </widget>
     </item>
     <item>
      <widget class="QLabel" name="l_hint">

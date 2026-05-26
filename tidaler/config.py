@@ -134,7 +134,7 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
 
         return True
 
-    def login_token(self, do_pkce: bool = False) -> bool:
+    def login_token(self, do_pkce: bool = True) -> bool:
         result = False
         self.is_pkce = do_pkce
 
@@ -238,7 +238,7 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         print("Session is now in Normal mode.")
         return True
 
-    def login(self, fn_print: Callable) -> bool:
+    def login(self, fn_print: Callable, fn_input: Callable) -> bool:
         is_token = self.login_token()
         result = False
 
@@ -249,10 +249,9 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         elif not is_token:
             fn_print("You either do not have a token or your token is invalid.")
             fn_print("No worries, we will handle this...")
-            # Login method: Device linking
-            self.session.login_oauth_simple(fn_print)
-            # Login method: PKCE authorization (was necessary for HI_RES_LOSSLESS streaming earlier)
-            # self.session.login_pkce(fn_print)
+
+            # Login method: PKCE authorization (tidal was being weird and downgrading quality)
+            self.session.login_pkce(fn_print)
 
             is_login = self.login_finalize()
 
