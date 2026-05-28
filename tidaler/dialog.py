@@ -193,6 +193,8 @@ class DialogPreferences(QtWidgets.QDialog):
             "format_track",
             "format_video",
             "path_binary_ffmpeg",
+            "filename_delimiter_artist",
+            "filename_delimiter_album_artist",
         ]
 
     def _init_spin_box(self):

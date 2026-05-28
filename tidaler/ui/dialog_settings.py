@@ -529,6 +529,44 @@ class Ui_DialogSettings(object):
 
         self.verticalLayout_2.addLayout(self.lh_path_binary_ffmpeg)
 
+        self.lh_path_filename_delimiter_artist = QHBoxLayout()
+        self.lh_path_filename_delimiter_artist.setObjectName(u"lh_path_filename_delimiter_artist")
+        self.l_icon_filename_delimiter_artist = QLabel(self.gb_path)
+        self.l_icon_filename_delimiter_artist.setObjectName(u"l_icon_filename_delimiter_artist")
+        sizePolicy4.setHeightForWidth(self.l_icon_filename_delimiter_artist.sizePolicy().hasHeightForWidth())
+        self.l_icon_filename_delimiter_artist.setSizePolicy(sizePolicy4)
+
+        self.lh_path_filename_delimiter_artist.addWidget(self.l_icon_filename_delimiter_artist)
+
+        self.l_filename_delimiter_artist = QLabel(self.gb_path)
+        self.l_filename_delimiter_artist.setObjectName(u"l_filename_delimiter_artist")
+        sizePolicy3.setHeightForWidth(self.l_filename_delimiter_artist.sizePolicy().hasHeightForWidth())
+        self.l_filename_delimiter_artist.setSizePolicy(sizePolicy3)
+
+        self.lh_path_filename_delimiter_artist.addWidget(self.l_filename_delimiter_artist)
+
+
+        self.verticalLayout_2.addLayout(self.lh_path_filename_delimiter_artist)
+
+        self.lh_path_filename_delimiter_album_artist = QHBoxLayout()
+        self.lh_path_filename_delimiter_album_artist.setObjectName(u"lh_path_filename_delimiter_album_artist")
+        self.l_icon_filename_delimiter_album_artist = QLabel(self.gb_path)
+        self.l_icon_filename_delimiter_album_artist.setObjectName(u"l_icon_filename_delimiter_album_artist")
+        sizePolicy4.setHeightForWidth(self.l_icon_filename_delimiter_album_artist.sizePolicy().hasHeightForWidth())
+        self.l_icon_filename_delimiter_album_artist.setSizePolicy(sizePolicy4)
+
+        self.lh_path_filename_delimiter_album_artist.addWidget(self.l_icon_filename_delimiter_album_artist)
+
+        self.l_filename_delimiter_album_artist = QLabel(self.gb_path)
+        self.l_filename_delimiter_album_artist.setObjectName(u"l_filename_delimiter_album_artist")
+        sizePolicy3.setHeightForWidth(self.l_filename_delimiter_album_artist.sizePolicy().hasHeightForWidth())
+        self.l_filename_delimiter_album_artist.setSizePolicy(sizePolicy3)
+
+        self.lh_path_filename_delimiter_album_artist.addWidget(self.l_filename_delimiter_album_artist)
+
+
+        self.verticalLayout_2.addLayout(self.lh_path_filename_delimiter_album_artist)
+
 
         self.horizontalLayout_2.addLayout(self.verticalLayout_2)
 
@@ -622,6 +660,26 @@ class Ui_DialogSettings(object):
 
         self.verticalLayout.addLayout(self.horizontalLayout_3)
 
+        self.horizontalLayout_14 = QHBoxLayout()
+        self.horizontalLayout_14.setObjectName(u"horizontalLayout_14")
+        self.le_filename_delimiter_artist = QLineEdit(self.gb_path)
+        self.le_filename_delimiter_artist.setObjectName(u"le_filename_delimiter_artist")
+
+        self.horizontalLayout_14.addWidget(self.le_filename_delimiter_artist)
+
+
+        self.verticalLayout.addLayout(self.horizontalLayout_14)
+
+        self.horizontalLayout_15 = QHBoxLayout()
+        self.horizontalLayout_15.setObjectName(u"horizontalLayout_15")
+        self.le_filename_delimiter_album_artist = QLineEdit(self.gb_path)
+        self.le_filename_delimiter_album_artist.setObjectName(u"le_filename_delimiter_album_artist")
+
+        self.horizontalLayout_15.addWidget(self.le_filename_delimiter_album_artist)
+
+
+        self.verticalLayout.addLayout(self.horizontalLayout_15)
+
 
         self.horizontalLayout_2.addLayout(self.verticalLayout)
 
@@ -694,6 +752,10 @@ class Ui_DialogSettings(object):
         self.l_format_mix.setText(QCoreApplication.translate("DialogSettings", u"TextLabel", None))
         self.l_icon_path_binary_ffmpeg.setText(QCoreApplication.translate("DialogSettings", u"TextLabel", None))
         self.l_path_binary_ffmpeg.setText(QCoreApplication.translate("DialogSettings", u"TextLabel", None))
+        self.l_icon_filename_delimiter_artist.setText(QCoreApplication.translate("DialogSettings", u"Artist delimiter", None))
+        self.l_filename_delimiter_artist.setText(QCoreApplication.translate("DialogSettings", u"Artist delimiter", None))
+        self.l_icon_filename_delimiter_album_artist.setText(QCoreApplication.translate("DialogSettings", u"Album artist delimiter", None))
+        self.l_filename_delimiter_album_artist.setText(QCoreApplication.translate("DialogSettings", u"Album artist delimiter", None))
         self.pb_download_base_path.setText(QCoreApplication.translate("DialogSettings", u"...", None))
         self.pb_path_binary_ffmpeg.setText(QCoreApplication.translate("DialogSettings", u"...", None))
     # retranslateUi
