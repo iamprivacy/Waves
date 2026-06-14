@@ -8,6 +8,7 @@ Classes:
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
 
+import contextlib
 import os
 import pathlib
 import random
@@ -66,11 +67,9 @@ from tidaler.helper.path import (
     url_to_filename,
 )
 from tidaler.helper.tidal import (
+    get_album_artists,
     instantiate_media,
     items_results_all,
-    get_album_artists,
-    name_builder_album_artist,
-    name_builder_artist,
     name_builder_item,
     name_builder_title,
 )
@@ -110,6 +109,9 @@ class RequestsClient:
 # TODO: Use pathlib.Path everywhere
 class Download:
     """Main class for managing downloads, segment merging, file operations, and metadata for TIDAL media."""
+
+    _FILE_OPERATION_RETRIES: int = 5
+    _FILE_OPERATION_RETRY_DELAY_SEC: float = 0.5
 
     settings: Settings
     tidal: "Tidal"
@@ -163,7 +165,7 @@ class Download:
         self.event_run = event_run
 
         if not self.settings.data.path_binary_ffmpeg:
-            self.settings.data.path_binary_ffmpeg = shutil.which('ffmpeg')
+            self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
 
         if not self.settings.data.path_binary_ffmpeg and (
             self.settings.data.video_convert_mp4 or self.settings.data.extract_flac
@@ -390,7 +392,7 @@ class Download:
             self.progress_gui.item_name.emit(media_name[:30])
 
         try:
-            p_task, progress_total, block_size = self._setup_progress(media_name, urls, progress_to_stdout)
+            p_task, _progress_total, block_size = self._setup_progress(media_name, urls, progress_to_stdout)
         except Exception:
             return False, path_file
 
@@ -1021,9 +1023,7 @@ class Download:
             self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
 
             # Move final file to the configured destination directory.
-            shutil.move(tmp_path_file, path_media_dst)
-
-            return True
+            return self._move_file(tmp_path_file, path_media_dst, overwrite=True)
 
     def _handle_metadata_and_extras(
         self,
@@ -1050,7 +1050,7 @@ class Download:
 
         # Write metadata to file.
         if media_stream:
-            result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
+            _result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
                 media, tmp_path_file, is_parent_album, media_stream
             )
 
@@ -1156,16 +1156,23 @@ class Download:
                 skip_file: bool = False
                 skip_symlink: bool = False
 
+            # Whether the destination is in place: either it was skipped (already present) or moved successfully.
+            moved: bool = skip_file
+
             if not skip_file:
                 self.fn_logger.debug(f"Move: {path_media_src} -> {path_media_dst}")
-                shutil.move(path_media_src, path_media_dst)
+                moved = self._move_file(path_media_src, path_media_dst, overwrite=True)
 
-            if not skip_symlink:
+            # Only replace the source with a symlink once the destination actually exists, otherwise a failed
+            # move would leave a broken symlink pointing at a missing file (and the source already unlinked).
+            if moved and not skip_symlink:
                 self.fn_logger.debug(f"Symlink: {path_media_src} -> {path_media_dst}")
                 path_media_dst_relative: pathlib.Path = path_media_dst.relative_to(path_media_src.parent, walk_up=True)
 
-                path_media_src.unlink(missing_ok=True)
-                path_media_src.symlink_to(path_media_dst_relative)
+                if self._unlink_with_retry(path_media_src):
+                    path_media_src.symlink_to(path_media_dst_relative)
+                else:
+                    self.fn_logger.error(f"Unable to replace source with symlink: {path_media_src}")
 
         return path_media_dst
 
@@ -1199,28 +1206,112 @@ class Download:
 
         return quality_old
 
-    def _move_file(self, path_file_source: pathlib.Path, path_file_destination: str | pathlib.Path) -> bool:
+    def _file_operation_retry_delay(self, attempt: int) -> float:
+        """Delay before retrying a file operation.
+
+        Args:
+            attempt (int): Zero-based retry attempt number.
+
+        Returns:
+            float: Delay in seconds before the next attempt.
+        """
+        return self._FILE_OPERATION_RETRY_DELAY_SEC * (attempt + 1)
+
+    def _retry_file_operation(self, operation: Callable[[], bool], description: str) -> bool:
+        """Retry a file operation
+
+        Args:
+            operation (Callable[[], bool]): Operation to run.
+            description (str): Human-readable operation description for logs.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
+        error_last: OSError | None = None
+
+        for attempt in range(self._FILE_OPERATION_RETRIES):
+            try:
+                return operation()
+            except OSError as error:
+                error_last = error
+                if attempt == self._FILE_OPERATION_RETRIES - 1:
+                    break
+                delay_sec: float = self._file_operation_retry_delay(attempt)
+                self.fn_logger.debug(f"File operation failed ({description}); retrying in {delay_sec:.1f}s: {error}")
+                time.sleep(delay_sec)
+
+        self.fn_logger.error(f"File operation failed after retries ({description}): {error_last}")
+        return False
+
+    def _unlink_with_retry(self, path_file: pathlib.Path) -> bool:
+        """Unlink a file with retries for transient file locks.
+
+        Args:
+            path_file (pathlib.Path): File path to unlink.
+
+        Returns:
+            bool: True if the file is absent or was removed, False otherwise.
+        """
+
+        def operation() -> bool:
+            path_file.unlink(missing_ok=True)
+            return True
+
+        return self._retry_file_operation(operation, f"unlink {path_file}")
+
+    def _move_file(
+        self,
+        path_file_source: pathlib.Path,
+        path_file_destination: str | pathlib.Path,
+        overwrite: bool = True,
+        skip_if_exists: bool = False,
+    ) -> bool:
         """Move a file from source to destination.
 
         Args:
             path_file_source (pathlib.Path): Source file path.
             path_file_destination (str | pathlib.Path): Destination file path.
+            overwrite (bool): Whether to overwrite an existing destination file.
+            skip_if_exists (bool): Whether an existing destination should be treated as success.
 
         Returns:
             bool: True if moved, False otherwise.
         """
-        result: bool
+        path_destination: pathlib.Path = pathlib.Path(path_file_destination)
 
         # Check if the file was downloaded
-        if path_file_source and path_file_source.is_file():
-            # Move it.
-            shutil.move(path_file_source, path_file_destination)
+        if not path_file_source or not path_file_source.is_file():
+            return False
 
-            result = True
-        else:
-            result = False
+        path_destination.parent.mkdir(parents=True, exist_ok=True)
 
-        return result
+        def operation() -> bool:
+            if skip_if_exists and path_destination.exists():
+                path_file_source.unlink(missing_ok=True)
+                return True
+
+            if path_destination.exists() and overwrite:
+                path_destination_tmp: pathlib.Path = path_destination.with_name(
+                    f".{path_destination.name}.{uuid4()}.tmp"
+                )
+                try:
+                    shutil.copy2(path_file_source, path_destination_tmp)
+                    path_destination_tmp.replace(path_destination)
+                    path_file_source.unlink(missing_ok=True)
+                except OSError:
+                    # Best-effort cleanup: never let a failing cleanup mask the original error or leak the tmp file.
+                    with contextlib.suppress(OSError):
+                        path_destination_tmp.unlink(missing_ok=True)
+                    raise
+                return True
+
+            if path_destination.exists() and not overwrite:
+                return False
+
+            shutil.move(path_file_source, path_destination)
+            return True
+
+        return self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
 
     def _move_lyrics(self, path_lyrics: pathlib.Path, file_media_dst: pathlib.Path) -> bool:
         """Move a lyrics file to the destination.
@@ -1234,7 +1325,7 @@ class Download:
         """
         # Build tmp lyrics filename
         path_file_lyrics: pathlib.Path = file_media_dst.with_suffix(EXTENSION_LYRICS)
-        result: bool = self._move_file(path_lyrics, path_file_lyrics)
+        result: bool = self._move_file(path_lyrics, path_file_lyrics, overwrite=True)
 
         return result
 
@@ -1250,7 +1341,7 @@ class Download:
         """
         # Build tmp lyrics filename
         path_file_cover: pathlib.Path = file_media_dst.parent / COVER_NAME
-        result: bool = self._move_file(path_cover, path_file_cover)
+        result: bool = self._move_file(path_cover, path_file_cover, overwrite=False, skip_if_exists=True)
 
         return result
 
@@ -1363,7 +1454,11 @@ class Download:
         lyrics_synced: str = ""
         lyrics_unsynced: str = ""
         cover_data: bytes = None
-        release_type: str = track.album.type.lower() if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type else ""
+        release_type: str = (
+            track.album.type.lower()
+            if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type
+            else ""
+        )
 
         if self.settings.data.lyrics_embed or self.settings.data.lyrics_file:
             # Try to retrieve lyrics.
@@ -1650,7 +1745,7 @@ class Download:
         # Report results as they become available
         for future in futures.as_completed(futures_list):
             # Retrieve result
-            status, result_path_file = future.result()
+            _status, result_path_file = future.result()
 
             if result_path_file:
                 result_dirs.append(result_path_file.parent)
@@ -1856,7 +1951,9 @@ class Download:
             )
             ffmpeg.execute()
 
-            shutil.move(path_out, path_file)
+            if not self._move_file(path_out, path_file, overwrite=True):
+                self.fn_logger.error(f"Unable to replace downsampled file: {path_file}")
+                raise OSError(f"Unable to replace downsampled file: {path_file}")
 
         return path_file
 
