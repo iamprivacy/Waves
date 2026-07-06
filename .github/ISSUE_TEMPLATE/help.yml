@@ -10,7 +10,7 @@ body:
     id: search-done
     attributes:
       label: You must use the search before you create an issue!
-      description: "**Search [here](https://github.com/maya-doshi/tidaler/issues?q=is%3Aissue+is%3Aopen%2Cclosed).** Otherwise this issue gets closed without any comment. Please keep in mind that everyone's time is very precious."
+      description: "**Search [here](https://github.com/iamprivacy/Waves/issues?q=is%3Aissue+is%3Aopen%2Cclosed).** Otherwise this issue gets closed without any comment. Please keep in mind that everyone's time is very precious."
       options:
         - label: I did use the search, I promise!
   - type: textarea
@@ -42,7 +42,7 @@ body:
     id: config
     attributes:
       label: Your settings
-      description: Please copy and paste your settings from `~/.config/tidal_dl_ng/settings.json` (macOS & Linux) / `%HOMEPATH%\.config\tidal_dl_ng\settings.json` (Windows). This will be automatically formatted into code, so no need for backticks.
+      description: Please copy and paste your settings from `~/.config/Waves/settings.json` (macOS & Linux) / `%HOMEPATH%\.config\Waves\settings.json` (Windows). This will be automatically formatted into code, so no need for backticks.
       render: json
     validations:
       required: true
