@@ -1,9 +1,6 @@
-APP_NAME = "TIDALER"
-APP_VERSION=`grep -m 1 'version =' pyproject.toml | tr -s ' ' | tr -d '"' | tr -d "'" | cut -d' ' -f3`
+WAVES_APP_NAME = "Waves"
+WAVES_VERSION=`grep -m 1 '__version__' tidaler/waves_ui/__init__.py | tr -d ' "' | cut -d'=' -f2`
 app_path_dist = "dist"
-path_asset = "tidaler/ui"
-APP_BUNDLE_NAME="gui"
-DMG_NAME="dmg"
 
 .PHONY: install
 install: ## Install the poetry environment and install the pre-commit hooks
@@ -60,40 +57,32 @@ docs: ## Build and serve the documentation
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: gui
-gui: ## Build GUI app
+.PHONY: gui-waves
+gui-waves: ## Build the Waves QML app (standalone). On macOS this yields dist/waves.app
 	@poetry run python -m nuitka \
-		--macos-app-version=$(APP_VERSION) \
-		--file-version=$(APP_VERSION) \
-		--product-version=$(APP_VERSION) \
-		--macos-app-name=$(APP_NAME) \
-		--output-filename=$(APP_NAME) \
-		--product-name=$(APP_NAME) \
-		tidaler/gui.py
+		--macos-app-version=$(WAVES_VERSION) \
+		--file-version=$(WAVES_VERSION) \
+		--product-version=$(WAVES_VERSION) \
+		--macos-app-name=$(WAVES_APP_NAME) \
+		--output-filename=$(WAVES_APP_NAME) \
+		--product-name=$(WAVES_APP_NAME) \
+		tidaler/waves.py
+	@# Strip the Qt modules the QML UI never loads (chiefly a ~210 MB bundled
+	@# Chromium), see tools/trim_qt_bundle.sh, which auto-detects the per-OS
+	@# bundle layout (waves.app on macOS, waves.dist on Linux/Windows).
+	@if [ -d "$(app_path_dist)/waves.app" ]; then \
+		bash tools/trim_qt_bundle.sh "$(app_path_dist)/waves.app"; \
+		echo "🔏 Re-sealing macOS bundle (trim broke Nuitka's ad-hoc signature)"; \
+		codesign --force --deep --sign - "$(app_path_dist)/waves.app"; \
+	elif [ -d "$(app_path_dist)/waves.dist" ]; then \
+		bash tools/trim_qt_bundle.sh "$(app_path_dist)/waves.dist"; \
+	fi
 
-.PHONY: gui-windows
-gui-windows: gui ## Build GUI app
-	@poetry run mv "$(app_path_dist)/$(APP_BUNDLE_NAME).dist" "$(app_path_dist)/$(APP_NAME)"
+# Per-OS aliases used by CI (release-or-test-build.yml). The build + trim already
+# happens in gui-waves; CI zips the result (macOS = waves.app, Linux/Windows =
+# waves.dist). They exist as named entry points so each matrix leg reads clearly.
+.PHONY: gui-waves-linux
+gui-waves-linux: gui-waves ## Build + trim the Waves app (Linux); artifact is dist/waves.dist
 
-.PHONY: gui-linux
-gui-linux: gui ## Build GUI app
-	@poetry run mv "$(app_path_dist)/$(APP_BUNDLE_NAME).dist" "$(app_path_dist)/$(APP_NAME)"
-
-# TODO: macos Signing: https://gist.github.com/txoof/0636835d3cc65245c6288b2374799c43
-.PHONY: gui-macos-dmg
-gui-macos-dmg: gui ## Package GUI in a *.dmg file
-	@poetry run mkdir -p $(app_path_dist)/dmg
-	@poetry run mv "$(app_path_dist)/$(APP_BUNDLE_NAME).app" "$(app_path_dist)/$(DMG_NAME)/$(APP_NAME).app"
-	@poetry run sleep 60
-	@poetry run /usr/bin/sudo create-dmg \
-                --volname "$(APP_NAME)" \
-                --volicon "$(path_asset)/icon.icns" \
-                --window-pos 200 120 \
-                --window-size 800 600 \
-                --icon-size 100 \
-                --icon "$(APP_NAME).app" 175 120 \
-                --hide-extension "$(APP_NAME).app" \
-                --app-drop-link 425 120 \
-				--filesystem APFS \
-                "$(app_path_dist)/$(APP_NAME).dmg" \
-                "$(app_path_dist)/$(DMG_NAME)/"
+.PHONY: gui-waves-windows
+gui-waves-windows: gui-waves ## Build + trim the Waves app (Windows); artifact is dist/waves.dist
