@@ -1,8 +1,8 @@
 [project]
 name = "tidaler"
-authors = [{ name = "Maya Doshi", email = "<maya-doshi@proton.me>" }]
-version = "0.1.8"
-description = "TIDAL Downloader (fork of tidal-dl-ng)"
+authors = [{ name = "iamprivacy" }]
+version = "0.1.0"
+description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
@@ -17,50 +17,41 @@ requires-python = ">=3.12,<3.14"
 dynamic = ["dependencies"]
 
 [project.urls]
-repository = "https://github.com/maya-doshi/tidaler"
-documentation = "https://github.com/maya-doshi/tidaler"
-
-[project.scripts]
-tidaler = "tidaler.cli:app"
-tidaler-gui = "tidaler.gui:gui_activate"
-tdn = "tidaler.cli:app"
-tdng = "tidaler.gui:gui_activate"
+repository = "https://github.com/iamprivacy/Waves"
+documentation = "https://github.com/iamprivacy/Waves"
 
 [tool.poetry]
 packages = [{ include = "tidaler" }]
 
 [tool.poetry.dependencies]
-requests = "~2.34.0"
+requests = "~2.32.5"
 mutagen = "^1.47.0"
 dataclasses-json = "^0.6.7"
 pathvalidate = "^3.3.1"
 m3u8 = "^6.0.0"
 coloredlogs = "^15.0.1"
-pyside6 = { version = "6.11.1", optional = true }
-pyqtdarktheme-fork = { version = "^2.3.4", optional = true }
+pyside6 = { version = "6.10.0", optional = true }
 rich = "^14.2.0"
 toml = "^0.10.2"
-typer = "^0.26.0"
 tidalapi = "^0.8.10"
 python-ffmpeg = "^2.0.12"
 pycryptodome = "^3.23.0"
 ansi2html = "^1.9.2"
 
 [project.optional-dependencies]
-gui = ["pyside6", "pyqtdarktheme-fork"]
+gui = ["pyside6"]
 
 [tool.poetry.group.dev]
 optional = true
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.1"
-deptry = "^0.25.0"
+deptry = "^0.24.0"
 pyright = "^1.1.398"
 pre-commit = "^4.5.0"
 tox = "^4.32.0"
 pyupgrade = "^3.21.2"
 bandit = "^1.9.2"
-darglint = "^1.8.1"
 isort = { extras = ["colors"], version = "^7.0.0" }
 mypy-extensions = "^1.1.0"
 pydocstyle = "^6.3.0"
@@ -68,7 +59,7 @@ pylint = "^4.0.4"
 pillow = "^12.0.0"
 pytest-cov = "^7.0.0"
 black = "^25.11.0"
-nuitka = "2.8.10"
+nuitka = "2.8.4"
 
 [tool.poetry.group.docs]
 optional = true
@@ -76,7 +67,7 @@ optional = true
 [tool.poetry.group.docs.dependencies]
 mkdocs = "^1.6.1"
 mkdocs-material = "^9.5.44"
-mkdocstrings = { extras = ["python"], version = "^0.30.0" }
+mkdocstrings = { extras = ["python"], version = "^0.27.0" }
 griffe = "^1.5.1"
 
 [build-system]
@@ -134,11 +125,35 @@ ignore = [
   # PEP 484 prohibits implicit `Optional`
   # Disabled only temporarily.
   "RUF013",
+  # Ambiguous-unicode warnings: the UI deliberately uses real typography
+  # (en dash "–", multiplication sign "×", etc.) in user-facing strings,
+  # docstrings and comments.
+  "RUF001",
+  "RUF002",
+  "RUF003",
 ]
 
 [tool.ruff.per-file-ignores]
-"tests/*" = ["S101"]
+# Tests use asserts (S101), terse error messages (TRY003) and throwaway temp
+# paths like "/tmp/x" as never-touched dummy dirs (S108).
+"tests/*" = ["S101", "TRY003", "S108"]
 "tidaler/cli.py" = ["UP007"]
+# The Waves bridge has several inherently branchy but linear functions (the
+# settings-schema builder, the settings dispatcher and the search/discography
+# orchestration) that trip mccabe (C901) without being genuinely complex.
+"tidaler/waves_ui/backend.py" = ["C901"]
+# The ffmpeg manager's job is to download and run a static ffmpeg build, so it
+# intentionally shells out (S603/S607); install() is one linear sequence (C901);
+# and its raised errors carry deliberately descriptive messages (TRY003).
+"tidaler/waves_ui/ffmpeg_manager.py" = ["S603", "S607", "C901", "TRY003"]
+# The updater downloads and swaps a packaged build, so it intentionally shells
+# out (S603/S607) for the platform swap/relaunch; install()/_apply are linear
+# sequences (C901); and its errors carry deliberately descriptive messages (TRY003).
+"tidaler/waves_ui/updater.py" = ["S603", "S606", "S607", "C901", "TRY003"]
+# download.py is upstream Tidaler code (kept as-is apart from the keep_album flag);
+# its downsample/transcode raises carry deliberately descriptive messages (TRY003),
+# same rationale as ffmpeg_manager/updater above.
+"tidaler/download.py" = ["TRY003"]
 
 [tool.black]
 # https://github.com/psf/black

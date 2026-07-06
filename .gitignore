@@ -170,3 +170,9 @@ cython_debug/
 # Custom
 
 download/
+
+# Local design mockups (not part of the shipped app)
+mockups/
+
+# Local scratch / working files (not part of the shipped app)
+scratchpad/
