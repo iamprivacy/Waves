@@ -1,11 +1,11 @@
-site_name: tidaler
-repo_url: https://github.com/maya-doshi/tidaler
-site_url: https://maya-doshi.github.io/tidaler
-site_description: TIDAL Media Downloader!
-site_author: Maya Doshi
+site_name: Waves
+repo_url: https://github.com/iamprivacy/Waves
+site_url: https://iamprivacy.github.io/Waves
+site_description: "Waves: a native desktop UI for the Tidaler download engine."
+site_author: iamprivacy
 edit_uri: edit/master/docs/
-repo_name: maya-doshi/tidaler
-copyright: Maintained by <a href="https://example.com">Robby</a>.
+repo_name: iamprivacy/Waves
+copyright: Maintained by <a href="https://github.com/iamprivacy">iamprivacy</a>.
 
 nav:
   - Home: index.md
@@ -43,9 +43,7 @@ theme:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/maya-doshi/tidaler
-    - icon: fontawesome/brands/python
-      link: https://pypi.org/project/tidaler
+      link: https://github.com/iamprivacy/Waves
 
 markdown_extensions:
   - toc:
