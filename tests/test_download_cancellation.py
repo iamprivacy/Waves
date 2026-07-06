@@ -57,13 +57,8 @@ class TestDownloadCancellation:
             call_count += 1
             if call_count >= 2:
                 event_stop.set()
-                # Simulate some delay to allow loop to check event
-                # In real code, the check happens in the loop of executor submission or result collection?
-                # Actually, check logic:
-                # 1. Submit all futures.
-                # 2. Iterate futures.as_completed.
-                # 3. Inside loop: check event_abort.
-                # Wait, I added event_stop check to _download_segments. Let's verify where.
+                # Trip the abort signal on the second segment so the loop
+                # observes it mid-flight and stops submitting the rest.
 
             return MagicMock(result=True, url=args[0])
 
@@ -78,7 +73,7 @@ class TestDownloadCancellation:
             # So if we set event_stop inside the execution of a future, the MAIN thread iterating as_completed will see it
             # as soon as one future completes and loop continues.
 
-            result, _results_list = download_instance._download_segments(
+            result, results_list = download_instance._download_segments(
                 urls, path_base, block_size, p_task, progress_to_stdout, event_stop=event_stop
             )
 

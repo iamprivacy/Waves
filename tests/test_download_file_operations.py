@@ -169,3 +169,99 @@ def test_downsample_audio_raises_when_output_move_fails(
         pytest.raises(OSError),
     ):
         download_instance._downsample_audio(source_path)
+
+
+def test_move_file_fresh_destination_is_atomic_and_clean(
+    download_instance: Download,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Verify a fresh move places the complete file and leaves no temp artifacts.
+
+    Args:
+        download_instance (Download): Download instance under test.
+        tmp_path (pathlib.Path): Temporary test directory.
+    """
+    source_path: pathlib.Path = tmp_path / "source.flac"
+    destination_path: pathlib.Path = tmp_path / "dest.flac"
+    source_path.write_bytes(b"audio-data")
+
+    result: bool = download_instance._move_file(source_path, destination_path, overwrite=True)
+
+    assert result is True
+    assert destination_path.read_bytes() == b"audio-data"
+    assert not source_path.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_move_file_cross_filesystem_completes_via_staged_copy(
+    download_instance: Download,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Verify a fresh move still completes when a same-filesystem rename is impossible.
+
+    Args:
+        download_instance (Download): Download instance under test.
+        tmp_path (pathlib.Path): Temporary test directory.
+    """
+    source_path: pathlib.Path = tmp_path / "source.flac"
+    destination_path: pathlib.Path = tmp_path / "dest.flac"
+    source_path.write_bytes(b"hi-res")
+
+    replace_original = pathlib.Path.replace
+
+    def replace_no_cross_device(self: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        # Force the direct source -> destination rename to fail like a cross-device
+        # move, but allow the temp-sibling -> destination swap (same filesystem).
+        if self == source_path:
+            raise OSError("Invalid cross-device link")
+        return replace_original(self, target)
+
+    with patch.object(pathlib.Path, "replace", replace_no_cross_device):
+        result: bool = download_instance._move_file(source_path, destination_path, overwrite=True)
+
+    assert result is True
+    assert destination_path.read_bytes() == b"hi-res"
+    assert not source_path.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_move_file_interrupted_cross_filesystem_copy_leaves_no_partial(
+    download_instance: Download,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Verify a crash mid-copy never leaves a half-written file under the real name.
+
+    This is the guarantee that stops an interrupted download from blocking its own
+    re-download: the destination must not exist, the source must survive for the
+    retry, and the staged temp file must be cleaned up.
+
+    Args:
+        download_instance (Download): Download instance under test.
+        tmp_path (pathlib.Path): Temporary test directory.
+    """
+    source_path: pathlib.Path = tmp_path / "source.flac"
+    destination_path: pathlib.Path = tmp_path / "dest.flac"
+    source_path.write_bytes(b"hi-res-audio")
+
+    replace_original = pathlib.Path.replace
+
+    def replace_no_cross_device(self: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        if self == source_path:
+            raise OSError("Invalid cross-device link")
+        return replace_original(self, target)
+
+    def copy2_crash(src: str, dst: str) -> None:
+        # Write a partial temp file, then simulate a crash / power loss mid-copy.
+        pathlib.Path(dst).write_bytes(b"hi-r")
+        raise OSError("simulated interruption during copy")
+
+    with (
+        patch.object(pathlib.Path, "replace", replace_no_cross_device),
+        patch("tidaler.download.shutil.copy2", copy2_crash),
+    ):
+        result: bool = download_instance._move_file(source_path, destination_path, overwrite=True)
+
+    assert result is False
+    assert not destination_path.exists()
+    assert source_path.read_bytes() == b"hi-res-audio"
+    assert list(tmp_path.glob(".*.tmp")) == []
