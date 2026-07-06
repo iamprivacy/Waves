@@ -27,13 +27,19 @@ class Settings:
     quality_audio: Quality = Quality.low_320k
     quality_video: QualityVideo = QualityVideo.P480
     download_dolby_atmos: bool = False
+    # Artist > Album > Track, the shape a music library (and Plex) expects.
+    # Playlists / mixes keep their own parent folder: they are platform
+    # constructs a library manager can't model, but stay downloadable.
     format_album: str = (
-        "Albums/{album_artist} - {album_title}{album_explicit}/{track_volume_num_optional}"
-        "{album_track_num}. {artist_name} - {track_title}{album_explicit}"
+        "{artist_name}/[{album_year}] {album_title}{album_explicit}/{track_volume_num_optional}"
+        "{album_track_num}. {artist_name} - {track_title}{track_explicit}"
     )
     format_playlist: str = "Playlists/{playlist_name}/{list_pos}. {artist_name} - {track_title}"
     format_mix: str = "Mix/{mix_name}/{artist_name} - {track_title}"
-    format_track: str = "Tracks/{artist_name} - {track_title}{track_explicit}"
+    format_track: str = (
+        "{artist_name}/[{album_year}] {album_title}{album_explicit}/{track_volume_num_optional}"
+        "{album_track_num}. {artist_name} - {track_title}{track_explicit}"
+    )
     format_video: str = "Videos/{artist_name} - {track_title}{track_explicit}"
     video_convert_mp4: bool = True
     path_binary_ffmpeg: str = ""
@@ -110,7 +116,7 @@ class HelpSettings:
     extract_flac: str = "Extract FLAC audio tracks from MP4 containers and save them as `*.flac` (uses FFmpeg)."
     downsample_enabled: str = (
         "Downsample FLAC files toward a fixed target rate/bit-depth using ffmpeg. "
-        "Each dimension is reduced independently and never upsampled — a 24-bit/44.1 kHz "
+        "Each dimension is reduced independently and never upsampled, a 24-bit/44.1 kHz "
         "source with a 16/48 target becomes 16-bit/44.1 kHz; a 16-bit/44.1 kHz source is "
         "left untouched. Useful for capping HI_RES_LOSSLESS downloads at a saner archive size."
     )

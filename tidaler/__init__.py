@@ -9,6 +9,11 @@ import toml
 from tidaler.constants import REQUESTS_TIMEOUT_SEC
 from tidaler.model.meta import ProjectInformation, ReleaseLatest
 
+# Sentinel version returned by latest_version_information() when the update
+# check could not be completed (e.g. no network). It must never compare equal
+# to a real release tag, and update_available() treats it as "no update".
+VERSION_CHECK_FAILED: str = "v0.0.0"
+
 
 def metadata_project() -> ProjectInformation:
     result: ProjectInformation
@@ -43,7 +48,7 @@ def metadata_project() -> ProjectInformation:
                 # attempt to parse, else use hardcoded fallback
                 repo_url = next(
                     (url.split(", ")[1] for url in urls if url.startswith("Repository")),
-                    "https://github.com/maya-doshi/tidaler",
+                    "https://github.com/iamprivacy/Waves",
                 )
 
             result = ProjectInformation(version=meta_info["Version"], repository_url=repo_url)
@@ -91,10 +96,14 @@ def latest_version_information() -> ReleaseLatest:
             release_info=release_info_json["body"],
         )
     except (requests.RequestException, KeyError, ValueError):
+        # Report the check as failed. Do NOT surface the raw API URL (the
+        # Download button would otherwise open it) and use the sentinel version
+        # so update_available() reports "no update available" rather than a
+        # bogus one.
         release_info = ReleaseLatest(
-            version="v0.0.0",
-            url=url,
-            release_info=f"Something went wrong calling {url}. Check your internet connection.",
+            version=VERSION_CHECK_FAILED,
+            url="",
+            release_info="Could not retrieve update information. Check your internet connection.",
         )
 
     return release_info
@@ -136,10 +145,20 @@ def name_app() -> str:
 __name_display__ = name_app()
 __version__ = version_app()
 
+# Per-user state directory name (settings, token, log, managed ffmpeg, updater
+# staging). Deliberately NOT the package name: the package is still "tidaler"
+# for upstream-merge friendliness, but sharing ~/.config/tidaler would make
+# Waves silently pick up an installed Tidaler / tidal-dl-ng login and settings.
+# Waves state must be fully isolated from every other app's.
+__config_dirname__ = "Waves-dev" if is_dev_env() else "Waves"
+
 
 def update_available() -> tuple[bool, ReleaseLatest]:
     latest_info: ReleaseLatest = latest_version_information()
     version_current: str = f"v{__version__}"
 
-    result = version_current not in [latest_info.version, "v0.0.0"]
+    # A failed check (sentinel version) is NOT an available update; treating it
+    # as one would show a bogus "v0.0.0 update available" prompt when offline.
+    result = False if latest_info.version == VERSION_CHECK_FAILED else version_current != latest_info.version
+
     return result, latest_info

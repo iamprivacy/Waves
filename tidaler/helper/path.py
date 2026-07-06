@@ -12,7 +12,7 @@ from pathvalidate.error import ValidationError
 from tidalapi import Album, Mix, Playlist, Track, UserPlaylist, Video
 from tidalapi.media import AudioExtensions
 
-from tidaler import __name_display__
+from tidaler import __config_dirname__
 from tidaler.constants import (
     FILENAME_LENGTH_MAX,
     FILENAME_SANITIZE_PLACEHOLDER,
@@ -49,7 +49,7 @@ def path_config_base() -> str:
     # X11 workaround: If user specified config path is set, do not point to "~/.config"
     path_user_custom: str = os.environ.get("XDG_CONFIG_HOME", "")
     path_config: str = ".config" if not path_user_custom else ""
-    path_base: str = os.path.join(path_home(), path_config, __name_display__)
+    path_base: str = os.path.join(path_home(), path_config, __config_dirname__)
 
     return path_base
 
@@ -451,10 +451,17 @@ def _format_metadata(
         return media.video_quality
     elif name == "track_quality" and isinstance(media, Track):
         return ", ".join(tag for tag in media.media_metadata_tags if tag is not None)
-    elif (name == "track_explicit" and isinstance(media, Track | Video)) or (
-        name == "album_explicit" and isinstance(media, Album)
-    ):
+    elif name == "track_explicit" and isinstance(media, Track | Video):
         return FORMAT_TEMPLATE_EXPLICIT if media.explicit else ""
+    elif name == "album_explicit":
+        # Paths are always formatted with the Track / Video being written, so
+        # the album marker must resolve through media.album too, not just for
+        # a bare Album object.
+        if isinstance(media, Album):
+            return FORMAT_TEMPLATE_EXPLICIT if media.explicit else ""
+        if isinstance(media, Track | Video) and getattr(media, "album", None):
+            return FORMAT_TEMPLATE_EXPLICIT if media.album.explicit else ""
+        return ""
     elif name == "media_type":
         if isinstance(media, Album):
             return media.type
@@ -482,7 +489,9 @@ def _format_volumes(
         return str(media.volume_num)
     elif name == "track_volume_num_optional" and isinstance(media, Track | Video):
         num_volumes: int = media.album.num_volumes if hasattr(media, "album") else 1
-        return "" if num_volumes == 1 else str(media.volume_num)
+        # Disc-number prefix in Plex's documented "2-01 - Track" style: the
+        # dash keeps disc 2 track 13 readable as 2-13 instead of 213.
+        return "" if num_volumes == 1 else f"{media.volume_num!s}-"
     elif name == "track_volume_num_optional_CD" and isinstance(media, Track | Video):
         num_volumes: int = media.album.num_volumes if hasattr(media, "album") else 1
         return "" if num_volumes == 1 else f"CD{media.volume_num!s}"
@@ -539,6 +548,19 @@ def get_format_template(
     return result
 
 
+def _no_traversal(part: str) -> str:
+    """Neutralize a bare current/parent-directory path component.
+
+    ``pathvalidate``'s ``sanitize_filename`` strips illegal characters but
+    deliberately leaves ``.`` and ``..`` untouched, so a remote-controlled media
+    name (artist/album/track title from the API) that renders to exactly ``..``
+    would survive as a live traversal segment and escape the download directory.
+    Mapping it to the standard replacement char makes that impossible regardless
+    of the user's path template.
+    """
+    return "_" if part in (".", "..") else part
+
+
 def path_file_sanitize(path_file: pathlib.Path, adapt: bool = False, uniquify: bool = False) -> pathlib.Path:
     """Sanitize a file path to ensure it is valid and optionally make it unique.
 
@@ -550,8 +572,8 @@ def path_file_sanitize(path_file: pathlib.Path, adapt: bool = False, uniquify: b
     Returns:
         pathlib.Path: The sanitized file path.
     """
-    sanitized_filename = sanitize_filename(
-        path_file.name, replacement_text="_", validate_after_sanitize=True, platform="auto"
+    sanitized_filename = _no_traversal(
+        sanitize_filename(path_file.name, replacement_text="_", validate_after_sanitize=True, platform="auto")
     )
 
     if not sanitized_filename.endswith(path_file.suffix):
@@ -564,7 +586,9 @@ def path_file_sanitize(path_file: pathlib.Path, adapt: bool = False, uniquify: b
     sanitized_path = pathlib.Path(
         *[
             (
-                sanitize_filename(part, replacement_text="_", validate_after_sanitize=True, platform="auto")
+                _no_traversal(
+                    sanitize_filename(part, replacement_text="_", validate_after_sanitize=True, platform="auto")
+                )
                 if part not in path_file.anchor
                 else part
             )

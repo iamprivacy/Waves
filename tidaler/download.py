@@ -73,7 +73,7 @@ from tidaler.helper.tidal import (
     name_builder_item,
     name_builder_title,
 )
-from tidaler.metadata import Metadata
+from tidaler.metadata import Metadata, MetadataUnreadable
 from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from tidaler.model.gui_data import ProgressBars
 
@@ -287,7 +287,9 @@ class Download:
             ) as executor:
                 # Dispatch all download tasks to worker threads
                 l_futures: list[futures.Future] = [
-                    executor.submit(self._download_segment, url, path_base, block_size, p_task, progress_to_stdout)
+                    executor.submit(
+                        self._download_segment, url, path_base, block_size, p_task, progress_to_stdout, event_stop
+                    )
                     for url in urls
                 ]
 
@@ -298,15 +300,24 @@ class Download:
 
                     dl_segment_results.append(result_dl_segment)
 
-                    # Check for a link that was skipped
-                    if not result_dl_segment.result and (result_dl_segment.url is not urls[-1]):
-                        # Sometimes it happens, if a track is very short (< 8 seconds or so), that the last URL in `urls` is
-                        # invalid (HTTP Error 500) and not necessary. File won't be corrupt.
-                        # If this is NOT the case, but any other URL has resulted in an error,
-                        # mark the whole thing as corrupt.
-                        result_segments = False
+                    # Check for a link that failed.
+                    if not result_dl_segment.result:
+                        # Sometimes, if a track is very short (< 8 seconds or so), the *last* URL of a
+                        # MULTI-segment track is a spurious tail (HTTP Error 500) that isn't needed; the
+                        # file won't be corrupt. Only that narrow case is exempt. A single-URL (BTS) track
+                        # has exactly one required segment which also happens to be `urls[-1]`, so a failure
+                        # there is a real failure and must NOT be exempted, otherwise a fully failed GET
+                        # (expired link, 403/500, network failure) would masquerade as success.
+                        is_spurious_tail: bool = len(urls) > 1 and result_dl_segment.url is urls[-1]
 
-                        self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
+                        if not is_spurious_tail:
+                            result_segments = False
+
+                            # A deliberate Stop/Cancel makes every in-flight segment
+                            # return failed by design, that's a cancellation, not
+                            # corruption, so don't scream "corrupt" once per segment.
+                            if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
+                                self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
 
                     # If app is terminated (CTRL+C) or item stopped
                     if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
@@ -431,13 +442,47 @@ class Download:
                     dl_segment_result.path_segment.unlink()
 
         except Exception:
-            if dl_segment_result is not dl_segment_results[-1]:
+            # Mirror the download-time leniency: only a spurious *tail* segment of a
+            # MULTI-segment track may be missing without corrupting the file. A merge
+            # failure on the sole segment of a single-URL (BTS) track is a real failure.
+            is_spurious_tail: bool = len(dl_segment_results) > 1 and dl_segment_result is dl_segment_results[-1]
+
+            if not is_spurious_tail:
                 result = False
 
         return result
 
+    def _wait_while_paused(self, event_stop: Event | None = None) -> bool:
+        """Block while paused (event_run cleared), staying responsive to abort/stop.
+
+        A bare ``event_run.wait()`` ignores both the global abort and the per-item
+        stop event, so quitting or removing a paused item would strand the segment
+        thread here forever (the threads are non-daemon and hang interpreter
+        shutdown). Instead poll on a short timeout and bail as soon as either abort
+        or stop is set.
+
+        Args:
+            event_stop (Event | None, optional): Per-item stop event. Defaults to None.
+
+        Returns:
+            bool: True if the caller should abort (abort/stop set), False to proceed.
+        """
+        while not self.event_run.is_set():
+            if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                return True
+            # Short timeout so a resume, abort, or stop is picked up promptly.
+            self.event_run.wait(0.1)
+
+        return self.event_abort.is_set() or bool(event_stop and event_stop.is_set())
+
     def _download_segment(
-        self, url: str, path_base: pathlib.Path, block_size: int | None, p_task: TaskID, progress_to_stdout: bool
+        self,
+        url: str,
+        path_base: pathlib.Path,
+        block_size: int | None,
+        p_task: TaskID,
+        progress_to_stdout: bool,
+        event_stop: Event | None = None,
     ) -> DownloadSegmentResult:
         """Download a single segment of a media file.
 
@@ -447,6 +492,7 @@ class Download:
             block_size (int | None): Block size for streaming.
             p_task (TaskID): Progress bar task ID.
             progress_to_stdout (bool): Whether to show progress in stdout.
+            event_stop (Event | None, optional): Per-item stop event. Defaults to None.
 
         Returns:
             DownloadSegmentResult: Result of the segment download.
@@ -459,14 +505,17 @@ class Download:
         id_segment: int = int(filename_stem) if filename_stem.isdecimal() else 0
         error: HTTPError | None = None
 
-        # If app is terminated (CTRL+C)
-        if self.event_abort.is_set():
+        # If app is terminated (CTRL+C) or item stopped
+        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
             return DownloadSegmentResult(
                 result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
             )
 
-        if not self.event_run.is_set():
-            self.event_run.wait()
+        # Honor pause, but wake promptly on resume/abort/stop instead of blocking forever.
+        if self._wait_while_paused(event_stop):
+            return DownloadSegmentResult(
+                result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
+            )
 
         # Retry download on failed segments, with an exponential delay between retries
         with requests.Session() as s:
@@ -483,6 +532,12 @@ class Download:
                 # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
                 with path_segment.open("wb") as f:
                     for data in r.iter_content(chunk_size=block_size):
+                        # Bail out promptly on abort (Stop/Cancel or app quit)
+                        # instead of streaming the whole segment first.
+                        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                            return DownloadSegmentResult(
+                                result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
+                            )
                         f.write(data)
                         # Advance progress bar.
                         self.progress.advance(p_task)
@@ -549,6 +604,7 @@ class Download:
         is_parent_album: bool = False,
         list_position: int = 0,
         list_total: int = 0,
+        keep_album: bool = False,
         event_stop: Event | None = None,
     ) -> tuple[bool, pathlib.Path | str]:
         """Download a single media item, handling file naming, skipping, and post-processing.
@@ -565,6 +621,8 @@ class Download:
             is_parent_album (bool, optional): Whether this is a parent album. Defaults to False.
             list_position (int, optional): Position in list. Defaults to 0.
             list_total (int, optional): Total items in list. Defaults to 0.
+            keep_album (bool, optional): Trust the album + numbering on the passed media
+                instead of re-fetching the track (used by best-of-both merges). Defaults to False.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
@@ -575,7 +633,7 @@ class Download:
             return False, ""
 
         # Step 1: Validate and prepare media
-        validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download)
+        validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download, keep_album)
         if validated_media is None or not isinstance(validated_media, Track | Video):
             return False, ""
 
@@ -598,8 +656,10 @@ class Download:
         # Step 3: Handle quality settings
         quality_audio_old, quality_video_old = self._adjust_quality_settings(quality_audio, quality_video)
 
-        # Step 4: Download and process media
-        download_success = self._download_and_process_media(
+        # Step 4: Download and process media.
+        # The returned path reflects the TRUE stream extension and any uniquify suffix, so
+        # skip/return-path/symlink below act on the file actually written, not the step-2 guess.
+        download_success, path_media_dst = self._download_and_process_media(
             media,
             path_media_dst,
             skip_download,
@@ -629,6 +689,7 @@ class Download:
         media_id: str | None,
         media_type: MediaType | None,
         video_download: bool = True,
+        keep_album: bool = False,
     ) -> Track | Video | Album | Playlist | UserPlaylist | Mix | None:
         """Validate and prepare media instance for download.
 
@@ -653,8 +714,11 @@ class Download:
                         f"This item is not available for listening anymore on TIDAL. Skipping: {name_builder_item(media)}"
                     )
                     return None
-                elif isinstance(media, Track):
-                    # Re-create media instance with full album information
+                elif isinstance(media, Track) and not keep_album:
+                    # Re-create media instance with full album information.
+                    # Skipped when keep_album is set: a best-of-both merge passes a
+                    # track deliberately re-tagged under another edition's album and
+                    # numbering, which this re-fetch would otherwise clobber.
                     media = self.session.track(str(media.id), with_album=True)
             elif isinstance(media, Album):
                 # Check if media is available not deactivated / removed from TIDAL.
@@ -796,7 +860,7 @@ class Download:
         is_parent_album: bool,
         file_extension_dummy: str,
         event_stop: Event | None = None,
-    ) -> bool:
+    ) -> tuple[bool, pathlib.Path]:
         """Download and process media file.
 
         Args:
@@ -808,25 +872,46 @@ class Download:
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
-            bool: Whether download was successful.
+            tuple[bool, pathlib.Path]: (Whether download was successful, the FINAL destination path).
+                The path reflects the true stream extension and any uniquify suffix, so the
+                caller's skip/return-path/symlink logic uses the file actually written.
         """
         if skip_download:
-            return True
+            return True, path_media_dst
 
         # Get stream information and final file extension
         stream_manifest, file_extension, do_flac_extract, media_stream = self._get_stream_info(media)
 
         if stream_manifest is None and isinstance(media, Track):
-            return False
+            return False, path_media_dst
 
-        # Update path if extension changed
+        # Update path to the TRUE stream extension. The step-2 path was guessed from a
+        # possibly-None quality (the Waves UI never passes quality_audio), so the real
+        # extension is only known now. Everything downstream (skip check, returned path,
+        # symlink) must use this corrected path, not the guess.
         if path_media_dst.suffix != file_extension:
             path_media_dst = path_media_dst.with_suffix(file_extension)
             path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
 
+        # Re-evaluate skip-existing against the TRUE extension. The step-2 check may have
+        # looked for the wrong extension (e.g. .flac while the stream is .m4a) and missed
+        # an already-downloaded file.
+        if self.skip_existing and check_file_exists(path_media_dst, extension_ignore=False):
+            self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_dst}'")
+
+            return True, path_media_dst
+
         os.makedirs(path_media_dst.parent, exist_ok=True)
 
-        # Perform actual download
+        # Perform actual download.
+        #
+        # De-duplicate distinct tracks whose sanitized names collide. When skip_existing is
+        # on, a pre-existing file for the SAME track was already skipped above, so any file
+        # that shows up at this destination belongs to a DIFFERENT track. Move without
+        # overwriting and uniquify the name on conflict, so the earlier track isn't clobbered
+        # (this also covers the concurrent case where two colliding tracks are in flight at
+        # once and neither existed at skip-check time). With skip_existing off the user has
+        # opted into replacing, so keep the historical overwrite behavior.
         return self._perform_actual_download(
             media,
             path_media_dst,
@@ -970,7 +1055,7 @@ class Download:
         is_parent_album: bool,
         media_stream: Stream | None,
         event_stop: Event | None = None,
-    ) -> bool:
+    ) -> tuple[bool, pathlib.Path]:
         """Perform the actual download and processing.
 
         Args:
@@ -983,7 +1068,7 @@ class Download:
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
-            bool: Whether download was successful.
+            tuple[bool, pathlib.Path]: (Whether download was successful, the final destination path).
         """
         # Create a temp directory and file.
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
@@ -999,7 +1084,7 @@ class Download:
             )
 
             if not result_download:
-                return False
+                return False, path_media_dst
 
             # Convert video from TS to MP4
             if isinstance(media, Video) and self.settings.data.video_convert_mp4:
@@ -1017,13 +1102,23 @@ class Download:
             ):
                 tmp_path_file = self._downsample_audio(tmp_path_file)
 
+            # De-duplicate colliding distinct tracks (skip_existing on: same track was already
+            # skipped upstream, so an occupied destination is a different track). Resolve the
+            # unique name BEFORE writing lyrics/cover so those sidecars align with the final
+            # audio file. With skip_existing off, keep the historical overwrite behavior.
+            overwrite: bool = True
+
+            if self.skip_existing:
+                path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True, uniquify=True))
+                overwrite = False
+
             # Handle metadata, lyrics, and cover
             self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
 
             self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
 
             # Move final file to the configured destination directory.
-            return self._move_file(tmp_path_file, path_media_dst, overwrite=True)
+            return self._move_file(tmp_path_file, path_media_dst, overwrite=overwrite), path_media_dst
 
     def _handle_metadata_and_extras(
         self,
@@ -1308,7 +1403,32 @@ class Download:
             if path_destination.exists() and not overwrite:
                 return False
 
-            shutil.move(path_file_source, path_destination)
+            # Fresh destination. Prefer a single atomic rename within the same
+            # filesystem. When the download temp dir and the library live on
+            # different filesystems (e.g. an external drive or network mount), a
+            # rename can't cross them, so copy the bytes into a hidden temp file in
+            # the destination directory and atomically swap it into the final name.
+            # Either way the real path only ever appears complete: an interrupted
+            # move (crash, power loss) leaves at most the throwaway temp file, never
+            # a half-written file under the real name that a later run would mistake
+            # for a finished download and skip.
+            try:
+                path_file_source.replace(path_destination)
+            except OSError:
+                pass  # cross-filesystem rename not possible; stage and swap below
+            else:
+                return True
+
+            path_destination_tmp: pathlib.Path = path_destination.with_name(f".{path_destination.name}.{uuid4()}.tmp")
+            try:
+                shutil.copy2(path_file_source, path_destination_tmp)
+                path_destination_tmp.replace(path_destination)
+                path_file_source.unlink(missing_ok=True)
+            except OSError:
+                # Best-effort cleanup: never leave a partial temp file behind.
+                with contextlib.suppress(OSError):
+                    path_destination_tmp.unlink(missing_ok=True)
+                raise
             return True
 
         return self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
@@ -1533,9 +1653,14 @@ class Download:
             release_type=release_type,
         )
 
-        m.save()
-
-        result = True
+        try:
+            m.save()
+            result = True
+        except MetadataUnreadable:
+            # A truncated/unidentifiable file (e.g. a failed download) can't be tagged.
+            # Fail only this item's tagging instead of aborting the whole collection.
+            self.fn_logger.exception(f"Could not write metadata; file is unreadable: {name_builder_item(track)}")
+            result = False
 
         return result, path_lyrics, path_cover
 
@@ -1814,7 +1939,10 @@ class Download:
                     else:
                         media_file_target = path_track.name
 
-                    f.write(str(media_file_target) + os.linesep)
+                    # Write a plain '\n'; text mode ('w') translates it to the platform
+                    # line ending. Using os.linesep here would double-translate on Windows
+                    # ('\r\n' -> '\r\r\n') and corrupt the entries.
+                    f.write(str(media_file_target) + "\n")
 
             result.append(path_playlist)
 
@@ -1882,7 +2010,7 @@ class Download:
         """Downsample a FLAC file toward the configured target rate/depth using ffmpeg.
 
         Each dimension (sample rate, bit depth) is reduced independently and
-        never upsampled — a 24/44.1 source with a 16/48 target becomes 16/44.1.
+        never upsampled, a 24/44.1 source with a 16/48 target becomes 16/44.1.
         Returns the original path if neither dimension needs to change.
         """
         target = DownsampleTarget(self.settings.data.downsample_target)
@@ -1952,9 +2080,8 @@ class Download:
             ffmpeg.execute()
 
             if not self._move_file(path_out, path_file, overwrite=True):
-                error_message = f"Unable to replace downsampled file: {path_file}"
-                self.fn_logger.error(error_message)
-                raise OSError(error_message)
+                self.fn_logger.error(f"Unable to replace downsampled file: {path_file}")
+                raise OSError(f"Unable to replace downsampled file: {path_file}")
 
         return path_file
 

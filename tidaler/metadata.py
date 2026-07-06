@@ -5,6 +5,19 @@ from mutagen import flac, id3, mp4
 from mutagen.id3 import APIC, SYLT, TALB, TBPM, TCOM, TCOP, TDRC, TIT2, TKEY, TOPE, TPE1, TRCK, TSRC, TXXX, USLT, WOAS
 
 
+class MetadataUnreadable(Exception):
+    """Raised when the audio file cannot be parsed for tagging.
+
+    ``mutagen.File`` returns ``None`` for unidentifiable or truncated files. Turning
+    that into an explicit, catchable error lets the caller fail only the offending
+    item instead of aborting the whole collection with a bare ``AttributeError``.
+    """
+
+    def __init__(self, path_file):
+        super().__init__(f"Cannot read audio file for tagging: {path_file}")
+        self.path_file = path_file
+
+
 class Metadata:
     path_file: str | pathlib.Path
     title: str
@@ -121,6 +134,11 @@ class Metadata:
         return result
 
     def save(self):
+        if self.m is None:
+            # mutagen.File() returns None for an unidentifiable/truncated file. Fail this
+            # item explicitly so a single bad file doesn't abort the whole collection.
+            raise MetadataUnreadable(self.path_file)
+
         if not self.m.tags:
             self.m.add_tags()
 

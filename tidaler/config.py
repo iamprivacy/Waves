@@ -115,8 +115,6 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         # session re-authentication when the session is already in the
         # correct mode (Atmos or Normal).
         self.is_atmos_session = False
-        # self.session.config.client_id = "km8T1xS355y7dd3H"
-        # self.session.config.client_secret = "vcmeGW1OuZ0fWYMCSZ6vNvSLJlT3XEpW0ambgYt5ZuI="
         self.file_path = path_file_token()
         self.token_from_storage = self.read(self.file_path)
 
