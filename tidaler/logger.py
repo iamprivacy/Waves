@@ -44,7 +44,7 @@ class QtHandler(logging.Handler):
 
         if record:
             # originally: XStream.stdout().write("{}\n".format(record))
-            XStream.stdout().write("%s\n" % record)
+            XStream.stdout().write(f"{record}\n")
 
 
 logger_gui = logging.getLogger(__name__)

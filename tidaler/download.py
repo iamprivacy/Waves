@@ -279,53 +279,68 @@ class Download:
         result_segments: bool = True
         dl_segment_results: list[DownloadSegmentResult] = []
 
-        # Download segments until progress is finished.
-        # TODO: Compute download speed (https://github.com/Textualize/rich/blob/master/examples/downloader.py)
-        while not self.progress.tasks[p_task].finished:
-            with futures.ThreadPoolExecutor(
-                max_workers=self.settings.data.downloads_simultaneous_per_track_max
-            ) as executor:
-                # Dispatch all download tasks to worker threads
-                l_futures: list[futures.Future] = [
-                    executor.submit(
-                        self._download_segment, url, path_base, block_size, p_task, progress_to_stdout, event_stop
-                    )
-                    for url in urls
-                ]
+        # One pass: download each URL exactly once. Segment-level retries are
+        # already handled inside _download_segment (requests Retry(total=5)), so
+        # the old `while not self.progress.tasks[p_task].finished` loop that
+        # re-submitted every URL added no real retry, only risk: a segment that
+        # returns an empty but successful body (HTTP 200, 0 bytes) advances the
+        # progress bar zero times, so `finished` (completed >= total) never flips
+        # and the loop re-downloaded the whole track forever. Success is derived
+        # from the per-segment results below, not from the progress counter.
+        with futures.ThreadPoolExecutor(
+            max_workers=self.settings.data.downloads_simultaneous_per_track_max
+        ) as executor:
+            # Dispatch all download tasks to worker threads
+            l_futures: list[futures.Future] = [
+                executor.submit(
+                    self._download_segment, url, path_base, block_size, p_task, progress_to_stdout, event_stop
+                )
+                for url in urls
+            ]
 
-                # Report results as they become available
-                for future in futures.as_completed(l_futures):
-                    # Retrieve result
-                    result_dl_segment: DownloadSegmentResult = future.result()
+            # Report results as they become available
+            for future in futures.as_completed(l_futures):
+                # Retrieve result
+                result_dl_segment: DownloadSegmentResult = future.result()
 
-                    dl_segment_results.append(result_dl_segment)
+                dl_segment_results.append(result_dl_segment)
 
-                    # Check for a link that failed.
-                    if not result_dl_segment.result:
-                        # Sometimes, if a track is very short (< 8 seconds or so), the *last* URL of a
-                        # MULTI-segment track is a spurious tail (HTTP Error 500) that isn't needed; the
-                        # file won't be corrupt. Only that narrow case is exempt. A single-URL (BTS) track
-                        # has exactly one required segment which also happens to be `urls[-1]`, so a failure
-                        # there is a real failure and must NOT be exempted, otherwise a fully failed GET
-                        # (expired link, 403/500, network failure) would masquerade as success.
-                        is_spurious_tail: bool = len(urls) > 1 and result_dl_segment.url is urls[-1]
+                # Check for a link that failed.
+                if not result_dl_segment.result:
+                    # Sometimes, if a track is very short (< 8 seconds or so), the *last* URL of a
+                    # MULTI-segment track is a spurious tail (HTTP Error 500) that isn't needed; the
+                    # file won't be corrupt. Only that narrow case is exempt. A single-URL (BTS) track
+                    # has exactly one required segment which also happens to be `urls[-1]`, so a failure
+                    # there is a real failure and must NOT be exempted, otherwise a fully failed GET
+                    # (expired link, 403/500, network failure) would masquerade as success.
+                    is_spurious_tail: bool = len(urls) > 1 and result_dl_segment.url is urls[-1]
 
-                        if not is_spurious_tail:
-                            result_segments = False
+                    if not is_spurious_tail:
+                        result_segments = False
 
-                            # A deliberate Stop/Cancel makes every in-flight segment
-                            # return failed by design, that's a cancellation, not
-                            # corruption, so don't scream "corrupt" once per segment.
-                            if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
-                                self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
+                        # A deliberate Stop/Cancel makes every in-flight segment
+                        # return failed by design, that's a cancellation, not
+                        # corruption, so don't scream "corrupt" once per segment.
+                        if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
+                            self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
 
-                    # If app is terminated (CTRL+C) or item stopped
-                    if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                        # Cancel all not yet started tasks
-                        for f in l_futures:
-                            f.cancel()
+                # If app is terminated (CTRL+C) or item stopped
+                if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                    # Cancel all not yet started tasks
+                    for f in l_futures:
+                        f.cancel()
 
-                        return False, dl_segment_results
+                    return False, dl_segment_results
+
+        # The progress total is only an estimate (segment count, or HEAD
+        # content-length / block size) and can exceed the number of chunks
+        # actually streamed, so a successful download may leave the task a hair
+        # below 100%. Snap it to complete so the GUI reads 100% and any
+        # `.finished` check downstream stays truthful. Only on success; a real
+        # failure is left as-is for the caller to mark failed.
+        task = self.progress.tasks[p_task]
+        if result_segments and task.total is not None and not task.finished:
+            self.progress.update(p_task, completed=task.total)
 
         return result_segments, dl_segment_results
 
@@ -1546,6 +1561,35 @@ class Download:
 
         return result
 
+    @staticmethod
+    def _want_cover_file(save_cover: bool, is_parent_album: bool, single_track: bool) -> bool:
+        """Whether to write the separate cover.jpg. The master toggle (save_cover)
+        must be on; then album/collection downloads always qualify, and a lone
+        single-track download qualifies only when the user opted in (single_track)."""
+        return bool(save_cover) and (bool(is_parent_album) or bool(single_track))
+
+    @staticmethod
+    def _cover_file_dimension(embedded: CoverDimensions, pref: str) -> CoverDimensions:
+        """Resolve the saved cover.jpg size. 'follow' (or an unknown value) uses
+        the embedded size; otherwise a CoverDimensions member name."""
+        if pref == "follow":
+            return embedded
+        try:
+            return CoverDimensions[pref]
+        except KeyError:
+            return embedded
+
+    def _album_cover_file_data(
+        self, track: Track, embedded_data, embedded_dim: CoverDimensions, file_dim: CoverDimensions
+    ):
+        """Cover bytes for the separate cover.jpg at ``file_dim``, reusing the
+        already-fetched embedded bytes when the two sizes match (no re-download)."""
+        if file_dim == CoverDimensions.PxORIGIN:
+            return self.cover_data(url=track.album.image(CoverDimensions.PxORIGIN))
+        if file_dim == embedded_dim:
+            return embedded_data
+        return self.cover_data(url=track.album.image(int(file_dim)))
+
     def metadata_write(
         self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream
     ) -> tuple[bool, pathlib.Path | None, pathlib.Path | None]:
@@ -1599,21 +1643,27 @@ class Download:
             path_lyrics = self.lyrics_to_file(path_media.parent, lyrics)
 
         cover_dimension = self.settings.data.metadata_cover_dimension
+        # The separately-saved cover.jpg can use its own size (see the helpers
+        # above); "follow" keeps the historical behaviour of matching embedded.
+        cover_file_pref = getattr(self.settings.data, "metadata_cover_file_dimension", "follow") or "follow"
+        cover_file_dimension = self._cover_file_dimension(cover_dimension, cover_file_pref)
+        want_cover_file = self._want_cover_file(
+            self.settings.data.cover_album_file,
+            is_parent_album,
+            getattr(self.settings.data, "cover_single_track_file", False),
+        )
 
-        if self.settings.data.metadata_cover_embed or (self.settings.data.cover_album_file and is_parent_album):
+        if self.settings.data.metadata_cover_embed or want_cover_file:
             # Do not write CoverDimensions.PxORIGIN to metadata, since it can exceed max metadata file size (>16Mb)
             url_cover = track.album.image(
                 int(cover_dimension) if cover_dimension != CoverDimensions.PxORIGIN else int(CoverDimensions.Px1280)
             )
             cover_data = self.cover_data(url=url_cover)
 
-        if cover_data and self.settings.data.cover_album_file and is_parent_album:
-            if cover_dimension == CoverDimensions.PxORIGIN:
-                url_cover_album_file = track.album.image(CoverDimensions.PxORIGIN)
-                cover_data_album_file = self.cover_data(url=url_cover_album_file)
-            else:
-                cover_data_album_file = cover_data
-
+        if cover_data and want_cover_file:
+            cover_data_album_file = self._album_cover_file_data(
+                track, cover_data, cover_dimension, cover_file_dimension
+            )
             path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
 
         metadata_target_upc = MetadataTargetUPC(self.settings.data.metadata_target_upc)

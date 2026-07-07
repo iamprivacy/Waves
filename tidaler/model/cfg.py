@@ -23,7 +23,15 @@ class Settings:
     # TODO: Implement multi threading for downloads.
     # multi_thread: bool = False
     download_delay: bool = True
-    download_base_path: str = "~/download"
+    # No default download folder: the user must choose one explicitly. A fresh
+    # install starts blank and the first download is gated until a folder is set
+    # (so nobody silently downloads into a folder they can't find). Existing
+    # installs keep whatever they persisted, including the old "~/download".
+    download_base_path: str = ""
+    # One-time flag for the soft "you're still on the old default folder" nudge
+    # shown to existing users who never changed "~/download". Set once the nudge
+    # is shown or dismissed so it never nags again.
+    download_folder_prompted: bool = False
     quality_audio: Quality = Quality.low_320k
     quality_video: QualityVideo = QualityVideo.P480
     download_dolby_atmos: bool = False
@@ -44,9 +52,18 @@ class Settings:
     video_convert_mp4: bool = True
     path_binary_ffmpeg: str = ""
     metadata_cover_dimension: CoverDimensions = CoverDimensions.Px320
+    # Size of the separately-saved cover.jpg. The sentinel "follow" means "match
+    # the embedded cover size above" (the historical behaviour); any other value
+    # is a CoverDimensions member name (e.g. "Px640", "PxORIGIN") applied only to
+    # the saved file, so the embedded art and the on-disk cover can differ.
+    metadata_cover_file_dimension: str = "follow"
     metadata_cover_embed: bool = True
     mark_explicit: bool = False
     cover_album_file: bool = True
+    # Also write cover.jpg when a single track is downloaded on its own (not just
+    # as part of a full album). Off by default: the historical behaviour only
+    # saved cover.jpg for album/collection downloads.
+    cover_single_track_file: bool = False
     extract_flac: bool = True
     downsample_enabled: bool = False
     downsample_target: DownsampleTarget = DownsampleTarget.BIT16_48
@@ -110,9 +127,14 @@ class HelpSettings:
     metadata_cover_dimension: str = (
         "The square dimensions of the cover image embedded into the track. Possible values: 80, 160, 320, 640, 1280, origin."
     )
+    metadata_cover_file_dimension: str = (
+        "Size of the saved 'cover.jpg'. 'Same as embedded' matches the embedded cover size; "
+        "otherwise pick an independent size (80, 160, 320, 640, 1280, origin)."
+    )
     metadata_cover_embed: str = "Embed album cover into file."
     mark_explicit: str = "Mark explicit tracks with '🅴' in track title (only applies to metadata)."
     cover_album_file: str = "Save cover to 'cover.jpg', if an album is downloaded."
+    cover_single_track_file: str = "Also save cover.jpg when downloading a single track on its own."
     extract_flac: str = "Extract FLAC audio tracks from MP4 containers and save them as `*.flac` (uses FFmpeg)."
     downsample_enabled: str = (
         "Downsample FLAC files toward a fixed target rate/bit-depth using ffmpeg. "
