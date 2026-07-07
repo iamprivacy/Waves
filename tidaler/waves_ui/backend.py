@@ -40,6 +40,13 @@ from tidalapi.media import Quality, Track, Video
 from tidalapi.mix import Mix
 from tidalapi.playlist import Playlist
 
+try:
+    # Ordered favourites (My Tidal sort). Absent on older tidalapi, in which
+    # case sorting silently degrades to the default (date-added) API order.
+    from tidalapi.types import AlbumOrder, ArtistOrder, ItemOrder, OrderDirection, VideoOrder
+except Exception:  # pragma: no cover - depends on installed tidalapi version
+    AlbumOrder = ArtistOrder = ItemOrder = OrderDirection = VideoOrder = None
+
 import tidaler.download as _tidaler_download
 from tidaler.config import Settings, Tidal
 from tidaler.constants import (
@@ -91,6 +98,9 @@ _FLAG_FIELDS = [
     "extract_flac",
     "metadata_cover_embed",
     "cover_album_file",
+    # Child of cover_album_file, carried inside its "cover_scope" composite rather
+    # than as its own tile; listed here so applySettings persists it as a bool.
+    "cover_single_track_file",
     "skip_existing",
     "symlink_to_track",
     "playlist_create",
@@ -237,6 +247,30 @@ def _enum_options(key: str, members) -> list:
 # thousands of delegates at once.
 _LIBRARY_PAGE = 100
 
+# The download folder Waves used to ship as a silent default. A blank path now
+# means "unset" (fresh installs), but existing users who never changed it still
+# carry this exact value; it triggers the one-time "choose a folder" nudge.
+_LEGACY_DEFAULT_DOWNLOAD_PATH = "~/download"
+
+# My Tidal sort: map the order keys QML sends to per-category tidalapi enums.
+# Direction is applied separately. Built only when the enums are importable;
+# an empty map means "no server-side sort" (older tidalapi) and every category
+# falls back to the default date-added order.
+if OrderDirection is not None:
+    _LIB_ORDER = {
+        "albums": {
+            "date": AlbumOrder.DateAdded,
+            "name": AlbumOrder.Name,
+            "release": AlbumOrder.ReleaseDate,
+            "artist": AlbumOrder.Artist,
+        },
+        "artists": {"date": ArtistOrder.DateAdded, "name": ArtistOrder.Name},
+        "tracks": {"date": ItemOrder.Date, "name": ItemOrder.Name, "artist": ItemOrder.Artist},
+        "videos": {"date": VideoOrder.DateAdded, "name": VideoOrder.Name, "artist": VideoOrder.Artist},
+    }
+else:  # pragma: no cover - older tidalapi
+    _LIB_ORDER = {}
+
 
 def _pretty(key: str) -> str:
     return key.replace("_", " ").capitalize()
@@ -292,11 +326,26 @@ class _TrackedDownload(Download):
     def __init__(self, *args, track_signals: _ProgressSignals | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._track_signals = track_signals
+        # Count tracks that actually wrote a file. The engine returns ok=False
+        # WITHOUT raising when a stream URL can't be fetched (e.g. an unentitled
+        # free account whose playback requests are rejected), so the job worker
+        # cannot tell success from silent failure by exceptions alone; it reads
+        # this tally instead. items() fans item() out on a pool, so guard it.
+        self._outcome_lock = Lock()
+        self.ok_count = 0
+
+    def _note_outcome(self, ok: bool) -> None:
+        """Tally a finished track (thread-safe: items() runs these on a pool)."""
+        if ok:
+            with self._outcome_lock:
+                self.ok_count += 1
 
     def item(self, *args, media=None, event_stop=None, **kwargs):
         relay = self._track_signals
         if relay is None or media is None or getattr(media, "id", None) is None:
-            return super().item(*args, media=media, event_stop=event_stop, **kwargs)
+            ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
+            self._note_outcome(ok)
+            return ok, path
         name = name_builder_item(media)
         base = {
             "id": str(media.id),
@@ -315,8 +364,16 @@ class _TrackedDownload(Download):
             raise
         aborted = self.event_abort.is_set() or (event_stop is not None and event_stop.is_set())
         status = "done" if ok else ("cancelled" if aborted else "failed")
+        self._note_outcome(ok)
         relay.track_event.emit({**base, "status": status})
         return ok, path
+
+
+def _raise_download_incomplete(message: str) -> None:
+    """Raise so a silent (no-exception) download failure routes through the job
+    worker's existing failure handling. Kept out of the try body so the raise is
+    abstracted to a helper (mirrors download.py's _raise_media_missing)."""
+    raise RuntimeError(message)
 
 
 def _fmt_duration(seconds: int | None) -> str:
@@ -392,6 +449,20 @@ def _release_date(obj) -> str:
         return date.strftime("%Y-%m-%d")
     except Exception:
         return str(date)
+
+
+def _date_added(obj) -> str:
+    """When the item was added to the user's favourites, as an ISO string (or ""
+    if unknown). tidalapi exposes ``user_date_added`` on favourite albums/artists/
+    tracks/videos/playlists; plain Mix objects carry no added date, so mixes
+    return "" and are excluded from date sorting and Recently added."""
+    dt = getattr(obj, "user_date_added", None) or getattr(obj, "date_added", None)
+    if dt is None:
+        return ""
+    try:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return str(dt)
 
 
 def _quality_label(obj) -> str:
@@ -901,6 +972,13 @@ class WavesBridge(QObject):
     artistMetaLoaded = Signal(str, int)
     libraryLoaded = Signal(str, "QVariant", bool)  # category, items (replace), hasMore
     libraryMore = Signal(str, "QVariant", bool)  # category, items (append), hasMore
+    # "Recently added" strip at the top of My Tidal: a single merged, recency-
+    # sorted payload of the newest favourite albums, artists and tracks.
+    recentlyAddedLoaded = Signal("QVariant")
+    # "Home" tab: a Browse-shaped, account-scoped landing. Carries a list of
+    # shelf sections ({rowKind, title, items}) so the SAME card/track shelves
+    # that render Browse render Home too.
+    homeLoaded = Signal("QVariant")
     # Browse (TIDAL editorial pages). browseLoaded carries the landing payload
     # {sections, genres, moods, decades, error}; browsePageLoaded carries one
     # drilled-into page {key, title, sections, error} where key is the page's
@@ -929,6 +1007,12 @@ class WavesBridge(QObject):
     motionBgChanged = Signal()  # motion_background pref flipped; Main.qml re-reads it
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
+    # Download-folder gating. downloadFolderMissing → no folder is set at all
+    # (blocking: the download did not start); downloadFolderDefault → the user is
+    # still on the historical "~/download" default (a one-time, non-blocking
+    # nudge, the download proceeds). QML routes both to the Downloads setting.
+    downloadFolderMissing = Signal()
+    downloadFolderDefault = Signal()
     # In-app audio preview. A preview is addressed by (kind, id) where kind is
     # "track" (id = track id) or "artist" (id = artist id, plays its top track),
     # so the same signals drive both the track-row button and the artist-artwork
@@ -1064,6 +1148,14 @@ class WavesBridge(QObject):
         self._lib_cache: dict[str, dict] = {}
         self._lib_loading: set[str] = set()
         self._lib_gen = 0  # bumped per first-page load to drop stale category loads
+        # Per-category My Tidal sort, {category: (order_key, "asc"|"desc")}. Absent
+        # = the default (date-added, descending) order. Session-only: a non-default
+        # sort is never persisted to the disk page cache (see _save_page_cache).
+        self._lib_sort: dict[str, tuple[str, str]] = {}
+        # Favourite album/track id sets for the library-scoped artist page, built
+        # lazily and cleared on logout (Waves never mutates favourites itself, so
+        # the only staleness is an external edit, tolerated like the page caches).
+        self._fav_ids: dict[str, set] = {}
         self._search_gen = 0  # bumped per search / open-link to drop stale results
         # Browse (TIDAL editorial pages): the landing payload plus every page
         # drilled into so far, cached for the session. `_browse_loading` de-dupes
@@ -1107,6 +1199,11 @@ class WavesBridge(QObject):
         self._queue: list[dict] = []
         self._queue_seq = 0
         self._paused = False
+        # A download deferred by the default-folder nudge: the user must decide
+        # (keep the default and continue, or choose a new folder and not download)
+        # before it runs. Holds a zero-arg replay of the exact download call, or
+        # None. Replayed by keepDownloadFolder(); cleared otherwise.
+        self._pending_download = None
         # Per-job abort events keyed by queue id, so a single running download
         # can be cancelled (the global _event_abort would stop everything).
         self._job_aborts: dict[int, Event] = {}
@@ -1315,6 +1412,7 @@ class WavesBridge(QObject):
             "quality": _quality_label(album),
             "popularity": _popularity(album),
             "explicit": bool(getattr(album, "explicit", False)),
+            "added": _date_added(album),
         }
 
     def _track_dict(self, track) -> dict:
@@ -1337,6 +1435,7 @@ class WavesBridge(QObject):
             "quality": _quality_label(track),
             "popularity": _popularity(track),
             "explicit": bool(getattr(track, "explicit", False)),
+            "added": _date_added(track),
         }
 
     def _video_dict(self, video) -> dict:
@@ -1350,6 +1449,7 @@ class WavesBridge(QObject):
             "art": _image(video, 320),
             "duration": _fmt_duration(getattr(video, "duration", 0)),
             "explicit": bool(getattr(video, "explicit", False)),
+            "added": _date_added(video),
         }
 
     def _playlist_dict(self, playlist) -> dict:
@@ -1362,6 +1462,7 @@ class WavesBridge(QObject):
             "art": _image(playlist),
             "tracks": int(getattr(playlist, "num_tracks", 0) or 0),
             "creator": str(getattr(creator, "name", "") or "") if creator is not None else "",
+            "added": _date_added(playlist),
         }
 
     def _mix_dict(self, mix) -> dict:
@@ -1372,6 +1473,7 @@ class WavesBridge(QObject):
             "title": name_builder_title(mix),
             "art": _image(mix),
             "subtitle": str(getattr(mix, "sub_title", "") or getattr(mix, "short_subtitle", "") or ""),
+            "added": _date_added(mix),
         }
 
     def _get_artist(self, artist_id: str):
@@ -1466,6 +1568,9 @@ class WavesBridge(QObject):
         # the freshly-cleared caches for the next account.
         self._lib_cache.clear()
         self._lib_loading.clear()
+        self._lib_sort.clear()
+        self._fav_ids.clear()
+        self._pending_download = None
         self._lib_gen += 1
         self._browse_root_cache = None
         self._browse_pages.clear()
@@ -1505,9 +1610,15 @@ class WavesBridge(QObject):
                 "more": e["more"] or len(e["items"]) > _LIBRARY_PAGE,
             }
             for cat, e in self._lib_cache.items()
+            # Only persist the default order; a session-only custom sort restored
+            # from disk would be silently mislabelled as the default.
+            if cat not in self._lib_sort
         }
         data = {
-            "version": 1,
+            # v2: the persisted default-sort library pages are now date-added
+            # descending (v1 held tidalapi's raw, non-date order), so drop v1
+            # snapshots rather than restore a stale order on launch.
+            "version": 2,
             "user": self._cache_user_id(),
             "browse_root": self._browse_root_cache,
             "browse_pages": self._browse_pages,
@@ -1538,7 +1649,7 @@ class WavesBridge(QObject):
         except Exception:
             logger.debug("page cache load failed", exc_info=True)
             return
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict) or data.get("version") != 2:
             return
         if str(data.get("user", "")) != self._cache_user_id():
             return
@@ -1844,6 +1955,106 @@ class WavesBridge(QObject):
 
         self.threadpool.start(Worker(work))
 
+    def _favorite_ids(self, kind: str) -> set:
+        """The user's favourite album or track ids (``kind`` = "albums"|"tracks"),
+        paginated once and cached for the session. Used to scope an artist page
+        to the user's library; cleared on logout."""
+        cached = self._fav_ids.get(kind)
+        if cached is not None:
+            return cached
+        ids: set[str] = set()
+        try:
+            favorites = self.tidal.session.user.favorites
+            method = getattr(favorites, kind)
+            offset = 0
+            while True:
+                try:
+                    batch = method(limit=_LIBRARY_PAGE, offset=offset) or []
+                    paged = True
+                except TypeError:
+                    batch = method() or []  # older tidalapi: one unpaged call
+                    paged = False
+                for o in batch:
+                    ids.add(str(getattr(o, "id", "")))
+                if not paged or len(batch) < _LIBRARY_PAGE:
+                    break
+                offset += _LIBRARY_PAGE
+        except Exception:
+            logger.exception("Could not load favourite %s ids", kind)
+        self._fav_ids[kind] = ids
+        return ids
+
+    @Slot(str)
+    def loadArtistLibrary(self, artist_id: str) -> None:
+        """Open the artist page scoped to the user's library: same layout, but
+        only the albums/EPs the user has favourited (and their favourited top
+        tracks). Emitted with ``libraryScoped`` so the QML keeps it distinct from
+        the full artist page; never cached or revalidated (the full page owns
+        that path)."""
+        artist_id = str(artist_id or "")
+        if not artist_id:
+            return
+        self._set_busy(True)
+        self._set_status("Loading library artist…")
+        gen = self._browse_gen  # account generation, bumped on logout
+
+        def work() -> None:
+            t0 = devlog.clock()
+            artist = self._get_artist(artist_id)
+            if artist is None:
+                self._set_status("Could not load artist")
+                self._set_busy(False)
+                return
+            try:
+                bio = _clean_bio(artist.get_bio() or "")
+            except Exception:
+                bio = ""
+            try:
+                albums = artist.get_albums()
+            except Exception:
+                albums = []
+            try:
+                eps = artist.get_ep_singles()
+            except Exception:
+                eps = []
+            try:
+                tops = artist.get_top_tracks(limit=50)
+            except Exception:
+                tops = []
+            fav_albums = self._favorite_ids("albums")
+            fav_tracks = self._favorite_ids("tracks")
+            payload = {
+                "id": artist_id,
+                "name": getattr(artist, "name", ""),
+                "art": _image(artist, 480),
+                "bio": bio,
+                "albums": [
+                    self._album_dict(a) for a in self._dedup_albums(albums) if str(getattr(a, "id", "")) in fav_albums
+                ],
+                "eps": [
+                    self._album_dict(a) for a in self._dedup_albums(eps) if str(getattr(a, "id", "")) in fav_albums
+                ],
+                "tracks": [
+                    self._track_dict(t) for t in self._dedup_tracks(tops) if str(getattr(t, "id", "")) in fav_tracks
+                ],
+                "libraryScoped": True,
+            }
+            if gen != self._browse_gen:
+                return  # logged out mid-fetch
+            self.artistLoaded.emit(payload)
+            self._set_status(getattr(artist, "name", "Artist"))
+            self._set_busy(False)
+            devlog.done(
+                "artist",
+                f"library id={artist_id}",
+                devlog.clock() - t0,
+                albums=len(payload["albums"]),
+                eps=len(payload["eps"]),
+                tracks=len(payload["tracks"]),
+            )
+
+        self.threadpool.start(Worker(work))
+
     def _fav_artist_dict(self, artist) -> dict:
         key = str(getattr(artist, "id", id(artist)))
         self._remember("artist", key, artist)
@@ -1855,7 +2066,33 @@ class WavesBridge(QObject):
             "popularity": -1,
         }
 
-    def _library_page(self, category: str, offset: int, limit: int) -> tuple[list, bool]:
+    def _lib_order_kwargs(self, category: str, order_spec) -> dict:
+        """tidalapi favourites kwargs for a My Tidal sort, or ``{}`` for the
+        default order (or an older tidalapi without ordered favourites)."""
+        if OrderDirection is None or not order_spec:
+            return {}
+        order_key, direction = order_spec
+        enum = _LIB_ORDER.get(category, {}).get(order_key)
+        if enum is None:
+            return {}
+        direction_enum = OrderDirection.Ascending if direction == "asc" else OrderDirection.Descending
+        return {"order": enum, "order_direction": direction_enum}
+
+    def _sort_local_library(self, items: list, order_spec) -> list:
+        """Sort the locally-paged categories (playlists/mixes). Sorts on string
+        keys (lower-cased name, or ISO added date) so a missing date never
+        raises, mixes simply sort to one end."""
+        if not order_spec:
+            return items
+        order_key, direction = order_spec
+        rev = direction == "desc"
+        if order_key == "name":
+            return sorted(items, key=lambda o: (name_builder_title(o) or "").lower(), reverse=rev)
+        if order_key == "date":
+            return sorted(items, key=_date_added, reverse=rev)
+        return items
+
+    def _library_page(self, category: str, offset: int, limit: int, order_override=None) -> tuple[list, bool]:
         """Build one page of a library category for the API window
         ``[offset, offset+limit)``. Returns the rows and whether more items
         exist beyond this window.
@@ -1868,6 +2105,17 @@ class WavesBridge(QObject):
           from the total ``get_*_count``, not the returned length.
         Playlists and mixes come back as one (small) list, paged locally."""
         session = self.tidal.session
+        # order_override lets a caller force a specific order (e.g. Home's date-desc
+        # previews) without touching the category's own persistent sort. Otherwise
+        # use the category's chosen sort; when none is set, apply date-added
+        # descending ourselves. tidalapi's raw default is NOT date-added (it reads
+        # alphabetical), so leaving it unset made the tab's default "Recently added"
+        # a lie and disagree with the Home previews. Applying it explicitly keeps
+        # the persistent sort map empty for the default (so the page cache still
+        # persists) while the tab and Home show the same newest-first order.
+        order_spec = order_override if order_override is not None else self._lib_sort.get(category)
+        if order_spec is None:
+            order_spec = ("date", "desc")
         if category in ("playlists", "mixes"):
             if category == "playlists":
                 full = [p for p in user_media_lists(session).get("playlists", []) if hasattr(p, "num_tracks")]
@@ -1875,6 +2123,8 @@ class WavesBridge(QObject):
             else:
                 full = user_media_lists(session).get("mixes", [])
                 builder = self._mix_dict
+            # Paged locally, so sort the whole list here before slicing.
+            full = self._sort_local_library(full, order_spec)
             page = full[offset : offset + limit]
             return [builder(m) for m in page], offset + limit < len(full)
         # (favourites method, total-count method, row builder)
@@ -1889,11 +2139,16 @@ class WavesBridge(QObject):
             return [], False
         method_name, count_name, builder = spec
         favorites = session.user.favorites
+        method = getattr(favorites, method_name)
+        order_kwargs = self._lib_order_kwargs(category, order_spec)
         try:
-            raw = getattr(favorites, method_name)(limit=limit, offset=offset) or []
+            raw = method(limit=limit, offset=offset, **order_kwargs) or []
         except TypeError:
-            # Older tidalapi without limit/offset kwargs: fetch-all + slice.
-            raw = (getattr(favorites, method_name)() or [])[offset : offset + limit]
+            # Older tidalapi: drop the order kwargs, then the limit/offset kwargs.
+            try:
+                raw = method(limit=limit, offset=offset) or []
+            except TypeError:
+                raw = (method() or [])[offset : offset + limit]
         try:
             more = offset + limit < int(getattr(favorites, count_name)())
         except Exception:
@@ -2017,6 +2272,107 @@ class WavesBridge(QObject):
             self.libraryMore.emit(category, items, more)
             self._set_status(self._lib_status(category, shown, more))
             devlog.done("library", f"{category} page@{offset}", devlog.clock() - t0, n=len(items), more=more)
+
+        self.threadpool.start(Worker(work))
+
+    @Slot(str, str, str)
+    def setLibrarySort(self, category: str, order: str, direction: str) -> None:
+        """Re-sort a My Tidal category and reload its first page. Server-paged
+        categories re-fetch in the new order; playlists/mixes re-sort locally. The
+        default (date, descending) clears the override so the category can reuse
+        the persisted page cache."""
+        if not self._logged_in:
+            return
+        category = str(category or "")
+        order = str(order or "date")
+        direction = "asc" if str(direction) == "asc" else "desc"
+        if order == "date" and direction == "desc":
+            self._lib_sort.pop(category, None)  # the default order; no override
+        else:
+            self._lib_sort[category] = (order, direction)
+        # Drop the differently-ordered page (and any in-flight load) so loadLibrary
+        # fetches page 1 fresh; it bumps _lib_gen, so a stale worker can't repaint.
+        self._lib_cache.pop(category, None)
+        self._lib_loading.discard(category)
+        self.loadLibrary(category)
+
+    @Slot()
+    def loadRecentlyAdded(self) -> None:
+        """Build the 'Recent' tab: the newest favourite albums, artists and tracks
+        merged into one recency-sorted list, each row tagged with its ``kind``.
+        Mixes and playlists are excluded (no reliable added date)."""
+        if not self._logged_in:
+            self.recentlyAddedLoaded.emit([])
+            return
+        limit = 24
+        gen = self._browse_gen  # bumped on logout only
+
+        def work() -> None:
+            t0 = devlog.clock()
+            items: list = []
+            for cat, kind in (("albums", "album"), ("artists", "artist"), ("tracks", "track")):
+                try:
+                    # Force date-desc regardless of the category's own sort.
+                    rows, _ = self._library_page(cat, 0, limit, order_override=("date", "desc"))
+                except Exception:
+                    logger.exception("Recently added: %s page failed", cat)
+                    rows = []
+                items.extend({**r, "kind": kind} for r in rows)
+            # Merge across kinds by added date, newest first; ties keep a stable
+            # album/artist/track order from the loop above.
+            items.sort(key=lambda r: r.get("added") or "", reverse=True)
+            if gen == self._browse_gen:
+                self.recentlyAddedLoaded.emit(items[:limit])
+            devlog.done("library", "recently-added", devlog.clock() - t0, n=len(items))
+
+        self.threadpool.start(Worker(work))
+
+    @Slot()
+    def loadHome(self) -> None:
+        """Build the 'Home' tab: a Browse-style landing scoped to the account.
+        Shelves are shaped like the Browse sections ({rowKind, title, items}),
+        each with a ``target`` naming the My Tidal category it previews:
+          * 'Recent albums' - the newest favourite albums, as album cards;
+          * 'Recent tracks' - the newest favourite tracks, as a track list.
+        Each shelf shows only the newest few; its heading drills into the full,
+        identically-sorted (newest-first) list in that category's own tab. No
+        playlist/mix or artist shelf: those either lack a reliable added date or
+        just echo the album a follow came from. Emitted via homeLoaded; empty
+        list when signed out."""
+        if not self._logged_in:
+            self.homeLoaded.emit([])
+            return
+        gen = self._browse_gen  # account generation, bumped on logout
+
+        def tagged(rows: list, kind: str) -> list:
+            return [{**r, "kind": kind} for r in rows]
+
+        def work() -> None:
+            t0 = devlog.clock()
+
+            def page(cat: str, n: int) -> list:
+                try:
+                    rows, _ = self._library_page(cat, 0, n, order_override=("date", "desc"))
+                except Exception:
+                    logger.exception("Home: %s page failed", cat)
+                    return []
+                else:
+                    return rows
+
+            # A generous preview of the newest of each kind; the heading opens the
+            # full, identically-sorted list in that category's own tab.
+            albums = tagged(page("albums", 24), "album")
+            tracks = tagged(page("tracks", 18), "track")
+
+            sections: list[dict] = []
+            if albums:
+                sections.append({"rowKind": "cards", "title": "Recent albums", "target": "albums", "items": albums})
+            if tracks:
+                sections.append({"rowKind": "tracks", "title": "Recent tracks", "target": "tracks", "items": tracks})
+
+            if gen == self._browse_gen:
+                self.homeLoaded.emit(sections)
+            devlog.done("library", "home", devlog.clock() - t0, n=len(sections))
 
         self.threadpool.start(Worker(work))
 
@@ -3243,6 +3599,68 @@ class WavesBridge(QObject):
             track_signals=signals,
         )
 
+    @staticmethod
+    def _folder_gate_action(path: str, prompted: bool) -> str:
+        """Pure decision for the download-folder gate. "block" = no folder set at
+        all (a fresh install: the download must not start); "nudge" = still on the
+        legacy "~/download" default and not yet warned (proceed, but warn once);
+        "ok" = a real folder is set."""
+        path = (path or "").strip()
+        if not path:
+            return "block"
+        if path == _LEGACY_DEFAULT_DOWNLOAD_PATH and not prompted:
+            return "nudge"
+        return "ok"
+
+    def _download_gate(self) -> str:
+        """Apply :meth:`_folder_gate_action` with its side effects: set the status
+        and emit the gate signal. Returns the action so the caller can defer (both
+        "block" and "nudge" hold the download; see :meth:`_download`). The one-time
+        flag is set only when the user picks "keep" (see :meth:`keepDownloadFolder`),
+        so the decision is asked on every attempt until it is actually resolved."""
+        action = self._folder_gate_action(
+            self.settings.data.download_base_path, self.settings.data.download_folder_prompted
+        )
+        if action == "block":
+            self._set_status("Choose a download folder to start downloading")
+            self.downloadFolderMissing.emit()
+        elif action == "nudge":
+            self._set_status("Choose a download location to continue")
+            self.downloadFolderDefault.emit()
+        return action
+
+    @Slot()
+    def keepDownloadFolder(self) -> None:
+        """The user chose to keep the legacy default: remember the decision (so the
+        nudge never asks again) and run the download that was held back."""
+        self.settings.data.download_folder_prompted = True
+        self.settings.save()
+        pending = self._pending_download
+        self._pending_download = None
+        if pending is not None:
+            pending()
+
+    @Slot()
+    def dismissDownloadFolderNudge(self) -> None:
+        """The user chose to change the folder (or dismissed the nudge): drop the
+        held-back download. Nothing is queued; they re-initiate after choosing a
+        folder. The one-time flag is left unset so an unresolved default is asked
+        about again next time."""
+        self._pending_download = None
+
+    @Slot()
+    def revealDownloadPath(self) -> None:
+        """Open the OS file manager at the current download folder (the folder
+        nudge's path is clickable). Falls back to the nearest existing ancestor so
+        the reveal never fails on a folder that has not been created yet."""
+        raw = (self.settings.data.download_base_path or "").strip()
+        if not raw:
+            return
+        target = pathlib.Path(raw).expanduser()
+        while not target.exists() and target != target.parent:
+            target = target.parent
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target)))
+
     def _download(
         self,
         obj,
@@ -3255,6 +3673,19 @@ class WavesBridge(QObject):
     ) -> None:
         if not self._logged_in:
             self._set_status("Sign in before downloading")
+            return
+        # A download must land somewhere the user can find. Every download path
+        # funnels through here, so one guard covers tracks, albums, videos,
+        # playlists, mixes and whole-artist queues.
+        gate = self._download_gate()
+        if gate == "block":
+            return  # nothing set (fresh install): download did not start
+        if gate == "nudge":
+            # Legacy default: hold this exact download until the user decides. The
+            # queue is untouched, so the download button stays in its idle state.
+            self._pending_download = lambda: self._download(
+                obj, type_media, name, file_template, collection, media_id, merge_plan
+            )
             return
         # Artist + total track count for the queue row label. Collections report
         # their track total; a single track/video counts as one.
@@ -3315,11 +3746,25 @@ class WavesBridge(QObject):
             t0 = devlog.clock()
             try:
                 if merge_plan is not None:
+                    # Raises on any partial failure; its own reconciliation stands.
                     self._download_merge_plan(dl, signals, job_abort, obj, file_template, merge_plan)
                 elif collection:
                     dl.items(file_template=file_template, media=obj)
+                    # items() returns None and swallows a per-track stream failure
+                    # as ok=False WITHOUT raising, so an album whose every track is
+                    # rejected (e.g. an unentitled/free account) would otherwise be
+                    # reported as a clean success. The relay counted every track
+                    # that actually wrote a file; zero means nothing downloaded.
+                    if dl.ok_count == 0 and not job_abort.is_set():
+                        _raise_download_incomplete("no tracks were downloaded")
                 else:
-                    dl.item(file_template=file_template, media=obj)
+                    # A single track: honor item()'s (ok, path). The engine returns
+                    # ok=False without raising when the stream URL can't be fetched
+                    # (the unentitled/free-account case), so discarding the return
+                    # would flip the button to a false "done".
+                    ok, _path = dl.item(file_template=file_template, media=obj)
+                    if not ok and not job_abort.is_set():
+                        _raise_download_incomplete("track produced no file")
                 if job_abort.is_set():
                     # Cancelled mid-download, don't report success.
                     self.downloadState.emit(media_id, "")
@@ -4050,6 +4495,16 @@ class WavesBridge(QObject):
         artist = self._get_artist(artist_id)
         if artist is None or self._dl is None:
             return
+        # Bail before the (network-heavy) discography scan if there's nowhere to
+        # save to; _download would reject each album anyway.
+        gate = self._download_gate()
+        if gate == "block":
+            return
+        if gate == "nudge":
+            # Hold the whole-artist queue behind the same decision; replay re-runs
+            # this scan once the user keeps the default folder.
+            self._pending_download = lambda: self.downloadArtist(artist_id)
+            return
         self._set_status("Loading artist discography…")
         self.downloadProgress.emit(artist_id, 0.0)
         self.downloadState.emit(artist_id, "running")
@@ -4553,12 +5008,10 @@ class WavesBridge(QObject):
                 },
                 {
                     "key": "clean_album_artist",
-                    "label": "Clean album-artist tag",
+                    "label": "Clean Album Artist",
                     "help": (
-                        "Write only the primary artist to the album-artist metadata field instead of every "
-                        "credited album artist. Important for Plex, which doesn't read a multi-artist album-artist "
-                        "field correctly and can split or misfile albums. Affects the metadata tag only; folder "
-                        "names are unchanged."
+                        "Write only the primary artist to the album-artist tag, so Plex sorts "
+                        "multi-artist albums correctly. Metadata only; folder names are unchanged."
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("clean_album_artist"),
@@ -4632,6 +5085,30 @@ class WavesBridge(QObject):
 
         def get_field(key: str) -> dict:
             f = dict(waves_fields[key]) if key in waves_fields else auto_field(key)
+            if key == "metadata_cover_dimension":
+                # Composite control: the embedded-cover size (this field's enum)
+                # plus an optional, progressively-disclosed size for the saved
+                # cover.jpg. Power users get a second size without a new row
+                # appearing for everyone else. QML renders "cover_sizes" specially
+                # and writes both keys back through applySettings.
+                f["type"] = "cover_sizes"
+                f["file_key"] = "metadata_cover_file_dimension"
+                f["file_value"] = getattr(d, "metadata_cover_file_dimension", "follow") or "follow"
+                f["file_label"] = "Separate cover.jpg size"
+                f["file_options"] = [
+                    {"value": "follow", "label": "Same as embedded"},
+                    *_enum_options("metadata_cover_dimension", _ENUM_BY_FIELD["metadata_cover_dimension"]),
+                ]
+            if key == "cover_album_file":
+                # Stays a normal on/off tile, but carries a nested child: a compact
+                # checkbox for single-track downloads that appears under the
+                # description while "Save cover.jpg" is on. The tile keeps its fixed
+                # size, so the niche option adds no separate tile and the section
+                # keeps its compact 2-column grid.
+                f["child_key"] = "cover_single_track_file"
+                f["child_value"] = bool(getattr(d, "cover_single_track_file", False))
+                f["child_label"] = "Also save for single tracks"
+                f["child_help"] = "Write cover.jpg for a single track downloaded on its own, not just full albums."
             if key in ("auto_update", "update_cadence"):
                 # Rendered inside the updater card (toggle + cadence segment),
                 # not as the generic tile/row controls.

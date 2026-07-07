@@ -169,7 +169,7 @@ class _Span:
     """Mutable handle yielded by :func:`span` so the timed block can attach
     fields it only learns mid-flight (result counts, sub-durations, …)."""
 
-    __slots__ = ("fields", "_t0")
+    __slots__ = ("_t0", "fields")
 
     def __init__(self, fields: dict) -> None:
         self.fields = fields
