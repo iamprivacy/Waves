@@ -115,6 +115,14 @@ ApplicationWindow {
     // flight (to avoid firing duplicate page requests while scrolling).
     property bool libHasMore: false
     property bool libLoadingMore: false
+    // My Tidal per-category sort, {cat: {key, asc}}. Kept in step with the
+    // backend's own per-category sort (both mutate only via libApplySort).
+    property var libSort: ({})
+    // Download-folder gate dialogs: the blocking "no folder set" gate and the
+    // one-time soft nudge for users still on the old default. Driven by the
+    // downloadFolderMissing / downloadFolderDefault signals.
+    property bool folderGateBlocking: false
+    property bool folderNudge: false
     property var artistData: ({})         // payload of the open artist page (artistLoaded)
     // ---- Download state (mirrors the bridge) ----------------------------
     // mediaId -> percent / state ("running"|"done"|"failed"), fed by the
@@ -185,6 +193,15 @@ ApplicationWindow {
     property bool browsePageError: false
     property var browseStack: []           // pages beneath the current one (Back pops)
     property string browseHighlightId: ""  // track to highlight + scroll to on an album page
+    // Opening an album by clicking one of its tracks scrolls the page down to that
+    // row. Keep the page hidden (but laid out) until that scroll has been applied,
+    // so the reader lands already on the track instead of watching it jump down,
+    // matching every other navigation that drops you in place. The highlighted row
+    // raises this as it lays out and lowers it once centred; the guard clears it if
+    // the track never appears, so a page can never stay hidden.
+    property bool browseHighlightPending: false
+    onBrowseHighlightPendingChanged: if (browseHighlightPending) hiRevealGuard.restart()
+    Timer { id: hiRevealGuard; interval: 500; onTriggered: root.browseHighlightPending = false }
     // Presentation: "art" = artwork-first (hero shelf, unframed covers, hover
     // download, genre/mood/decade colour tiles at the bottom, the streaming-
     // service look); "console" = chip sets up top + framed cards. Persisted.
@@ -245,6 +262,26 @@ ApplicationWindow {
         visible: bgWave.motionOn
         color: root.bg
         opacity: 0.93
+    }
+
+    // One shared 20 Hz "breathe" clock for the next-to-fill cell in every LED
+    // matrix (the download button, queue rows, progress bars). A per-frame
+    // SequentialAnimation on each cell marks the whole window dirty every vsync;
+    // with the full-window wave-loop video behind it, that recomposites the
+    // entire scene at the display refresh for the whole download and pegs a CPU
+    // core, the exact trap the WaveMark logo hit (see its note near line 2096).
+    // Stepping one value at 20 Hz keeps the pulse visually identical while
+    // repainting ~6x less. Cells bind opacity straight to ledPulse; when none
+    // are pulsing nothing reads it, so the ticks cost nothing.
+    property real ledPulse: 0.85
+    Timer {
+        running: root.active
+        interval: 50; repeat: true
+        property real phase: 0
+        onTriggered: {
+            phase = (phase + 0.05 / 1.04) % 1   // 1.04s breathe = 2 x 520ms
+            root.ledPulse = 0.28 + 0.57 * (0.5 + 0.5 * Math.cos(2 * Math.PI * phase))
+        }
     }
 
     Timer {
@@ -623,19 +660,35 @@ ApplicationWindow {
     // `active` is `!artistOpen && !libraryOpen && !settingsOpen`, so clearing the
     // old view first would transiently make Search active and fire its power-on
     // animation mid-switch. Target-first keeps Search inactive throughout.
-    function openLibrary() { navPush(); markNav("library"); navOrigin = "library"; libraryOpen = true; settingsOpen = false; artistOpen = false; loadLib("albums") }
+    function openLibrary() { navPush(); markNav("library"); navOrigin = "library"; libraryOpen = true; settingsOpen = false; artistOpen = false; loadLib("home") }
     function loadLib(cat) {
         libraryCategory = cat
         libLoadingMore = false
         libHasMore = false
         expandedAlbums = ({})
-        // Clear the old category's rows immediately so they don't linger under
-        // the loading state and cause a jarring pop when the new data arrives.
-        // (When the new category is cached, the refill happens in the same tick,
-        // so there's no visible flash.)
+        // "Home" is a self-contained, Browse-shaped landing. Like the Browse tab,
+        // it is fetched once and then kept: re-opening My Tidal shows the shelves
+        // it already has, instantly, instead of clearing to an empty pane and
+        // flashing blank while the async load runs. The placeholder glyph shows
+        // only on the very first load (nothing cached yet). Logout drops the cache
+        // (onLoggedInChanged), so a different account still refetches.
+        if (cat === "home") {
+            if (root.homeSections.length === 0) waves.loadHome()
+            return
+        }
+        // Every other category is a paginated favourites list. Clear the old
+        // category's rows immediately so they don't linger under the loading
+        // state; a cached category refills in the same tick, so there's no flash.
         libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
         libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
         waves.loadLibrary(cat)
+    }
+    // Deep-link to the download-folder setting (from the folder gate/nudge), the
+    // same instant jump the update notice uses, no scroll animation.
+    function openDownloadSetting() {
+        navPush(); markNav("settings")
+        settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
+        Qt.callLater(function() { settingsPage.jumpToCard("downloads") })
     }
     // Browse: open the tab (fetching the landing page once per session) and
     // drill into an editorial page. Target-first flag order, same as above.
@@ -781,6 +834,7 @@ ApplicationWindow {
         navPush()
         if (browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = highlight || ""
+        browseHighlightPending = false   // the highlighted row re-arms this on layout
         browsePageKey = "item:" + kind + ":" + id
         browsePage = null
         browsePageError = false
@@ -833,12 +887,19 @@ ApplicationWindow {
     // rare track without an album id).
     function openBrowseCard(card) {
         var kind = card.kind || ""
-        if (kind === "artist") waves.loadArtist(card.id)
-        else if (kind === "playlist" || kind === "mix" || kind === "album") openBrowseItem(kind, card.id)
-        else if (kind === "track") {
+        // The artist page switches the active surface itself in onArtistLoaded,
+        // so those branches return before the browse-surface flip below.
+        if (kind === "artist") { waves.loadArtist(card.id); return }
+        if (kind === "playlist" || kind === "mix" || kind === "album") {
+            openBrowseItem(kind, card.id)
+        } else if (kind === "track") {
             if (card.album_id) openBrowseItem("album", card.album_id, card.id)
-            else if (card.artist_id) waves.loadArtist(card.artist_id)
-        }
+            else { if (card.artist_id) waves.loadArtist(card.artist_id); return }
+        } else return
+        // This card is reused on My Tidal's Home shelves, which live in the
+        // library pane, so make Browse the active surface; when the click came
+        // from within Browse these flags are already set, so it is a no-op.
+        browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
     }
     // Browse rows carry per-item `artists` arrays; stash them in the same
     // artistsById side map the search/library rows use, so ArtistLinks inside
@@ -1440,7 +1501,7 @@ ApplicationWindow {
                             // Column-major bottom-up fill, same as the download matrices.
                             readonly property int fillIndex: index * 2 + (1 - rowTop)
                             readonly property bool lit: fillIndex < Math.round(Math.max(0, Math.min(100, pm.value)) / 100 * 20)
-                            width: 3; height: 3; radius: 1
+                            width: 3; height: 3; radius: 0   // sharp LED cells, not rounded
                             color: root.segColor(index)
                             opacity: lit ? 1.0 : 0.16
                         }
@@ -1541,15 +1602,13 @@ ApplicationWindow {
                     readonly property bool pulsing: fillIndex === diGrid.lit && diGrid.lit < diGrid.total
                     x: col * (diGrid.cellW + diGrid.ggap)
                     y: rowTop * (diGrid.cellH + diGrid.ggap)
-                    width: diGrid.cellW; height: diGrid.cellH; radius: 1
+                    width: diGrid.cellW; height: diGrid.cellH; radius: 0   // sharp LED cells
                     color: root.accent
-                    property real pulseVal: 0.85
-                    opacity: pulsing ? pulseVal : (litCell ? 1.0 : 0.16)
-                    SequentialAnimation on pulseVal {
-                        running: pulsing; loops: Animation.Infinite
-                        NumberAnimation { from: 0.85; to: 0.28; duration: 520; easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 0.28; to: 0.85; duration: 520; easing.type: Easing.InOutSine }
-                    }
+                    // Breathe off the shared 20 Hz clock (root.ledPulse) rather than
+                    // a per-frame animation: this grid also runs a layer + mask
+                    // effect, so a per-frame pulse re-rendered the masked layer every
+                    // vsync for the whole download. See root.ledPulse.
+                    opacity: pulsing ? root.ledPulse : (litCell ? 1.0 : 0.16)
                 }
             }
         }
@@ -2228,16 +2287,19 @@ ApplicationWindow {
         id: ga
         property string label: ""
         property bool danger: false
+        property bool neutral: false      // grey secondary style (e.g. "keep" beside a green CTA)
+        property bool showArrow: true     // hide when two GateActions sit side by side
         signal clicked()
-        readonly property color fg: danger ? root.red : root.accent
-        readonly property color bg: danger ? root.redCont : root.accentCont
+        readonly property color fg: neutral ? root.textHi : (danger ? root.red : root.accent)
+        readonly property color bg: neutral ? root.surface3 : (danger ? root.redCont : root.accentCont)
+        readonly property color bd: neutral ? root.outline : (danger ? Qt.alpha(root.red, 0.55) : root.accentDim)
         Layout.fillWidth: true; implicitHeight: 46; radius: 10
         color: gaMa.containsMouse && ga.enabled ? Qt.lighter(bg, 1.35) : bg
-        border.width: 1; border.color: danger ? Qt.alpha(root.red, 0.55) : root.accentDim
+        border.width: 1; border.color: bd
         RowLayout {
             anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
-            Text { textFormat: Text.PlainText; text: ga.label; color: ga.fg; font.pixelSize: 13; font.bold: true; font.family: root.uiFont; Layout.fillWidth: true; elide: Text.ElideRight }
-            Ico { name: "arrow-right"; color: ga.fg; size: 15 }
+            Text { textFormat: Text.PlainText; text: ga.label; color: ga.fg; font.pixelSize: 13; font.bold: true; font.family: root.uiFont; Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: ga.showArrow ? Text.AlignLeft : Text.AlignHCenter }
+            Ico { visible: ga.showArrow; name: "arrow-right"; color: ga.fg; size: 15 }
         }
         MouseArea { id: gaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ga.clicked() }
     }
@@ -2658,15 +2720,12 @@ ApplicationWindow {
                 readonly property bool pulsing: dm.pulse && fillIndex === dm.litCount && dm.litCount < dm.total
                 x: col * (dm.dot + dm.gap)
                 y: rowTop * (dm.dot + dm.gap)
-                width: dm.dot; height: dm.dot; radius: 1
+                width: dm.dot; height: dm.dot; radius: 0   // sharp LED cells
                 color: dm.onColor
-                property real pulseVal: 0.85
-                opacity: pulsing ? pulseVal : (lit ? 1.0 : 0.16)
-                SequentialAnimation on pulseVal {
-                    running: pulsing; loops: Animation.Infinite
-                    NumberAnimation { from: 0.85; to: 0.28; duration: 520; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.28; to: 0.85; duration: 520; easing.type: Easing.InOutSine }
-                }
+                // Breathe off the shared 20 Hz clock (root.ledPulse) rather than a
+                // per-frame animation, so a running download doesn't repaint the
+                // whole window every vsync. See root.ledPulse.
+                opacity: pulsing ? root.ledPulse : (lit ? 1.0 : 0.16)
             }
         }
     }
@@ -3659,6 +3718,7 @@ ApplicationWindow {
     ListModel { id: libPlaylistsModel }
     ListModel { id: libMixesModel }
     ListModel { id: libVideosModel }
+    property var homeSections: []   // "Home" tab: Browse-shaped, account-scoped shelves
 
     function appendPlain(model, arr) { if (arr) for (var i = 0; i < arr.length; ++i) model.append(arr[i]) }
     function fill(model, arr) { model.clear(); appendPlain(model, arr) }
@@ -3767,10 +3827,55 @@ ApplicationWindow {
              : cat === "artists" ? libArtistsModel : cat === "playlists" ? libPlaylistsModel
              : cat === "mixes" ? libMixesModel : cat === "videos" ? libVideosModel : null
     }
+    // ---- My Tidal sort (per category) --------------------------------------
+    // Options adapt to the category; every category shares a "Recently added"
+    // default so it matches the backend's default order with no extra fetch.
+    function libSortOptions(cat) {
+        if (cat === "albums") return [["Recently added", "date"], ["Name", "name"], ["Release date", "release"], ["Artist", "artist"]]
+        if (cat === "tracks" || cat === "videos") return [["Recently added", "date"], ["Name", "name"], ["Artist", "artist"]]
+        return [["Recently added", "date"], ["Name", "name"]]   // artists, playlists, mixes
+    }
+    function libSortLabels(cat) { return root.libSortOptions(cat).map(function(o){ return o[0] }) }
+    function libSortGet(cat) { var s = root.libSort[cat]; return s ? s : ({ key: "date", asc: false }) }
+    function libSortCurrentIndex(cat) {
+        var opts = root.libSortOptions(cat), k = root.libSortGet(cat).key
+        for (var i = 0; i < opts.length; ++i) if (opts[i][1] === k) return i
+        return 0
+    }
+    function libApplySort(cat, key, asc) {
+        // Clone into a NEW object: mutating and reassigning the SAME reference does
+        // not fire the var-property change signal, so the direction-arrow binding
+        // (libSortGet().asc) never re-evaluated and the arrow appeared stuck.
+        var m = {}
+        for (var k in root.libSort) m[k] = root.libSort[k]
+        m[cat] = { key: key, asc: asc }
+        root.libSort = m
+        waves.setLibrarySort(cat, key, asc ? "asc" : "desc")
+    }
+    // From a Home "Recently added" preview shelf, open the full My Tidal tab for
+    // that kind, forced to newest-first so it lands on the very items the preview
+    // showed and the complete list beneath them. If the tab is already
+    // newest-first, just switch to it (loadLib reuses its cache, no re-fetch);
+    // otherwise reset the sort, which reloads page one in date order.
+    function openLibrarySorted(cat) {
+        if (!cat) return
+        var g = root.libSortGet(cat)
+        if (g.key === "date" && !g.asc) { root.loadLib(cat); return }
+        libraryCategory = cat
+        libLoadingMore = false
+        libHasMore = false
+        expandedAlbums = ({})
+        libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
+        libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
+        var m = {}
+        for (var k in root.libSort) m[k] = root.libSort[k]
+        m[cat] = { key: "date", asc: false }
+        root.libSort = m
+        waves.setLibrarySort(cat, "date", "desc")   // one date-desc reload; onLibraryLoaded fills
+    }
     function libIsMedia(cat) { return cat === "albums" || cat === "tracks" || cat === "videos" }
     function libFill(cat, items) { var m = libModelFor(cat); if (m) { if (libIsMedia(cat)) fillMedia(m, items); else fill(m, items) } }
     function libAppend(cat, items) { var m = libModelFor(cat); if (m) { if (libIsMedia(cat)) appendMedia(m, items); else appendPlain(m, items) } }
-    function libActiveCount() { var m = libModelFor(libraryCategory); return m ? m.count : 0 }
     // Called as the active list scrolls; loads the next page well before the
     // bottom (~1.5 viewports early) so it feels endless.
     function libMaybeLoadMore(view, cat) {
@@ -3800,6 +3905,18 @@ ApplicationWindow {
             root.libLoadingMore = false
             root.libAppend(cat, items)
         }
+        function onHomeLoaded(sections) {
+            if (root.libraryCategory !== "home") return
+            root.libHasMore = false          // Home is one self-contained landing
+            root.libLoadingMore = false
+            // Only populate when the load actually returned shelves. An empty
+            // result (a transient fetch failure) must not wipe shelves already on
+            // screen; a still-empty first load simply leaves the placeholder glyph
+            // up, and the next visit retries (homeSections is still empty).
+            if (sections && sections.length) root.homeSections = sections
+        }
+        function onDownloadFolderMissing() { root.folderGateBlocking = true }
+        function onDownloadFolderDefault() { root.folderNudge = true }
         function onLoggedInChanged() {
             // Drop every QML-side copy of Browse data when the account flips:
             // the landing embeds personalized For You rows, and the backend's
@@ -3819,6 +3936,7 @@ ApplicationWindow {
             root.navHistory = []
             root._navRestoring = false
             root.browseHighlightId = ""
+            root.homeSections = []
             if (waves.loggedIn && root.browseOpen) {
                 root.browseLoading = true
                 waves.loadBrowse()
@@ -3838,6 +3956,14 @@ ApplicationWindow {
             root.browsePageLoading = false
             root.browsePageError = !!p.error
             root.browseArtistsSideMap(p.sections || [])
+            // Opening an album ON a track: arm the hide BEFORE assigning the page,
+            // so its rows lay out already invisible (browseCol opacity 0) and never
+            // paint at the top for a frame before the highlighted row centers
+            // itself. The row's own timer then scrolls into place and reveals;
+            // hiRevealGuard (re-armed by this pending change) clears the hide if the
+            // row never appears. Without this the pane flashed the top then scrolled
+            // for an uncached album, e.g. one opened from a My Tidal Home shelf.
+            if (!p.error && root.browseHighlightId !== "") root.browseHighlightPending = true
             root.browsePage = p.error ? null : p
         }
         function onBrowseSectionMore(p) {
@@ -3915,9 +4041,13 @@ ApplicationWindow {
         }
         function onArtistLoaded(p) {
             // Background revalidation of a cached page: update in place only
-            // if the user is still looking at this artist, never navigate.
+            // if the user is still looking at this artist, never navigate. Never
+            // let a full-page refresh overwrite a library-scoped view of the same
+            // artist (scoped loads never emit refresh, so this only guards the
+            // full page from clobbering a scoped one at the same id).
             if (p.refresh) {
-                if (!root.artistOpen || !root.artistData || ("" + root.artistData.id) !== ("" + p.id)) return
+                if (!root.artistOpen || !root.artistData || root.artistData.libraryScoped
+                    || ("" + root.artistData.id) !== ("" + p.id)) return
                 root.artistData = p
                 root.fillMedia(artistAlbumsModel, p.albums)
                 root.fillMedia(artistEpModel, p.eps)
@@ -4192,8 +4322,8 @@ ApplicationWindow {
                         }
                         ComboBox {
                             id: sortBox
-                            implicitHeight: 44; implicitWidth: 180
-                            model: ["Sort: Relevance", "Sort: Release date", "Sort: Name"]
+                            implicitHeight: 44; implicitWidth: 156
+                            model: ["Relevance", "Release date", "Name"]
                             onActivated: root.applySort()
                             background: Rectangle { radius: 8; color: root.surface2; border.color: sortBox.popup.visible ? root.accent : root.outline }
                             contentItem: Text {
@@ -4396,6 +4526,25 @@ ApplicationWindow {
             Column {
                 id: browseCol
                 x: 22; width: browsePane.width - 44; spacing: 8
+                // Hidden (but still laid out, so heights resolve) until the
+                // highlighted-track scroll has been applied: opening an album from
+                // a track then reveals it already on the row, never mid-jump.
+                // Landing on a highlighted track: hide the pane INSTANTLY while it
+                // lays out and scrolls to the row (entering the state has no
+                // transition, so the un-scrolled top never shows, that was the
+                // flash), then FADE the reveal in so the album eases into place
+                // already scrolled instead of dropping in blank. Only the reveal
+                // direction is animated (the Transition's `to: ""`); a Behavior
+                // can't do direction here without racing the pending change.
+                opacity: 1
+                states: State {
+                    name: "positioning"; when: root.browseHighlightPending
+                    PropertyChanges { target: browseCol; opacity: 0 }
+                }
+                transitions: Transition {
+                    to: ""   // leaving "positioning" == the reveal
+                    NumberAnimation { property: "opacity"; duration: 260; easing.type: Easing.OutCubic }
+                }
 
                 // Item header (playlist / mix / album page): a full-width hero,
                 // the artwork doubles as a dimmed backdrop so the strip above
@@ -4770,13 +4919,19 @@ ApplicationWindow {
                                     num: (root.browsePage && root.browsePage.header) ? (modelData.num || 0) : 0
                                     albumId: modelData.album_id || ""
                                     hi: root.browseHighlightId !== "" && modelData.id === root.browseHighlightId
-                                    // Track click landed here: bring the row front and
-                                    // center once the page has laid out.
+                                    // Track click landed here: hide the page while it
+                                    // lays out, center this row, then reveal, so the
+                                    // scroll into place is never seen. onCompleted
+                                    // fires before the first paint, so the page is
+                                    // already hidden when this content would show at
+                                    // the top.
+                                    Component.onCompleted: if (btr.hi) root.browseHighlightPending = true
                                     Timer {
                                         interval: 120; running: btr.hi
                                         onTriggered: {
                                             var y = btr.mapToItem(browseCol, 0, 0).y - (browsePane.height - btr.height) / 2
                                             browsePane.contentY = Math.max(0, Math.min(y, browsePane.contentHeight - browsePane.height))
+                                            root.browseHighlightPending = false
                                         }
                                     }
                                 }
@@ -5094,6 +5249,17 @@ ApplicationWindow {
                                 label: "Download discography"
                                 onTap: function(){ waves.downloadArtist(root.artistData.id) }
                             }
+                            // A library-scoped artist page (opened from My Tidal)
+                            // shows only owned releases; offer a jump to the artist's
+                            // full catalogue page. loadArtist() is the full path and
+                            // onArtistLoaded swaps the view (Back returns here).
+                            Text {
+                                visible: !!root.artistData.libraryScoped
+                                text: "View full artist page"
+                                color: root.accent; font.pixelSize: 13; font.bold: true
+                                anchors.verticalCenter: parent.verticalCenter
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtist(root.artistData.id || "") }
+                            }
                             Text {
                                 text: "Copy link"; color: root.textLo; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("artist", root.artistData.id || "") }
@@ -5181,33 +5347,118 @@ ApplicationWindow {
             visible: root.libraryOpen
             spacing: 8
 
-            Item {
-                Layout.fillWidth: true; Layout.leftMargin: 22; implicitHeight: 30
-                Row {
-                    id: libBack; spacing: 8; anchors.verticalCenter: parent.verticalCenter
-                    Ico { name: "arrow-left"; color: root.textLo; size: 16; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "My Tidal"; color: root.textHi; font.pixelSize: 18; font.bold: true }
+            // Top bar: title + category tabs on the left, sort inline on the
+            // right, all one row (like Settings). No separate back header (you
+            // arrive here from the nav) and no separate sort row underneath.
+            RowLayout {
+                Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22; Layout.topMargin: 2
+                spacing: 14
+                Text {
+                    textFormat: Text.PlainText; text: "My Tidal"; color: root.textHi
+                    font.pixelSize: 18; font.bold: true; Layout.alignment: Qt.AlignVCenter
                 }
-                MouseArea { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; width: libBack.width; height: parent.height; cursorShape: Qt.PointingHandCursor; onClicked: root.libraryOpen = false }
-            }
-
-            Flow {
-                Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22; spacing: 8
-                Repeater {
-                    model: [["albums", "Albums"], ["tracks", "Tracks"], ["artists", "Artists"], ["playlists", "Playlists"], ["mixes", "Mixes"], ["videos", "Videos"]]
-                    delegate: Rectangle {
-                        id: lchip
-                        required property var modelData
-                        readonly property bool on: root.libraryCategory === modelData[0]
-                        radius: 8; implicitHeight: 30; implicitWidth: lcRow.implicitWidth + 26
-                        color: on ? root.accentCont : "transparent"
-                        border.color: on ? root.accentDim : root.border1
-                        Row {
-                            id: lcRow; anchors.centerIn: parent; spacing: 7
-                            Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: lchip.on ? root.accent : root.textDim }
-                            Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: lchip.modelData[1]; color: lchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
+                // Wrap the tab strip in a plain Item that carries Layout.fillWidth,
+                // and flow against a DEFINITE width (parent.width). A Flow with
+                // Layout.fillWidth directly hits a stale-width feedback loop and
+                // wraps spuriously on narrower (but still valid) window sizes,
+                // leaving a dead band under the tabs. This is the pattern the other
+                // Flows in this file use.
+                Item {
+                    Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
+                    implicitHeight: libTabsFlow.implicitHeight
+                    Flow {
+                        id: libTabsFlow
+                        objectName: "libTabsFlow"
+                        width: parent.width; spacing: 8
+                        Repeater {
+                            model: [["home", "Home"], ["albums", "Albums"], ["tracks", "Tracks"], ["artists", "Artists"], ["playlists", "Playlists"], ["mixes", "Mixes"], ["videos", "Videos"]]
+                            delegate: Rectangle {
+                                id: lchip
+                                required property var modelData
+                                readonly property bool on: root.libraryCategory === modelData[0]
+                                radius: 8; implicitHeight: 30; implicitWidth: lcRow.implicitWidth + 26
+                                color: on ? root.accentCont : "transparent"
+                                border.color: on ? root.accentDim : root.border1
+                                Row {
+                                    id: lcRow; anchors.centerIn: parent; spacing: 7
+                                    Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: lchip.on ? root.accent : root.textDim }
+                                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: lchip.modelData[1]; color: lchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
+                                }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.loadLib(lchip.modelData[0]) }
+                            }
                         }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.loadLib(lchip.modelData[0]) }
+                    }
+                }
+                // Sort (mirrors the Search sort); hidden on the Recent strip,
+                // which is already newest-first and merged across kinds.
+                ComboBox {
+                    id: libSortBox
+                    // Kept in the layout on Home too (opacity/enabled, not
+                    // visible) so the header keeps the same height and the tabs
+                    // keep the same position on every tab. Toggling `visible`
+                    // here dropped ~40px and shifted the whole pane vertically
+                    // when switching to or from Home.
+                    opacity: root.libraryCategory === "home" ? 0 : 1
+                    enabled: root.libraryCategory !== "home"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitHeight: 40; implicitWidth: 160
+                    model: root.libSortLabels(root.libraryCategory)
+                    // A Binding element (not an inline currentIndex) so the value
+                    // survives the control's own imperative write on selection.
+                    Binding {
+                        target: libSortBox; property: "currentIndex"
+                        value: root.libSortCurrentIndex(root.libraryCategory)
+                        restoreMode: Binding.RestoreBindingOrValue
+                    }
+                    onActivated: {
+                        var opts = root.libSortOptions(root.libraryCategory)
+                        root.libApplySort(root.libraryCategory, opts[currentIndex][1], root.libSortGet(root.libraryCategory).asc)
+                    }
+                    background: Rectangle { radius: 8; color: root.surface2; border.color: libSortBox.popup.visible ? root.accent : root.outline }
+                    contentItem: Text {
+                        textFormat: Text.PlainText
+                        text: libSortBox.displayText; color: root.textHi; font.pixelSize: 14
+                        leftPadding: 14; rightPadding: 28; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                    }
+                    indicator: ExpandChevron {
+                        x: libSortBox.width - 26; y: (libSortBox.height - 18) / 2; tile: 18; glyph: 13
+                        showTile: false; closedAngle: -90; openAngle: 0
+                        stroke: root.libraryOpen ? root.accent : "transparent"
+                        open: libSortBox.popup.visible
+                    }
+                    delegate: ItemDelegate {
+                        width: libSortBox.width
+                        contentItem: Text { textFormat: Text.PlainText; text: modelData; color: root.textHi; font.pixelSize: 14; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { color: highlighted ? root.surface3 : root.surface2 }
+                        highlighted: libSortBox.highlightedIndex === index
+                    }
+                    popup: Popup {
+                        y: libSortBox.height + 4; width: libSortBox.width; padding: 4
+                        implicitHeight: contentItem.implicitHeight + 8
+                        background: Rectangle { radius: 8; color: root.surface2; border.color: root.outline }
+                        contentItem: ListView {
+                            clip: true; implicitHeight: contentHeight
+                            model: libSortBox.popup.visible ? libSortBox.delegateModel : null
+                            ScrollBar.vertical: ScrollBar {}
+                        }
+                    }
+                }
+                Rectangle {
+                    // Reserve its space on Home too, matching libSortBox above,
+                    // so the header height and tab positions never shift.
+                    opacity: root.libraryCategory === "home" ? 0 : 1
+                    enabled: root.libraryCategory !== "home"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitHeight: 40; implicitWidth: 40; radius: 8
+                    color: root.surface2; border.color: root.outline
+                    Text {
+                        textFormat: Text.PlainText
+                        anchors.centerIn: parent; text: root.libSortGet(root.libraryCategory).asc ? "↑" : "↓"
+                        color: root.textHi; font.family: root.mono; font.pixelSize: 18
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { var g = root.libSortGet(root.libraryCategory); root.libApplySort(root.libraryCategory, g.key, !g.asc) }
                     }
                 }
             }
@@ -5235,18 +5486,143 @@ ApplicationWindow {
                         albumId: model.album_id || ""
                     }
                 }
-                LibList {
-                    cat: "artists"; model: libArtistsModel
-                    delegate: Rectangle {
+                // Artists as a compact card grid (the Search artist card, shrunk)
+                // rather than tall full-width rows, so more fit on screen. Click
+                // opens the artist scoped to the user's library.
+                GridView {
+                    id: libArtistsGrid
+                    visible: root.libraryCategory === "artists"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    clip: true
+                    model: libArtistsModel
+                    property int cols: Math.max(3, Math.floor(width / 132))
+                    cellWidth: width > 0 ? Math.floor(width / cols) : 132
+                    cellHeight: cellWidth + 30
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar {}
+                    onContentYChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
+                    onContentHeightChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
+                    onHeightChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
+                    delegate: Item {
                         required property var model
-                        width: ListView.view.width; height: 60; radius: 10; color: root.surface; border.color: root.border1
-                        RowLayout {
-                            anchors.fill: parent; anchors.margins: 10; spacing: 12
-                            Art { width: 40; height: 40; url: model.art }
-                            Text { textFormat: Text.PlainText; text: model.name; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                            DownIcon { onTap: function(){ waves.downloadArtist(model.id) } }
+                        width: libArtistsGrid.cellWidth; height: libArtistsGrid.cellHeight
+                        Rectangle {
+                            anchors.fill: parent; anchors.margins: 5; radius: 10
+                            color: agMa.containsMouse ? root.surface2 : root.surface; border.color: root.border1
+                            Column {
+                                anchors.fill: parent; anchors.margins: 8; spacing: 6
+                                Item {
+                                    width: parent.width; height: width
+                                    Art { anchors.centerIn: parent; width: parent.width; height: width; url: model.art }
+                                }
+                                Text {
+                                    textFormat: Text.PlainText; text: model.name
+                                    color: root.textHi; font.pixelSize: 12; font.bold: true
+                                    elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter
+                                }
+                            }
+                            MouseArea { id: agMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtistLibrary(model.id) }
                         }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: waves.loadArtist(model.id) }
+                    }
+                }
+                // Home: a Browse-shaped landing scoped to the account. Rendered
+                // from homeSections (same shelf shape as Browse), so the app's own
+                // art-forward ArtCard / TrackRow shelves render it. Under a
+                // "Recently added" header sit two preview shelves, "Recent albums"
+                // and "Recent tracks"; each heading drills into that full tab,
+                // newest-first (openLibrarySorted).
+                Flickable {
+                    id: homePane
+                    visible: root.libraryCategory === "home"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    clip: true
+                    contentWidth: width; contentHeight: homeCol.height + 24
+                    ScrollBar.vertical: ScrollBar {}
+                    boundsBehavior: Flickable.StopAtBounds
+                    Column {
+                        id: homeCol
+                        // No topPadding: the favourites lists start flush at the
+                        // top of the pane, so Home must too, or the content jumps
+                        // vertically when you switch between them.
+                        width: homePane.width; spacing: 20
+                        Text {
+                            visible: root.homeSections.length > 0
+                            textFormat: Text.PlainText; text: "Recently added"
+                            color: root.textHi; font.pixelSize: 20; font.bold: true
+                        }
+                        Repeater {
+                            model: root.homeSections
+                            delegate: Column {
+                                id: homeSec
+                                required property var modelData
+                                readonly property string target: homeSec.modelData.target || ""
+                                width: homeCol.width; spacing: 10
+                                // Clickable shelf heading: drills into the matching
+                                // My Tidal tab, newest-first, showing the full list
+                                // this shelf previews. The hit area hugs the text.
+                                Item {
+                                    implicitWidth: headRow.implicitWidth
+                                    implicitHeight: headRow.implicitHeight
+                                    Row {
+                                        id: headRow; spacing: 6
+                                        Text {
+                                            id: headText
+                                            textFormat: Text.PlainText
+                                            text: homeSec.modelData.title || ""
+                                            color: (headMouse.containsMouse && homeSec.target !== "") ? root.accent : root.textHi
+                                            font.pixelSize: 16; font.bold: true
+                                        }
+                                        Text {
+                                            visible: homeSec.target !== ""
+                                            anchors.verticalCenter: headText.verticalCenter
+                                            textFormat: Text.PlainText; text: "›"
+                                            color: headMouse.containsMouse ? root.accent : root.textLo
+                                            font.pixelSize: 18
+                                        }
+                                    }
+                                    MouseArea {
+                                        id: headMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        enabled: homeSec.target !== ""
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: root.openLibrarySorted(homeSec.target)
+                                    }
+                                }
+                                // Card shelf (Recent albums preview).
+                                ListView {
+                                    visible: homeSec.modelData.rowKind === "cards"
+                                    width: parent.width; height: 250
+                                    orientation: ListView.Horizontal
+                                    spacing: 14; clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    model: visible ? homeSec.modelData.items : []
+                                    delegate: ArtCard {
+                                        required property var modelData
+                                        card: modelData
+                                    }
+                                    ShelfWheelRedirect { pane: homePane }
+                                }
+                                // Recent tracks (vertical list, reuses TrackRow).
+                                Column {
+                                    visible: homeSec.modelData.rowKind === "tracks"
+                                    width: parent.width
+                                    Repeater {
+                                        model: homeSec.modelData.rowKind === "tracks" ? homeSec.modelData.items : []
+                                        delegate: TrackRow {
+                                            required property var modelData
+                                            width: homeCol.width
+                                            tId: modelData.id; kind: modelData.kind || "track"
+                                            title: modelData.title; artistName: modelData.artist || ""; artistId: modelData.artist_id || ""
+                                            album: modelData.album || ""; art: modelData.art || ""; year: "" + (modelData.year || ""); date: modelData.date || ""
+                                            duration: modelData.duration || ""; quality: modelData.quality || ""; popularity: modelData.popularity || 0
+                                            albumId: modelData.album_id || ""
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 LibList {
@@ -5304,19 +5680,12 @@ ApplicationWindow {
                     }
                 }
 
-                // Loading / empty state for the active category (drawn over the
-                // empty list).
-                Text {
-                    textFormat: Text.PlainText
-                    visible: waves.busy && root.libActiveCount() === 0
-                    x: 22; y: 24
-                    text: "Loading " + root.libraryCategory + "…"; color: root.textLo; font.pixelSize: 14
-                }
-                Text {
-                    visible: !waves.busy && root.libActiveCount() === 0
-                    x: 22; y: 24
-                    text: "Nothing here yet"; color: root.textLo; font.pixelSize: 14
-                }
+                // No placeholder while a category loads or when it is empty. The
+                // pane is transparent, so the ambient wave-loop background fills it
+                // on its own; a loading or empty category simply shows the moving
+                // water, never a card or glyph that flashes in for a beat and fades
+                // out. (The waves are the brand presence here, so nothing else needs
+                // to stand in.)
             }
         }
 
@@ -6047,6 +6416,74 @@ ApplicationWindow {
     }
     FfmpegManager { id: appFfmpeg; objectName: "appFfmpeg" }
 
+    // Download-folder gate: no folder is set at all (fresh install). Blocks, the
+    // download did not start; the CTA jumps straight to the Downloads setting.
+    Rectangle {
+        id: folderGate
+        objectName: "folderGate"
+        anchors.fill: parent
+        visible: root.folderGateBlocking
+        color: "#06070ef4"
+        MouseArea { anchors.fill: parent; hoverEnabled: true }   // eat clicks behind the card
+        Rectangle {
+            anchors.centerIn: parent; width: 440
+            implicitHeight: fgCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            ColumnLayout {
+                id: fgCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; text: "Choose a download folder" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "Waves doesn't have a folder to save downloads to yet. Pick where your music should go, then start the download again."
+                }
+                GateAction { label: "Open download settings"; onClicked: { root.folderGateBlocking = false; root.openDownloadSetting() } }
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    textFormat: Text.PlainText; text: "Not now"; color: root.textLo; font.pixelSize: 13
+                    MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.folderGateBlocking = false }
+                }
+            }
+        }
+    }
+
+    // Download-folder nudge: still on the old "~/download" default. Blocking: the
+    // download is held in the backend until the user decides. "Keep" continues it;
+    // "Choose a new location" abandons it (they re-initiate after picking a folder),
+    // so the download button never changes state until the decision is made.
+    Rectangle {
+        id: folderNudge
+        objectName: "folderNudge"
+        anchors.fill: parent
+        visible: root.folderNudge
+        color: "#06070ecc"
+        MouseArea { anchors.fill: parent; onClicked: { root.folderNudge = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: fnCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: fnCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "Would you like to update your download location?" }
+                Text { // guard:deliberate-richtext download-nudge-body
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    textFormat: Text.StyledText; linkColor: "#e6ebf0"
+                    // The path is a link: clicking it opens the OS file manager at that
+                    // folder (backend expands ~ and falls back to the nearest real dir).
+                    text: "Currently downloads are going to the default path <a href=\"reveal\"><tt>~/download</tt></a> the application shipped in v0.1.0, and that caused some issues with users being unable to locate their files, or not realizing they could update the default location for downloads.<br><br>Would you like to keep the current default, or choose a new location?"
+                    onLinkActivated: function(link) { waves.revealDownloadPath() }
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
+                    GateAction { showArrow: false; label: "Choose a new location"; onClicked: { root.folderNudge = false; waves.dismissDownloadFolderNudge(); root.openDownloadSetting() } }
+                    GateAction { showArrow: false; neutral: true; label: "Keep the default location"; onClicked: { root.folderNudge = false; waves.keepDownloadFolder() } }
+                }
+            }
+        }
+    }
+
     Rectangle {
         id: ffmpegGate
         objectName: "ffmpegGate"
@@ -6129,22 +6566,13 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                 }
 
-                // Progress (while downloading/installing)
-                ColumnLayout {
-                    visible: appFfmpeg.busy; Layout.fillWidth: true; spacing: 5
-                    Rectangle {
-                        Layout.fillWidth: true; height: 8; radius: 4; color: root.surface3
-                        Rectangle {
-                            width: parent.width * Math.max(0, Math.min(100, appFfmpeg.pct)) / 100
-                            height: parent.height; radius: 4; color: root.accent
-                            Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-                        }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { textFormat: Text.PlainText; text: appFfmpeg.message || "Working…"; color: root.textDim; font.family: root.mono; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
-                        Text { textFormat: Text.PlainText; text: Math.round(appFfmpeg.pct) + "%"; color: root.accent; font.family: root.mono; font.pixelSize: 11; font.bold: true }
-                    }
+                // Progress (while downloading/installing): the same LED
+                // dot-matrix pill the Settings updater card uses.
+                LedBar {
+                    visible: appFfmpeg.busy; Layout.fillWidth: true
+                    radius: root.btnRad; mono: root.mono
+                    pct: appFfmpeg.pct
+                    label: (appFfmpeg.message || "Working…") + " · " + Math.round(appFfmpeg.pct) + "%"
                 }
                 Text {
                     textFormat: Text.PlainText

@@ -38,6 +38,7 @@ Item {
     readonly property color greenCont:    "#08230f"
     readonly property color cyan:         "#56c8d8"
     readonly property color red:          "#ff5a52"
+    readonly property color redCont:      "#2a0e0c"
     readonly property string mono:        monoFont
     // Console button spec (Button Lab verdict, 2026-07-02), mirrors Main.qml.
     readonly property string uiFont:   uiFontFamily
@@ -96,7 +97,10 @@ Item {
     function jumpToCard(cardId) {
         for (var i = 0; i < secRep.count; i++) {
             var it = secRep.itemAt(i)
-            if (it && it.modelData.card === cardId) {
+            // Match a special card key (ffmpeg/updates) or a plain section id
+            // (e.g. "downloads"), so the folder gate can deep-link a regular
+            // section the same way the update notice targets its card.
+            if (it && (it.modelData.card === cardId || it.modelData.id === cardId)) {
                 settingsFlick.contentY = Math.max(0, Math.min(it.y, settingsFlick.contentHeight - settingsFlick.height))
                 return
             }
@@ -104,6 +108,11 @@ Item {
     }
 
     function val(f) { return editMap[f.key] !== undefined ? editMap[f.key] : f.value }
+    // Secondary value for a composite field (the cover_sizes "separate file"
+    // dropdown), read/written under its own file_key.
+    function val2(f) { return editMap[f.file_key] !== undefined ? editMap[f.file_key] : f.file_value }
+    // Child toggle value for the cover_scope composite, under its own child_key.
+    function valChild(f) { return editMap[f.child_key] !== undefined ? editMap[f.child_key] : f.child_value }
     function setv(key, v) { var e = Object.assign({}, editMap); e[key] = v; editMap = e; dirty = true }
     // Within a section, on/off switches render as a tile grid and everything
     // else as labelled rows.
@@ -126,7 +135,11 @@ Item {
         return cur === true
     }
     // Dropdown options are {value, label}; find the row for a stored value.
+    // Tolerates a missing options list: the composite cover_sizes delegate
+    // instantiates its dropdowns for every field (one shown by type), so this
+    // is evaluated even where a field has no options.
     function enumIndex(options, value) {
+        if (!options) return 0
         for (var i = 0; i < options.length; i++) if (options[i].value === value) return i
         return 0
     }
@@ -377,10 +390,10 @@ Item {
                 width: backR.width; height: backR.height
                 Row {
                     id: backR; spacing: 8
-                    Ico { name: "arrow-left"; color: page.textLo; size: 17; anchors.verticalCenter: parent.verticalCenter }
+                    // No back arrow / back-on-click: you reach Settings from the nav,
+                    // and CANCEL / SAVE (right) close it. Title only.
                     Text { text: "Settings"; color: page.textHi; font.pixelSize: 22; font.bold: true }
                 }
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.closed() }
             }
             Row {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; spacing: 10
@@ -487,21 +500,13 @@ Item {
                             color: page.textDim; font.pixelSize: 12
                         }
 
-                        // Progress (while downloading/installing)
-                        ColumnLayout {
-                            visible: page.ff.busy; Layout.fillWidth: true; Layout.topMargin: 2; spacing: 4
-                            Rectangle {
-                                Layout.fillWidth: true; height: 8; radius: 4; color: page.surface3
-                                Rectangle {
-                                    width: parent.width * Math.max(0, Math.min(100, page.ff.pct)) / 100
-                                    height: parent.height; radius: 4; color: page.accent
-                                    Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-                                }
-                            }
-                            Text {
-                                text: (page.ff.message || "Working…") + " · " + Math.round(page.ff.pct) + "%"
-                                color: page.textDim; font.family: page.mono; font.pixelSize: 11
-                            }
+                        // Progress (while downloading/installing): the same LED
+                        // dot-matrix pill the updater card uses.
+                        LedBar {
+                            visible: page.ff.busy; Layout.fillWidth: true; Layout.topMargin: 2
+                            radius: page.btnRad; mono: page.mono
+                            pct: page.ff.pct
+                            label: (page.ff.message || "Working…") + " · " + Math.round(page.ff.pct) + "%"
                         }
 
                         // Failure message
@@ -598,11 +603,10 @@ Item {
                                     : (page.ff.checking ? "Checking…" : "Check for updates")
                                 implicitWidth: ffPrimTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffPrimTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
                                 opacity: page.ff.checking ? 0.6 : 1.0
-                                color: page.ff.updateAvailable ? page.accentCont : "transparent"
-                                border.color: page.ff.updateAvailable ? page.accentDim : page.outline
+                                color: page.accentCont; border.color: page.accentDim
                                 Text {
                                     id: ffPrimTxt; anchors.centerIn: parent; text: ffPrimary.label.toUpperCase()
-                                    color: page.ff.updateAvailable ? page.accent : page.textLo
+                                    color: page.accent
                                     font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
                                 }
                                 MouseArea {
@@ -613,8 +617,8 @@ Item {
                             }
                             Rectangle {
                                 implicitWidth: ffRemTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffRemTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
-                                color: "transparent"; border.color: page.border1
-                                Text { id: ffRemTxt; anchors.centerIn: parent; text: "REMOVE"; color: page.textLo; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                color: page.redCont; border.color: Qt.alpha(page.red, 0.55)
+                                Text { id: ffRemTxt; anchors.centerIn: parent; text: "REMOVE"; color: page.red; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.ff.remove() }
                             }
                             // Transient confirmation after a check finds nothing new.
@@ -716,79 +720,14 @@ Item {
                                 color: page.textDim; font.pixelSize: 12
                             }
 
-                            // Progress (while downloading/installing): an LED
-                            // field in the DownIcon running style (Main.qml),
-                            // scaled to a full-width strip. Cells fill column by
-                            // column from the bottom left; the "msg · N%" line
-                            // reads on top. Cell columns run flush to the strip's
-                            // edges, the outermost ones are clipped by the
-                            // rounded mask rather than padded (Progress Lab
-                            // verdict: fill past the corners, never show a gap).
-                            Rectangle {
-                                visible: page.auBusy
-                                Layout.fillWidth: true
-                                implicitHeight: 30; radius: page.btnRad
-                                color: page.accentCont; border.width: 1; border.color: page.accentDim
-                                clip: true
-                                Item {
-                                    id: auLedGrid
-                                    anchors.fill: parent
-                                    readonly property int grows: 6
-                                    readonly property real ggap: 1.5
-                                    readonly property real cellH: (height - (grows - 1) * ggap) / grows
-                                    // Aim for the lab's ~25px cells but always
-                                    // overfill: the last column bleeds off the
-                                    // right edge instead of leaving a gap.
-                                    readonly property int gcols: Math.max(1, Math.ceil((width + ggap) / (25 + ggap)))
-                                    readonly property real cellW: 25
-                                    readonly property int total: gcols * grows
-                                    readonly property int lit: Math.round(Math.max(0, Math.min(100, page.auPct)) / 100 * total)
-                                    opacity: 0.5
-                                    // Item clip is square; mask the grid to the
-                                    // button's rounded shape so edge-to-edge
-                                    // cells never poke past the corners.
-                                    layer.enabled: true
-                                    layer.effect: MultiEffect {
-                                        maskEnabled: true
-                                        maskSource: ShaderEffectSource { sourceItem: auLedMask; hideSource: false }
-                                    }
-                                    Repeater {
-                                        model: auLedGrid.total
-                                        delegate: Rectangle {
-                                            required property int index
-                                            readonly property int col: index % auLedGrid.gcols
-                                            readonly property int rowTop: Math.floor(index / auLedGrid.gcols)
-                                            // column-major, bottom-up, mirroring DotMatrix's rising fill
-                                            readonly property int fillIndex: col * auLedGrid.grows + (auLedGrid.grows - 1 - rowTop)
-                                            readonly property bool litCell: fillIndex < auLedGrid.lit
-                                            readonly property bool pulsing: fillIndex === auLedGrid.lit && auLedGrid.lit < auLedGrid.total
-                                            x: col * (auLedGrid.cellW + auLedGrid.ggap)
-                                            y: rowTop * (auLedGrid.cellH + auLedGrid.ggap)
-                                            width: auLedGrid.cellW; height: auLedGrid.cellH; radius: 1
-                                            color: page.accent
-                                            property real pulseVal: 0.85
-                                            opacity: pulsing ? pulseVal : (litCell ? 1.0 : 0.16)
-                                            SequentialAnimation on pulseVal {
-                                                running: pulsing; loops: Animation.Infinite
-                                                NumberAnimation { from: 0.85; to: 0.28; duration: 520; easing.type: Easing.InOutSine }
-                                                NumberAnimation { from: 0.28; to: 0.85; duration: 520; easing.type: Easing.InOutSine }
-                                            }
-                                        }
-                                    }
-                                }
-                                Item {
-                                    id: auLedMask
-                                    anchors.fill: parent
-                                    visible: false
-                                    Rectangle { anchors.fill: parent; radius: page.btnRad - 1; color: "#ffffff" }
-                                }
-                                Text {
-                                    anchors.centerIn: parent
-                                    textFormat: Text.PlainText
-                                    text: (page.auMsg || "Working…") + " · " + Math.round(page.auPct) + "%"
-                                    color: page.accent; font.family: page.mono; font.pixelSize: 11; font.bold: true
-                                    style: Text.Outline; styleColor: "#a0060f09"
-                                }
+                            // Progress (while downloading/installing): the shared
+                            // LED dot-matrix pill (LedBar.qml, extracted from the
+                            // DownIcon running style via the Progress Lab).
+                            LedBar {
+                                visible: page.auBusy; Layout.fillWidth: true
+                                radius: page.btnRad; mono: page.mono
+                                pct: page.auPct
+                                label: (page.auMsg || "Working…") + " · " + Math.round(page.auPct) + "%"
                             }
 
                             // Failure message
@@ -1012,11 +951,10 @@ Item {
                                     : page.ff.stateKey === "managed" ? page.green
                                     : page.ff.stateKey === "path" ? page.gold
                                     : page.red
-                                border.width: (glyphTile.ffStatus || glyphTile.auStatus) ? 1 : 0
-                                border.color: (glyphTile.ffStatus || glyphTile.auStatus)
-                                    ? Qt.rgba(glyphTile.statusColor.r, glyphTile.statusColor.g, glyphTile.statusColor.b, 0.4)
-                                    : "transparent"
-                                Behavior on border.color { ColorAnimation { duration: 220 } }
+                                // No status ring: it made the FFmpeg (and Updates) tile the
+                                // only outlined section, which looked out of place. The status
+                                // still reads from the glyph colour (red/gold/green) below.
+                                border.width: 0
                                 SectionIcon {
                                     anchors.centerIn: parent
                                     glyph: card.modelData.id !== undefined ? card.modelData.id : ""
@@ -1102,12 +1040,14 @@ Item {
                                     Item {
                                         id: body
                                         x: 14; y: 10; width: parent.width - 28
-                                        implicitHeight: modelData.type === "str" ? strCol.implicitHeight : inlineRow.implicitHeight
+                                        implicitHeight: modelData.type === "str" ? strCol.implicitHeight
+                                                      : modelData.type === "cover_sizes" ? coverCol.implicitHeight
+                                                      : inlineRow.implicitHeight
 
                                         // Enum / int / float: label + help on the left, control on the right
                                         RowLayout {
                                             id: inlineRow
-                                            visible: modelData.type !== "str"
+                                            visible: modelData.type !== "str" && modelData.type !== "cover_sizes"
                                             width: parent.width; spacing: 14
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 2
@@ -1128,6 +1068,52 @@ Item {
                                                 step: modelData.step !== undefined ? modelData.step : 1
                                                 decimals: modelData.decimals !== undefined ? modelData.decimals : 0
                                                 onChanged: function(v){ page.setv(modelData.key, v) }
+                                            }
+                                        }
+
+                                        // Cover sizes: the embedded-cover size (this enum) plus a
+                                        // progressively-disclosed size for the saved cover.jpg, so a
+                                        // second size is available with no extra settings row for
+                                        // everyone who doesn't want it.
+                                        Column {
+                                            id: coverCol
+                                            visible: modelData.type === "cover_sizes"
+                                            width: parent.width; spacing: 10
+                                            property bool expanded: page.val2(modelData) !== "follow"
+                                            RowLayout {
+                                                width: parent.width; spacing: 14
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true; spacing: 2
+                                                    Text { text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                    Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                }
+                                                SCombo {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    model: modelData.options ? modelData.options : []
+                                                    currentIndex: page.enumIndex(modelData.options, page.val(modelData))
+                                                    onActivated: page.setv(modelData.key, modelData.options[currentIndex].value)
+                                                }
+                                            }
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                text: (coverCol.expanded ? "▾  " : "▸  ") + "Separate cover.jpg size"
+                                                color: page.accent; font.pixelSize: 12
+                                                MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: coverCol.expanded = !coverCol.expanded }
+                                            }
+                                            RowLayout {
+                                                visible: coverCol.expanded
+                                                width: parent.width; spacing: 14
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true; spacing: 2
+                                                    Text { text: modelData.file_label ? modelData.file_label : "Separate cover.jpg size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
+                                                    Text { text: "Size of the saved cover.jpg. \"Same as embedded\" matches the size above."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                }
+                                                SCombo {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    model: modelData.file_options ? modelData.file_options : []
+                                                    currentIndex: page.enumIndex(modelData.file_options, page.val2(modelData))
+                                                    onActivated: page.setv(modelData.file_key, modelData.file_options[currentIndex].value)
+                                                }
                                             }
                                         }
 
@@ -1187,13 +1173,24 @@ Item {
                                         required property var modelData
                                         // Flags that need FFmpeg are greyed and inert while it's missing.
                                         readonly property bool ffBlocked: modelData.requires_ffmpeg === true && page.ff.stateKey === "missing"
+                                        // A tile may carry a nested child (e.g. Save cover.jpg ->
+                                        // "Also save for single tracks"): a compact checkbox that appears
+                                        // UNDER the description while the parent flag is on. The box keeps
+                                        // its fixed size; the column just re-centres to make room, so the
+                                        // tile never grows or shifts its neighbours.
+                                        readonly property bool hasChild: modelData.child_key !== undefined
+                                        readonly property bool childOn: flagTile.hasChild && !flagTile.ffBlocked && (page.val(flagTile.modelData) === true)
                                         width: (inner.width - 10) / 2
-                                        height: 92; radius: 10; border.color: page.border1
+                                        height: 92
+                                        radius: 10; border.color: page.border1
                                         opacity: ffBlocked ? 0.45 : 1
                                         // Ease the tile back to full strength when ffmpeg
                                         // arrives, in step with the toggle animating on.
                                         Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                                         color: (tileMouse.containsMouse && !ffBlocked) ? page.surface2 : page.surface
+
+                                        // Whole-tile click toggles the parent flag; the child checkbox
+                                        // sits above this and swallows its own clicks.
                                         MouseArea {
                                             id: tileMouse
                                             anchors.fill: parent; hoverEnabled: true
@@ -1216,11 +1213,43 @@ Item {
                                                 Text {
                                                     visible: flagTile.modelData.help !== "" && !flagTile.ffBlocked
                                                     text: flagTile.modelData.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                                                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
+                                                    // Trim the helper to two lines while the child checkbox is
+                                                    // showing, so both fit the fixed box.
+                                                    wrapMode: Text.WordWrap; maximumLineCount: flagTile.childOn ? 2 : 3; elide: Text.ElideRight; Layout.fillWidth: true
                                                 }
                                                 Text {
                                                     visible: flagTile.ffBlocked
                                                     text: "Requires FFmpeg"; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
+                                                }
+                                                // Nested child: a compact checkbox + label, shown only while
+                                                // the parent flag is on (layouts skip it when hidden, so other
+                                                // tiles are unchanged).
+                                                Item {
+                                                    visible: flagTile.childOn
+                                                    Layout.fillWidth: true; implicitHeight: childRowL.implicitHeight
+                                                    MouseArea {
+                                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                        onClicked: page.setv(flagTile.modelData.child_key, !(page.valChild(flagTile.modelData) === true))
+                                                    }
+                                                    RowLayout {
+                                                        id: childRowL
+                                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                        spacing: 8
+                                                        Rectangle {
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                            width: 18; height: 18; radius: 5
+                                                            readonly property bool on: page.valChild(flagTile.modelData) === true
+                                                            color: on ? page.accentCont : page.surface3
+                                                            border.color: on ? page.accent : page.outline; border.width: 2
+                                                            Behavior on color { ColorAnimation { duration: 140 } }
+                                                            Behavior on border.color { ColorAnimation { duration: 140 } }
+                                                            Ico { anchors.centerIn: parent; visible: parent.on; name: "check"; color: page.accent; size: 12 }
+                                                        }
+                                                        Text {
+                                                            text: flagTile.modelData.child_label !== undefined ? flagTile.modelData.child_label : ""
+                                                            color: page.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
