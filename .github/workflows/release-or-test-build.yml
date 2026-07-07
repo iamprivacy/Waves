@@ -360,6 +360,24 @@ jobs:
             echo "::error::WAVES_SIGNING_KEY is not set; a tagged release MUST be signed or the in-app updater (fail-closed) will refuse every update. Add the WAVES_SIGNING_KEY secret before tagging."
             exit 1
           fi
+      # The Release body comes from CHANGELOG.md: the section whose heading is
+      # exactly "## <tag> (date)". Missing section = empty body + a warning,
+      # never a failed release.
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          awk -v tag="$RELEASE_TAG" '
+            # Match the tag as any field on a "## " heading, so an optional emoji
+            # accent (e.g. "## 🌊 v0.1.1 (date)") does not shift it off field 2.
+            /^## / { on = 0; for (i = 2; i <= NF; i++) if ($i == tag) on = 1; next }
+            on && (started || NF) { started = 1; print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ -s RELEASE_NOTES.md ]; then
+            echo "----- RELEASE_NOTES.md -----"; cat RELEASE_NOTES.md
+          else
+            echo "::warning::CHANGELOG.md has no '## ${RELEASE_TAG}' section; the Release body will be empty."
+          fi
       - name: Publish manifest + signature
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         env:
@@ -367,6 +385,7 @@ jobs:
         with:
           fail_on_unmatched_files: false
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          body_path: RELEASE_NOTES.md
           # This runs only after signing succeeded, so flipping draft→false here is
           # what makes the fully-signed Release visible to users. If signing failed
           # the job stops before this step and the Release stays a draft (invisible
