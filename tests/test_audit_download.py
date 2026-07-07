@@ -20,22 +20,19 @@ from tidaler.model.downloader import DownloadSegmentResult
 
 
 class _FakeTask:
-    """Progress task that reports `finished` False on the first check, True after.
+    """Minimal stand-in for a rich progress Task.
 
-    `_download_segments` wraps its executor block in `while not task.finished`; the
-    real segment downloader advances progress until finished. In these tests the
-    segment downloader is mocked, so we flip `finished` to True after the first read
-    to let the outer loop run exactly one pass and then exit.
+    `_download_segments` now runs its segment pass exactly once, then reads
+    `.finished`/`.total` to decide whether to snap progress to complete. The real
+    segment downloader is mocked in these tests, so this exposes a plain, inert
+    task the single pass can inspect.
     """
 
     def __init__(self):
-        self._reads = 0
+        self.total = 100.0
+        self.completed = 0.0
+        self.finished = False
         self.percentage = 0.0
-
-    @property
-    def finished(self) -> bool:
-        self._reads += 1
-        return self._reads > 1
 
 
 class _FakeProgress:
@@ -48,6 +45,14 @@ class _FakeProgress:
 
     def advance(self, _task):
         pass
+
+    def update(self, _task, *, completed=None, **_kwargs):
+        # Mirror the tiny slice of rich.Progress.update that _download_segments
+        # uses to reconcile the bar to 100% on success.
+        if completed is not None:
+            self._task.completed = completed
+            self._task.finished = completed >= self._task.total
+            self._task.percentage = min(100.0, completed / self._task.total * 100)
 
 
 def _make_download(skip_existing: bool = False) -> Download:

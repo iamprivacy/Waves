@@ -108,6 +108,7 @@ SAFE_PLAINTEXT = "textFormat: Text.PlainText"
 DELIBERATE_RICHTEXT: set[tuple[str, str]] = {
     ("Main.qml", "ffmpeg-attribution"),  # FFmpeg source attribution link (appFfmpeg.status.*)
     ("Main.qml", "privacy-promise"),  # privacy-promise blurb (string literal w/ <font>)
+    ("Main.qml", "download-nudge-body"),  # download-folder nudge body (string literal, <font>/<tt> code path)
     ("SettingsPage.qml", "ffmpeg-attribution"),  # FFmpeg attribution link (page.ff.status.*)
     ("SettingsPage.qml", "updater-releases-link"),  # updater "Releases & changelog" link (page.appUp.*)
 }

@@ -148,7 +148,7 @@ def test_full_selfupdate_rejects_tampered_asset_over_local_http(tmp_path, monkey
             sha256sums_url=f"{base}/SHA256SUMS",
             sig_url=f"{base}/SHA256SUMS.sig",
         )
-        with pytest.raises(u.UpdaterError, match="[Cc]hecksum"):
+        with pytest.raises(u.UpdaterError, match=r"[Cc]hecksum"):
             up.install(release=release, session=requests.Session())
     finally:
         stop()

@@ -73,7 +73,7 @@ class TestDownloadCancellation:
             # So if we set event_stop inside the execution of a future, the MAIN thread iterating as_completed will see it
             # as soon as one future completes and loop continues.
 
-            result, results_list = download_instance._download_segments(
+            result, _ = download_instance._download_segments(
                 urls, path_base, block_size, p_task, progress_to_stdout, event_stop=event_stop
             )
 

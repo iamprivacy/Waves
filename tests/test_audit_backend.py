@@ -54,6 +54,8 @@ class _Stub:
         self._lib_cache: dict = {}
         self._lib_loading: set = set()
         self._lib_gen = 0
+        self._lib_sort: dict = {}
+        self._fav_ids: dict = {}
         self.settings = type("S", (), {"data": type("D", (), {"path_binary_ffmpeg": ""})()})()
         self._ffmpeg_user_path = ""
         # Fake signals
