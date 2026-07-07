@@ -74,7 +74,7 @@ To be just as plain about what is new: it's mine. I wrote the interface, the in-
 Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engine described above:
 
 - **A from‑scratch native UI**: a calm, dark "console" theme (CRT phosphor‑green) drawn in PySide6 / Qt Quick. No web view, no Electron; one real desktop window.
-- **Browse, where Waves opens**: TIDAL's editorial front page (New Arrivals, TIDAL Rising, the full genre / mood / decade catalogue), rendered art‑first with live cover mosaics. Every page drills down for real, with hover **Preview / Download** controls, quality badges, and trackpad swipe‑back (macOS) the whole way.
+- **Browse, where Waves opens**: TIDAL's editorial front page (New Arrivals, TIDAL Rising, the full genre / mood / decade catalogue), rendered art‑first with live cover mosaics. Every page drills down for real, with hover **Preview / Download** controls and quality badges the whole way.
 - **Built‑in updates** (opt‑in): Waves can check for a newer version and install a **cryptographically signed** update from Settings, with a one‑click restart. Update checks are off by default and never send any of your data (see [Privacy](#privacy)).
 - **Search‑first**: a single field searches artists, albums, tracks, videos, playlists, and mixes, or resolves a pasted `tidal.com` link and opens the release automatically.
 - **Art‑forward results**: cover art inline, results grouped by type, color‑coded quality badges (HI‑RES / LOSSLESS / HIGH), release‑date sorting and filtering, and clickable per‑artist credits.
@@ -88,7 +88,7 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - **Library‑friendly tagging**: a "clean album‑artist" mode (on by default) writes only the primary artist to the album‑artist tag, so Plex won't mis‑read or split multi‑artist albums.
 - **Explicit, clean, or both**: when a release comes in both explicit and clean versions, keep whichever you prefer, or both side by side.
 - **Instant navigation**: pages and cover art you've already seen render instantly from a persistent local cache and quietly refresh in the background. Even a fresh launch paints right away.
-- **My TIDAL**: your favorite albums, tracks, artists, videos, playlists, and mixes, with virtualized infinite scroll so large libraries stay smooth.
+- **My TIDAL**: your favorite albums, tracks, artists, videos, playlists, and mixes, with virtualized infinite scroll so large libraries stay smooth. It opens on a **Home** tab that previews your newest additions, up to 24 recent albums and 18 recent tracks; click any shelf heading to open the full list in that tab. Sort any category by recently added, name, release date, or artist, the same control as Search.
 - **Grouped download queue**: Completed / Downloading / Queued sections with live per‑track progress, plus per‑album and per‑artist roll‑ups.
 - **Defense‑in‑depth by default**: helper binaries are verified before they run, FFmpeg against a published SHA‑256 and app updates against an Ed25519 signature that fails closed. Extra defensive input validation is layered in as general hygiene.
 - **Silent background work on Windows**: every FFmpeg job (FLAC extraction, video conversion, previews) runs fully hidden. No more split‑second console pop‑ups stealing focus while you type, a long‑standing annoyance during downloads in the upstream app.
