@@ -77,13 +77,30 @@ def test_compiled_build_opt_in_still_enables(monkeypatch):
     assert module.ENABLED is True
 
 
-def test_disabled_event_is_noop(monkeypatch):
-    """When disabled, event() must not emit (privacy: no activity persisted)."""
-    module = _load_devlog(monkeypatch, waves_debug="0")
-    calls = []
-    monkeypatch.setattr(module._log, "info", lambda *a, **k: calls.append(a))
-    module.event("search", "needle=secret query")
-    assert calls == []
+def test_disabled_event_stays_off_disk(monkeypatch, tmp_path):
+    """The privacy property, enforced at the handler layer since diagnostics
+    landed: with verbose off, an INFO activity event feeds only the in-memory
+    breadcrumb ring; nothing about it is persisted to disk."""
+    import logging
+
+    monkeypatch.delenv("WAVES_DEBUG", raising=False)
+    for name in ("tidaler.waves_ui.devlog", "tidaler.waves_ui.diagnostics"):
+        sys.modules.pop(name, None)
+    # Detach handlers a previous install left on the shared loggers.
+    for lg in (logging.getLogger("waves"), logging.getLogger()):
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+    devlog = importlib.import_module("tidaler.waves_ui.devlog")
+    diagnostics = importlib.import_module("tidaler.waves_ui.diagnostics")
+    log_path = diagnostics.install(str(tmp_path))
+    assert log_path is not None
+
+    devlog.event("search", "needle=zebra stripes")
+    for h in logging.getLogger("waves").handlers:
+        h.flush()
+    on_disk = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    assert "zebra stripes" not in on_disk  # never persisted while verbose is off
+    assert any("zebra stripes" in line for line in diagnostics._crumbs.ring)  # but breadcrumbed
 
 
 @pytest.fixture(autouse=True)
