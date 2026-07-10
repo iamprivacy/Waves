@@ -1,7 +1,7 @@
 [project]
 name = "tidaler"
 authors = [{ name = "iamprivacy" }]
-version = "0.1.2"
+version = "0.1.3"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
