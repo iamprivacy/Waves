@@ -1196,6 +1196,7 @@ class WavesBridge(QObject):
         self._browse_pages: dict[str, dict] = {}
         self._browse_loading: set[str] = set()
         self._browse_gen = 0  # bumped on logout so in-flight loads can't cache
+        self._browse_reval_ts = 0.0  # monotonic time of the last completed landing fetch
         self._browse_lock = Lock()
         # Artist pages, cached for the session like browse pages so revisits
         # render instantly; every visit still revalidates in the background
@@ -2618,11 +2619,31 @@ class WavesBridge(QObject):
     @Slot()
     def loadBrowse(self) -> None:
         """Load the Browse landing page, or restore it from the session cache."""
+        self._load_browse_root(emit_cached=True)
+
+    @Slot()
+    def refreshBrowse(self) -> None:
+        """Silently revalidate a Browse landing the UI has already painted.
+
+        The QML calls this on every return to the Browse tab (loadBrowse only
+        runs while the tab has nothing to show). It re-fetches the editorial
+        pages in the background and re-emits only if the content actually
+        changed, so orderings like "New tracks" track TIDAL instead of staying
+        frozen at whatever the first load of the session returned. Throttled:
+        rapid tab flips within a minute don't re-hit the API."""
+        if self._browse_root_cache is None:
+            self.loadBrowse()
+            return
+        if time.monotonic() - self._browse_reval_ts < 60.0:
+            return
+        self._load_browse_root(emit_cached=False)
+
+    def _load_browse_root(self, emit_cached: bool) -> None:
         if not self._logged_in:
             self._set_status("Sign in to browse")
             return
         cached = self._browse_root_cache
-        if cached is not None:
+        if cached is not None and emit_cached:
             self.browseLoaded.emit(cached)
             self._start_tile_art(cached, self._browse_gen)
         if "root" in self._browse_loading:
@@ -2649,6 +2670,10 @@ class WavesBridge(QObject):
                 # would stomp the replacement load started after re-login.
                 return
             self._browse_loading.discard("root")
+            if not payload["error"]:
+                # Only a completed fetch resets the refreshBrowse throttle, so
+                # a failed revalidation is retried on the next tab visit.
+                self._browse_reval_ts = time.monotonic()
             if revalidate:
                 # Silent background refresh of a cached landing: re-emit (and
                 # re-persist) only if the editorial content actually changed;

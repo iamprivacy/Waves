@@ -653,6 +653,8 @@ ApplicationWindow {
             browsePageLoading = false; browsePageError = false
             if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false; waves.loadBrowse()
+            } else if (waves.loggedIn) {
+                waves.refreshBrowse()   // silent, throttled; repaints only on change
             }
         } else {   // search
             settingsOpen = false; artistOpen = false; libraryOpen = false; browseOpen = false
@@ -710,6 +712,8 @@ ApplicationWindow {
             if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false
                 waves.loadBrowse()
+            } else if (waves.loggedIn) {
+                waves.refreshBrowse()   // silent, throttled; repaints only on change
             }
             return
         }
@@ -733,6 +737,8 @@ ApplicationWindow {
         if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
             waves.loadBrowse()
+        } else if (waves.loggedIn) {
+            waves.refreshBrowse()   // silent, throttled; repaints only on change
         }
     }
     function openBrowseLink(path, title) {
@@ -766,6 +772,47 @@ ApplicationWindow {
                                     // listing endless-scrolls like fetched ones
                                     data: sec.data || "", total: sec.total || 0,
                                     offset: sec.offset || 0, modType: sec.modType || "" }] }
+    }
+    // A local: page is a snapshot of its landing row taken at click time; a
+    // background revalidation can deliver a fresher ordering afterwards (e.g.
+    // "New tracks" gaining releases at the top). Re-snapshot from the fresh
+    // row when its head no longer matches; a page whose head still agrees is
+    // left alone, preserving any endless-scroll growth and the user's place.
+    function localPageFresh(pg, rows) {
+        if (!pg || ("" + pg.key).indexOf("local:") !== 0) return null
+        if (!pg.sections || pg.sections.length === 0) return null
+        var cur = pg.sections[0]
+        function ids(list, n) {
+            var out = []
+            for (var k = 0; k < list.length && (n < 0 || k < n); k++)
+                out.push("" + list[k].kind + ":" + list[k].id)
+            return out.join("\n")
+        }
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i]
+            var match = cur.data ? r.data === cur.data
+                                 : (r.rowKind === cur.rowKind && r.title === cur.title)
+            if (!match) continue
+            var head = r.items || []
+            if (ids(head, -1) === ids(cur.items || [], head.length)) return null   // unchanged
+            return { key: pg.key, title: pg.title,
+                     sections: [{ rowKind: r.rowKind, title: r.title || pg.title,
+                                  items: head, more: "",
+                                  data: r.data || "", total: r.total || 0,
+                                  offset: r.offset || 0, modType: r.modType || "" }] }
+        }
+        return null
+    }
+    function refreshLocalBrowsePages(rows) {
+        var fresh = localPageFresh(browsePage, rows)
+        if (fresh) browsePage = fresh
+        var changed = false
+        var st = browseStack.map(function(pg) {
+            var f = localPageFresh(pg, rows)
+            if (f) changed = true
+            return f || pg
+        })
+        if (changed) browseStack = st
     }
     // Open all of one wayfinding cloud (Genres / Moods / Decades) as its own
     // page: the landing shows these as horizontal tile shelves, and their
@@ -3952,6 +3999,9 @@ ApplicationWindow {
             root.browseArtistsSideMap(p.sections || [])
             root.browseSections = p.sections || []
             root.browseChips = { genres: p.genres || [], moods: p.moods || [], decades: p.decades || [] }
+            // An open (or stacked) local: row page snapshotted a row this
+            // payload may have just refreshed; bring it in line.
+            root.refreshLocalBrowsePages(p.sections || [])
         }
         function onBrowsePageLoaded(p) {
             if (p.key !== root.browsePageKey) return   // stale: user already left this page
@@ -4523,6 +4573,8 @@ ApplicationWindow {
                 if (visible && waves.loggedIn && root.browseSections.length === 0 && !root.browseLoading) {
                     root.browseLoading = true; root.browseError = false
                     waves.loadBrowse()
+                } else if (visible && waves.loggedIn) {
+                    waves.refreshBrowse()   // silent, throttled; repaints only on change
                 }
             }
 
