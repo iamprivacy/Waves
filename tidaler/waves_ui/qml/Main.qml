@@ -10,7 +10,10 @@ ApplicationWindow {
     visible: true
     width: 1120
     height: 780
-    minimumWidth: 880
+    // Never allow a width that clips the header: the top bar's content
+    // (logo, wordmark, nav tabs, queue, connection pill, sign out) sets the
+    // real floor. headerRow reports 0 until it is laid out, hence the max.
+    minimumWidth: Math.max(880, Math.ceil(headerRow.implicitWidth) + 44)
     minimumHeight: 560
     title: "Waves"
     color: bg

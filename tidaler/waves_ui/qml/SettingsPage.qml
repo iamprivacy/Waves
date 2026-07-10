@@ -84,6 +84,11 @@ Item {
     readonly property bool auBusy: auState === "downloading" || auState === "verifying" || auState === "installing"
     readonly property bool auDone: auState === "done"
     function auRefresh() { page.appUp = waves.appUpdateStatus() }
+
+    // ---- Diagnostics export state ----
+    property bool diagBusy: false        // an export is being written
+    property string diagPath: ""         // last exported bundle path ("" = none yet)
+    property bool diagFailed: false
     function auCheck() {
         if (page.auBusy || page.auChecking) return
         page.auChecking = true; page.auUpToDate = false; waves.checkAppUpdate()
@@ -178,6 +183,8 @@ Item {
         case "processing":  return "M5.2 5.2H10.8V10.8H5.2Z M6.7 5.2V3.6 M9.3 5.2V3.6 M6.7 10.8V12.4 M9.3 10.8V12.4 M5.2 6.7H3.6 M5.2 9.3H3.6 M10.8 6.7H12.4 M10.8 9.3H12.4"
         case "discography": return "M2.6 8A5.4 5.4 0 1 0 13.4 8A5.4 5.4 0 1 0 2.6 8Z M6.9 8A1.1 1.1 0 1 0 9.1 8A1.1 1.1 0 1 0 6.9 8Z"
         case "updates":     return "M8 3V12.4 M4.6 6.4L8 3L11.4 6.4"
+        // Pulse/heartbeat trace: diagnostics watch the app's vitals.
+        case "diagnostics": return "M2.6 8H5.4L6.8 4.6L9.2 11.4L10.6 8H13.4"
         default:            return "M3 5.4H13 M3 10.6H13 M5.4 5.4A1.5 1.5 0 1 0 8.4 5.4A1.5 1.5 0 1 0 5.4 5.4Z M7.6 10.6A1.5 1.5 0 1 0 10.6 10.6A1.5 1.5 0 1 0 7.6 10.6Z"
         }
     }
@@ -185,7 +192,7 @@ Item {
     // Front-load the build at startup (behind the login overlay) so every
     // open of the page is instant. The startup update check is opt-in and
     // throttled in the backend, it no-ops unless the user enabled it.
-    Component.onCompleted: { refreshSchema(); auRefresh(); waves.startupUpdateCheck() }
+    Component.onCompleted: { refreshSchema(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
 
     onActiveChanged: {
         if (active) {
@@ -219,6 +226,11 @@ Item {
             // silent startup one.
             if (!available && wasManual) { page.auUpToDate = true; auUpToDateTimer.restart() }
         }
+        function onDiagnosticsExported(path) {
+            page.diagBusy = false
+            page.diagPath = path
+            page.diagFailed = (path === "")
+        }
     }
 
     // ---- Controls -------------------------------------------------------
@@ -245,6 +257,107 @@ Item {
             Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             Behavior on width { NumberAnimation { duration: 140 } }
             Behavior on color { ColorAnimation { duration: 160 } }
+        }
+    }
+
+    // Segmented cadence control with a spring-slid thumb; shared by the
+    // Updates and FFmpeg auto-check tiles (AutoCheckTile below) so the two
+    // controls stay identical. `field` is the embedded enum descriptor.
+    component CadenceSeg: Rectangle {
+        id: seg
+        property var field: null
+        readonly property var opts: field ? field.options : []
+        readonly property string cad: field ? String(page.val(field)) : "daily"
+        readonly property bool onSecond: opts.length > 1 && cad === opts[1].value
+        readonly property real pad: 2
+        readonly property real seg1W: segT1.implicitWidth + 16
+        readonly property real seg2W: segT2.implicitWidth + 16
+        radius: 6; implicitHeight: 26
+        implicitWidth: seg1W + seg2W + pad * 2
+        color: page.surface3; border.color: page.outline
+        Rectangle {
+            y: seg.pad
+            height: parent.height - seg.pad * 2
+            radius: 5
+            color: page.accentCont; border.color: page.accentDim
+            x: seg.onSecond ? seg.pad + seg.seg1W : seg.pad
+            width: seg.onSecond ? seg.seg2W : seg.seg1W
+            Behavior on x { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 1.6 } }
+            Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        }
+        RowLayout {
+            anchors.fill: parent; anchors.margins: seg.pad; spacing: 0
+            Item {
+                Layout.fillHeight: true; implicitWidth: seg.seg1W
+                Text {
+                    id: segT1; anchors.centerIn: parent
+                    text: seg.opts.length > 0 ? String(seg.opts[0].label).toUpperCase() : ""
+                    font.family: page.uiFont; font.bold: true; font.pixelSize: 10
+                    color: !seg.onSecond ? page.accent : page.textLo
+                    Behavior on color { ColorAnimation { duration: 160 } }
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: if (seg.field && seg.opts.length > 0) page.setv(seg.field.key, seg.opts[0].value)
+                }
+            }
+            Item {
+                Layout.fillHeight: true; implicitWidth: seg.seg2W
+                Text {
+                    id: segT2; anchors.centerIn: parent
+                    text: seg.opts.length > 1 ? String(seg.opts[1].label).toUpperCase() : ""
+                    font.family: page.uiFont; font.bold: true; font.pixelSize: 10
+                    color: seg.onSecond ? page.accent : page.textLo
+                    Behavior on color { ColorAnimation { duration: 160 } }
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: if (seg.field && seg.opts.length > 1) page.setv(seg.field.key, seg.opts[1].value)
+                }
+            }
+        }
+    }
+
+    // Right-hand auto-check tile (pill toggle + cadence segment), shared by
+    // the Updates and FFmpeg cards so the toggle and segment are identical by
+    // construction. `autoField`/`cadField` are the card's embedded schema
+    // descriptors; background/border colors are overridable at the use site.
+    component AutoCheckTile: Rectangle {
+        id: act
+        property var autoField: null
+        property var cadField: null
+        readonly property bool autoOn: autoField ? page.val(autoField) === true : false
+        // For the host card's implicitHeight formula (the tile itself is
+        // anchored top/bottom, so its own implicitHeight is not used).
+        readonly property real rowImplicitHeight: actRow.implicitHeight
+        radius: 10; color: page.surface; border.color: page.border1
+        RowLayout {
+            id: actRow
+            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
+            SToggle {
+                Layout.alignment: Qt.AlignVCenter
+                checked: act.autoOn
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: if (act.autoField) page.setv(act.autoField.key, !act.autoOn)
+                }
+            }
+            ColumnLayout {
+                Layout.fillWidth: true; spacing: 3
+                Text { text: act.autoField ? act.autoField.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                Text {
+                    text: "Notifies only; nothing downloads until you click Update. The check sends none of your data."
+                    color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
+                }
+            }
+            ColumnLayout {
+                Layout.alignment: Qt.AlignVCenter
+                visible: act.autoOn
+                spacing: 4
+                Text { text: "CADENCE"; color: page.textDim; font.family: page.mono; font.pixelSize: 9; font.letterSpacing: 1.2; Layout.alignment: Qt.AlignHCenter }
+                CadenceSeg { field: act.cadField }
+            }
         }
     }
 
@@ -440,8 +553,24 @@ Item {
                 // a Component is non-visual, so it adds nothing to the layout.
                 Component {
                     id: ffmpegCardComp
+                    Item {
+                    id: ffCard
+                    width: parent ? parent.width : 0
+                    // A managed install mirrors the Updates card: twin tiles,
+                    // status + actions on the left, the shared auto-check
+                    // toggle + cadence segment on the right, keeping FFmpeg's
+                    // darker palette and MANAGED chip. The other states
+                    // (missing / system-linked) keep the single wide card.
+                    readonly property bool twin: page.ff.stateKey === "managed"
+                    implicitHeight: twin
+                        ? Math.max(ffLeftCol.implicitHeight + 28, ffTileR.rowImplicitHeight + 24, 108)
+                        : ffSingle.implicitHeight
+
+                    // ---- Single wide card: missing / system-linked states ----
                     Rectangle {
-                    width: parent ? parent.width : 0; radius: 12
+                    id: ffSingle
+                    visible: !ffCard.twin
+                    width: parent.width; radius: 12
                     color: page.surface0; border.color: page.outline
                     implicitHeight: ffCol.implicitHeight + 28
 
@@ -591,44 +720,6 @@ Item {
                             }
                         }
 
-                        // MANAGED, update controls + remove (centered). Settings is
-                        // the ongoing manager, so it keeps the check/update flow the
-                        // one-shot pop-up doesn't need.
-                        RowLayout {
-                            visible: page.ff.stateKey === "managed" && !page.ff.busy
-                            Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 2; spacing: 8
-                            Rectangle {
-                                id: ffPrimary
-                                readonly property string label: page.ff.updateAvailable ? "Update"
-                                    : (page.ff.checking ? "Checking…" : "Check for updates")
-                                implicitWidth: ffPrimTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffPrimTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
-                                opacity: page.ff.checking ? 0.6 : 1.0
-                                color: page.accentCont; border.color: page.accentDim
-                                Text {
-                                    id: ffPrimTxt; anchors.centerIn: parent; text: ffPrimary.label.toUpperCase()
-                                    color: page.accent
-                                    font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
-                                }
-                                MouseArea {
-                                    anchors.fill: parent; enabled: !page.ff.checking
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: { if (page.ff.updateAvailable) page.ff.install(); else page.ff.checkUpdates() }
-                                }
-                            }
-                            Rectangle {
-                                implicitWidth: ffRemTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffRemTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
-                                color: page.redCont; border.color: Qt.alpha(page.red, 0.55)
-                                Text { id: ffRemTxt; anchors.centerIn: parent; text: "REMOVE"; color: page.red; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.ff.remove() }
-                            }
-                            // Transient confirmation after a check finds nothing new.
-                            Text {
-                                visible: page.ff.upToDate && !page.ff.updateAvailable && !page.ff.checking
-                                text: "✓ Up to date"; color: page.green; font.pixelSize: 12
-                                Layout.alignment: Qt.AlignVCenter
-                            }
-                        }
-
                         // BUSY, cancel (centered).
                         Rectangle {
                             visible: page.ff.busy
@@ -655,6 +746,146 @@ Item {
                             onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                         }
                     }
+                    }
+
+                    // ---- Managed: left tile, status + actions (the Updates
+                    // card's layout, FFmpeg's darker palette) ----------------
+                    Rectangle {
+                        visible: ffCard.twin
+                        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                        width: (parent.width - 10) / 2
+                        radius: 12; color: page.surface0; border.color: page.outline
+                        ColumnLayout {
+                            id: ffLeftCol
+                            x: 16; y: 14; width: parent.width - 32; spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Rectangle { width: 7; height: 7; radius: 4; color: page.green }
+                                Text { text: "FFMPEG"; color: page.textHi; font.pixelSize: 13; font.bold: true; font.letterSpacing: 1.4 }
+                                Text {
+                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                    // A pending update is worth shouting about, as
+                                    // on the Updates card: gold and full-size.
+                                    color: page.ff.updateAvailable ? page.gold : page.textDim
+                                    font.pixelSize: page.ff.updateAvailable ? 14 : 12
+                                    font.weight: page.ff.updateAvailable ? Font.DemiBold : Font.Normal
+                                    text: page.ff.updateAvailable ? "update available"
+                                        : "installed and managed by Waves"
+                                }
+                                Rectangle {
+                                    visible: page.ff.updateAvailable && !page.ff.busy
+                                    Layout.alignment: Qt.AlignVCenter
+                                    radius: 5; color: page.goldCont; border.color: page.gold
+                                    implicitWidth: ffUpdT.implicitWidth + 14; implicitHeight: 19
+                                    Text { textFormat: Text.PlainText; id: ffUpdT; anchors.centerIn: parent; text: "UPDATE"; color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true }
+                                }
+                                Rectangle {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    radius: 5; implicitHeight: 19; implicitWidth: ffChipTxt.implicitWidth + 16
+                                    color: page.green
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        id: ffChipTxt; anchors.centerIn: parent
+                                        text: "MANAGED" + (page.ff.status.version ? " · " + page.ff.status.version : "")
+                                        color: page.greenCont
+                                        font.family: page.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.4
+                                    }
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Used to convert videos to MP4, extract FLAC from MP4 containers, and downsample hi-res audio. Without it those steps are skipped."
+                                color: page.textDim; font.pixelSize: 12
+                            }
+
+                            // Progress while an update is downloading/installing.
+                            LedBar {
+                                visible: page.ff.busy; Layout.fillWidth: true
+                                radius: page.btnRad; mono: page.mono
+                                pct: page.ff.pct
+                                label: (page.ff.message || "Working…") + " · " + Math.round(page.ff.pct) + "%"
+                            }
+
+                            // Failure message
+                            Text {
+                                visible: page.ff.lifeState === "failed"
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Install failed: " + page.ff.message
+                                color: page.red; font.pixelSize: 12
+                            }
+
+                            RowLayout {
+                                Layout.topMargin: 2; spacing: 10
+                                Rectangle {
+                                    id: ffPrimary
+                                    readonly property string label: page.ff.busy ? "Updating…"
+                                        : page.ff.updateAvailable ? "Update"
+                                        : (page.ff.checking ? "Checking…" : "Check for updates")
+                                    implicitWidth: ffPrimTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffPrimTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                    opacity: (page.ff.busy || page.ff.checking) ? 0.6 : 1.0
+                                    color: page.accentCont; border.color: page.accentDim
+                                    Text {
+                                        id: ffPrimTxt; anchors.centerIn: parent; text: ffPrimary.label.toUpperCase()
+                                        color: page.accent
+                                        font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent; enabled: !page.ff.busy && !page.ff.checking
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: { if (page.ff.updateAvailable) page.ff.install(); else page.ff.checkUpdates() }
+                                    }
+                                }
+                                Rectangle {
+                                    visible: !page.ff.busy
+                                    implicitWidth: ffRemTxt.implicitWidth + page.btnPadH * 2; implicitHeight: ffRemTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                    color: page.redCont; border.color: Qt.alpha(page.red, 0.55)
+                                    Text { id: ffRemTxt; anchors.centerIn: parent; text: "REMOVE"; color: page.red; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.ff.remove() }
+                                }
+                                // Cancel while busy
+                                Rectangle {
+                                    visible: page.ff.busy
+                                    implicitWidth: ffCanTxt2.implicitWidth + page.btnPadH * 2; implicitHeight: ffCanTxt2.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                    color: "transparent"; border.color: page.red
+                                    Text { id: ffCanTxt2; anchors.centerIn: parent; text: "CANCEL"; color: page.red; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.ff.cancel() }
+                                }
+                                // Transient confirmation after a check finds nothing new.
+                                Text {
+                                    visible: page.ff.upToDate && !page.ff.updateAvailable && !page.ff.checking
+                                    text: "✓ Up to date"; color: page.green; font.pixelSize: 12
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                            }
+
+                            // Source attribution (same block as the single card).
+                            Text { // guard:deliberate-richtext ffmpeg-attribution-managed
+                                visible: page.ff.status.source ? true : false
+                                Layout.fillWidth: true; Layout.topMargin: 2; wrapMode: Text.WordWrap
+                                textFormat: Text.StyledText
+                                linkColor: page.cyan
+                                color: page.textDim; font.pixelSize: 11
+                                text: "Managed builds for " + (page.ff.status.os || "") + "/" + (page.ff.status.arch || "")
+                                      + " come from <a href=\"" + (page.ff.status.source_url || "") + "\">"
+                                      + (page.ff.status.source || "") + "</a>"
+                                      + (page.ff.status.source_license ? " · " + page.ff.status.source_license : "")
+                                      + ". Thank you to the maintainers. FFmpeg © the FFmpeg project (ffmpeg.org)."
+                                onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                            }
+                        }
+                    }
+
+                    // ---- Managed: right tile, the shared auto-check controls,
+                    // identical to the Updates card's tile by construction ----
+                    AutoCheckTile {
+                        id: ffTileR
+                        visible: ffCard.twin
+                        anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
+                        width: (parent.width - 10) / 2
+                        radius: 12; color: page.surface0; border.color: page.outline
+                        autoField: page.fieldByKey("ffmpeg_auto_update")
+                        cadField: page.fieldByKey("ffmpeg_update_cadence")
+                    }
                 }
                 }
 
@@ -668,7 +899,7 @@ Item {
                     Item {
                     id: auCard
                     width: parent ? parent.width : 0
-                    implicitHeight: Math.max(auLeftCol.implicitHeight + 24, auRightRow.implicitHeight + 24, 108)
+                    implicitHeight: Math.max(auLeftCol.implicitHeight + 24, auTileR.rowImplicitHeight + 24, 108)
 
                     readonly property string st: page.appUp.state ? page.appUp.state : "not_configured"
                     readonly property bool canInstall: page.appUp.can_self_install === true
@@ -676,7 +907,6 @@ Item {
                     // Embedded field descriptors (may be null before the schema loads).
                     readonly property var afAuto: page.fieldByKey("auto_update")
                     readonly property var afCad: page.fieldByKey("update_cadence")
-                    readonly property bool autoOn: afAuto ? page.val(afAuto) === true : false
 
                     // ---- Left tile: status, actions, releases link -----------
                     Rectangle {
@@ -810,87 +1040,160 @@ Item {
                     }
 
                     // ---- Right tile: auto-check toggle + cadence segment ------
+                    // (AutoCheckTile, shared with the FFmpeg card.)
+                    AutoCheckTile {
+                        id: auTileR
+                        anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
+                        width: (parent.width - 10) / 2
+                        autoField: auCard.afAuto
+                        cadField: auCard.afCad
+                    }
+                    }
+                }
+
+                // Diagnostics card: status + export on the left, the two
+                // privacy toggles on the right (its `embedded` schema fields).
+                // Identity PII never reaches the log, so the card's job is
+                // one action (export) and one decision (verbose on/off).
+                Component {
+                    id: diagCardComp
+                    Item {
+                    id: dgCard
+                    width: parent ? parent.width : 0
+                    implicitHeight: Math.max(dgLeftCol.implicitHeight + 24, dgRightCol.implicitHeight + 24, 108)
+
+                    readonly property var dfVerbose: page.fieldByKey("verbose_diagnostics")
+                    readonly property var dfRedact: page.fieldByKey("diagnostics_redact_content")
+                    readonly property bool vbOn: dfVerbose ? page.val(dfVerbose) === true : false
+                    readonly property bool rdOn: dfRedact ? page.val(dfRedact) === true : false
+
+                    // ---- Left tile: status, export action ------------------
+                    Rectangle {
+                        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                        width: (parent.width - 10) / 2
+                        radius: 10; color: page.surface; border.color: page.border1
+                        ColumnLayout {
+                            id: dgLeftCol
+                            x: 14; y: 12; width: parent.width - 28; spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Rectangle { width: 7; height: 7; radius: 4; color: dgCard.vbOn ? page.green : page.textDim }
+                                Text { text: "Diagnostic report"; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                Text {
+                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                    color: page.textDim; font.pixelSize: 12
+                                    text: dgCard.vbOn ? "verbose logging on" : "logging warnings only"
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Bundles recent activity and error logs into one text file, ready to attach to a bug report. Personal details are always removed."
+                                color: page.textDim; font.pixelSize: 12
+                            }
+                            RowLayout {
+                                Layout.topMargin: 2; spacing: 10
+                                Rectangle {
+                                    id: dgPrimary
+                                    implicitWidth: dgPrimTxt.implicitWidth + page.btnPadH * 2; implicitHeight: dgPrimTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                    opacity: page.diagBusy ? 0.6 : 1.0
+                                    color: page.accentCont; border.color: page.accentDim
+                                    Text {
+                                        id: dgPrimTxt; anchors.centerIn: parent
+                                        text: (page.diagBusy ? "Exporting…" : "Export report").toUpperCase()
+                                        color: page.accent
+                                        font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent; enabled: !page.diagBusy
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            // Push the two prefs as they stand in the UI so the
+                                            // export honours an unsaved checkbox change.
+                                            waves.setWavesPref("verbose_diagnostics", dgCard.vbOn)
+                                            waves.setWavesPref("diagnostics_redact_content", dgCard.rdOn)
+                                            page.diagFailed = false
+                                            page.diagBusy = true
+                                            waves.exportDiagnostics()
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    visible: page.diagPath !== "" && !page.diagBusy
+                                    implicitWidth: dgShowTxt.implicitWidth + page.btnPadH * 2; implicitHeight: dgShowTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                    color: "transparent"; border.color: page.outline
+                                    Text { id: dgShowTxt; anchors.centerIn: parent; text: "SHOW FILE"; color: page.textLo; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.revealDiagnostics(page.diagPath) }
+                                }
+                                Text {
+                                    visible: page.diagPath !== "" && !page.diagBusy
+                                    text: "✓ Saved"; color: page.green; font.pixelSize: 12
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                                Text {
+                                    visible: page.diagFailed
+                                    text: "Export failed"; color: page.red; font.pixelSize: 12
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- Right tile: verbose + redact-content toggles -------
                     Rectangle {
                         anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
                         width: (parent.width - 10) / 2
                         radius: 10; color: page.surface; border.color: page.border1
-                        RowLayout {
-                            id: auRightRow
-                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
-                            SToggle {
-                                Layout.alignment: Qt.AlignVCenter
-                                checked: auCard.autoOn
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: if (auCard.afAuto) page.setv("auto_update", !auCard.autoOn)
-                                }
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 3
-                                Text { text: auCard.afAuto ? auCard.afAuto.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                                Text {
-                                    text: "Notifies only; nothing downloads until you click Update. The check sends none of your data."
-                                    color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
-                                }
-                            }
-                            ColumnLayout {
-                                Layout.alignment: Qt.AlignVCenter
-                                visible: auCard.autoOn
-                                spacing: 4
-                                Text { text: "CADENCE"; color: page.textDim; font.family: page.mono; font.pixelSize: 9; font.letterSpacing: 1.2; Layout.alignment: Qt.AlignHCenter }
-                                // Segmented cadence control with a spring-slid thumb.
-                                Rectangle {
-                                    id: cadSeg
-                                    readonly property var opts: auCard.afCad ? auCard.afCad.options : []
-                                    readonly property string cad: auCard.afCad ? String(page.val(auCard.afCad)) : "daily"
-                                    readonly property bool onSecond: opts.length > 1 && cad === opts[1].value
-                                    readonly property real pad: 2
-                                    readonly property real seg1W: cadT1.implicitWidth + 16
-                                    readonly property real seg2W: cadT2.implicitWidth + 16
-                                    radius: 6; implicitHeight: 26
-                                    implicitWidth: seg1W + seg2W + pad * 2
-                                    color: page.surface3; border.color: page.outline
-                                    Rectangle {
-                                        y: cadSeg.pad
-                                        height: parent.height - cadSeg.pad * 2
-                                        radius: 5
-                                        color: page.accentCont; border.color: page.accentDim
-                                        x: cadSeg.onSecond ? cadSeg.pad + cadSeg.seg1W : cadSeg.pad
-                                        width: cadSeg.onSecond ? cadSeg.seg2W : cadSeg.seg1W
-                                        Behavior on x { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 1.6 } }
-                                        Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                        ColumnLayout {
+                            id: dgRightCol
+                            x: 14; width: parent.width - 28; spacing: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 13
+                                SToggle {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    checked: dgCard.vbOn
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            var v = !dgCard.vbOn
+                                            page.setv("verbose_diagnostics", v)
+                                            // Applies live: the watchdog and detail level flip now,
+                                            // not on Save, so "turn on, reproduce, export" just works.
+                                            waves.setWavesPref("verbose_diagnostics", v)
+                                        }
                                     }
-                                    RowLayout {
-                                        anchors.fill: parent; anchors.margins: cadSeg.pad; spacing: 0
-                                        Item {
-                                            Layout.fillHeight: true; implicitWidth: cadSeg.seg1W
-                                            Text {
-                                                id: cadT1; anchors.centerIn: parent
-                                                text: cadSeg.opts.length > 0 ? String(cadSeg.opts[0].label).toUpperCase() : ""
-                                                font.family: page.uiFont; font.bold: true; font.pixelSize: 10
-                                                color: !cadSeg.onSecond ? page.accent : page.textLo
-                                                Behavior on color { ColorAnimation { duration: 160 } }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: if (cadSeg.opts.length > 0) page.setv("update_cadence", cadSeg.opts[0].value)
-                                            }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 3
+                                    Text { text: dgCard.dfVerbose ? dgCard.dfVerbose.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text {
+                                        text: "Logs detailed activity to help diagnose slowdowns, freezes and crashes. Turn on, reproduce the problem, then export."
+                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                                        wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 13
+                                SToggle {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    checked: dgCard.rdOn
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            var v = !dgCard.rdOn
+                                            page.setv("diagnostics_redact_content", v)
+                                            waves.setWavesPref("diagnostics_redact_content", v)
                                         }
-                                        Item {
-                                            Layout.fillHeight: true; implicitWidth: cadSeg.seg2W
-                                            Text {
-                                                id: cadT2; anchors.centerIn: parent
-                                                text: cadSeg.opts.length > 1 ? String(cadSeg.opts[1].label).toUpperCase() : ""
-                                                font.family: page.uiFont; font.bold: true; font.pixelSize: 10
-                                                color: cadSeg.onSecond ? page.accent : page.textLo
-                                                Behavior on color { ColorAnimation { duration: 160 } }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: if (cadSeg.opts.length > 1) page.setv("update_cadence", cadSeg.opts[1].value)
-                                            }
-                                        }
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 3
+                                    Text { text: dgCard.dfRedact ? dgCard.dfRedact.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text {
+                                        text: "Exports always remove usernames, paths, addresses and tokens. This also hides searches and titles, which can make bugs harder to reproduce."
+                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                                        wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
                                     }
                                 }
                             }
@@ -940,15 +1243,17 @@ Item {
                                 color: page.surface3; Layout.alignment: Qt.AlignVCenter
                                 // The FFmpeg section's glyph doubles as a status light:
                                 // red = not found, yellow = found but unmanaged (system
-                                // PATH or a linked path), green = installed & managed by
-                                // Waves. The Updates glyph goes gold while a newer
-                                // release is available. Every other section keeps the
-                                // accent glyph.
+                                // PATH or a linked path), and managed-by-Waves reads as
+                                // the standard accent, so a healthy FFmpeg section looks
+                                // like every other section (page.green is mintier than
+                                // the accent and made this one glyph stand out). The
+                                // Updates glyph goes gold while a newer release is
+                                // available. Every other section keeps the accent glyph.
                                 readonly property bool ffStatus: card.modelData.card === "ffmpeg" && page.ff
                                 readonly property bool auStatus: card.modelData.card === "updates" && page.auUpdate
                                 readonly property color statusColor: glyphTile.auStatus ? page.gold
                                     : !glyphTile.ffStatus ? page.accent
-                                    : page.ff.stateKey === "managed" ? page.green
+                                    : page.ff.stateKey === "managed" ? page.accent
                                     : page.ff.stateKey === "path" ? page.gold
                                     : page.red
                                 // No status ring: it made the FFmpeg (and Updates) tile the
@@ -1026,6 +1331,15 @@ Item {
                                 width: inner.width
                                 height: (active && item) ? item.implicitHeight : 0
                                 sourceComponent: updatesCardComp
+                            }
+
+                            // Diagnostics card, Diagnostics section only.
+                            Loader {
+                                active: card.modelData.card === "diagnostics"
+                                visible: active
+                                width: inner.width
+                                height: (active && item) ? item.implicitHeight : 0
+                                sourceComponent: diagCardComp
                             }
 
                             // Value-bearing settings (str / enum / int / float) as labelled rows
@@ -1164,7 +1478,9 @@ Item {
 
                             // On/off switches as a 2-column tile grid (keeps the look).
                             Flow {
-                                visible: page.boolFields(card.modelData.fields).length > 0
+                                id: flagFlow
+                                readonly property int flagCount: page.boolFields(card.modelData.fields).length
+                                visible: flagCount > 0
                                 width: parent.width; spacing: 10
                                 Repeater {
                                     model: page.boolFields(card.modelData.fields)
@@ -1251,6 +1567,39 @@ Item {
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // An odd tile count would leave a blank half-row.
+                                // Fill the empty slot with a calm, non-interactive
+                                // wave tile (the WaveMark's glyph patterns, static
+                                // and dim) so the grid reads as finished surface,
+                                // not a hole. Placeholder until these sections get
+                                // a fuller redesign.
+                                Rectangle {
+                                    visible: flagFlow.flagCount % 2 === 1
+                                    width: (inner.width - 10) / 2; height: 92
+                                    radius: 10; color: page.surface; border.color: page.border1
+                                    Item {
+                                        anchors.fill: parent; anchors.margins: 3; clip: true
+                                        Repeater {
+                                            model: [
+                                                { yf: 0.10, px: 7,  op: 0.10, pat: "   '    .     *   :   .   " },
+                                                { yf: 0.26, px: 8,  op: 0.13, pat: ".~-~..-~-.~..-~-." },
+                                                { yf: 0.42, px: 8,  op: 0.16, pat: "-.~-..~.-~-..~.-" },
+                                                { yf: 0.58, px: 10, op: 0.20, pat: "_.-~-._.,-~-._.-" },
+                                                { yf: 0.74, px: 11, op: 0.24, pat: ".-~^-._,.~-^._.-~" }
+                                            ]
+                                            delegate: Text {
+                                                required property var modelData
+                                                textFormat: Text.PlainText
+                                                y: Math.round(86 * modelData.yf)
+                                                text: modelData.pat.repeat(24)
+                                                font.family: page.mono; font.pixelSize: modelData.px
+                                                color: page.accent; opacity: modelData.op
+                                                font.letterSpacing: -0.5
                                             }
                                         }
                                     }
