@@ -120,9 +120,44 @@ jobs:
           fi
           echo "Dispatched commit is on master; release build may proceed."
 
-  build:
+  create-release:
+    # Create the draft Release exactly once, before the build matrix starts.
+    # Each platform leg used to independently ask softprops/action-gh-release
+    # to "find or create" the Release by tag; running six of those at once is
+    # a race, more than one leg can find nothing and create its own, splitting
+    # the platform assets across duplicate drafts (observed on v0.1.2: two
+    # drafts both tagged v0.1.2, assets scattered between them). Creating the
+    # Release here, ahead of the matrix, removes the race: every leg's own
+    # upload step (further below) then finds this one unambiguous Release by
+    # tag instead of racing to create it.
     needs: ["compute"]
-    if: always() && needs.compute.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/test-build' || github.event_name == 'workflow_dispatch')
+    if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create the Release (empty draft, assets attached by the matrix)
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          # Point a not-yet-existing tag at the exact commit that was built,
+          # not the default branch tip. Ignored when the tag already exists (a
+          # tag push), which is the common release path.
+          target_commitish: ${{ github.sha }}
+          # Keep the Release a DRAFT while binaries upload; the sign-manifest
+          # job flips it live only after SHA256SUMS.sig is attached, so a
+          # user's (fail-closed) updater never sees a published-but-unsigned
+          # release.
+          draft: true
+
+  build:
+    needs: ["compute", "create-release"]
+    # create-release is skipped outright on a non-release run (test-build /
+    # a dispatch with no release_tag), which is fine; but if it's supposed to
+    # run and fails, don't burn six platforms' worth of build minutes on a
+    # release that has nowhere to land. (Hyphenated job id, so bracket syntax:
+    # dot notation would parse "create-release" as a subtraction.)
+    if: always() && needs.compute.result == 'success' && needs['create-release'].result != 'failure' && needs['create-release'].result != 'cancelled' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/test-build' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       matrix:
@@ -295,6 +330,10 @@ jobs:
         # dispatch that merely happens to run on a tag ref), OR a dispatch that
         # supplies release_tag. A dispatch with a blank release_tag builds
         # artifacts only ("Blank = artifacts only").
+        # The create-release job already made this Release (draft, empty)
+        # before any matrix leg started, so every leg here finds the same
+        # unambiguous Release by tag and just appends its two files, instead
+        # of racing to create it themselves.
         if: ${{ ((github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) }}
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         env:
@@ -302,15 +341,7 @@ jobs:
         with:
           fail_on_unmatched_files: true
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-          # Point a not-yet-existing tag at the exact commit that was built,
-          # not the default branch tip. Ignored when the tag already exists (a
-          # tag push), which is the common release path.
           target_commitish: ${{ github.sha }}
-          # Keep the Release a DRAFT while binaries upload; the sign-manifest
-          # job flips it live only after SHA256SUMS.sig is attached, so a user's
-          # (fail-closed) updater never sees a published-but-unsigned release.
-          # This holds for BOTH a tag push and a dispatch+release_tag: both are
-          # real releases that must be signed before going live.
           draft: true
           files: |
             ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}
