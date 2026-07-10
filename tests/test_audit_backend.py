@@ -358,5 +358,41 @@ def test_page_cache_round_trip_and_account_guard(tmp_path):
     assert other._browse_root_cache is None and other._artist_cache == {}
 
 
+# --------------------------------------------------------------------------- #
+# refreshBrowse: silent revalidation on every Browse visit, throttled so rapid
+# tab flips don't re-hit the API; with no cache yet it must fall back to the
+# full loadBrowse (spinner) path.
+# --------------------------------------------------------------------------- #
+def test_refresh_browse_throttles_and_falls_back():
+    import time as _time
+
+    class _RB:
+        def __init__(self):
+            self._browse_root_cache = None
+            self._browse_reval_ts = 0.0
+            self.load_calls: list = []
+
+        def loadBrowse(self):
+            self.load_calls.append("full")
+
+        def _load_browse_root(self, emit_cached):
+            self.load_calls.append(emit_cached)
+
+    stub = _RB()
+    refresh = WavesBridge.refreshBrowse.__get__(stub, _RB)
+
+    refresh()  # no cache yet: must delegate to the full loadBrowse path
+    assert stub.load_calls == ["full"]
+
+    stub._browse_root_cache = {"sections": [1], "error": False}
+    stub._browse_reval_ts = _time.monotonic()  # a fetch just completed
+    refresh()  # inside the throttle window: no API hit
+    assert stub.load_calls == ["full"]
+
+    stub._browse_reval_ts = _time.monotonic() - 61.0
+    refresh()  # stale enough: silent revalidation, never re-emitting the cache
+    assert stub.load_calls == ["full", False]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
