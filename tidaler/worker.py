@@ -1,4 +1,8 @@
+import logging
+
 from PySide6 import QtCore
+
+logger = logging.getLogger(__name__)
 
 
 # Taken from https://www.pythonguis.com/tutorials/multithreading-pyside6-applications-qthreadpool/
@@ -28,7 +32,15 @@ class Worker(QtCore.QRunnable):
         """
         Initialise the runner function with passed args, kwargs.
         """
-        self.fn(*self.args, **self.kwargs)
+        # Never let an exception escape into Qt's C++ QThreadPool: depending on
+        # the PySide/Qt build that boundary can abort the whole process, and even
+        # when it doesn't the failure vanishes into stderr with no context. Log it
+        # here so a failed background job (a discography scan, a download, an art
+        # fetch) is diagnosable instead of a silent stuck button or a hard crash.
+        try:
+            self.fn(*self.args, **self.kwargs)
+        except Exception:
+            logger.exception("Background worker crashed in %r", getattr(self.fn, "__name__", self.fn))
 
     def thread(self) -> QtCore.QThread:
         return QtCore.QThread.currentThread()

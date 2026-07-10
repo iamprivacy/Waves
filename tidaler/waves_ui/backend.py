@@ -76,7 +76,7 @@ from tidaler.waves_ui import proc
 from tidaler.worker import Worker
 
 from . import __version__ as _WAVES_VERSION
-from . import devlog
+from . import devlog, diagnostics
 from .ffmpeg_manager import FfmpegCancelled, FfmpegManager
 from .updater import AppUpdater, UpdateCancelled
 
@@ -1005,6 +1005,7 @@ class WavesBridge(QObject):
     _queueTracksFetched = Signal(int, "QVariantList")
     pausedChanged = Signal()
     motionBgChanged = Signal()  # motion_background pref flipped; Main.qml re-reads it
+    diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
     # Download-folder gating. downloadFolderMissing → no folder is set at all
@@ -1082,8 +1083,28 @@ class WavesBridge(QObject):
         # one pool; downloads run on a separate pool so a long album download
         # can never starve the UI of threads.
         self.threadpool = QtCore.QThreadPool()
+        # Cap the metadata pool so a burst of interactive work (e.g. many art
+        # meta / album-tracks requests) can't spawn a thread per core and starve
+        # the machine; the default (idealThreadCount) is fine as a ceiling but we
+        # keep it explicit so the count is predictable across platforms.
+        self.threadpool.setMaxThreadCount(max(4, QtCore.QThread.idealThreadCount()))
+        # Discography scans (whole-artist / best-of-both release discovery) run on
+        # their OWN single-thread pool so that queueing SEVERAL artists at once
+        # scans them one-after-another instead of concurrently. The scans drive
+        # the shared, not-thread-safe tidalapi session and mutate shared caches;
+        # running them in parallel raced on that shared state (the app already
+        # serialises browse-page parsing behind ``_browse_lock`` and stream
+        # fetches behind ``stream_lock`` for the same reason). Serialising here
+        # makes "add many artists" behave exactly like adding them one at a time
+        # (the case users report as working) with no cap on how many can queue.
+        self._scan_pool = QtCore.QThreadPool()
+        self._scan_pool.setMaxThreadCount(1)
         self.dl_pool = QtCore.QThreadPool()
         self.dl_pool.setMaxThreadCount(max(2, int(self.settings.data.downloads_concurrent_max or 3)))
+        # Let the verbose perf sampler report saturation per pool by name.
+        diagnostics.register_pool("ui", self.threadpool)
+        diagnostics.register_pool("scan", self._scan_pool)
+        diagnostics.register_pool("dl", self.dl_pool)
         # Aggregate progress for "download discography": artist_id -> {keys, done,
         # failed, prog} so the artist button shows a bar averaged over its albums.
         self._artist_groups: dict[str, dict] = {}
@@ -1140,6 +1161,14 @@ class WavesBridge(QObject):
             "mix": {},
         }
         self._objs_max = _MAX_OBJS_PER_BUCKET
+        # Guards the object buckets above. ``_remember`` is called from worker
+        # threads (search enrichment, discography scans, album-track loads), and
+        # its FIFO eviction (``del d[next(iter(d))]``) iterates the dict, so two
+        # workers evicting at once could raise "dictionary changed size during
+        # iteration"/KeyError. The lock makes the write+evict atomic; reads
+        # (``.get``) stay lock-free (atomic under the GIL, and tolerant of a
+        # racing eviction by design).
+        self._objs_lock = Lock()
         # Accumulated library rows keyed by category, {category: {"items": [...],
         # "offset": int, "more": bool}}, so re-opening a category restores
         # everything scrolled so far instantly, and infinite scroll knows where
@@ -1239,6 +1268,9 @@ class WavesBridge(QObject):
         self._waves_prefs_path = os.path.join(os.path.dirname(self.settings.file_path), "waves.json")
         self._waves_prefs = self._load_waves_prefs()
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
+        # Now that the pref is known, raise diagnostics to verbose if asked
+        # (starts the freeze watchdog + perf sampler; GUI thread required).
+        diagnostics.set_verbose(self._waves_pref_bool("verbose_diagnostics"))
         self._try_token_login()
 
     def eventFilter(self, obj, event) -> bool:
@@ -1287,7 +1319,35 @@ class WavesBridge(QObject):
     def _set_logged_in(self, value: bool) -> None:
         if value != self._logged_in:
             self._logged_in = value
+            if value:
+                self._register_session_secrets()
             self.loggedInChanged.emit()
+
+    def _register_session_secrets(self) -> None:
+        """Teach the log redactor this session's secrets the moment they exist.
+
+        Every value registered here is literal-replaced out of every log line
+        and export from now on: OAuth tokens, and the TIDAL account id (which
+        would otherwise slip through as an innocent-looking number). Runs at
+        each login/refresh; registering the same value twice is a no-op.
+        """
+        try:
+            session = getattr(self.tidal, "session", None)
+            for attr, tag in (
+                ("access_token", "‹token›"),
+                ("refresh_token", "‹token›"),
+                ("session_id", "‹session›"),
+            ):
+                val = getattr(session, attr, None)
+                if val:
+                    diagnostics.register_secret(str(val), tag)
+            user = getattr(session, "user", None)
+            for attr, tag in (("id", "‹account›"), ("username", "‹email›")):
+                val = getattr(user, attr, None)
+                if val:
+                    diagnostics.register_secret(str(val), tag)
+        except Exception:
+            logger.debug("could not register session secrets", exc_info=True)
 
     def _set_busy(self, value: bool) -> None:
         if value != self._busy:
@@ -1390,9 +1450,10 @@ class WavesBridge(QObject):
         on after eviction, the slot's ``.get()`` returns None and the action
         no-ops, never a crash."""
         d = self._objs[bucket]
-        d[key] = obj
-        if len(d) > self._objs_max:
-            del d[next(iter(d))]  # evict oldest insert (dicts keep insertion order)
+        with self._objs_lock:
+            d[key] = obj
+            if len(d) > self._objs_max:
+                del d[next(iter(d))]  # evict oldest insert (dicts keep insertion order)
 
     # ----- result dict builders -----------------------------------------
 
@@ -1746,8 +1807,9 @@ class WavesBridge(QObject):
         devlog.event("search", f"begin needle={needle}")
         self._set_busy(True)
         self._set_status(f"Searching “{needle}”…")
-        for bucket in self._objs.values():
-            bucket.clear()
+        with self._objs_lock:
+            for bucket in self._objs.values():
+                bucket.clear()
 
         def work() -> None:
             t0 = devlog.clock()
@@ -3377,12 +3439,23 @@ class WavesBridge(QObject):
             "auto_update": False,
             "update_cadence": "daily",
             "update_last_check": 0,
+            # FFmpeg auto-check mirrors the app updater: opt-in, off by
+            # default, and only meaningful for the managed copy (a system
+            # FFmpeg has nothing Waves could update).
+            "ffmpeg_auto_update": False,
+            "ffmpeg_update_cadence": "daily",
+            "ffmpeg_update_last_check": 0,
             # Browse landing presentation: "art" (artwork-first, hover
             # controls) or "console" (chip sets + framed cards).
             "browse_style": "art",
             # Ambient wave-loop video behind the UI; on by default, the toggle
             # fully stops the decode pipeline (not just hides it).
             "motion_background": True,
+            # Diagnostics (Settings > Diagnostics). Verbose is off by default:
+            # the on-disk log then carries only warnings/errors plus breadcrumb
+            # dumps. The redact-content flag applies to exported bundles only.
+            "verbose_diagnostics": False,
+            "diagnostics_redact_content": False,
         }
         try:
             with open(self._waves_prefs_path, encoding="utf-8") as handle:
@@ -3419,10 +3492,48 @@ class WavesBridge(QObject):
         self._save_waves_prefs()
         if key == "motion_background":
             self.motionBgChanged.emit()
+        elif key == "verbose_diagnostics":
+            diagnostics.set_verbose(bool(value))
 
     def _waves_pref_bool(self, key: str) -> bool:
         v = self._waves_prefs.get(key, False)
         return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    # ----- diagnostics export --------------------------------------------
+
+    @Slot()
+    def exportDiagnostics(self) -> None:
+        """Build the redacted diagnostic bundle off the GUI thread and report
+        the resulting path via diagnosticsExported (empty string on failure).
+        Content redaction follows the user's checkbox pref; identity PII is
+        scrubbed regardless."""
+        redact_content = self._waves_pref_bool("diagnostics_redact_content")
+
+        def work() -> None:
+            path = ""
+            try:
+                path = diagnostics.export_bundle(redact_content=redact_content)
+            except Exception:
+                logger.exception("diagnostics export failed")
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_emit_diagnostics_exported",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(str, path),
+            )
+
+        self.threadpool.start(Worker(work))
+
+    @Slot(str)
+    def _emit_diagnostics_exported(self, path: str) -> None:
+        self.diagnosticsExported.emit(path)
+
+    @Slot(str)
+    def revealDiagnostics(self, path: str) -> None:
+        """Open the folder containing the exported bundle (or the log folder
+        when no export has happened yet) in the system file manager."""
+        target = pathlib.Path(path).parent if path else pathlib.Path(os.path.dirname(self.settings.file_path))
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target)))
 
     def _album_key(self, album):
         # Group by normalised title + normalised primary-artist NAME + track count.
@@ -3661,6 +3772,21 @@ class WavesBridge(QObject):
             target = target.parent
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target)))
 
+    def _release_job_signals(self, qid: int) -> None:
+        """Drop a finished job's progress relay and free its QObject.
+
+        The relay (:class:`_ProgressSignals`) is parented to the bridge, so
+        popping the dict reference alone leaves the C++ object alive as a bridge
+        child for the whole session, one leaked QObject (with live signal
+        connections) per download. Over a long session, or after queueing many
+        discographies, these accumulate without bound. ``deleteLater()`` is safe
+        to call from this download worker thread: it posts a deferred-delete to
+        the object's home (GUI) thread, processed after any still-queued progress
+        emits, so nothing is deleted out from under an in-flight signal."""
+        sig = self._job_signals.pop(qid, None)
+        if sig is not None:
+            sig.deleteLater()
+
     def _download(
         self,
         obj,
@@ -3734,7 +3860,7 @@ class WavesBridge(QObject):
                 self.downloadState.emit(media_id, "")
                 self._bump_artist_group(media_id, None, "failed")
                 self._job_aborts.pop(qid, None)
-                self._job_signals.pop(qid, None)
+                self._release_job_signals(qid)
                 # Drop the track-poll registration too, or the 500 ms per-track
                 # progress timer keeps polling this dead job forever.
                 self._job_dls.pop(qid, None)
@@ -3798,7 +3924,7 @@ class WavesBridge(QObject):
                     devlog.done("download", f"FAILED {type_media} id={media_id}", devlog.clock() - t0)
             finally:
                 self._job_aborts.pop(qid, None)
-                self._job_signals.pop(qid, None)
+                self._release_job_signals(qid)
                 # Worker-thread pop is safe (the GUI poller iterates a list()
                 # snapshot); the poll timer stops itself once this is empty.
                 self._job_dls.pop(qid, None)
@@ -4408,7 +4534,9 @@ class WavesBridge(QObject):
                 self._albumsQueued.emit([album_id])
                 self._set_status("No richer edition found; downloading this album")
 
-        self.threadpool.start(Worker(work))
+        # Edition discovery hits the shared session like a discography scan, so
+        # serialise it on the same single-thread pool.
+        self._scan_pool.start(Worker(work))
 
     @Slot(str)
     def downloadPlaylist(self, playlist_id: str) -> None:
@@ -4583,7 +4711,9 @@ class WavesBridge(QObject):
                 parts.append(f"{len(track_keys)} guest tracks")
             self._set_status("Downloading " + " + ".join(parts) + "…")
 
-        self.threadpool.start(Worker(work))
+        # Serialised scan pool: queueing several artists scans them one at a time
+        # rather than racing on the shared tidalapi session and caches.
+        self._scan_pool.start(Worker(work))
 
     @Slot()
     def stopAll(self) -> None:
@@ -4629,9 +4759,10 @@ class WavesBridge(QObject):
             ev.set()
         if getattr(self, "_event_run", None) is not None:
             self._event_run.set()  # release any paused worker so it hits the abort
-        for pool in (self.dl_pool, self.threadpool):
+        for pool in (self.dl_pool, self._scan_pool, self.threadpool):
             pool.clear()
         self.dl_pool.waitForDone(4000)
+        self._scan_pool.waitForDone(1000)
         self.threadpool.waitForDone(1000)
 
     # ----- in-app FFmpeg manager ----------------------------------------- #
@@ -4762,6 +4893,43 @@ class WavesBridge(QObject):
         self._waves_prefs["update_last_check"] = now
         self._save_waves_prefs()
         self.checkAppUpdate()
+
+    @Slot()
+    def startupFfmpegUpdateCheck(self) -> None:
+        """The managed FFmpeg's twin of ``startupUpdateCheck``: throttled,
+        opt-in, fired once from QML at startup. No-ops unless
+        ``ffmpeg_auto_update`` is on; with the ``daily`` cadence it also skips
+        if the last check was under 24h ago. Notifies only, nothing downloads
+        until the user clicks Update."""
+        if not self._waves_pref_bool("ffmpeg_auto_update"):
+            return
+        cadence = self._waves_prefs.get("ffmpeg_update_cadence", "daily")
+        try:
+            last = int(self._waves_prefs.get("ffmpeg_update_last_check", 0))
+        except (TypeError, ValueError):
+            last = 0
+        now = int(time.time())
+        if cadence == "daily" and (now - last) < 86400:
+            return
+        # Stamp before firing so a slow check can't double-trigger.
+        self._waves_prefs["ffmpeg_update_last_check"] = now
+        self._save_waves_prefs()
+        logger.info("Automatic FFmpeg update check")
+
+        def work() -> None:
+            try:
+                # Only a managed install can be updated in place; a system
+                # FFmpeg (or none at all) has nothing for the check to act on.
+                # Probed on the worker: status() may exec the binary.
+                if self._ffmpeg.status(self._user_ffmpeg_path()).get("state") != "managed":
+                    return
+                available, current, latest = self._ffmpeg.update_available()
+            except Exception:
+                logger.debug("automatic ffmpeg update check failed", exc_info=True)
+                return
+            self.ffmpegUpdateChecked.emit(bool(available), current, latest)
+
+        self.threadpool.start(Worker(work))
 
     @Slot()
     def installAppUpdate(self) -> None:
@@ -5062,6 +5230,29 @@ class WavesBridge(QObject):
                     "value": self._waves_pref_bool("motion_background"),
                 },
                 {
+                    "key": "verbose_diagnostics",
+                    "label": "Verbose diagnostics",
+                    "help": (
+                        "Write a detailed activity log to help diagnose slowdowns, freezes and "
+                        "crashes. Off by default: only warnings and errors are kept. Turn it on, "
+                        "reproduce the problem, then export the report below."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("verbose_diagnostics"),
+                },
+                {
+                    "key": "diagnostics_redact_content",
+                    "label": "Also hide titles and searches",
+                    "help": (
+                        "Exported reports always remove your username, file paths, network "
+                        "addresses, account details and tokens. This additionally hides what you "
+                        "searched for and the track, album and artist names; that can make some "
+                        "bugs harder to reproduce."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("diagnostics_redact_content"),
+                },
+                {
                     "key": "auto_update",
                     "label": "Check for updates automatically",
                     "help": (
@@ -5078,6 +5269,25 @@ class WavesBridge(QObject):
                     "help": "Run the automatic check on every launch, or at most once a day.",
                     "type": "enum",
                     "value": self._waves_prefs.get("update_cadence", "daily"),
+                    "options": _enum_options("update_cadence", ["launch", "daily"]),
+                },
+                {
+                    "key": "ffmpeg_auto_update",
+                    "label": "Check for updates automatically",
+                    "help": (
+                        "Off by default. When on, Waves checks for a newer managed FFmpeg build "
+                        "(at launch or once a day) and only notifies you; nothing downloads until "
+                        "you click Update. The check sends none of your data."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("ffmpeg_auto_update"),
+                },
+                {
+                    "key": "ffmpeg_update_cadence",
+                    "label": "How often to check",
+                    "help": "Run the automatic check on every launch, or at most once a day.",
+                    "type": "enum",
+                    "value": self._waves_prefs.get("ffmpeg_update_cadence", "daily"),
                     "options": _enum_options("update_cadence", ["launch", "daily"]),
                 },
             ]
@@ -5109,9 +5319,13 @@ class WavesBridge(QObject):
                 f["child_value"] = bool(getattr(d, "cover_single_track_file", False))
                 f["child_label"] = "Also save for single tracks"
                 f["child_help"] = "Write cover.jpg for a single track downloaded on its own, not just full albums."
-            if key in ("auto_update", "update_cadence"):
-                # Rendered inside the updater card (toggle + cadence segment),
-                # not as the generic tile/row controls.
+            if key in ("auto_update", "update_cadence", "ffmpeg_auto_update", "ffmpeg_update_cadence"):
+                # Rendered inside the updater / FFmpeg cards (toggle + cadence
+                # segment), not as the generic tile/row controls.
+                f["embedded"] = True
+            if key in ("verbose_diagnostics", "diagnostics_redact_content"):
+                # Rendered inside the diagnostics card next to the export
+                # action, not as generic tiles.
                 f["embedded"] = True
             if key in _FFMPEG_DEPENDENT:
                 f["requires_ffmpeg"] = True
@@ -5147,6 +5361,9 @@ class WavesBridge(QObject):
             elif key == "update_cadence":
                 f["depends_on"] = "auto_update"
                 f["depends_on_value"] = self._waves_pref_bool("auto_update")
+            elif key == "ffmpeg_update_cadence":
+                f["depends_on"] = "ffmpeg_auto_update"
+                f["depends_on_value"] = self._waves_pref_bool("ffmpeg_auto_update")
             elif key == "downsample_target":
                 f["depends_on"] = "downsample_enabled"
                 f["depends_on_value"] = bool(d.downsample_enabled)
@@ -5209,7 +5426,14 @@ class WavesBridge(QObject):
                 # path_binary_ffmpeg is a str field → renders as a labelled box
                 # with a Browse… button right under the card (before the bool
                 # toggles), so linking your own binary lives beside its status.
-                "fields": ["path_binary_ffmpeg", "video_convert_mp4", "extract_flac"],
+                # The two ffmpeg_* auto-check fields are embedded in the card.
+                "fields": [
+                    "path_binary_ffmpeg",
+                    "video_convert_mp4",
+                    "extract_flac",
+                    "ffmpeg_auto_update",
+                    "ffmpeg_update_cadence",
+                ],
             },
             {
                 "group": "Discography & editions",
@@ -5231,6 +5455,13 @@ class WavesBridge(QObject):
                 "card": "updates",
                 "desc": "Keep Waves current. Checks are off by default and never send any of your data.",
                 "fields": ["auto_update", "update_cadence"],
+            },
+            {
+                "group": "Diagnostics",
+                "id": "diagnostics",
+                "card": "diagnostics",
+                "desc": "Help fix bugs with a shareable report. Personal details are always removed.",
+                "fields": ["verbose_diagnostics", "diagnostics_redact_content"],
             },
             {
                 "group": "Advanced",
