@@ -10,6 +10,25 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 🔄 v0.1.3 (2026-07-10)
+
+<p align="center">
+  <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
+
+### 🐛 Fixed
+
+- 🔄 Browse now keeps up with TIDAL. The landing page (New tracks, New albums,
+  Top playlists, and the rest) used to load once per session and then stay
+  frozen, so "new" rows drifted days out of date, and scrolling deep into a row
+  could surface newer tracks below older ones. Every return to the Browse tab
+  now quietly re-checks the editorial pages and repaints only what actually
+  changed, and an open row listing snaps to the fresh ordering too.
+
 ## 🩺 v0.1.2 (2026-07-09)
 
 <p align="center">
