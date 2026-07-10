@@ -91,6 +91,7 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - **My TIDAL**: your favorite albums, tracks, artists, videos, playlists, and mixes, with virtualized infinite scroll so large libraries stay smooth. It opens on a **Home** tab that previews your newest additions, up to 24 recent albums and 18 recent tracks; click any shelf heading to open the full list in that tab. Sort any category by recently added, name, release date, or artist, the same control as Search.
 - **Grouped download queue**: Completed / Downloading / Queued sections with live per‑track progress, plus per‑album and per‑artist roll‑ups.
 - **Defense‑in‑depth by default**: helper binaries are verified before they run, FFmpeg against a published SHA‑256 and app updates against an Ed25519 signature that fails closed. Extra defensive input validation is layered in as general hygiene.
+- **Privacy‑guarded diagnostics** (opt‑in): a local activity log that scrubs identity information at the moment each line is written, not afterward, so an exported bug report is safe to post publicly. See [Diagnostics](#diagnostics) below.
 - **Silent background work on Windows**: every FFmpeg job (FLAC extraction, video conversion, previews) runs fully hidden. No more split‑second console pop‑ups stealing focus while you type, a long‑standing annoyance during downloads in the upstream app.
 - **Thoughtful touches**: smooth animations throughout, paste‑to‑open for TIDAL links, and metadata fixing for Plex users.
 
@@ -103,7 +104,22 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - Clicking the FFmpeg button downloads a build from the open‑source FFmpeg host.
 - Turning on automatic update checks (off by default) lets Waves ask the public GitHub releases page whether a newer version exists. The check only ever _notifies_ you; nothing downloads until you choose to update.
 
-Your credentials and downloads stay on your machine.
+Your credentials and downloads stay on your machine. The same principle carries into the optional diagnostic logger below: nothing leaves your machine unless you export a report yourself.
+
+---
+
+## Diagnostics
+
+Most apps make a bug report cost you your privacy: either describe the problem badly, or hand over a raw log full of your username, file paths, and account details. Waves closes that gap by redacting at the source. Identity information never reaches the log in the first place, so there is nothing to leak, whether you export a report or not.
+
+- **Off by default.** Only warnings and errors are kept until you ask for more. In **Settings → Diagnostics**, turn on **Verbose diagnostics**, reproduce the problem, then click **Export report** for one text file ready to attach to an issue.
+- **Redacted at the source, not the export.** Every log handler shares the same filter: usernames, file paths (every OS's forms), hostnames, IP/MAC addresses, emails, session tokens, and your TIDAL account id are replaced with placeholders the instant they would otherwise be written, verbose mode or not. There's no code path left that can write them to disk unredacted.
+- **A breadcrumb trail, always on.** Waves keeps the last ~250 activity events in memory at no disk cost. The moment something goes wrong, that trail is written to the log automatically, so even a first-time crash arrives with the events that led up to it.
+- **An optional second layer.** "Also hide titles and searches" additionally hashes what you searched for and any track, album, or artist names in the export, for anyone who'd rather not share that either.
+
+The log lives at `waves_dev.log`, next to `crash.log`, in the Waves config folder (`~/.config/Waves` on macOS and Linux, `%USERPROFILE%\.config\Waves` on Windows). It's plain text; read it yourself any time you like. Clicking **Export report** doesn't send anything anywhere: it writes a separate, timestamped copy of that redacted data into the same folder, and **Show file** opens it in your file manager so you can move it, attach it, or send it yourself, wherever you want.
+
+**Logs are never transmitted off your device, unless you do it yourself.**
 
 ---
 

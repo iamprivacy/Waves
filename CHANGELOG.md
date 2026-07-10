@@ -10,7 +10,75 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 🩺 v0.1.2 (2026-07-09)
+
+<p align="center">
+  <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
+
+### ✨ Added
+
+- 🩺 A new Diagnostics section in Settings, built around a privacy-guarded
+  logger: every line is scrubbed of identity information (username, file
+  paths, network addresses, account details, tokens) the moment it's written,
+  not filtered afterward, so nothing sensitive is ever on disk to begin with.
+  Turn on "Verbose diagnostics", reproduce the problem, then click "Export
+  report" for a single text file that's safe to attach to a public bug
+  report. An optional switch also hides what you searched for and the names
+  of tracks, albums and artists. Verbose mode also watches for interface
+  freezes and records what the app was doing when one happened. See the
+  [README](README.md#diagnostics) for how the guard works.
+- 🩺 Waves now keeps a crash log. If the app ever crashes or freezes, the
+  technical details land in `crash.log` inside the Waves config folder
+  (`~/.config/Waves` on macOS and Linux, `%USERPROFILE%\.config\Waves` on
+  Windows), and the bug report form explains where to find it. The log holds
+  only version numbers and stack traces of the app's own code, never personal
+  data.
+
+### 🔧 Changed
+
+- 🎛️ The FFmpeg card in Settings now mirrors the Updates card: status and
+  actions on the left, and a new "Check for updates automatically" toggle
+  (every launch or once a day) on the right. Like app updates, the automatic
+  check is off by default, only notifies you, and sends none of your data.
+
+### 🐛 Fixed
+
+- 🎨 The Settings section icons now all share the same green. The FFmpeg
+  section's icon still works as a status light (red when missing, yellow for
+  a system copy), but a healthy managed install now reads as the standard
+  accent instead of a slightly minty green that made it stand out.
+
+- 🌊 A settings section with an odd number of on/off tiles no longer leaves a
+  blank spot in the grid; the empty slot is now filled with a calm ASCII-wave
+  tile in the Waves style.
+
+- 🪟 The window can no longer be resized narrow enough to cut off the left side
+  of the top bar. The minimum window width now follows what the top bar
+  actually needs.
+
+- 📥 Adding several artists to "download discography" at once no longer crashes
+  or stalls the app. The release scans now run one after another instead of all
+  at the same time, so you can queue as many artists as you like and they simply
+  line up. Downloads themselves still run in parallel as before.
+
+- 🖼️ Cover art the app has seen before now paints straight from the local cache
+  on launch (the Browse landing page no longer flashes the loading placeholder
+  while every cover is re-checked against the server).
+
 ## 🌊 v0.1.1 (2026-07-07)
+
+<p align="center">
+  <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
 
 ### ✨ Added
 
@@ -77,6 +145,14 @@ cutting a release renames that section to the new version.
   lands already positioned on it, with no visible jump.
 
 ## 🚀 v0.1.0 (2026-07-06)
+
+<p align="center">
+  <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
 
 First public release of Waves: a native desktop TIDAL downloader built on the
 Tidal-DL-NG engine (actively maintained as Tidaler) with a from-scratch
