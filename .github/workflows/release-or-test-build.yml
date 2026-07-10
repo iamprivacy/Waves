@@ -378,6 +378,18 @@ jobs:
           else
             echo "::warning::CHANGELOG.md has no '## ${RELEASE_TAG}' section; the Release body will be empty."
           fi
+      - name: Set release notes body
+        # The build job creates the Release (as a bodyless draft) before this job
+        # runs, and softprops/action-gh-release does NOT overwrite the body of an
+        # already-existing release, so its body_path below is silently ignored.
+        # Set the notes explicitly here, while the release is still a draft.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          if [ -s RELEASE_NOTES.md ]; then
+            gh release edit "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md
+          fi
       - name: Publish manifest + signature
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         env:

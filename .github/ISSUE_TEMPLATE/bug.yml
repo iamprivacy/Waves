@@ -50,7 +50,14 @@ body:
     id: logs
     attributes:
       label: Relevant log output
-      description: Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks. No logs? Issue will be rejected and closed.
+      description: |
+        Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks. No logs? Issue will be rejected and closed.
+
+        **Did the app crash or freeze?** Waves keeps a crash log with the technical details we need. Paste its most recent entries (everything after the last "session start" line). You can find it at:
+        - macOS & Linux: `~/.config/Waves/crash.log`
+        - Windows: `%USERPROFILE%\.config\Waves\crash.log`
+
+        The crash log contains only version numbers and stack traces of the app's own code, no personal data or account details.
       render: shell
   - type: textarea
     id: config
