@@ -10,44 +10,73 @@ or import :func:`waves_activate` and call it (optionally passing an existing
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import sys
+import threading
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QWindow
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest
 from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 
 from tidaler.config import Tidal
 
-from . import proc
+from . import diagnostics, proc
 from .backend import WavesBridge
 
 _QML_MAIN = Path(__file__).parent / "qml" / "Main.qml"
 _FONT_DIR = Path(__file__).parent / "fonts"
 
 
+class _CacheFirstNAM(QNetworkAccessManager):
+    """A network manager that trusts its disk cache for cover art.
+
+    TIDAL cover URLs are content-addressed: a given URL always yields the exact
+    same bytes, so a cached cover can never go stale. Yet the default policy
+    (``PreferNetwork``) still checks freshness with the CDN on every launch, a
+    round-trip per cover, which is why a page of already-downloaded covers can
+    still sit on the loading placeholder at startup. Forcing ``PreferCache`` on
+    GETs serves a cached cover straight from disk with no network hop; only a
+    cover we have never fetched goes to the network. Safe precisely because the
+    URLs are immutable."""
+
+    def createRequest(self, op, request, outgoingData=None):
+        if op == QNetworkAccessManager.Operation.GetOperation:
+            request.setAttribute(
+                QNetworkRequest.Attribute.CacheLoadControlAttribute,
+                QNetworkRequest.CacheLoadControl.PreferCache,
+            )
+        return super().createRequest(op, request, outgoingData)
+
+
 class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
-    """Give the QML image loader an HTTP disk cache.
+    """Give the QML image loader a cache-first HTTP disk cache.
 
     Every ``Image`` in the UI fetches cover art through the engine's network
-    manager, which by default has NO cache, so each launch re-downloaded
-    every cover it showed. TIDAL's image CDN serves content-addressed URLs
-    with long cache lifetimes, so a modest disk cache makes search results,
-    browse shelves and tile mosaics paint instantly from local storage on
-    every launch after the first, spending zero network on repeat art."""
+    manager, which by default has NO cache, so each launch re-downloaded every
+    cover it showed. A disk cache plus the cache-first policy (see
+    :class:`_CacheFirstNAM`) makes search results, browse shelves and tile
+    mosaics paint from local storage on every launch after the first, spending
+    zero network on repeat art. The cache is sized to hold a whole browsing
+    session's covers so they do not evict (and re-download) each other, small
+    thumbnails at ~tens of KB each fit thousands in 256 MB."""
 
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
         self._cache_dir = cache_dir
 
     def create(self, parent) -> QNetworkAccessManager:
-        nam = QNetworkAccessManager(parent)
+        nam = _CacheFirstNAM(parent)
         cache = QNetworkDiskCache(nam)
         cache.setCacheDirectory(self._cache_dir)
-        cache.setMaximumCacheSize(120 * 1024 * 1024)  # ~120 MB of covers
+        # ~256 MB. Covers are tens of KB each, so this holds several thousand:
+        # a big browse session's shelves no longer evict earlier covers (which
+        # would re-download, and re-flash the placeholder, on the next launch).
+        cache.setMaximumCacheSize(256 * 1024 * 1024)
         nam.setCache(cache)
         return nam
 
@@ -148,7 +177,123 @@ def _ui_font() -> str:
     return QGuiApplication.font().family()
 
 
+# Handle kept module-global: faulthandler holds the fd for the process lifetime.
+_crash_log_file = None
+
+
+def _crash_log_path() -> Path:
+    """The persistent crash log, next to settings.json so it is easy to name in
+    a bug report: ~/.config/Waves/crash.log on every platform."""
+    from tidaler.helper.path import path_config_base
+
+    return Path(path_config_base()) / "crash.log"
+
+
+def _open_crash_log():
+    """Open crash.log for appending (rotating one old copy past ~512 KB) and
+    stamp a session header. Returns the open handle, or None on any failure.
+    The handle deliberately outlives this function: faulthandler holds it for
+    the life of the process."""
+    path = _crash_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.is_file() and path.stat().st_size > 512 * 1024:
+            path.replace(path.with_suffix(".log.1"))
+    except OSError:
+        pass
+    fh = open(path, "a", encoding="utf-8")  # noqa: SIM115
+    from tidaler.waves_ui import __version__
+
+    fh.write(f"\n=== Waves {__version__} session start ===\n")
+    fh.flush()
+    return fh
+
+
+def _install_crash_diagnostics() -> None:
+    """Make crashes and swallowed background errors diagnosable.
+
+    The download/scan work runs on background threads; a native fault (a Qt
+    object misused across threads, a segfault in a C dependency) or an uncaught
+    Python exception on a worker would otherwise leave no trace. ``faulthandler``
+    dumps a C-level traceback on SIGSEGV/SIGABRT/SIGFPE, and the excepthooks
+    route any uncaught Python exception (main thread or worker thread) through
+    the logger instead of a bare stderr print.
+
+    A packaged app's stderr is invisible to the user, so both are also pointed
+    at a persistent crash.log in the config folder; the bug-report template
+    tells users where to find it. This is diagnostics only: it records stack
+    traces of our own code, never user data. Best-effort and idempotent."""
+    global _crash_log_file
+    log = logging.getLogger(__name__)
+    try:
+        _crash_log_file = _open_crash_log()
+    except Exception:
+        _crash_log_file = None
+        log.debug("could not open crash.log", exc_info=True)
+    try:
+        if not faulthandler.is_enabled():
+            faulthandler.enable(file=_crash_log_file or sys.stderr)
+    except Exception:
+        log.debug("faulthandler.enable() failed", exc_info=True)
+
+    def _record(prefix: str, exc_info) -> None:
+        log.critical(prefix, exc_info=exc_info)
+        if _crash_log_file is not None:
+            try:
+                _crash_log_file.write(f"{prefix}:\n")
+                traceback.print_exception(*exc_info, file=_crash_log_file)
+                _crash_log_file.flush()
+            except Exception:
+                log.debug("could not append to crash.log", exc_info=True)
+
+    def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        _record("Uncaught exception", (exc_type, exc, tb))
+
+    sys.excepthook = _hook
+    # Uncaught exceptions on threading.Thread workers (Python 3.8+).
+    threading.excepthook = lambda args: (
+        None
+        if issubclass(args.exc_type, SystemExit)
+        else _record(
+            f"Uncaught exception in thread {getattr(args.thread, 'name', '?')}",
+            (args.exc_type, args.exc_value, args.exc_traceback),
+        )
+    )
+
+
+def _raise_fd_limit() -> None:
+    """Lift the open-file-descriptor soft limit toward the hard limit.
+
+    A macOS app launched from Finder/Launchpad inherits a low RLIMIT_NOFILE soft
+    limit (often 256), while a large download session opens many at once: HTTP
+    sockets for concurrent scans and downloads, per-segment sockets, output
+    files, ffmpeg pipes, and the QML network manager's cover-art connections.
+    Queueing several discographies pushes toward that ceiling; once crossed,
+    socket()/open() start failing and the session degrades or dies. Raising the
+    soft limit (never above the hard limit) is safe, reversible per-process, and
+    standard for I/O-heavy apps. No-op on platforms without ``resource``."""
+    try:
+        import resource
+    except ImportError:
+        return  # Windows: no POSIX resource limits
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 10240 if hard == resource.RLIM_INFINITY else min(hard, 10240)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError):
+        logging.getLogger(__name__).debug("could not raise fd limit", exc_info=True)
+
+
 def waves_activate(tidal: Tidal | None = None) -> int:
+    _install_crash_diagnostics()
+    # The freeze watchdog's stuck-event-loop tracebacks belong in the same
+    # crash.log faulthandler already writes to.
+    diagnostics.set_crash_file(_crash_log_file)
+    _raise_fd_limit()
     # Download conversions go through python-ffmpeg, which would flash a
     # console window per spawn on the console-less Windows build.
     proc.silence_python_ffmpeg()

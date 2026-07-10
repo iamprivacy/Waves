@@ -32,22 +32,14 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-import tempfile
 import time
 from contextlib import contextmanager
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-# Default: OFF everywhere, packaged builds AND from-source runs. A shipped app
-# shouldn't persist users' search queries and activity to disk, and neither
-# should a from-source run unless the developer explicitly opts in. A developer
-# who wants logs sets WAVES_DEBUG=1; real warnings/errors always surface
-# regardless of this flag.
-#
-# (We deliberately don't try to auto-enable on frozen/compiled detection:
-# Nuitka doesn't set sys.frozen, so any "on unless frozen" default would leak
-# activity from shipped Nuitka binaries. Only an explicit WAVES_DEBUG=1 enables.)
+# Back-compat alias: WAVES_DEBUG=1 forces verbose diagnostics on. Runtime
+# control (the Settings toggle) lives in diagnostics.set_verbose; the calls
+# below always emit and the handlers installed by diagnostics.install decide
+# what persists (breadcrumb ring always, disk only per the privacy model).
 ENABLED = os.environ.get("WAVES_DEBUG", "0") != "0"
 
 LOG_FILENAME = "waves_dev.log"
@@ -67,64 +59,14 @@ _BUDGETS = {
 }
 
 _log = logging.getLogger("waves.perf")  # child of "waves"; inherits its handlers
-_initialized = False
-_log_path: Path | None = None
-
-
-def _resolve_path(log_dir: str | None) -> Path:
-    """Prefer a caller-supplied directory (next to the app's settings, so it's
-    easy to find); fall back to the OS temp dir if that isn't writable."""
-    if log_dir:
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-            candidate = Path(log_dir) / LOG_FILENAME
-            # Touch to confirm it's writable before committing to it.
-            with open(candidate, "a", encoding="utf-8"):
-                pass
-        except OSError:
-            pass
-        else:
-            return candidate
-    return Path(tempfile.gettempdir()) / LOG_FILENAME
 
 
 def init(log_dir: str | None = None) -> Path | None:
-    """Configure handlers on the ``waves`` logger. Idempotent.
+    """Install the diagnostics stack (handlers, redaction, breadcrumbs) on the
+    ``waves`` logger tree. Idempotent; returns the on-disk log path or None."""
+    from . import diagnostics
 
-    Returns the active log-file path (or ``None`` if file logging is disabled
-    and only stderr is used)."""
-    global _initialized, _log_path
-    if _initialized:
-        return _log_path
-    _initialized = True
-
-    parent = logging.getLogger("waves")
-    parent.propagate = False
-    logging.addLevelName(logging.WARNING, "WARN")  # keep the level column 5-wide
-    fmt = logging.Formatter("%(asctime)s.%(msecs)03d  %(levelname)-5s %(message)s", datefmt="%H:%M:%S")
-
-    # stderr always gets a handler so genuine errors are never swallowed.
-    stream = logging.StreamHandler(sys.stderr)
-    stream.setFormatter(fmt)
-    parent.addHandler(stream)
-
-    if not ENABLED:
-        parent.setLevel(logging.WARNING)
-        return None
-
-    parent.setLevel(logging.DEBUG)
-    _log_path = _resolve_path(log_dir)
-    try:
-        file_handler = RotatingFileHandler(_log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-        file_handler.setFormatter(fmt)
-        parent.addHandler(file_handler)
-    except OSError:
-        _log_path = None
-
-    # Per-run divider so successive sessions are easy to tell apart in the file.
-    _log.info("%s", "=" * 72)
-    event("init", "waves dev logging started", file=str(_log_path or "stderr only"))
-    return _log_path
+    return diagnostics.install(log_dir or "")
 
 
 def fmt_dur(seconds: float) -> str:
@@ -146,16 +88,17 @@ def _compose(category: str, message: str, fields: dict, suffix: str = "") -> str
 
 
 def event(category: str, message: str = "", **fields) -> None:
-    """Log a point-in-time event with no duration."""
-    if not ENABLED:
-        return
+    """Log a point-in-time event with no duration.
+
+    Always emits: these INFO lines feed the in-memory breadcrumb ring that a
+    crash report is stitched from. They reach *disk* only in verbose mode (the
+    file handler's level gates them), so the privacy default is unchanged.
+    """
     _log.info("%s", _compose(category, message, fields))
 
 
 def done(category: str, message: str = "", duration: float = 0.0, **fields) -> None:
     """Log a completed operation with its duration; flag it if over budget."""
-    if not ENABLED:
-        return
     _log.info("%s", _compose(category, message, fields, f"({fmt_dur(duration)})"))
     budget = _BUDGETS.get(category)
     if budget is not None and duration > budget:
