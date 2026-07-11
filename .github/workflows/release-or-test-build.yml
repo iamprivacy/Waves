@@ -237,9 +237,16 @@ jobs:
               cd ..
     runs-on: ${{ matrix.os }}
     steps:
+      # Skip checkout + setup on legs the `only` filter excludes, so a targeted
+      # dispatch (e.g. only=windows-x64) does not spin the other legs (notably the
+      # 10x-billed macOS runners) through a full poetry install just to build
+      # nothing. Releases and test-build pushes leave `only` blank, so every leg
+      # still runs. Same guard the build / smoke / checksum / upload steps use.
       - name: Check out
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
         uses: actions/checkout@v4
       - name: Set up the environment
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
         uses: ./.github/actions/setup-poetry-env
       - name: Build Waves for ${{matrix.TARGET}}
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
