@@ -621,6 +621,7 @@ ApplicationWindow {
     function navBackLabel() { return navHistory.length > 0 ? navHistory[navHistory.length - 1].label : "" }
     function navBack() {
         markNav("back")
+        saveSearchView()   // leaving Search via Back must also keep its drill-in restorable
         if (navHistory.length === 0) {
             // Nothing recorded (fresh session view): the old level-up fallback.
             if (settingsOpen) settingsOpen = false
@@ -672,7 +673,65 @@ ApplicationWindow {
     // `active` is `!artistOpen && !libraryOpen && !settingsOpen`, so clearing the
     // old view first would transiently make Search active and fire its power-on
     // animation mid-switch. Target-first keeps Search inactive throughout.
-    function openLibrary() { navPush(); markNav("library"); navOrigin = "library"; libraryOpen = true; settingsOpen = false; artistOpen = false; loadLib("home") }
+    function openLibrary() { saveSearchView(); navPush(); markNav("library"); navOrigin = "library"; libraryOpen = true; settingsOpen = false; artistOpen = false; loadLib("home") }
+
+    // ---- Search tab state save/restore -----------------------------------
+    // The artist drill-in state (artistData/expandedAlbums) is SHARED between
+    // tabs, and other tabs overwrite it (My Tidal opens its own artist pages,
+    // loadLib clears expandedAlbums). So the Search tab's exact view is
+    // snapshotted the moment the user leaves the tab, and the Search nav
+    // button restores it: first press returns exactly where you were (artist
+    // page, expanded album, scroll); a second press while already on Search
+    // resets to a blank search page, mirroring Browse's two-step behaviour.
+    property var searchSaved: null
+    function saveSearchView() {
+        if (navOrigin !== "search" || settingsOpen) return
+        searchSaved = (artistOpen && artistData && artistData.id)
+            ? { artistData: artistData, expandedAlbums: expandedAlbums,
+                artistY: artistView.contentY, resultsY: results.contentY }
+            : { resultsY: results.contentY }
+    }
+    function openSearch() {
+        var onSearchTab = navOrigin === "search" && !settingsOpen && !libraryOpen && !browseOpen
+        if (!onSearchTab) {
+            navPush()
+            markNav("search restore")
+            var fromOtherTab = navOrigin !== "search"
+            navOrigin = "search"
+            if (fromOtherTab) {
+                // Restore the saved drill-in BEFORE clearing the tab flags so
+                // the results pane never flashes underneath (same target-first
+                // rule as openLibrary).
+                var s = searchSaved
+                if (s && s.artistData && s.artistData.id) {
+                    artistData = s.artistData
+                    expandedAlbums = s.expandedAlbums || ({})
+                    artistOpen = true
+                    browseOpen = false; libraryOpen = false; settingsOpen = false
+                    // Same-frame restore: the pane becomes visible this frame,
+                    // so clamping contentY now lands pre-paint (no visible jump).
+                    artistView.contentY = Math.min(s.artistY || 0, Math.max(0, artistView.contentHeight - artistView.height))
+                } else {
+                    artistOpen = false
+                    browseOpen = false; libraryOpen = false; settingsOpen = false
+                    if (s) results.contentY = Math.min(s.resultsY || 0, Math.max(0, results.contentHeight - results.height))
+                }
+            } else {
+                // Only Settings was covering the Search view: uncover it as-is.
+                settingsOpen = false; browseOpen = false; libraryOpen = false
+            }
+            return
+        }
+        // Second press while already on Search: a fresh, blank search page.
+        navPush()
+        markNav("search blank")
+        artistOpen = false
+        searchSaved = null
+        searchField.text = ""
+        trackCache = ({}); expandedAlbums = ({})
+        artistsModel.clear(); albumsRaw = []; applySort()
+        tracksModel.clear(); videosModel.clear(); playlistsModel.clear(); mixesModel.clear()
+    }
     function loadLib(cat) {
         libraryCategory = cat
         libLoadingMore = false
@@ -708,6 +767,7 @@ ApplicationWindow {
         // Coming from another section, the tab RETURNS to Browse exactly as it
         // was left (open sub-page, stack, scroll all intact). Only a second
         // click, Browse already active and highlighted, goes home.
+        saveSearchView()
         var alreadyActive = browseOpen && !artistOpen && !libraryOpen && !settingsOpen
                             && navOrigin === "browse"
         if (!alreadyActive) {
@@ -4114,6 +4174,7 @@ ApplicationWindow {
         function onSearchResults(r) {
             root.navPush()
             root.markNav("search render")
+            root.searchSaved = null   // a fresh search replaces the saved drill-in
             root.navOrigin = "search"
             root.browseOpen = false
             root.artistOpen = false
@@ -4289,7 +4350,10 @@ ApplicationWindow {
                 NavTab {
                     label: "Search"
                     active: root.navOrigin === "search" && !root.settingsOpen
-                    onClicked: { root.navPush(); root.markNav("results"); root.navOrigin = "search"; root.browseOpen = false; root.artistOpen = false; root.libraryOpen = false; root.settingsOpen = false }
+                    // First press returns to Search exactly as it was left
+                    // (artist page, expanded album, scroll); a second press
+                    // while already there resets to a blank search page.
+                    onClicked: root.openSearch()
                 }
                 NavTab {
                     label: "My Tidal"

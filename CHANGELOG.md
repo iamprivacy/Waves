@@ -56,6 +56,11 @@ cutting a release renames that section to the new version.
 
 ### 🔧 Changed
 
+- 🔍 The Search tab now remembers where you were. Coming back from My Tidal or
+  Browse returns you to the exact page you left, artist page, expanded album,
+  scroll position and all, instead of dropping you back on the results list.
+  Pressing Search again while already on it starts a fresh, blank search, the
+  same two-step behaviour the Browse tab already had.
 - 📊 Album, playlist, and discography progress bars now move continuously.
   They used to sit still and then jump each time a whole track finished; the
   bar (and the matching media buttons) now creeps along with the tracks that
