@@ -18,6 +18,9 @@ cutting a release renames that section to the new version.
   Windows). TLS setup for the segment connections is now done once and
   shared, and at most 10 connections open at a time instead of up to 60 at
   once.
+- 🎬 The connection check that picks the starting video quality no longer
+  counts connection setup time as slowness, so slower machines get a more
+  accurate (often higher) starting quality.
 
 ## 🔄 v0.1.4 (2026-07-11)
 

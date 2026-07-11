@@ -140,6 +140,31 @@ class _SharedContextAdapter(HTTPAdapter):
         super().cert_verify(conn, url, verify, cert)
 
 
+def pooled_session(
+    pool_connections: int = 10,
+    pool_maxsize: int = 10,
+    pool_block: bool = False,
+    max_retries: Retry | int = 0,
+) -> requests.Session:
+    """Build a keep-alive session whose connections share one preloaded
+    SSLContext (see _SharedContextAdapter). Callers own the pool and retry
+    policy; the download engine's process-wide instance lives in
+    Download._shared_http()."""
+    ssl_context = create_urllib3_context()
+    ssl_context.load_verify_locations(certifi.where())
+    session = requests.Session()
+    adapter = _SharedContextAdapter(
+        ssl_context,
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        pool_block=pool_block,
+        max_retries=max_retries,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 # TODO: Use pathlib.Path everywhere
 class Download:
     """Main class for managing downloads, segment merging, file operations, and metadata for TIDAL media."""
@@ -166,21 +191,12 @@ class Download:
         """Return the process-wide session, building it on first use."""
         with cls._http_lock:
             if cls._http_shared is None:
-                # One SSLContext with certifi loaded once, shared by every
-                # connection (see _SharedContextAdapter for why this matters).
-                ssl_context = create_urllib3_context()
-                ssl_context.load_verify_locations(certifi.where())
-                session = requests.Session()
-                adapter = _SharedContextAdapter(
-                    ssl_context,
+                cls._http_shared = pooled_session(
                     pool_connections=cls._HTTP_POOL_MAXSIZE,
                     pool_maxsize=cls._HTTP_POOL_MAXSIZE,
                     pool_block=True,
                     max_retries=Retry(total=5, backoff_factor=1),
                 )
-                session.mount("https://", adapter)
-                session.mount("http://", adapter)
-                cls._http_shared = session
             return cls._http_shared
 
     settings: Settings

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from tidaler.download import Download, _SharedContextAdapter
+from tidaler.download import Download, _SharedContextAdapter, pooled_session
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +73,18 @@ def test_cert_verify_skips_ca_path_for_default_verify():
     conn = _Conn()
     adapter.cert_verify(conn, "https://example.com", verify=True, cert=None)
     assert not hasattr(conn, "ca_certs")
+
+
+def test_pooled_session_defaults_fail_fast():
+    """pooled_session() serves latency-sensitive one-shot callers (the video
+    bandwidth probe): shared preloaded context, but single-attempt and
+    non-blocking, unlike the download engine's retrying, blocking pool."""
+    s = pooled_session()
+    adapter = s.get_adapter("https://example.com")
+    assert isinstance(adapter, _SharedContextAdapter)
+    assert adapter._pool_block is False
+    assert adapter.max_retries.total == 0
+    assert adapter._ssl_context.cert_store_stats()["x509_ca"] > 0
 
 
 def test_cert_verify_falls_back_for_custom_verify(tmp_path):

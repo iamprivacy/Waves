@@ -82,6 +82,25 @@ from .updater import AppUpdater, UpdateCancelled
 
 logger = logging.getLogger("waves")
 
+# One keep-alive session for the video bandwidth probe, built on first use.
+# Same preloaded-SSLContext trick as the download engine (a bare
+# requests.get() pays a cold SSLContext build + certifi parse + TLS handshake
+# per call), but deliberately NOT Download._shared_http(): that pool blocks
+# when saturated, so a probe during a full-tilt album download would sit
+# waiting for a free connection, and its five-retries-with-backoff policy
+# would stretch a failed probe from one attempt to five, delaying video start.
+_http_probe = None
+_http_probe_lock = Lock()
+
+
+def _probe_http():
+    global _http_probe
+    with _http_probe_lock:
+        if _http_probe is None:
+            _http_probe = _tidaler_download.pooled_session()
+        return _http_probe
+
+
 # The trackpad back-gesture (horizontal scroll → navigate back) is a macOS-only
 # convention; on Linux/Windows a horizontal wheel is ordinary scrolling.
 _IS_MACOS = sys.platform == "darwin"
@@ -4323,12 +4342,14 @@ class WavesBridge(QObject):
     def _probe_video_mbps(self, seg_url: str) -> float:
         """Measure downstream throughput by timing ~1.5 MB of a real stream
         segment (or 4 s, whichever comes first). Returns Mbps, or -1."""
-        import requests
-
         try:
             t0 = time.monotonic()
             n = 0
-            with requests.get(seg_url, stream=True, timeout=10) as r:  # , timeout set
+            # Pooled probe session (see _probe_http): the old bare
+            # requests.get() paid full TLS setup per call, and that setup time
+            # was counted against the measured throughput, biasing the probe
+            # low on slow CPUs.
+            with _probe_http().get(seg_url, stream=True, timeout=10) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(65536):
                     n += len(chunk)
