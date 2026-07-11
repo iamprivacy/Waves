@@ -1055,7 +1055,7 @@ class WavesBridge(QObject):
     appUpdateStatusChanged = Signal()
     appUpdateProgress = Signal(float)
     appUpdateStateChanged = Signal(str, str)  # state, message
-    appUpdateChecked = Signal(bool, str, str)  # available, current, latest
+    appUpdateChecked = Signal(bool, str, str, bool)  # available, current, latest, manual
     # Internal: marshal a *batch* of album enqueues onto the GUI thread. A
     # discography download resolves its albums on a worker thread, then emits
     # this once with the whole list so (a) every album's progress relay
@@ -5072,19 +5072,22 @@ class WavesBridge(QObject):
         return self._updater.status()
 
     @Slot()
-    def checkAppUpdate(self) -> None:
+    @Slot(bool)
+    def checkAppUpdate(self, manual: bool = False) -> None:
         """User- or startup-initiated check. Best-effort, off the GUI thread;
         emits ``appUpdateChecked``. Never downloads, a found update is only
-        surfaced as a badge until the user clicks Install."""
+        surfaced as a badge until the user clicks Install. ``manual`` marks a
+        check the user ran from the Settings card, so the update toast can
+        stay quiet (they are already looking at the updater)."""
 
         def work() -> None:
             try:
                 available, current, latest = self._updater.update_available()
             except Exception:
                 logger.debug("app update check failed", exc_info=True)
-                self.appUpdateChecked.emit(False, "", "")
+                self.appUpdateChecked.emit(False, "", "", manual)
                 return
-            self.appUpdateChecked.emit(bool(available), current, latest)
+            self.appUpdateChecked.emit(bool(available), current, latest, manual)
 
         self.threadpool.start(Worker(work))
 

@@ -91,7 +91,7 @@ Item {
     property bool diagFailed: false
     function auCheck() {
         if (page.auBusy || page.auChecking) return
-        page.auChecking = true; page.auUpToDate = false; waves.checkAppUpdate()
+        page.auChecking = true; page.auUpToDate = false; waves.checkAppUpdate(true)
     }
 
     // Deep-link: land the view on a section card, e.g. arriving from the

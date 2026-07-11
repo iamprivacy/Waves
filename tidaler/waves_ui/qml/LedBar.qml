@@ -85,7 +85,17 @@ Rectangle {
         visible: false
         Rectangle { anchors.fill: parent; radius: bar.radius - 1; color: "#ffffff" }
     }
+    // Dark plate behind the label: the label is accent-on-accent once the
+    // cells under it light up, so without a backing it washes out as the bar
+    // fills. The plate hugs the text and rides above the masked grid.
+    Rectangle {
+        anchors.centerIn: parent
+        width: ledLabel.implicitWidth + 14; height: ledLabel.implicitHeight + 4
+        radius: 4; color: "#0a120c"; opacity: 0.78
+        visible: bar.label !== ""
+    }
     Text {
+        id: ledLabel
         anchors.centerIn: parent
         textFormat: Text.PlainText
         text: bar.label

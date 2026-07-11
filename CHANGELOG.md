@@ -14,6 +14,15 @@ cutting a release renames that section to the new version.
 
 ### ✨ Added
 
+- 🔔 A new-release toast that carries the whole update. When the automatic
+  update check (opt-in) finds a new version, a small notice appears at the
+  bottom of the window and INSTALL runs everything right there: download,
+  signature verification and staging with live progress, then a RESTART NOW
+  prompt (CANCEL available mid-install, RETRY on failure). It stays up until
+  you act on it or dismiss it, and returns at every launch until you do (per
+  version). A manual check from Settings never toasts (you are already on the
+  updater card), and the gold update notice in the status bar plus the full
+  Settings updater card remain as before.
 - 🛡️ Downloads now check for FFmpeg up front. Starting a download without
   FFmpeg used to quietly produce degraded files (FLAC left in its stream
   container, no video conversion, track lengths unrepaired so strict players
@@ -85,6 +94,9 @@ cutting a release renames that section to the new version.
   warns once per session, and it records which FFmpeg it used (managed, custom,
   system, or none) in your settings file so a pasted config shows whether FFmpeg
   was available. The FFmpeg path field itself is left untouched.
+- 💡 The dot-matrix progress pill's status text now sits on a dark backing
+  plate, so it stays readable as the lit cells fill in behind it (updater
+  cards, FFmpeg installs, and the new update toast all share the fix).
 
 ## 🔄 v0.1.3 (2026-07-10)
 

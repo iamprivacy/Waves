@@ -4306,9 +4306,15 @@ ApplicationWindow {
         }
         function onLoginUrlReady(url) { Qt.openUrlExternally(url); loginPanel.urlOpened = true }
         function onBackRequested() { root.navBack() }
-        function onAppUpdateChecked(available, current, latest) {
+        function onAppUpdateChecked(available, current, latest, manual) {
             root.appUpdAvailable = available
             root.appUpdLatest = latest
+            // Toast on detection; re-shows each launch until dismissed or
+            // acted on (per version). The status-bar notice stays regardless.
+            // Only for the automatic (opt-in) startup check: a manual check
+            // means the user is already on the Settings updater card, so a
+            // toast pointing them at the update would be noise.
+            if (available && !manual) updateToast.offer(latest)
         }
         // Once the new build is staged the notice would be advertising a
         // version the user already has; the Settings card carries the
@@ -6660,6 +6666,9 @@ ApplicationWindow {
         // "Don't show this again at launch": suppresses the ffmpeg-missing
         // re-prompt permanently for users who don't want FFmpeg at all.
         property bool ffmpegPromptDismissed: false
+        // Update toast: the version the user last dismissed (✕) or acted on,
+        // so that version stops toasting at launch; a NEWER release toasts.
+        property string updateToastDismissed: ""
     }
     FfmpegManager { id: appFfmpeg; objectName: "appFfmpeg" }
 
@@ -6942,6 +6951,192 @@ ApplicationWindow {
                           + (appFfmpeg.status.source_license ? " · " + appFfmpeg.status.source_license : "")
                           + ". Thank you to the maintainers. FFmpeg © the FFmpeg project (ffmpeg.org)."
                     onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                }
+            }
+        }
+    }
+
+    // Update toast: a newer Waves release was detected (launch check or a
+    // manual one), and the WHOLE update flow runs inline here:
+    //   offer      [gold dot] Waves vX is available     INSTALL   ✕
+    //   installing [LedBar: download / verify / stage]  CANCEL
+    //   ready      [green dot] vX installed             RESTART NOW   LATER
+    //   failed     [red dot] Install failed: <reason>   RETRY   ✕
+    // Shows on detection and again at every launch until the user dismisses
+    // or acts on it (remembered per version); the gold status-bar notice
+    // stays up regardless. Deliberately NO auto-hide: an update notice waits
+    // until it is acted on in some way. The Settings updater card keeps its
+    // own full controls; both listen to the same backend signals.
+    Rectangle {
+        id: updateToast
+        objectName: "updateToast"
+        // phase: "" (hidden) | "offer" | "installing" | "ready" | "failed"
+        property string phase: ""
+        // face: what the pill RENDERS. Tracks phase while shown but keeps the
+        // last state during the fade-out, so dismissing never rebinds the
+        // texts (RESTART NOW must not snap back to INSTALL mid-fade) and the
+        // width never re-measures while collapsing.
+        property string face: "offer"
+        onPhaseChanged: if (phase !== "") face = phase
+        property string version: ""
+        property real pct: 0
+        property string stage: ""
+        property string error: ""
+        function offer(v) {
+            if (setupSettings.updateToastDismissed === v) return
+            version = v; pct = 0; phase = "offer"
+        }
+        function dismiss() {   // remembered for this version
+            setupSettings.updateToastDismissed = version
+            phase = ""
+        }
+
+        // Real updater lifecycle. Progress/stage bind only while this toast
+        // drives the install; "done" flips any visible toast to the restart
+        // prompt (even one still on "offer" while Settings ran the install).
+        Connections {
+            target: waves
+            function onAppUpdateProgress(p) { if (updateToast.phase === "installing") updateToast.pct = p }
+            function onAppUpdateStateChanged(state, message) {
+                if (updateToast.phase === "") return
+                if (state === "downloading") {
+                    if (updateToast.phase === "installing") updateToast.stage = message
+                } else if (state === "done") {
+                    updateToast.pct = 100; updateToast.phase = "ready"
+                } else if (state === "failed" && updateToast.phase === "installing") {
+                    updateToast.error = message; updateToast.phase = "failed"
+                } else if (state === "cancelled" && updateToast.phase === "installing") {
+                    updateToast.pct = 0; updateToast.phase = "offer"
+                }
+            }
+        }
+
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 46
+        // The pill widens while the LED bar is up, then narrows again.
+        width: face === "installing" ? Math.min(560, parent.width - 40)
+                                     : Math.min(utRow.implicitWidth + 28, parent.width - 40)
+        Behavior on width { enabled: updateToast.phase !== ""; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+        height: 40; radius: 10
+        color: root.surface2; border.color: root.outline; border.width: 1
+        opacity: phase !== "" ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        // gentle settle down and away as it fades
+        transform: Translate {
+            y: updateToast.phase !== "" ? 0 : 10
+            Behavior on y { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        }
+
+        RowLayout {
+            id: utRow
+            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
+            spacing: 12
+
+            // status dot (offer: gold / ready: green / failed: red)
+            Rectangle {
+                visible: updateToast.face !== "installing"
+                width: 7; height: 7; radius: 4; Layout.alignment: Qt.AlignVCenter
+                color: updateToast.face === "ready" ? root.green
+                     : updateToast.face === "failed" ? root.red : root.gold
+            }
+
+            // main line (offer / ready / failed)
+            Text {
+                visible: updateToast.face !== "installing"
+                Layout.alignment: Qt.AlignBaseline
+                textFormat: Text.PlainText
+                text: updateToast.face === "ready" ? "Waves v" + updateToast.version + " installed"
+                    : updateToast.face === "failed" ? "Install failed: " + updateToast.error
+                    : "Waves v" + updateToast.version + " is available"
+                color: updateToast.face === "failed" ? root.red : root.textHi
+                font.pixelSize: 12; elide: Text.ElideRight
+                Layout.maximumWidth: root.width - 300
+            }
+
+            // the LED pill while installing (same bar as the Settings card)
+            LedBar {
+                visible: updateToast.face === "installing"
+                Layout.fillWidth: true; Layout.preferredHeight: 22
+                Layout.alignment: Qt.AlignVCenter
+                radius: 8; mono: root.mono
+                pct: updateToast.pct
+                label: updateToast.stage + " · " + Math.round(updateToast.pct) + "%"
+            }
+
+            // primary action per phase: green. On hover the label runs a
+            // console "decode": every glyph scrambles, then characters lock
+            // in left to right while the tail keeps churning, with a bright
+            // flash that fades as the word resolves. Deliberate, not a bug.
+            // CANCEL (installing) stays plain grey: no glitch on it.
+            Text {
+                id: utAct
+                Layout.alignment: Qt.AlignBaseline
+                textFormat: Text.PlainText
+                readonly property string realLabel: updateToast.face === "offer" ? "INSTALL"
+                    : updateToast.face === "installing" ? "CANCEL"
+                    : updateToast.face === "ready" ? "RESTART NOW"
+                    : "RETRY"
+                property string scr: ""
+                text: scr !== "" ? scr : realLabel
+                color: updateToast.face === "installing" ? root.textDim
+                     : utGlitch.running ? Qt.lighter(root.green, 1.0 + 0.45 * (1 - utAct._gt / utGlitch.ticks))
+                     : root.green
+                font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.8
+                property int _gt: 0
+                readonly property string _glyphs: "ABCDEF0123456789/:#@$%&*+=<>"
+                Timer {
+                    id: utGlitch; interval: 30; repeat: true
+                    readonly property int ticks: 12
+                    onTriggered: {
+                        utAct._gt++
+                        if (utAct._gt > ticks) { utGlitch.stop(); utAct.scr = ""; return }
+                        // characters resolve left to right; the unresolved
+                        // tail keeps scrambling every tick
+                        var locked = Math.floor(utAct.realLabel.length * utAct._gt / ticks)
+                        var out = ""
+                        for (var i = 0; i < utAct.realLabel.length; i++)
+                            out += (i < locked || utAct.realLabel.charAt(i) === " ")
+                                 ? utAct.realLabel.charAt(i)
+                                 : utAct._glyphs.charAt(Math.floor(Math.random() * utAct._glyphs.length))
+                        utAct.scr = out
+                    }
+                }
+                MouseArea {
+                    id: utGo; anchors.fill: parent; anchors.margins: -8
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onEntered: if (updateToast.phase !== "installing") { utAct._gt = 0; utGlitch.restart() }
+                    onClicked: {
+                        if (updateToast.phase === "offer" || updateToast.phase === "failed") {
+                            // acted on: stop re-showing at launch
+                            setupSettings.updateToastDismissed = updateToast.version
+                            updateToast.pct = 0; updateToast.error = ""; updateToast.stage = "Downloading update…"
+                            updateToast.phase = "installing"
+                            waves.installAppUpdate()
+                        } else if (updateToast.phase === "installing") {
+                            waves.cancelAppUpdate()   // backend answers with state "cancelled"
+                        } else {
+                            waves.restartForUpdate()
+                        }
+                    }
+                }
+            }
+
+            // secondary: ✕ (offer/failed) or LATER (ready); nothing mid-install
+            Text {
+                visible: updateToast.face !== "installing"
+                Layout.leftMargin: 2
+                Layout.alignment: Qt.AlignBaseline
+                textFormat: Text.PlainText
+                text: updateToast.face === "ready" ? "LATER" : "✕"
+                color: utX.containsMouse ? root.textHi : root.textDim
+                font.family: updateToast.face === "ready" ? root.mono : root.uiFont
+                font.pixelSize: updateToast.face === "ready" ? 10 : 11
+                font.bold: updateToast.face === "ready"; font.letterSpacing: updateToast.face === "ready" ? 0.8 : 0
+                MouseArea {
+                    id: utX; anchors.fill: parent; anchors.margins: -8
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: updateToast.dismiss()
                 }
             }
         }
