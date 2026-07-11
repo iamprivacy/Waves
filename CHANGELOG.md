@@ -16,6 +16,12 @@ cutting a release renames that section to the new version.
 
 - 📋 The Completed section of the download queue now lists the most recently
   finished item first, oldest at the bottom.
+- 🔍 Pressing Search puts the cursor in the search bar, ready to type. Any
+  previous query is selected, so typing starts a fresh search.
+- 🎤 Artist pages show the first 5 top tracks with a SHOW ALL link for the
+  rest, and the Top tracks, Albums and EPs & Singles sections are now
+  collapsible. A collapsed section stays collapsed on every artist page
+  until you reopen it, so album hunters skip the top tracks for good.
 
 ### 🐛 Fixed
 

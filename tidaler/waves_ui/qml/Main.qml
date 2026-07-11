@@ -134,6 +134,22 @@ ApplicationWindow {
     // until the user sets FFmpeg up or explicitly continues degraded.
     property bool ffmpegBlocked: false
     property var artistData: ({})         // payload of the open artist page (artistLoaded)
+    // Artist-page section collapse: persisted (prefs), so a section a user
+    // folds away stays folded on every artist page until reopened. Album/EP
+    // hunters shouldn't have to scroll past Top tracks on each visit.
+    property bool artistTracksCollapsed: waves.wavesPref("artist_sec_tracks_collapsed") === true
+    property bool artistAlbumsCollapsed: waves.wavesPref("artist_sec_albums_collapsed") === true
+    property bool artistEpsCollapsed: waves.wavesPref("artist_sec_eps_collapsed") === true
+    function toggleArtistSection(which) {
+        var v
+        if (which === "tracks") { v = artistTracksCollapsed = !artistTracksCollapsed }
+        else if (which === "albums") { v = artistAlbumsCollapsed = !artistAlbumsCollapsed }
+        else { v = artistEpsCollapsed = !artistEpsCollapsed }
+        waves.setWavesPref("artist_sec_" + which + "_collapsed", v)
+    }
+    // Top tracks show only the first 5; SHOW ALL reveals the rest for this
+    // page visit only (deliberately not persisted).
+    property bool topTracksExpanded: false
     // ---- Download state (mirrors the bridge) ----------------------------
     // mediaId -> percent / state ("running"|"done"|"failed"), fed by the
     // downloadProgress and downloadState signals; dlPct()/dlSt() read these.
@@ -723,6 +739,10 @@ ApplicationWindow {
                 // Only Settings was covering the Search view: uncover it as-is.
                 settingsOpen = false; browseOpen = false; libraryOpen = false
             }
+            // Ready to type immediately: the Search press hands the keyboard
+            // to the field (existing text selected, so typing replaces it).
+            searchField.forceActiveFocus()
+            searchField.selectAll()
             return
         }
         // Second press while already on Search: a fresh, blank search page.
@@ -734,6 +754,7 @@ ApplicationWindow {
         trackCache = ({}); expandedAlbums = ({})
         artistsModel.clear(); albumsRaw = []; applySort()
         tracksModel.clear(); videosModel.clear(); playlistsModel.clear(); mixesModel.clear()
+        searchField.forceActiveFocus()
     }
     function loadLib(cat) {
         libraryCategory = cat
@@ -2741,8 +2762,15 @@ ApplicationWindow {
     }
 
     component SectionHeader: Item {
+        id: secHead
         property string label: ""
         property int count: -1
+        // Collapsible mode (artist-page sections): shows a chevron, makes the
+        // whole header a click target, and the caller owns the state (so it
+        // can persist it via prefs).
+        property bool collapsible: false
+        property bool collapsed: false
+        signal toggled()
         anchors.left: parent ? parent.left : undefined
         anchors.right: parent ? parent.right : undefined
         implicitHeight: 36
@@ -2750,13 +2778,27 @@ ApplicationWindow {
             anchors.left: parent.left; anchors.right: parent.right
             anchors.bottom: parent.bottom; anchors.bottomMargin: 7
             spacing: 12
-            Text { textFormat: Text.PlainText; text: label; color: root.textLo; font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.9 }
+            ExpandChevron {
+                visible: secHead.collapsible
+                open: !secHead.collapsed; hovered: secMa.containsMouse
+                tile: 20; glyph: 14; showTile: false
+                stroke: secMa.containsMouse ? root.accent : root.textLo
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text { textFormat: Text.PlainText; text: label; color: secHead.collapsible && secMa.containsMouse ? root.textHi : root.textLo; font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.9 }
             Rectangle { Layout.fillWidth: true; height: 1; color: root.divider }
             Rectangle {
                 visible: count >= 0; radius: 4; color: "transparent"; border.color: root.border1
                 implicitHeight: 18; implicitWidth: cntT.implicitWidth + 16
                 Text { textFormat: Text.PlainText; id: cntT; anchors.centerIn: parent; text: count; color: root.textDim; font.family: root.mono; font.pixelSize: 11 }
             }
+        }
+        MouseArea {
+            id: secMa
+            anchors.fill: parent
+            enabled: secHead.collapsible; hoverEnabled: secHead.collapsible
+            cursorShape: secHead.collapsible ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: secHead.toggled()
         }
     }
 
@@ -4227,6 +4269,7 @@ ApplicationWindow {
             root.markNav("artist render")
             root.artistData = p
             root.bioExpanded = false
+            root.topTracksExpanded = false
             root.expandedAlbums = ({})
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
             root.libraryOpen = false
@@ -5468,23 +5511,51 @@ ApplicationWindow {
                     color: root.textLo; font.pixelSize: 13; width: parent.width; wrapMode: Text.WordWrap; lineHeight: 1.3
                 }
 
-                // Top tracks
-                SectionHeader { visible: artistTracksModel.count > 0; label: "TOP TRACKS"; count: artistTracksModel.count }
+                // Top tracks: first 5 only, SHOW ALL reveals the rest for this
+                // visit. Collapsed state persists across artist pages (prefs).
+                SectionHeader {
+                    visible: artistTracksModel.count > 0
+                    label: "TOP TRACKS"; count: artistTracksModel.count
+                    collapsible: true; collapsed: root.artistTracksCollapsed
+                    onToggled: root.toggleArtistSection("tracks")
+                }
                 Repeater {
-                    model: artistTracksModel
+                    // null model while collapsed: no delegates exist at all,
+                    // cheaper than count instances with visible: false.
+                    model: root.artistTracksCollapsed ? null : artistTracksModel
                     delegate: TrackRow {
                         required property var model
+                        required property int index
+                        visible: index < 5 || root.topTracksExpanded
                         width: artistCol.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; quality: model.quality; popularity: model.popularity
                         albumId: model.album_id || ""
                     }
                 }
+                Text {
+                    textFormat: Text.PlainText
+                    visible: !root.artistTracksCollapsed && artistTracksModel.count > 5
+                    text: root.topTracksExpanded ? "SHOW LESS" : "SHOW ALL " + artistTracksModel.count
+                    color: showAllMa.containsMouse ? root.accent : root.textDim
+                    font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.4
+                    MouseArea {
+                        id: showAllMa
+                        anchors.fill: parent; anchors.margins: -4
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.topTracksExpanded = !root.topTracksExpanded
+                    }
+                }
 
                 // Albums (expand inline)
-                SectionHeader { visible: artistAlbumsModel.count > 0; label: "ALBUMS"; count: artistAlbumsModel.count }
+                SectionHeader {
+                    visible: artistAlbumsModel.count > 0
+                    label: "ALBUMS"; count: artistAlbumsModel.count
+                    collapsible: true; collapsed: root.artistAlbumsCollapsed
+                    onToggled: root.toggleArtistSection("albums")
+                }
                 Repeater {
-                    model: artistAlbumsModel
+                    model: root.artistAlbumsCollapsed ? null : artistAlbumsModel
                     delegate: AlbumBlock {
                         required property var model
                         width: artistCol.width
@@ -5494,9 +5565,14 @@ ApplicationWindow {
                 }
 
                 // EPs & singles
-                SectionHeader { visible: artistEpModel.count > 0; label: "EPS & SINGLES"; count: artistEpModel.count }
+                SectionHeader {
+                    visible: artistEpModel.count > 0
+                    label: "EPS & SINGLES"; count: artistEpModel.count
+                    collapsible: true; collapsed: root.artistEpsCollapsed
+                    onToggled: root.toggleArtistSection("eps")
+                }
                 Repeater {
-                    model: artistEpModel
+                    model: root.artistEpsCollapsed ? null : artistEpModel
                     delegate: AlbumBlock {
                         required property var model
                         width: artistCol.width

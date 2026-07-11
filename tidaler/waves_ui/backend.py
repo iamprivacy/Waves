@@ -3578,6 +3578,12 @@ class WavesBridge(QObject):
             # dumps. The redact-content flag applies to exported bundles only.
             "verbose_diagnostics": False,
             "diagnostics_redact_content": False,
+            # Artist-page sections: a collapsed section stays collapsed on
+            # every artist page until reopened (album hunters skip the top
+            # tracks every time otherwise).
+            "artist_sec_tracks_collapsed": False,
+            "artist_sec_albums_collapsed": False,
+            "artist_sec_eps_collapsed": False,
         }
         try:
             with open(self._waves_prefs_path, encoding="utf-8") as handle:
