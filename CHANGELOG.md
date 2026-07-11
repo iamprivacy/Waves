@@ -29,6 +29,11 @@ cutting a release renames that section to the new version.
   fine. Waves now rebuilds the container after downloading so the correct
   duration is written, keeping the audio bit for bit identical (this needs
   FFmpeg).
+- 📂 Finished downloads now tuck themselves into the queue's Completed section
+  even while the queue panel is closed. The 5-second tidy-up only ran while a
+  row was on screen, so opening the queue after a big batch made every finished
+  row fold away at once, in one distracting cascade. Rows you are watching
+  still fade out gently; everything else is already in place when you look.
 - 🪟 Windows: downloads no longer flash open a command-prompt window for every
   track. FLAC extraction and format conversion run ffmpeg as a child process,
   and the flag that keeps that process windowless was being discarded before the

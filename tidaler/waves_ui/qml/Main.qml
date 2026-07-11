@@ -173,6 +173,9 @@ ApplicationWindow {
     property bool completedCollapsed: true
     property int completedCount: 0
     property int downloadingCount: 0
+    // Finished rows still lingering before their move to Completed; arms the
+    // root lingerClock so the fold happens with the queue drawer closed too.
+    property int lingerCount: 0
     property int queuedCount: 0
     property int compBump: 0
     // Queue-row album expansion: which rows are open (by qid) and each row's
@@ -3791,6 +3794,11 @@ ApplicationWindow {
                 var idx = pos[it.qid]
                 var row = m.get(idx)
                 if (row.status !== it.status) m.setProperty(idx, "status", it.status)
+                // Wall-clock stamp of when the row finished: the root
+                // lingerClock promotes on doneAt+5s whether or not the queue
+                // drawer (and so this row's delegate) exists.
+                if (it.status === "done" && !row.moved && !row.doneAt)
+                    m.setProperty(idx, "doneAt", Date.now())
                 if (row.progress !== it.progress) m.setProperty(idx, "progress", it.progress)
                 if (row.name !== it.name) m.setProperty(idx, "name", it.name)
                 if (row.artist !== it.artist) m.setProperty(idx, "artist", it.artist || "")
@@ -3804,7 +3812,8 @@ ApplicationWindow {
                            progress: it.progress, media_id: it.media_id, template: it.template,
                            collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
                            art: it.art || "",
-                           uiGroup: (it.status === "queued" ? "queued" : "downloading"), moved: false })
+                           uiGroup: (it.status === "queued" ? "queued" : "downloading"), moved: false,
+                           doneAt: (it.status === "done" ? Date.now() : 0), leaving: false })
             }
         }
         for (var k = m.count - 1; k >= 0; --k) if (!seen[m.get(k).qid]) m.remove(k)
@@ -3825,14 +3834,43 @@ ApplicationWindow {
     }
 
     function updateQueueCounts() {
-        var m = queueModel, c = 0, d = 0, q = 0
+        var m = queueModel, c = 0, d = 0, q = 0, l = 0
         for (var i = 0; i < m.count; ++i) {
-            var grp = m.get(i).uiGroup
+            var row = m.get(i)
+            var grp = row.uiGroup
             if (grp === "completed") c++
             else if (grp === "downloading") d++
             else q++
+            if (row.status === "done" && !row.moved) l++
         }
         root.completedCount = c; root.downloadingCount = d; root.queuedCount = q
+        root.lingerCount = l
+    }
+
+    // The linger clock: finished rows fold into Completed on a wall clock
+    // (doneAt + 5s), whether or not the queue drawer is open. The per-row
+    // delegate used to own this timing, so with the drawer closed nothing
+    // ever moved, and opening it after a big batch animated every row at
+    // once. Rows on screen still get the leaving fade first; with the drawer
+    // closed the promotion is silent (there is nothing to animate).
+    Timer {
+        id: lingerClock
+        interval: 1000; repeat: true; running: root.lingerCount > 0
+        onTriggered: {
+            var m = queueModel, now = Date.now()
+            for (var i = m.count - 1; i >= 0; --i) {
+                var row = m.get(i)
+                if (row.status !== "done" || row.moved) continue
+                if (!row.doneAt) { m.setProperty(i, "doneAt", now); continue }
+                var age = now - row.doneAt
+                if (age < 5000) continue
+                if (!queueDrawer.visible) { promoteCompleted(row.qid); continue }
+                // Visible: fade the row out (leaving), then move it once the
+                // fade has finished (next tick).
+                if (!row.leaving) m.setProperty(i, "leaving", true)
+                else if (age >= 5500) promoteCompleted(row.qid)
+            }
+        }
     }
 
     // Move a finished row into the Completed group (after its 5s linger). It
@@ -3848,6 +3886,7 @@ ApplicationWindow {
                 for (var k = 0; k < m.count; ++k) if (k !== i && m.get(k).uiGroup === "completed") c++
                 m.setProperty(i, "moved", true)
                 m.setProperty(i, "uiGroup", "completed")
+                m.setProperty(i, "leaving", false)
                 if (i !== c) m.move(i, c, 1)
                 root.compBump += 1
                 updateQueueCounts()
@@ -6132,7 +6171,9 @@ ApplicationWindow {
                         else { e[model.qid] = true; waves.loadQueueTracks(model.qid) }
                         root.queueExpanded = e
                     }
-                    property bool leaving: false
+                    // Driven by the root lingerClock via the model, so the
+                    // fold works with the drawer closed (no delegate) too.
+                    readonly property bool leaving: model.leaving === true
                     width: ListView.view.width
                     property real bodyH: actCol.implicitHeight + 18
                     height: (collapsed || leaving) ? 0 : bodyH + 8
@@ -6144,13 +6185,13 @@ ApplicationWindow {
                     Behavior on height { enabled: !qtrackAnim.running; NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
                     Behavior on opacity { NumberAnimation { duration: 240 } }
 
-                    // Finish flow: ✓ DONE chip pops, a 5s bar drains, then the row
-                    // collapses + fades in place and, once it's zero-height, is
-                    // moved into Completed (so the reorder never leaves a gap).
+                    // Finish flow: ✓ DONE chip pops, then the row collapses +
+                    // fades in place and is moved into Completed. The timing
+                    // (doneAt + 5s) lives on the model row and is driven by
+                    // the root lingerClock, not here: a delegate only exists
+                    // while the drawer shows it, so per-row timers meant a
+                    // closed drawer never folded anything.
                     onStChanged: if (qrow.lingering) chipPop.restart()
-                    Timer { interval: 5000; running: qrow.lingering && !qrow.leaving; repeat: false; onTriggered: qrow.leaving = true }
-                    Timer { interval: 380; running: qrow.leaving && !qrow.isComp; repeat: false
-                        onTriggered: { root.promoteCompleted(model.qid); qrow.leaving = false } }
 
                     // ---- queue card (Completed rows use the same card as
                     // Downloading/Queued, art thumb, caret, hover peek and
@@ -6345,12 +6386,21 @@ ApplicationWindow {
                                 }
                             }
                         }
-                        // 5-second countdown bar, drains while the ✓ DONE chip lingers
+                        // 5-second countdown bar, drains while the ✓ DONE chip
+                        // lingers. Sized from doneAt so a delegate created
+                        // mid-linger (drawer opened late) starts at the true
+                        // remaining fraction, not a fresh full bar.
                         Rectangle {
                             anchors.left: parent.left; anchors.bottom: parent.bottom
                             height: 2; radius: 1; color: root.accent; opacity: 0.6
-                            visible: qrow.lingering
-                            NumberAnimation on width { running: qrow.lingering; from: activeRect.width; to: 0; duration: 5000; easing.type: Easing.Linear }
+                            visible: qrow.lingering && !qrow.leaving
+                            NumberAnimation on width {
+                                running: qrow.lingering && !qrow.leaving
+                                from: activeRect.width * Math.max(0, 1 - (Date.now() - model.doneAt) / 5000)
+                                to: 0
+                                duration: Math.max(1, 5000 - (Date.now() - model.doneAt))
+                                easing.type: Easing.Linear
+                            }
                         }
                     }
                 }
