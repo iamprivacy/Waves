@@ -12,6 +12,13 @@ cutting a release renames that section to the new version.
 
 ## Unreleased
 
+### ✨ Added
+
+- ▶️ Artist cards in My Tidal now carry the same compact preview player as the
+  Browse cards, centered under the artist's name: one click plays that
+  artist's top track (with the elapsed counter and STOP control), filling the
+  blank strip at the bottom of each card.
+
 ### 🐛 Fixed
 
 - 🔥 Downloads no longer peg the CPU or freeze the window. Every track segment

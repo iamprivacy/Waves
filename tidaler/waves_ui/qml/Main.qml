@@ -5660,7 +5660,8 @@ ApplicationWindow {
                     model: libArtistsModel
                     property int cols: Math.max(3, Math.floor(width / 132))
                     cellWidth: width > 0 ? Math.floor(width / cols) : 132
-                    cellHeight: cellWidth + 30
+                    // + name row + the preview row pinned to the card bottom
+                    cellHeight: cellWidth + 46
                     cacheBuffer: 800
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar {}
@@ -5686,6 +5687,65 @@ ApplicationWindow {
                                 }
                             }
                             MouseArea { id: agMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtistLibrary(model.id) }
+                            // ---- compact preview row (the Browse card's control
+                            // line, shrunk): ▶ PREVIEW -> elapsed + · STOP, playing
+                            // this artist's top track via the shared preview
+                            // machinery. Declared after agMa so its clicks win
+                            // over the open-artist click underneath.
+                            Item {
+                                id: agPv
+                                readonly property string pst: root.pvSt("artist", "" + model.id)
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.bottom: parent.bottom; anchors.bottomMargin: 8
+                                width: agPvRow.implicitWidth; height: 16
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.togglePreview("artist", "" + model.id, 0)
+                                }
+                                Row {
+                                    id: agPvRow
+                                    anchors.verticalCenter: parent.verticalCenter; spacing: 4
+                                    Ico {
+                                        visible: agPv.pst !== "loading"
+                                        name: agPv.pst === "playing" ? "pause" : "play"
+                                        color: agPv.pst === "error" ? root.red : root.accent
+                                        size: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        text: agPv.pst === "" ? "PREVIEW"
+                                            : agPv.pst === "loading" ? "[buffering]"
+                                            : agPv.pst === "error" ? "RETRY"
+                                            : root.fmtMs(root.previewPosition)
+                                        color: agPv.pst === "error" ? root.red : root.accent
+                                        font.family: agPv.pst === "playing" || agPv.pst === "paused" || agPv.pst === "loading" ? root.mono : root.uiFont
+                                        font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        property real breathe: 1
+                                        opacity: agPv.pst === "loading" ? breathe : 1
+                                        SequentialAnimation on breathe {
+                                            running: agPv.pst === "loading"; loops: Animation.Infinite
+                                            NumberAnimation { from: 1.0; to: 0.3; duration: 520; easing.type: Easing.InOutSine }
+                                            NumberAnimation { from: 0.3; to: 1.0; duration: 520; easing.type: Easing.InOutSine }
+                                        }
+                                    }
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        visible: agPv.pst === "playing" || agPv.pst === "paused"
+                                        text: "· STOP"
+                                        color: agStopMa.containsMouse ? root.red : root.textDim
+                                        font.family: root.uiFont; font.pixelSize: 9; font.bold: true; font.letterSpacing: root.btnTrack
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        MouseArea {
+                                            id: agStopMa
+                                            anchors.fill: parent; anchors.margins: -3
+                                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.stopPreview()
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
