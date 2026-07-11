@@ -164,6 +164,31 @@ class Download:
         self.event_abort = event_abort
         self.event_run = event_run
 
+        # One pooled, keep-alive HTTP session shared by every segment download.
+        # The old code built a fresh requests.Session() per segment, which forced
+        # a full TLS handshake for each one. A HiRes album is served as dozens of
+        # segments per track and fanned across up to
+        # downloads_simultaneous_per_track_max x downloads_concurrent_max threads,
+        # so that became a storm of handshakes, and handshake crypto runs GIL-free
+        # in openssl, so it saturated every CPU core (100% CPU, GUI unresponsive)
+        # the moment a download started. Reusing pooled connections cuts the
+        # per-segment CPU cost by roughly 16x and raises throughput. Size the pool
+        # to the worst-case concurrent segment count so connections are reused
+        # instead of discarded (a full pool silently drops keep-alive).
+        _pool = max(
+            10,
+            int(self.settings.data.downloads_simultaneous_per_track_max or 1)
+            * int(self.settings.data.downloads_concurrent_max or 1),
+        )
+        self._http = requests.Session()
+        _adapter = HTTPAdapter(
+            pool_connections=_pool,
+            pool_maxsize=_pool,
+            max_retries=Retry(total=5, backoff_factor=1),
+        )
+        self._http.mount("https://", _adapter)
+        self._http.mount("http://", _adapter)
+
         if not self.settings.data.path_binary_ffmpeg:
             self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
 
@@ -532,34 +557,32 @@ class Download:
                 result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
             )
 
-        # Retry download on failed segments, with an exponential delay between retries
-        with requests.Session() as s:
-            retries = Retry(total=5, backoff_factor=1)  # , status_forcelist=[ 502, 503, 504 ])
+        # Reuse the pooled, keep-alive session built once in __init__. Retry/backoff
+        # is configured on that shared adapter, so segments reuse connections instead
+        # of paying a TLS handshake each (the old per-segment Session was the cause of
+        # the all-core CPU spike on download).
+        try:
+            # Create the request object with stream=True, so the content won't be loaded into memory at once.
+            r = self._http.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC)
 
-            s.mount("https://", HTTPAdapter(max_retries=retries))
+            r.raise_for_status()
 
-            try:
-                # Create the request object with stream=True, so the content won't be loaded into memory at once.
-                r = s.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC)
+            # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
+            with path_segment.open("wb") as f:
+                for data in r.iter_content(chunk_size=block_size):
+                    # Bail out promptly on abort (Stop/Cancel or app quit)
+                    # instead of streaming the whole segment first.
+                    if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                        return DownloadSegmentResult(
+                            result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
+                        )
+                    f.write(data)
+                    # Advance progress bar.
+                    self.progress.advance(p_task)
 
-                r.raise_for_status()
-
-                # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
-                with path_segment.open("wb") as f:
-                    for data in r.iter_content(chunk_size=block_size):
-                        # Bail out promptly on abort (Stop/Cancel or app quit)
-                        # instead of streaming the whole segment first.
-                        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                            return DownloadSegmentResult(
-                                result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
-                            )
-                        f.write(data)
-                        # Advance progress bar.
-                        self.progress.advance(p_task)
-
-                result = True
-            except Exception:
-                self.progress.advance(p_task)
+            result = True
+        except Exception:
+            self.progress.advance(p_task)
 
         # To send the progress to the GUI, we need to emit the percentage.
         if not progress_to_stdout:

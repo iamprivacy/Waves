@@ -10,6 +10,19 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## Unreleased
+
+### 🐛 Fixed
+
+- 🔥 Downloads no longer peg the CPU or freeze the window. Every track segment
+  was opening a brand-new encrypted connection (a fresh TLS handshake) instead of
+  reusing one, so a high-resolution album fanned across many parallel connections
+  became a storm of handshakes. Handshake crypto runs across all cores, so it
+  could drive CPU to 100% and make the app unresponsive the moment a download
+  started (worse the more cores a machine has). Segments now reuse pooled
+  connections, which cuts the download CPU cost by roughly 16x and downloads
+  faster, on any hardware and without lowering the parallelism.
+
 ## 🔄 v0.1.3 (2026-07-10)
 
 <p align="center">
