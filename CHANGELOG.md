@@ -10,7 +10,11 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
-## Unreleased
+## 🔄 v0.1.4 (2026-07-11)
+
+<p align="center">
+  <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+</p>
 
 ### ✨ Added
 
