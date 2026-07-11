@@ -22,6 +22,12 @@ cutting a release renames that section to the new version.
   started (worse the more cores a machine has). Segments now reuse pooled
   connections, which cuts the download CPU cost by roughly 16x and downloads
   faster, on any hardware and without lowering the parallelism.
+- 🌡️ Starting an album download no longer causes a brief CPU spike. The
+  connection pool that keeps downloads cheap was being rebuilt from scratch for
+  every queued album, so each one began with a burst of encrypted-connection
+  handshakes (CPU jumps to 100% for a moment, then settles). The warm pool is
+  now shared across the whole session, so only the very first download pays
+  that cost.
 - 🎧 Downloaded tracks now carry their real length everywhere. Tracks delivered
   as segmented streams (most AAC and lossless files) were saved in a container
   whose header reported a length of zero, so strict players (for example Winamp)

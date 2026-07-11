@@ -17,7 +17,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from concurrent import futures
-from threading import Event
+from threading import Event, Lock
 from uuid import uuid4
 
 import m3u8
@@ -113,6 +113,33 @@ class Download:
     _FILE_OPERATION_RETRIES: int = 5
     _FILE_OPERATION_RETRY_DELAY_SEC: float = 0.5
 
+    # Process-wide keep-alive HTTP session (see the comment in __init__): all
+    # Download instances share one warm connection pool so an album start does
+    # not pay a burst of TLS handshakes on a cold per-instance pool.
+    _http_shared: requests.Session | None = None
+    _http_pool: int = 0
+    _http_lock = Lock()
+
+    @classmethod
+    def _shared_http(cls, pool: int) -> requests.Session:
+        """Return the shared session, (re)mounting a larger adapter if the
+        configured concurrency has grown past the current pool size."""
+        with cls._http_lock:
+            if cls._http_shared is None or pool > cls._http_pool:
+                session = cls._http_shared or requests.Session()
+                adapter = HTTPAdapter(
+                    pool_connections=pool,
+                    pool_maxsize=pool,
+                    max_retries=Retry(total=5, backoff_factor=1),
+                )
+                # mount() replaces the adapter (dropping any warm connections),
+                # so only do it on first use or when the pool must grow.
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                cls._http_shared = session
+                cls._http_pool = pool
+            return cls._http_shared
+
     settings: Settings
     tidal: "Tidal"
     session: Session
@@ -175,19 +202,19 @@ class Download:
         # per-segment CPU cost by roughly 16x and raises throughput. Size the pool
         # to the worst-case concurrent segment count so connections are reused
         # instead of discarded (a full pool silently drops keep-alive).
+        #
+        # The session is process-wide (shared across Download instances), not
+        # per-instance: the GUI builds a fresh Download per queued album, and a
+        # per-instance session meant a cold pool at every album start, so the
+        # first wave of segment fetches paid all its TLS handshakes at once (a
+        # brief all-core spike on each click of Download). Sharing the warm
+        # pool pays the handshake cost once per app run.
         _pool = max(
             10,
             int(self.settings.data.downloads_simultaneous_per_track_max or 1)
             * int(self.settings.data.downloads_concurrent_max or 1),
         )
-        self._http = requests.Session()
-        _adapter = HTTPAdapter(
-            pool_connections=_pool,
-            pool_maxsize=_pool,
-            max_retries=Retry(total=5, backoff_factor=1),
-        )
-        self._http.mount("https://", _adapter)
-        self._http.mount("http://", _adapter)
+        self._http = self._shared_http(_pool)
 
         if not self.settings.data.path_binary_ffmpeg:
             self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
