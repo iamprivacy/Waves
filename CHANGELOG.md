@@ -12,6 +12,11 @@ cutting a release renames that section to the new version.
 
 ## Unreleased
 
+### 🔧 Changed
+
+- 📋 The Completed section of the download queue now lists the most recently
+  finished item first, oldest at the bottom.
+
 ### 🐛 Fixed
 
 - 🖥️ Starting a download no longer spikes the CPU to 100% (most visible on

@@ -3953,14 +3953,13 @@ ApplicationWindow {
         for (var i = 0; i < m.count; ++i) {
             if (m.get(i).qid === qid) {
                 if (m.get(i).uiGroup === "completed") return
-                // Land just after the existing Completed rows (keeps completion
-                // order); the ListView move transition slides it up into place.
-                var c = 0
-                for (var k = 0; k < m.count; ++k) if (k !== i && m.get(k).uiGroup === "completed") c++
+                // Land at the TOP of the Completed group (newest first, oldest
+                // at the bottom); Completed is the first group, so that is
+                // model index 0. The ListView move transition slides it up.
                 m.setProperty(i, "moved", true)
                 m.setProperty(i, "uiGroup", "completed")
                 m.setProperty(i, "leaving", false)
-                if (i !== c) m.move(i, c, 1)
+                if (i !== 0) m.move(i, 0, 1)
                 root.compBump += 1
                 updateQueueCounts()
                 return
