@@ -192,16 +192,20 @@ class Download:
         if not self.settings.data.path_binary_ffmpeg:
             self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
 
-        if not self.settings.data.path_binary_ffmpeg and (
-            self.settings.data.video_convert_mp4 or self.settings.data.extract_flac
-        ):
+        # True whenever ffmpeg is genuinely absent, decoupled from the two gated
+        # flags: the MP4/M4A duration-repair remux also needs ffmpeg, so callers
+        # (the backend) must be able to warn on pure absence, not just when FLAC
+        # extraction / video convert were requested. Surfaced via _warn_if_ffmpeg_missing.
+        self.ffmpeg_missing = not self.settings.data.path_binary_ffmpeg
+
+        if self.ffmpeg_missing and (self.settings.data.video_convert_mp4 or self.settings.data.extract_flac):
             self.settings.data.video_convert_mp4 = False
             self.settings.data.extract_flac = False
 
             self.fn_logger.error(
-                "FFmpeg path is not set and it is not in the path. Videos can be downloaded but will not be processed."
-                "FLAC cannot be extracted from MP4 containers. Make sure FFmpeg is installed. The path to the FFmpeg"
-                "binary must be set in (`path_binary_ffmpeg`) or just have it in the $PATH."
+                "FFmpeg not found (not set and not on $PATH). FLAC extraction, video conversion, and MP4/M4A "
+                "duration repair are disabled; files may play but can report 0:00 in strict players. Install "
+                "FFmpeg from Settings, or set `path_binary_ffmpeg` (or have ffmpeg on the $PATH)."
             )
 
     def _get_media_urls(
@@ -1139,6 +1143,24 @@ class Download:
                 and tmp_path_file.suffix == AudioExtensions.FLAC
             ):
                 tmp_path_file = self._downsample_audio(tmp_path_file)
+
+            # Rebuild the MP4/M4A container so its moov/mvhd carries the real duration.
+            # A DASH download is a raw byte-concatenation of fragmented-MP4 segments
+            # (_segments_merge), whose top-level moov duration is 0: fragmented MP4 keeps
+            # per-sample timing in the moof boxes, not the moov. Strict players (Winamp)
+            # then read 0:00 and refuse to play, while lenient ones (VLC, ffmpeg) rescan
+            # the fragments. FLAC-extracted tracks are already a native .flac (no moov)
+            # and single-file BTS streams carry a complete moov, so both are exempt.
+            # The container is keyed off the destination suffix: the temp file is the
+            # bare merge output (a uuid with no extension), the true .m4a/.mp4 is only
+            # known on path_media_dst.
+            if (
+                isinstance(media, Track)
+                and path_media_dst.suffix in (AudioExtensions.M4A, AudioExtensions.MP4)
+                and not getattr(media_stream, "is_bts", False)
+                and self.settings.data.path_binary_ffmpeg
+            ):
+                tmp_path_file = self._faststart_remux(tmp_path_file, path_media_dst.suffix)
 
             # De-duplicate colliding distinct tracks (skip_existing on: same track was already
             # skipped upstream, so an occupied destination is a different track). Resolve the
@@ -2078,6 +2100,60 @@ class Download:
         ffmpeg.execute()
 
         return path_media_out
+
+    def _faststart_remux(self, path_file: pathlib.Path, container_ext: str) -> pathlib.Path:
+        """Rebuild an MP4/M4A container so its moov/mvhd carries the real duration.
+
+        A DASH download is a raw concatenation of fragmented-MP4 segments, whose
+        top-level moov duration is 0 (timing lives in the per-fragment moof boxes).
+        A ``-c copy`` remux with ``+faststart`` writes a fresh non-fragmented moov
+        with the correct mvhd/mdhd/tkhd duration, keeping the audio bitstream bit
+        for bit identical (no re-encode). The remux writes to a sibling temp and
+        only replaces the original on success, so a failed remux never loses the
+        file (it stays playable in lenient players, just 0:00 in strict ones).
+
+        ``container_ext`` (``.m4a``/``.mp4``) is given explicitly because the input
+        is the bare merge temp with no extension, so ffmpeg needs it to pick the
+        MP4 muxer for the output.
+
+        Args:
+            path_file (pathlib.Path): The merged (extensionless) temp file.
+            container_ext (str): The destination container extension.
+
+        Returns:
+            pathlib.Path: The finalized file (same path as the input).
+        """
+        path_out = path_file.with_name(f"{path_file.stem}.faststart{container_ext}")
+
+        try:
+            (
+                FFmpeg(executable=self.settings.data.path_binary_ffmpeg)
+                .option("y")
+                .option("hide_banner")
+                .option("nostdin")
+                .input(url=path_file)
+                .output(
+                    url=path_out,
+                    map=0,
+                    codec="copy",
+                    movflags="+faststart",
+                    loglevel="quiet",
+                )
+            ).execute()
+        except Exception:
+            # Never lose the download: the raw file still plays in lenient players,
+            # it just reports 0:00 in strict ones. Drop the partial and keep it.
+            self.fn_logger.exception(
+                "Container remux failed; keeping the raw file (may report 0:00 in strict players)."
+            )
+            with contextlib.suppress(OSError):
+                path_out.unlink()
+
+            return path_file
+
+        os.replace(path_out, path_file)
+
+        return path_file
 
     def _downsample_audio(self, path_file: pathlib.Path) -> pathlib.Path:
         """Downsample a FLAC file toward the configured target rate/depth using ffmpeg.

@@ -51,6 +51,12 @@ class Settings:
     format_video: str = "Videos/{artist_name} - {track_title}{track_explicit}"
     video_convert_mp4: bool = True
     path_binary_ffmpeg: str = ""
+    # Read-only diagnostic, written by the app, never edited in the Settings UI:
+    # which ffmpeg a download would actually use, as a CATEGORY only (never a
+    # path). "custom" (user override), "managed" (bundled copy), "system" (found
+    # on PATH) or "none". Lets a pasted config reveal the ffmpeg situation, since
+    # path_binary_ffmpeg stays "" for both the managed and the absent cases.
+    ffmpeg_source: str = "unknown"
     metadata_cover_dimension: CoverDimensions = CoverDimensions.Px320
     # Size of the separately-saved cover.jpg. The sentinel "follow" means "match
     # the embedded cover size above" (the historical behaviour); any other value

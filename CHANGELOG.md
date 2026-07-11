@@ -22,11 +22,26 @@ cutting a release renames that section to the new version.
   started (worse the more cores a machine has). Segments now reuse pooled
   connections, which cuts the download CPU cost by roughly 16x and downloads
   faster, on any hardware and without lowering the parallelism.
+- 🎧 Downloaded tracks now carry their real length everywhere. Tracks delivered
+  as segmented streams (most AAC and lossless files) were saved in a container
+  whose header reported a length of zero, so strict players (for example Winamp)
+  showed 0:00 and refused to play them, even though VLC played the same file
+  fine. Waves now rebuilds the container after downloading so the correct
+  duration is written, keeping the audio bit for bit identical (this needs
+  FFmpeg).
 - 🪟 Windows: downloads no longer flash open a command-prompt window for every
   track. FLAC extraction and format conversion run ffmpeg as a child process,
   and the flag that keeps that process windowless was being discarded before the
   process started, so a console popped up (and vanished) for each one. It now
   runs fully hidden.
+
+### 🔧 Changed
+
+- 🛠️ When FFmpeg is missing, Waves says so instead of quietly degrading. Without
+  FFmpeg it cannot extract FLAC, convert video, or repair track length, so it now
+  warns once per session, and it records which FFmpeg it used (managed, custom,
+  system, or none) in your settings file so a pasted config shows whether FFmpeg
+  was available. The FFmpeg path field itself is left untouched.
 
 ## 🔄 v0.1.3 (2026-07-10)
 

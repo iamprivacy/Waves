@@ -1129,6 +1129,9 @@ class WavesBridge(QObject):
         # the on-disk value up front is what keeps them from being misread as a
         # user choice. Updated on save in applySettings.
         self._ffmpeg_user_path = (self.settings.data.path_binary_ffmpeg or "").strip()
+        # One-shot guard so the "running without ffmpeg" warning is surfaced once
+        # per session (re-armed by _warn_if_ffmpeg_missing when ffmpeg reappears).
+        self._ffmpeg_missing_warned = False
         # The global run/abort gates are created ONCE and shared by every
         # Download built this session. In-flight workers park in
         # ``event_run.wait()`` and check ``event_abort`` per chunk, so these
@@ -1365,10 +1368,45 @@ class WavesBridge(QObject):
         installing one. In-memory only (never persisted): the precedence is
         explicit override → managed copy → PATH (download.py's own shutil.which).
         """
+        # Keep the persisted diagnostic in step with reality on every resolve
+        # (login, each download build, after an ffmpeg install/remove).
+        self.settings.data.ffmpeg_source = self._ffmpeg_source_label()
         if self.settings.data.path_binary_ffmpeg:
             return  # power-user override wins
         if self._ffmpeg.is_installed():
             self.settings.data.path_binary_ffmpeg = str(self._ffmpeg.binary_path)
+
+    def _ffmpeg_source_label(self) -> str:
+        """Category of the ffmpeg binary a download would actually use, for the
+        persisted ``ffmpeg_source`` field. Mirrors the real precedence (a genuine
+        user override wins, then the bundled managed copy, then a binary on PATH,
+        then none) and returns a CATEGORY only, never a path (so nothing sensitive
+        reaches the config or a diagnostics bundle)."""
+        if self._user_ffmpeg_path():
+            return "custom"
+        if self._ffmpeg.is_installed():
+            return "managed"
+        if shutil.which("ffmpeg"):
+            return "system"
+        return "none"
+
+    def _warn_if_ffmpeg_missing(self, dl: Download) -> None:
+        """Surface, once per session, that a download is proceeding with no ffmpeg,
+        so the in-memory disable of FLAC extraction / video convert / duration
+        repair is not invisible. The status glyph already shows "missing"; this
+        refreshes it and leaves a breadcrumb. Re-arms when ffmpeg reappears."""
+        if not getattr(dl, "ffmpeg_missing", False):
+            self._ffmpeg_missing_warned = False
+            return
+        if self._ffmpeg_missing_warned:
+            return
+        self._ffmpeg_missing_warned = True
+        logger.warning(
+            "Downloads are running without FFmpeg: FLAC extraction, video conversion, and "
+            "MP4/M4A duration repair are disabled (files may play but can show 0:00 in strict "
+            "players). Install FFmpeg from Settings."
+        )
+        self.ffmpegStatusChanged.emit()
 
     def _user_ffmpeg_path(self) -> str:
         """The user's *explicit* FFmpeg override, or "" if none.
@@ -1412,6 +1450,7 @@ class WavesBridge(QObject):
             event_abort=self._event_abort,
             event_run=self._event_run,
         )
+        self._warn_if_ffmpeg_missing(self._dl)
 
     def _try_token_login(self) -> None:
         """Attempt a cached-token login OFF the GUI thread.
@@ -3723,7 +3762,7 @@ class WavesBridge(QObject):
             list_item=signals.list_item,
             list_name=signals.list_name,
         )
-        return _TrackedDownload(
+        dl = _TrackedDownload(
             tidal_obj=self.tidal,
             path_base=self.settings.data.download_base_path,
             fn_logger=logger,
@@ -3734,6 +3773,8 @@ class WavesBridge(QObject):
             event_run=self._event_run,
             track_signals=signals,
         )
+        self._warn_if_ffmpeg_missing(dl)
+        return dl
 
     @staticmethod
     def _folder_gate_action(path: str, prompted: bool) -> str:
@@ -5564,6 +5605,9 @@ class WavesBridge(QObject):
         # it. Restore the user's real value (empty or their own override) first;
         # _init_download() below re-injects the managed path if still needed.
         self._restore_ffmpeg_path()
+        # Refresh the derived ffmpeg source category so a save right after a path
+        # change persists the right value (a category only, never the path).
+        self.settings.data.ffmpeg_source = self._ffmpeg_source_label()
         self.settings.save()
         # Keep the album-artist metadata filter in sync with its pref.
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
