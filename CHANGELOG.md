@@ -22,6 +22,10 @@ cutting a release renames that section to the new version.
   rest, and the Top tracks, Albums and EPs & Singles sections are now
   collapsible. A collapsed section stays collapsed on every artist page
   until you reopen it, so album hunters skip the top tracks for good.
+- ✨ Download bars no longer freeze at 100% while the final steps run
+  (merging, decrypting, tagging): the dots twinkle softly until the item is
+  actually done. Applies to the queue rows, download buttons and the small
+  hover-card bars alike.
 
 ### 🐛 Fixed
 

@@ -303,6 +303,11 @@ ApplicationWindow {
     // repainting ~6x less. Cells bind opacity straight to ledPulse; when none
     // are pulsing nothing reads it, so the ticks cost nothing.
     property real ledPulse: 0.85
+    // Companion phase for the "finishing" twinkle (bar at 100% while the
+    // final steps run): each lit dot breathes on its own offset of this.
+    // Same stepped-clock discipline as ledPulse, one write per tick; when no
+    // bar is finishing nothing binds it, so it costs nothing.
+    property real shimmerPhase: 0
     Timer {
         running: root.active
         interval: 50; repeat: true
@@ -310,6 +315,7 @@ ApplicationWindow {
         onTriggered: {
             phase = (phase + 0.05 / 1.04) % 1   // 1.04s breathe = 2 x 520ms
             root.ledPulse = 0.28 + 0.57 * (0.5 + 0.5 * Math.cos(2 * Math.PI * phase))
+            root.shimmerPhase = (root.shimmerPhase + 0.05 / 1.6) % 1   // 1.6s twinkle cycle
         }
     }
 
@@ -1747,6 +1753,9 @@ ApplicationWindow {
                     readonly property int fillIndex: col * diGrid.grows + (diGrid.grows - 1 - rowTop)
                     readonly property bool litCell: fillIndex < diGrid.lit
                     readonly property bool pulsing: fillIndex === diGrid.lit && diGrid.lit < diGrid.total
+                    // Same finishing twinkle as DotMatrix (this grid is the
+                    // same visual language, just inlined for the mask effect).
+                    readonly property real twinkleR: { var r = Math.sin(index * 12.9898) * 43758.5453; return r - Math.floor(r) }
                     x: col * (diGrid.cellW + diGrid.ggap)
                     y: rowTop * (diGrid.cellH + diGrid.ggap)
                     width: diGrid.cellW; height: diGrid.cellH; radius: 0   // sharp LED cells
@@ -1755,7 +1764,9 @@ ApplicationWindow {
                     // a per-frame animation: this grid also runs a layer + mask
                     // effect, so a per-frame pulse re-rendered the masked layer every
                     // vsync for the whole download. See root.ledPulse.
-                    opacity: pulsing ? root.ledPulse : (litCell ? 1.0 : 0.16)
+                    opacity: (di.pct >= 99.9 && litCell)
+                           ? 0.62 + 0.38 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (root.shimmerPhase * 2 + twinkleR)))
+                           : pulsing ? root.ledPulse : (litCell ? 1.0 : 0.16)
                 }
             }
         }
@@ -2212,6 +2223,10 @@ ApplicationWindow {
                 anchors.left: parent.left; anchors.right: dbPct.left; anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
                 rows: 4; dot: 3; gap: 2; pct: Math.max(0, db.pct)
+                // Only visible while st === "running", so 100% here means the
+                // final steps are still in flight: twinkle in step with the
+                // queue row for the same item.
+                finishing: db.pct >= 99.9
             }
         }
         // IDLE / DONE / FAILED, centered glyph + label
@@ -2867,6 +2882,13 @@ ApplicationWindow {
         property int maxCols: 0
         property bool pulse: true
         property color onColor: root.accent
+        // "Finishing" twinkle (chosen in the shimmer lab): the bar sits at
+        // 100% while the final steps run (merge, decrypt, FLAC extract,
+        // tagging), so instead of freezing, every lit dot breathes on its
+        // own pseudo-random offset of the shared shimmerPhase clock. Only
+        // download surfaces set this; the player's scrub track is playback
+        // position, not work, and must stay static at 100%.
+        property bool finishing: false
         readonly property int cols: {
             var c = Math.max(1, Math.floor((width + gap) / (dot + gap)))
             return (maxCols > 0 && c > maxCols) ? maxCols : c
@@ -2886,6 +2908,10 @@ ApplicationWindow {
                 readonly property bool lit: fillIndex < dm.litCount
                 // the single next block pulses while a download is in progress
                 readonly property bool pulsing: dm.pulse && fillIndex === dm.litCount && dm.litCount < dm.total
+                // Per-dot pseudo-random phase offset for the finishing twinkle
+                // (fract(sin(i)*const), the classic shader hash: cheap, stable,
+                // uniform enough for eyes).
+                readonly property real twinkleR: { var r = Math.sin(index * 12.9898) * 43758.5453; return r - Math.floor(r) }
                 x: col * (dm.dot + dm.gap)
                 y: rowTop * (dm.dot + dm.gap)
                 width: dm.dot; height: dm.dot; radius: 0   // sharp LED cells
@@ -2893,7 +2919,9 @@ ApplicationWindow {
                 // Breathe off the shared 20 Hz clock (root.ledPulse) rather than a
                 // per-frame animation, so a running download doesn't repaint the
                 // whole window every vsync. See root.ledPulse.
-                opacity: pulsing ? root.ledPulse : (lit ? 1.0 : 0.16)
+                opacity: (dm.finishing && lit)
+                       ? 0.62 + 0.38 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (root.shimmerPhase * 2 + twinkleR)))
+                       : pulsing ? root.ledPulse : (lit ? 1.0 : 0.16)
             }
         }
     }
@@ -3451,7 +3479,7 @@ ApplicationWindow {
                     id: bcDlRun
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                     visible: bc.dlSt === "running"; spacing: 5
-                    DotMatrix { width: 34; rows: 2; dot: 4; gap: 2; pct: Math.max(0, bc.dlPct); anchors.verticalCenter: parent.verticalCenter }
+                    DotMatrix { width: 34; rows: 2; dot: 4; gap: 2; pct: Math.max(0, bc.dlPct); finishing: bc.dlPct >= 99.9; anchors.verticalCenter: parent.verticalCenter }
                     Text {
                         textFormat: Text.PlainText
                         text: bc.dlPct >= 0 ? Math.round(bc.dlPct) + "%" : "…"
@@ -6540,6 +6568,9 @@ ApplicationWindow {
                                     rows: 2; dot: 4; gap: 4; maxCols: 0
                                     pulse: qrow.st === "running"
                                     pct: qrow.st === "done" ? 100 : model.progress
+                                    // 100% but still running = the final steps (merge,
+                                    // decrypt, tag) are in flight: twinkle, don't freeze.
+                                    finishing: qrow.st === "running" && model.progress >= 99.9
                                     onColor: qrow.st === "failed" ? root.red : qrow.st === "queued" ? root.cyanDim : root.accent
                                 }
                             }
