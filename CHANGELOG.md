@@ -35,6 +35,14 @@ cutting a release renames that section to the new version.
   fine. Waves now rebuilds the container after downloading so the correct
   duration is written, keeping the audio bit for bit identical (this needs
   FFmpeg).
+- 💾 Downloads to a network drive or NAS no longer fail one by one after the
+  drive drops off (for example when the laptop lid was closed). Waves now
+  checks that the download folder really accepts writes before starting, and
+  if the same share simply reconnected under a new name (macOS often remounts
+  it with a "1" suffix) it follows the live mount automatically. If the folder
+  is genuinely unreachable, the download is held and a dialog explains what
+  happened, with "Try again" (after reconnecting) and "Choose a new location"
+  actions, instead of a wall of silently failed tracks.
 - 📂 Finished downloads now tuck themselves into the queue's Completed section
   even while the queue panel is closed. The 5-second tidy-up only ran while a
   row was on screen, so opening the queue after a big batch made every finished

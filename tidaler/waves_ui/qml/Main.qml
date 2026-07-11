@@ -126,6 +126,10 @@ ApplicationWindow {
     // downloadFolderMissing / downloadFolderDefault signals.
     property bool folderGateBlocking: false
     property bool folderNudge: false
+    // The set folder failed the reachability probe (NAS asleep, stale mount);
+    // the download is held backend-side until Try again / a new folder.
+    property bool folderUnreachable: false
+    property string folderUnreachablePath: ""
     property var artistData: ({})         // payload of the open artist page (artistLoaded)
     // ---- Download state (mirrors the bridge) ----------------------------
     // mediaId -> percent / state ("running"|"done"|"failed"), fed by the
@@ -4006,6 +4010,7 @@ ApplicationWindow {
         }
         function onDownloadFolderMissing() { root.folderGateBlocking = true }
         function onDownloadFolderDefault() { root.folderNudge = true }
+        function onDownloadFolderUnreachable(path) { root.folderUnreachablePath = path; root.folderUnreachable = true }
         function onLoggedInChanged() {
             // Drop every QML-side copy of Browse data when the account flips:
             // the landing embeds personalized For You rows, and the backend's
@@ -6587,6 +6592,44 @@ ApplicationWindow {
                     Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
                     GateAction { showArrow: false; label: "Choose a new location"; onClicked: { root.folderNudge = false; waves.dismissDownloadFolderNudge(); root.openDownloadSetting() } }
                     GateAction { showArrow: false; neutral: true; label: "Keep the default location"; onClicked: { root.folderNudge = false; waves.keepDownloadFolder() } }
+                }
+            }
+        }
+    }
+
+    // Download folder set but unreachable (NAS asleep after lid close, drive
+    // unplugged, stale mount). The download is held backend-side; "Try again"
+    // re-runs it through the full gate (which also auto-heals a share that
+    // remounted under a new /Volumes name).
+    Rectangle {
+        id: folderUnreachableGate
+        objectName: "folderUnreachableGate"
+        anchors.fill: parent
+        visible: root.folderUnreachable
+        color: "#06070ecc"
+        MouseArea { anchors.fill: parent; onClicked: { root.folderUnreachable = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: fuCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: fuCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "Download folder isn't reachable" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+                    color: root.textLo; font.family: root.mono; font.pixelSize: 12
+                    text: root.folderUnreachablePath
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "The folder is set, but writing to it failed just now. If it lives on a network drive or NAS, it may have disconnected while the computer slept. Reconnect it and try again, or choose a different folder. The download is held and will start once this is resolved."
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
+                    GateAction { showArrow: false; label: "Try again"; onClicked: { root.folderUnreachable = false; waves.retryDownloadFolder() } }
+                    GateAction { showArrow: false; neutral: true; label: "Choose a new location"; onClicked: { root.folderUnreachable = false; waves.dismissDownloadFolderNudge(); root.openDownloadSetting() } }
                 }
             }
         }

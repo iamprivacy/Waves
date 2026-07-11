@@ -28,7 +28,7 @@ import tempfile
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 
 from PySide6 import QtCore, QtGui
 from PySide6.QtCore import Property, QEvent, QObject, Qt, QTimer, Signal, Slot
@@ -1014,6 +1014,12 @@ class WavesBridge(QObject):
     # nudge, the download proceeds). QML routes both to the Downloads setting.
     downloadFolderMissing = Signal()
     downloadFolderDefault = Signal()
+    # A folder IS set but a write probe says it is not reachable right now (a
+    # NAS that dropped off on sleep, an unplugged drive, a stale macOS mount
+    # point). Blocking: the download is held (see _pending_download) until the
+    # user reconnects and retries, or picks a new folder. Arg = the dead path,
+    # for display in the dialog only (never logged).
+    downloadFolderUnreachable = Signal(str)
     # In-app audio preview. A preview is addressed by (kind, id) where kind is
     # "track" (id = track id) or "artist" (id = artist id, plays its top track),
     # so the same signals drive both the track-row button and the artist-artwork
@@ -3814,6 +3820,63 @@ class WavesBridge(QObject):
             return "nudge"
         return "ok"
 
+    @staticmethod
+    def _probe_folder_verdict(path: str, volumes_root: str = "/Volumes") -> tuple[str, str]:
+        """Filesystem half of the reachability gate, run on a worker thread (a
+        dead network mount can HANG filesystem calls for tens of seconds, so
+        this must never run on the GUI thread directly). Returns
+        ("ok", path)      the folder is a real, writable directory;
+        ("healed", live)  the folder is dead, but the same relative folder is
+                          alive under a sibling mount point: the classic macOS
+                          pattern where a share that dropped off (sleep, lid
+                          close) remounts as "/Volumes/Name 1" or "Name-1",
+                          leaving the stored path pointing at a stale dir;
+        ("dead", path)    unreachable and not healable.
+        The write probe (create + delete a dotfile) is deliberate: a stale
+        mount point can pass exists()/is_dir() while every real write fails."""
+
+        def writable(p: pathlib.Path) -> bool:
+            try:
+                os.makedirs(p, exist_ok=True)
+                probe = p / f".waves-probe-{os.urandom(4).hex()}"
+                probe.write_bytes(b"w")
+                probe.unlink()
+            except OSError:
+                return False
+            return True
+
+        base = pathlib.Path(path).expanduser()
+        if writable(base):
+            return ("ok", path)
+        # macOS remount healing: same volume name modulo a " N"/"-N" suffix,
+        # same relative folder below it, and actually writable.
+        parts = pathlib.PurePosixPath(base).parts
+        root = pathlib.PurePosixPath(volumes_root).parts
+        if len(parts) > len(root) and parts[: len(root)] == root:
+            vol, rest = parts[len(root)], parts[len(root) + 1 :]
+            stem = re.sub(r"[ -]\d+$", "", vol)
+            try:
+                siblings = os.listdir(volumes_root)
+            except OSError:
+                siblings = []
+            for cand in siblings:
+                if cand != vol and re.sub(r"[ -]\d+$", "", cand) == stem:
+                    live = pathlib.Path(volumes_root, cand, *rest)
+                    if writable(live):
+                        return ("healed", str(live))
+        return ("dead", path)
+
+    def _probe_download_base(self, timeout_s: float = 4.0) -> tuple[str, str]:
+        """Run :meth:`_probe_folder_verdict` with a hang guard: the probe runs
+        on a daemon thread and a timeout counts as dead, so the worst a stale
+        mount can cost the GUI is `timeout_s`, not a 30s+ SMB stall."""
+        path = self.settings.data.download_base_path
+        result: list[tuple[str, str]] = []
+        t = Thread(target=lambda: result.append(self._probe_folder_verdict(path)), daemon=True)
+        t.start()
+        t.join(timeout_s)
+        return result[0] if result else ("dead", path)
+
     def _download_gate(self) -> str:
         """Apply :meth:`_folder_gate_action` with its side effects: set the status
         and emit the gate signal. Returns the action so the caller can defer (both
@@ -3829,7 +3892,25 @@ class WavesBridge(QObject):
         elif action == "nudge":
             self._set_status("Choose a download location to continue")
             self.downloadFolderDefault.emit()
-        return action
+            return action
+        if action != "ok":
+            return action
+        # The folder is set: make sure it actually works before tracks start
+        # failing one by one against a dead mount.
+        verdict, live = self._probe_download_base()
+        if verdict == "healed":
+            # Follow the live mount and persist it, exactly what re-picking the
+            # folder in Settings would have done by hand. Path stays out of the
+            # logs (share names are identity), the category is enough.
+            logger.info("Download folder auto-healed onto a remounted volume")
+            self.settings.data.download_base_path = live
+            self.settings.save()
+            return "ok"
+        if verdict == "dead":
+            self._set_status("Download folder isn't reachable")
+            self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
+            return "unreachable"
+        return "ok"
 
     @Slot()
     def keepDownloadFolder(self) -> None:
@@ -3849,6 +3930,17 @@ class WavesBridge(QObject):
         folder. The one-time flag is left unset so an unresolved default is asked
         about again next time."""
         self._pending_download = None
+
+    @Slot()
+    def retryDownloadFolder(self) -> None:
+        """The user reconnected the drive and hit "Try again" on the unreachable
+        dialog: re-run the held download. It re-enters the full gate, so if the
+        folder is still dead (or has healed onto a remounted volume) the right
+        thing happens again."""
+        pending = self._pending_download
+        self._pending_download = None
+        if pending is not None:
+            pending()
 
     @Slot()
     def revealDownloadPath(self) -> None:
@@ -3897,9 +3989,11 @@ class WavesBridge(QObject):
         gate = self._download_gate()
         if gate == "block":
             return  # nothing set (fresh install): download did not start
-        if gate == "nudge":
-            # Legacy default: hold this exact download until the user decides. The
-            # queue is untouched, so the download button stays in its idle state.
+        if gate in ("nudge", "unreachable"):
+            # Legacy default, or a set folder that is not reachable right now (a
+            # NAS that dropped off, a stale mount): hold this exact download until
+            # the user decides / reconnects. The queue is untouched, so the
+            # download button stays in its idle state.
             self._pending_download = lambda: self._download(
                 obj, type_media, name, file_template, collection, media_id, merge_plan
             )
