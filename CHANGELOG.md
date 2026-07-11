@@ -10,6 +10,15 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## Unreleased
+
+### 🐛 Fixed
+
+- 🖥️ Starting a download no longer spikes the CPU to 100% (most visible on
+  Windows). TLS setup for the segment connections is now done once and
+  shared, and at most 10 connections open at a time instead of up to 60 at
+  once.
+
 ## 🔄 v0.1.4 (2026-07-11)
 
 <p align="center">

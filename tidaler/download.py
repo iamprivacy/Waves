@@ -20,6 +20,7 @@ from concurrent import futures
 from threading import Event, Lock
 from uuid import uuid4
 
+import certifi
 import m3u8
 import requests
 from ffmpeg import FFmpeg
@@ -39,6 +40,7 @@ from tidalapi.media import (
     StreamManifest,
     VideoExtensions,
 )
+from urllib3.util.ssl_ import create_urllib3_context
 
 from tidaler.config import Settings, Tidal
 from tidaler.constants import (
@@ -106,6 +108,38 @@ class RequestsClient:
         return o.text, o.url
 
 
+class _SharedContextAdapter(HTTPAdapter):
+    """HTTPAdapter that gives every pooled connection one shared, preloaded
+    SSLContext.
+
+    requests' default cert_verify hands urllib3 a CA bundle *path* per
+    connection, and urllib3 then builds a fresh SSLContext and re-parses the
+    whole certifi PEM corpus (~150 certificates) on every TLS connect. That
+    work runs GIL-free in OpenSSL, so a burst of cold connections saturates
+    every core (the CPU spike at download start, worst on modest Windows
+    boxes). Loading certifi once and sharing the context leaves only the
+    handshake itself per connection, which is a few milliseconds.
+    """
+
+    def __init__(self, ssl_context, **kwargs) -> None:
+        self._ssl_context = ssl_context
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["ssl_context"] = self._ssl_context
+        return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+    def cert_verify(self, conn, url, verify, cert) -> None:
+        # For the default verify=True case, do NOT set conn.ca_certs: that is
+        # what triggers urllib3's per-connection load_verify_locations(). The
+        # shared context already carries certifi and CERT_REQUIRED, so
+        # verification stays fully on. Custom verify paths or client certs
+        # fall back to the stock (slower, per-connection) behaviour.
+        if verify is True and cert is None:
+            return
+        super().cert_verify(conn, url, verify, cert)
+
+
 # TODO: Use pathlib.Path everywhere
 class Download:
     """Main class for managing downloads, segment merging, file operations, and metadata for TIDAL media."""
@@ -117,27 +151,36 @@ class Download:
     # Download instances share one warm connection pool so an album start does
     # not pay a burst of TLS handshakes on a cold per-instance pool.
     _http_shared: requests.Session | None = None
-    _http_pool: int = 0
     _http_lock = Lock()
 
+    # Hard cap on connections per host, with pool_block=True below. Worker
+    # threads beyond this queue for a free connection instead of each opening
+    # its own, so a cold download start opens at most this many connections
+    # concurrently (the old worst case was per-track x concurrent = 60, and
+    # every one of them paid TLS setup at once). Ten concurrent CDN streams
+    # saturate any consumer link, so this does not gate throughput.
+    _HTTP_POOL_MAXSIZE: int = 10
+
     @classmethod
-    def _shared_http(cls, pool: int) -> requests.Session:
-        """Return the shared session, (re)mounting a larger adapter if the
-        configured concurrency has grown past the current pool size."""
+    def _shared_http(cls) -> requests.Session:
+        """Return the process-wide session, building it on first use."""
         with cls._http_lock:
-            if cls._http_shared is None or pool > cls._http_pool:
-                session = cls._http_shared or requests.Session()
-                adapter = HTTPAdapter(
-                    pool_connections=pool,
-                    pool_maxsize=pool,
+            if cls._http_shared is None:
+                # One SSLContext with certifi loaded once, shared by every
+                # connection (see _SharedContextAdapter for why this matters).
+                ssl_context = create_urllib3_context()
+                ssl_context.load_verify_locations(certifi.where())
+                session = requests.Session()
+                adapter = _SharedContextAdapter(
+                    ssl_context,
+                    pool_connections=cls._HTTP_POOL_MAXSIZE,
+                    pool_maxsize=cls._HTTP_POOL_MAXSIZE,
+                    pool_block=True,
                     max_retries=Retry(total=5, backoff_factor=1),
                 )
-                # mount() replaces the adapter (dropping any warm connections),
-                # so only do it on first use or when the pool must grow.
                 session.mount("https://", adapter)
                 session.mount("http://", adapter)
                 cls._http_shared = session
-                cls._http_pool = pool
             return cls._http_shared
 
     settings: Settings
@@ -199,22 +242,17 @@ class Download:
         # so that became a storm of handshakes, and handshake crypto runs GIL-free
         # in openssl, so it saturated every CPU core (100% CPU, GUI unresponsive)
         # the moment a download started. Reusing pooled connections cuts the
-        # per-segment CPU cost by roughly 16x and raises throughput. Size the pool
-        # to the worst-case concurrent segment count so connections are reused
-        # instead of discarded (a full pool silently drops keep-alive).
+        # per-segment CPU cost by roughly 16x and raises throughput.
         #
         # The session is process-wide (shared across Download instances), not
         # per-instance: the GUI builds a fresh Download per queued album, and a
-        # per-instance session meant a cold pool at every album start, so the
-        # first wave of segment fetches paid all its TLS handshakes at once (a
-        # brief all-core spike on each click of Download). Sharing the warm
-        # pool pays the handshake cost once per app run.
-        _pool = max(
-            10,
-            int(self.settings.data.downloads_simultaneous_per_track_max or 1)
-            * int(self.settings.data.downloads_concurrent_max or 1),
-        )
-        self._http = self._shared_http(_pool)
+        # per-instance session meant a cold pool at every album start. Even a
+        # warm pool goes cold when the CDN drops idle keep-alives between
+        # downloads, so the pool is small and blocking (at most
+        # _HTTP_POOL_MAXSIZE connections ever get opened at once) and every
+        # connection shares one preloaded SSLContext, capping the worst-case
+        # TLS setup burst at download start to a blip.
+        self._http = self._shared_http()
 
         if not self.settings.data.path_binary_ffmpeg:
             self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
@@ -594,22 +632,24 @@ class Download:
         # the all-core CPU spike on download).
         try:
             # Create the request object with stream=True, so the content won't be loaded into memory at once.
-            r = self._http.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC)
+            # Context-manage the response: the shared pool blocks when full
+            # (pool_block=True), so a connection left to garbage collection on
+            # an early return would starve waiting segment workers.
+            with self._http.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC) as r:
+                r.raise_for_status()
 
-            r.raise_for_status()
-
-            # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
-            with path_segment.open("wb") as f:
-                for data in r.iter_content(chunk_size=block_size):
-                    # Bail out promptly on abort (Stop/Cancel or app quit)
-                    # instead of streaming the whole segment first.
-                    if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                        return DownloadSegmentResult(
-                            result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
-                        )
-                    f.write(data)
-                    # Advance progress bar.
-                    self.progress.advance(p_task)
+                # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
+                with path_segment.open("wb") as f:
+                    for data in r.iter_content(chunk_size=block_size):
+                        # Bail out promptly on abort (Stop/Cancel or app quit)
+                        # instead of streaming the whole segment first.
+                        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                            return DownloadSegmentResult(
+                                result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
+                            )
+                        f.write(data)
+                        # Advance progress bar.
+                        self.progress.advance(p_task)
 
             result = True
         except Exception:
@@ -1614,7 +1654,9 @@ class Download:
         if url:
             response = None
             try:
-                response = requests.get(url, timeout=REQUESTS_TIMEOUT_SEC)
+                # Shared pooled session: cover art rides an existing warm
+                # connection instead of paying TLS setup per track.
+                response = Download._shared_http().get(url, timeout=REQUESTS_TIMEOUT_SEC)
                 response.raise_for_status()
                 result = response.content
             except requests.RequestException:
