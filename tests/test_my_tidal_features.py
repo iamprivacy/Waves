@@ -38,6 +38,40 @@ def test_folder_gate_real_path_ok():
     assert WavesBridge._folder_gate_action("/Users/me/Music", True) == "ok"
 
 
+def test_download_gate_never_probes_the_filesystem():
+    """The click-time gate runs on the GUI thread: it must stay pure string
+    checks. The write probe of the folder (seconds against a stale network
+    mount, and it froze the UI before the queue row could even appear) belongs
+    to _gate_reachability on the download worker."""
+    fake = MagicMock()
+    fake._folder_gate_action = lambda *a: "ok"
+    assert WavesBridge._download_gate(fake) == "ok"
+    fake._probe_download_base.assert_not_called()
+
+
+def test_gate_reachability_ok_proceeds():
+    fake = MagicMock()
+    fake._probe_download_base = lambda: ("ok", "/some/folder")
+    assert WavesBridge._gate_reachability(fake, lambda: None) is True
+
+
+def test_gate_reachability_healed_persists_live_path():
+    fake = MagicMock()
+    fake._probe_download_base = lambda: ("healed", "/Volumes/Music 1/Library")
+    assert WavesBridge._gate_reachability(fake, lambda: None) is True
+    assert fake.settings.data.download_base_path == "/Volumes/Music 1/Library"
+    fake.settings.save.assert_called_once()
+
+
+def test_gate_reachability_dead_holds_retry_and_warns():
+    fake = MagicMock()
+    fake._probe_download_base = lambda: ("dead", "/Volumes/Gone/Library")
+    retry = lambda: None
+    assert WavesBridge._gate_reachability(fake, retry) is False
+    assert fake._pending_download is retry
+    fake.downloadFolderUnreachable.emit.assert_called_once()
+
+
 def test_keep_download_folder_marks_prompted_and_replays():
     # "Keep the default location": persist the decision and run the held download.
     ran = []

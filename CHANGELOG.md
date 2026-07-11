@@ -21,6 +21,12 @@ cutting a release renames that section to the new version.
 - 🎬 The connection check that picks the starting video quality no longer
   counts connection setup time as slowness, so slower machines get a more
   accurate (often higher) starting quality.
+- ⚡ The Download button reacts instantly. The safety check that verifies the
+  download folder is reachable used to run before anything appeared on
+  screen, which could freeze the click for several seconds when the folder
+  lives on a network drive. The queue row now appears immediately and the
+  check runs in the background; an unreachable folder still shows the same
+  warning with Try again.
 
 ## 🔄 v0.1.4 (2026-07-11)
 

@@ -3909,7 +3909,13 @@ class WavesBridge(QObject):
         and emit the gate signal. Returns the action so the caller can defer (both
         "block" and "nudge" hold the download; see :meth:`_download`). The one-time
         flag is set only when the user picks "keep" (see :meth:`keepDownloadFolder`),
-        so the decision is asked on every attempt until it is actually resolved."""
+        so the decision is asked on every attempt until it is actually resolved.
+
+        Deliberately cheap (pure string checks): this runs on the GUI thread at
+        the moment of the Download click. The reachability probe of the folder
+        lives in :meth:`_gate_reachability`, called from the download worker,
+        because a write probe against a network mount costs seconds and used to
+        stall the GUI (no queue row, no progress bar) before anything happened."""
         action = self._folder_gate_action(
             self.settings.data.download_base_path, self.settings.data.download_folder_prompted
         )
@@ -3919,11 +3925,14 @@ class WavesBridge(QObject):
         elif action == "nudge":
             self._set_status("Choose a download location to continue")
             self.downloadFolderDefault.emit()
-            return action
-        if action != "ok":
-            return action
-        # The folder is set: make sure it actually works before tracks start
-        # failing one by one against a dead mount.
+        return action
+
+    def _gate_reachability(self, retry) -> bool:
+        """Worker-thread half of the download-folder gate: make sure the set
+        folder actually works before tracks start failing one by one against a
+        dead mount. Returns True to proceed. On a dead mount it shows the
+        unreachable dialog and stashes ``retry`` so "Try again" replays the
+        download; the caller unwinds its own queue state."""
         verdict, live = self._probe_download_base()
         if verdict == "healed":
             # Follow the live mount and persist it, exactly what re-picking the
@@ -3932,12 +3941,13 @@ class WavesBridge(QObject):
             logger.info("Download folder auto-healed onto a remounted volume")
             self.settings.data.download_base_path = live
             self.settings.save()
-            return "ok"
+            return True
         if verdict == "dead":
             self._set_status("Download folder isn't reachable")
+            self._pending_download = retry
             self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
-            return "unreachable"
-        return "ok"
+            return False
+        return True
 
     @Slot()
     def keepDownloadFolder(self) -> None:
@@ -4027,11 +4037,11 @@ class WavesBridge(QObject):
         gate = self._download_gate()
         if gate == "block":
             return  # nothing set (fresh install): download did not start
-        if gate in ("nudge", "unreachable"):
-            # Legacy default, or a set folder that is not reachable right now (a
-            # NAS that dropped off, a stale mount): hold this exact download until
-            # the user decides / reconnects. The queue is untouched, so the
-            # download button stays in its idle state.
+        if gate == "nudge":
+            # Still on the legacy default: hold this exact download until the
+            # user decides. The queue is untouched, so the download button
+            # stays in its idle state. (A set-but-unreachable folder is caught
+            # later, on the worker, by _gate_reachability.)
             self._pending_download = lambda: self._download(
                 obj, type_media, name, file_template, collection, media_id, merge_plan
             )
@@ -4098,6 +4108,23 @@ class WavesBridge(QObject):
                 # Drop the track-poll registration too, or the 500 ms per-track
                 # progress timer keeps polling this dead job forever.
                 self._job_dls.pop(qid, None)
+                return
+            # Reachability probe of the download folder, here on the worker so
+            # the click stays instant (a write probe against a stale network
+            # mount costs seconds). On a dead mount: dialog + held retry, and
+            # the optimistic queue row is withdrawn so the queue reads as if
+            # the download never started (matching the pre-probe contract).
+            if not self._gate_reachability(
+                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan)
+            ):
+                self.downloadState.emit(media_id, "")
+                self._bump_artist_group(media_id, None, "failed")
+                self._job_aborts.pop(qid, None)
+                self._release_job_signals(qid)
+                self._job_dls.pop(qid, None)
+                self._job_tracks.pop(qid, None)
+                self._queue = [q for q in self._queue if q["qid"] != qid]
+                self._emit_queue()
                 return
             self._set_queue_status(qid, "running")
             self.downloadState.emit(media_id, "running")
@@ -4874,6 +4901,13 @@ class WavesBridge(QObject):
         self.downloadState.emit(artist_id, "running")
 
         def work() -> None:
+            # Bail before the (network-heavy) discography scan if the folder is
+            # a dead mount; each album's own worker would re-probe anyway, but
+            # this saves the whole scan. Runs here on the worker, not at click
+            # time: the probe can cost seconds against a stale network mount.
+            if not self._gate_reachability(lambda: self.downloadArtist(artist_id)):
+                self.downloadState.emit(artist_id, "")
+                return
             albums, guest = self._artist_releases(artist)
             deduped = self._dedup_albums(albums)
             plans: list = []
