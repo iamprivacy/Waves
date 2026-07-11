@@ -130,6 +130,9 @@ ApplicationWindow {
     // the download is held backend-side until Try again / a new folder.
     property bool folderUnreachable: false
     property string folderUnreachablePath: ""
+    // FFmpeg missing at download time: the download is held backend-side
+    // until the user sets FFmpeg up or explicitly continues degraded.
+    property bool ffmpegBlocked: false
     property var artistData: ({})         // payload of the open artist page (artistLoaded)
     // ---- Download state (mirrors the bridge) ----------------------------
     // mediaId -> percent / state ("running"|"done"|"failed"), fed by the
@@ -760,6 +763,12 @@ ApplicationWindow {
         navPush(); markNav("settings")
         settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
         Qt.callLater(function() { settingsPage.jumpToCard("downloads") })
+    }
+    // Deep-link to the FFmpeg card (from the pre-download gate).
+    function openFfmpegSetting() {
+        navPush(); markNav("settings")
+        settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
+        Qt.callLater(function() { settingsPage.jumpToCard("ffmpeg") })
     }
     // Browse: open the tab (fetching the landing page once per session) and
     // drill into an editorial page. Target-first flag order, same as above.
@@ -4071,6 +4080,7 @@ ApplicationWindow {
         function onDownloadFolderMissing() { root.folderGateBlocking = true }
         function onDownloadFolderDefault() { root.folderNudge = true }
         function onDownloadFolderUnreachable(path) { root.folderUnreachablePath = path; root.folderUnreachable = true }
+        function onFfmpegMissingBlocked() { root.ffmpegBlocked = true }
         function onLoggedInChanged() {
             // Drop every QML-side copy of Browse data when the account flips:
             // the landing embeds personalized For You rows, and the backend's
@@ -6932,6 +6942,39 @@ ApplicationWindow {
                           + (appFfmpeg.status.source_license ? " · " + appFfmpeg.status.source_license : "")
                           + ". Thank you to the maintainers. FFmpeg © the FFmpeg project (ffmpeg.org)."
                     onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                }
+            }
+        }
+    }
+
+    // FFmpeg-missing download gate: the download is HELD backend-side before
+    // anything is queued, because without FFmpeg the files come out degraded
+    // (no FLAC extraction, no video conversion, no track-length repair, so
+    // strict players can read 0:00). Fix it first, or knowingly continue.
+    Rectangle {
+        id: ffmpegBlockGate
+        objectName: "ffmpegBlockGate"
+        anchors.fill: parent
+        visible: root.ffmpegBlocked
+        color: "#06070ecc"
+        MouseArea { anchors.fill: parent; onClicked: { root.ffmpegBlocked = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: fbCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: fbCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "This download needs FFmpeg" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "FFmpeg isn't set up, so files would save degraded: FLAC stays wrapped in its stream container, videos aren't converted, and track lengths aren't repaired (strict players can show 0:00). Set it up in Settings with one click, then start the download again, or continue anyway with these limitations."
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
+                    GateAction { showArrow: false; label: "Set up FFmpeg"; onClicked: { root.ffmpegBlocked = false; waves.dismissDownloadFolderNudge(); root.openFfmpegSetting() } }
+                    GateAction { showArrow: false; neutral: true; label: "Continue anyway"; onClicked: { root.ffmpegBlocked = false; waves.bypassFfmpegGate() } }
                 }
             }
         }

@@ -14,6 +14,13 @@ cutting a release renames that section to the new version.
 
 ### ✨ Added
 
+- 🛡️ Downloads now check for FFmpeg up front. Starting a download without
+  FFmpeg used to quietly produce degraded files (FLAC left in its stream
+  container, no video conversion, track lengths unrepaired so strict players
+  show 0:00). The download is now held while a dialog explains the problem,
+  with "Set up FFmpeg" jumping straight to the one-click install and
+  "Continue anyway" available for those who want the files regardless (asked
+  once per session).
 - ▶️ Artist cards in My Tidal now carry the same compact preview player as the
   Browse cards, centered under the artist's name: one click plays that
   artist's top track (with the elapsed counter and STOP control), filling the

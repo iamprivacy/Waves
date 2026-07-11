@@ -1044,6 +1044,11 @@ class WavesBridge(QObject):
     editionMergeChanged = Signal()
     # In-app FFmpeg manager (Settings → FFmpeg card).
     ffmpegStatusChanged = Signal()
+    # A download was HELD because FFmpeg is missing: without it the files
+    # would be degraded (no FLAC extraction, no video conversion, no track
+    # length repair, so strict players can read 0:00). QML shows a blocking
+    # choice: set FFmpeg up first, or continue anyway (bypass, session-wide).
+    ffmpegMissingBlocked = Signal()
     ffmpegProgress = Signal(float)
     ffmpegStateChanged = Signal(str, str)  # state, message
     ffmpegUpdateChecked = Signal(bool, str, str)  # available, current, latest
@@ -1138,6 +1143,9 @@ class WavesBridge(QObject):
         # One-shot guard so the "running without ffmpeg" warning is surfaced once
         # per session (re-armed by _warn_if_ffmpeg_missing when ffmpeg reappears).
         self._ffmpeg_missing_warned = False
+        # "Continue anyway" on the FFmpeg-missing download gate: session-wide,
+        # so one decision covers the whole batch the user is queueing.
+        self._ffmpeg_gate_bypassed = False
         # The global run/abort gates are created ONCE and shared by every
         # Download built this session. In-flight workers park in
         # ``event_run.wait()`` and check ``event_abort`` per chunk, so these
@@ -3932,6 +3940,17 @@ class WavesBridge(QObject):
         self._pending_download = None
 
     @Slot()
+    def bypassFfmpegGate(self) -> None:
+        """The user chose "Continue anyway" on the FFmpeg-missing gate: remember
+        the decision for the session and run the held download degraded (the
+        breadcrumb from _warn_if_ffmpeg_missing still records the skip)."""
+        self._ffmpeg_gate_bypassed = True
+        pending = self._pending_download
+        self._pending_download = None
+        if pending is not None:
+            pending()
+
+    @Slot()
     def retryDownloadFolder(self) -> None:
         """The user reconnected the drive and hit "Try again" on the unreachable
         dialog: re-run the held download. It re-enters the full gate, so if the
@@ -3994,6 +4013,17 @@ class WavesBridge(QObject):
             # NAS that dropped off, a stale mount): hold this exact download until
             # the user decides / reconnects. The queue is untouched, so the
             # download button stays in its idle state.
+            self._pending_download = lambda: self._download(
+                obj, type_media, name, file_template, collection, media_id, merge_plan
+            )
+            return
+        # FFmpeg gate: without it the files come out degraded (no FLAC
+        # extraction, no video conversion, no track-length repair, so strict
+        # players can show 0:00). Hold the download so the user can fix it
+        # first; "Continue anyway" bypasses for the session.
+        if self._ffmpeg_source_label() == "none" and not self._ffmpeg_gate_bypassed:
+            self._set_status("Set up FFmpeg to download at full quality")
+            self.ffmpegMissingBlocked.emit()
             self._pending_download = lambda: self._download(
                 obj, type_media, name, file_template, collection, media_id, merge_plan
             )
