@@ -3399,6 +3399,31 @@ class WavesBridge(QObject):
                     ticks[tid] = pct
             if ticks:
                 self.queueTrackPct.emit(qid, ticks)
+            self._bump_group_progress(qid, reg)
+
+    def _bump_group_progress(self, qid: int, reg: dict) -> None:
+        """Fold the in-flight tracks' fractional progress into an album or
+        playlist row's roll-up so the bar creeps between track completions
+        instead of jumping once per finished track: (consumed + running
+        fractions) / total. Monotonic (only ever raises the row's percent), so
+        the exact finished/total marks from list_item still land on top."""
+        item = self._queue_item(qid)
+        if item is None or not item.get("collection"):
+            return
+        total = int(item.get("tracks") or 0)
+        if total <= 0:
+            return
+        consumed = sum(1 for r in reg.values() if r.get("status") in ("done", "failed", "cancelled"))
+        running = sum(float(r.get("pct", 0.0)) for r in reg.values() if r.get("status") == "running")
+        smooth = min(100.0, (consumed * 100.0 + running) / total)
+        if smooth <= float(item.get("progress", 0.0)) + 0.1:
+            return
+        if item.get("media_id"):
+            # Fans out to the media button and any artist-discography group
+            # too, so those bars inherit the same smooth motion.
+            self._report_pct(item["media_id"], qid, smooth)
+        else:
+            self._set_queue_progress(qid, smooth)
 
     @Slot(int)
     def loadQueueTracks(self, qid: int) -> None:

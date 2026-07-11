@@ -6222,7 +6222,10 @@ ApplicationWindow {
                                             if (qrow.st === "queued") return a + "Queued"
                                             if (qrow.st === "failed") return a + "Failed"
                                             if (model.collection && model.tracks > 0)
-                                                return a + (qrow.st === "done" ? model.tracks : Math.round(model.progress / 100 * model.tracks)) + "/" + model.tracks + " tracks"
+                                                // Floor, not round: the roll-up now moves with the in-flight
+                                                // track, and 6.4 done of 12 must read "6/12", not "7/12".
+                                                // The epsilon absorbs float error at exact completions.
+                                                return a + (qrow.st === "done" ? model.tracks : Math.floor(model.progress / 100 * model.tracks + 1e-6)) + "/" + model.tracks + " tracks"
                                             if (qrow.st === "running") return a + Math.round(model.progress) + "%"
                                             return a + (qrow.st === "done" ? "Done" : qrow.st === "cancelled" ? "Cancelled" : qrow.st)
                                         }

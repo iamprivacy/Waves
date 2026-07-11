@@ -37,6 +37,11 @@ cutting a release renames that section to the new version.
 
 ### 🔧 Changed
 
+- 📊 Album, playlist, and discography progress bars now move continuously.
+  They used to sit still and then jump each time a whole track finished; the
+  bar (and the matching media buttons) now creeps along with the tracks that
+  are currently downloading, and the "N/total tracks" count only ticks up
+  when a track really completes.
 - 🛠️ When FFmpeg is missing, Waves says so instead of quietly degrading. Without
   FFmpeg it cannot extract FLAC, convert video, or repair track length, so it now
   warns once per session, and it records which FFmpeg it used (managed, custom,
