@@ -176,3 +176,7 @@ mockups/
 
 # Local scratch / working files (not part of the shipped app)
 scratchpad/
+
+# Deferred distribution channels (kept local until each venue actually launches)
+packaging/aur/
+packaging/winget/
