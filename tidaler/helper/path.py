@@ -1,9 +1,12 @@
+import contextlib
 import math
 import os
 import pathlib
 import posixpath
 import re
+import shutil
 import sys
+import threading
 from copy import deepcopy
 from urllib.parse import unquote, urlsplit
 
@@ -39,8 +42,79 @@ def path_home() -> str:
         return os.path.abspath("./")
 
 
+# One-shot legacy-config migration bookkeeping (see path_config_base):
+# "" = nothing to do / not attempted, "moved" = migrated, "failed" = the move
+# raised and the legacy folder is still in use. The app logs this at startup.
+CONFIG_MIGRATION: str = ""
+_migrate_lock = threading.Lock()
+
+
+def _path_home_plain() -> str:
+    """The user's home directory, ignoring the XDG_CONFIG_HOME override.
+
+    Used to build the platform-native config location, which must anchor on
+    the real home even when XDG_CONFIG_HOME points elsewhere.
+    """
+    if "HOME" in os.environ:
+        return os.environ["HOME"]
+    if "HOMEDRIVE" in os.environ and "HOMEPATH" in os.environ:
+        return os.path.join(os.environ["HOMEDRIVE"], os.environ["HOMEPATH"])
+    return os.path.abspath("./")
+
+
+def _path_config_native() -> str:
+    """The platform's conventional per-user config folder, or "" when the
+    platform has no convention beyond XDG (Linux and everything else).
+
+    macOS:   ~/Library/Application Support/<app>
+    Windows: %APPDATA%\\<app> (roaming; "" if APPDATA is unset)
+    """
+    if sys.platform == "darwin":
+        return os.path.join(_path_home_plain(), "Library", "Application Support", __config_dirname__)
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        return os.path.join(appdata, __config_dirname__) if appdata else ""
+    return ""
+
+
+def _migrate_legacy_config(legacy: str, native: str) -> None:
+    """Move the legacy dotfolder to the native location, exactly once.
+
+    Whole-directory rename when the native folder does not exist yet;
+    otherwise a merge that never overwrites (an installer may have created
+    the native folder first, e.g. the Homebrew cask writing its
+    install-channel sentinel there before the app's first launch). A failure
+    is recorded so path_config_base keeps answering with the still-working
+    legacy folder instead of silently splitting the user's settings.
+    """
+    global CONFIG_MIGRATION
+    try:
+        if not os.path.isdir(native):
+            os.makedirs(os.path.dirname(native), exist_ok=True)
+            shutil.move(legacy, native)
+        else:
+            for name in os.listdir(legacy):
+                target = os.path.join(native, name)
+                if not os.path.exists(target):
+                    shutil.move(os.path.join(legacy, name), target)
+            # Only removable once everything moved; a leftover (collision)
+            # keeps the folder, which is fine: native already wins.
+            with contextlib.suppress(OSError):
+                os.rmdir(legacy)
+        CONFIG_MIGRATION = "moved"
+    except OSError:
+        CONFIG_MIGRATION = "failed"
+
+
 def path_config_base() -> str:
     """Get the base configuration path.
+
+    Platform-native so users can actually find it: Application Support on
+    macOS, %APPDATA% on Windows, XDG ~/.config elsewhere. An explicit
+    XDG_CONFIG_HOME still wins on every platform (power-user override, and
+    the upstream behavior). The first call that finds config only at the
+    legacy ~/.config location migrates it over; if that move fails the
+    legacy folder stays authoritative, so settings never silently vanish.
 
     Returns:
         str: The base configuration path.
@@ -48,10 +122,27 @@ def path_config_base() -> str:
     # https://wiki.archlinux.org/title/XDG_Base_Directory
     # X11 workaround: If user specified config path is set, do not point to "~/.config"
     path_user_custom: str = os.environ.get("XDG_CONFIG_HOME", "")
-    path_config: str = ".config" if not path_user_custom else ""
-    path_base: str = os.path.join(path_home(), path_config, __config_dirname__)
+    if path_user_custom:
+        return os.path.join(path_user_custom, __config_dirname__)
 
-    return path_base
+    legacy: str = os.path.join(path_home(), ".config", __config_dirname__)
+    native: str = _path_config_native()
+    if not native or native == legacy:
+        return legacy
+
+    if CONFIG_MIGRATION == "failed":
+        return legacy
+    # Migrate when the legacy folder exists and the native one is not yet a
+    # real config home (missing, or created empty/sentinel-only by an
+    # installer). Both having settings.json means native is already live:
+    # leave the stale legacy folder alone.
+    if os.path.isdir(legacy) and not os.path.isfile(os.path.join(native, "settings.json")):
+        with _migrate_lock:
+            if os.path.isdir(legacy) and not os.path.isfile(os.path.join(native, "settings.json")):
+                _migrate_legacy_config(legacy, native)
+        if CONFIG_MIGRATION == "failed":
+            return legacy
+    return native
 
 
 def path_file_log() -> str:

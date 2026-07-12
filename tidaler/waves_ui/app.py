@@ -183,7 +183,8 @@ _crash_log_file = None
 
 def _crash_log_path() -> Path:
     """The persistent crash log, next to settings.json so it is easy to name in
-    a bug report: ~/.config/Waves/crash.log on every platform."""
+    a bug report: crash.log in the platform's config folder (Application
+    Support on macOS, %APPDATA% on Windows, ~/.config elsewhere)."""
     from tidaler.helper.path import path_config_base
 
     return Path(path_config_base()) / "crash.log"
@@ -288,8 +289,21 @@ def _raise_fd_limit() -> None:
         logging.getLogger(__name__).debug("could not raise fd limit", exc_info=True)
 
 
+def _log_config_migration() -> None:
+    """Breadcrumb the legacy-config migration outcome (never the path itself:
+    home paths are PII). The migration ran as a side effect of the first
+    config-folder resolution, inside _install_crash_diagnostics."""
+    from tidaler.helper import path as _path_helper
+
+    if _path_helper.CONFIG_MIGRATION == "moved":
+        logging.getLogger("waves.config").info("config migrated to the platform-native folder")
+    elif _path_helper.CONFIG_MIGRATION == "failed":
+        logging.getLogger("waves.config").warning("config migration failed; the legacy folder stays in use")
+
+
 def waves_activate(tidal: Tidal | None = None) -> int:
     _install_crash_diagnostics()
+    _log_config_migration()
     # The freeze watchdog's stuck-event-loop tracebacks belong in the same
     # crash.log faulthandler already writes to.
     diagnostics.set_crash_file(_crash_log_file)
