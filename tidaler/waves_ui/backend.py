@@ -28,7 +28,7 @@ import tempfile
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, local
 
 from PySide6 import QtCore, QtGui
 from PySide6.QtCore import Property, QEvent, QObject, Qt, QTimer, Signal, Slot
@@ -72,6 +72,7 @@ from tidaler.helper.tidal import (
 )
 from tidaler.model.cfg import HelpSettings
 from tidaler.model.gui_data import ProgressBars
+from tidaler.ownership import OwnershipStore, quality_rank
 from tidaler.waves_ui import proc
 from tidaler.worker import Worker
 
@@ -332,6 +333,26 @@ class _ProgressSignals(QObject):
         self._bridge._track_lifecycle(self._qid, dict(ev))
 
 
+def _stream_quality(info) -> dict:
+    """Delivered-quality snapshot from a ``TrackStreamInfo``, normalized to plain
+    strings/ints for the ownership record. Present only when a stream was actually
+    fetched (a real download), never on a skip_existing short-circuit, so a skipped
+    file never records a quality it did not actually deliver."""
+    stream = info.media_stream
+    manifest = getattr(info, "stream_manifest", None)
+
+    def _val(x):
+        return getattr(x, "value", x)  # a Quality / AudioMode enum to its str value
+
+    return {
+        "tier": _val(getattr(stream, "audio_quality", None)),
+        "audio_mode": _val(getattr(stream, "audio_mode", None)),
+        "bit_depth": getattr(stream, "bit_depth", None),
+        "sample_rate": getattr(stream, "sample_rate", None),
+        "codecs": getattr(manifest, "codecs", None),
+    }
+
+
 class _TrackedDownload(Download):
     """``Download`` that reports each track's lifecycle to the queue drawer.
 
@@ -342,9 +363,30 @@ class _TrackedDownload(Download):
     bridge's poller read live per-track percentages out of ``self.progress``.
     """
 
-    def __init__(self, *args, track_signals: _ProgressSignals | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        track_signals: _ProgressSignals | None = None,
+        ownership_of=None,
+        target_rank: int = -1,
+        **kwargs,
+    ) -> None:
+        # Per-thread override for skip_existing, set up BEFORE super().__init__,
+        # which assigns self.skip_existing (our property setter). items() fans
+        # item() across a pool, so a quality upgrade can only force a re-download
+        # for the one track on the current thread, never for its concurrent
+        # siblings; a thread-local carries that per-track decision safely.
+        self._tls = local()
+        self._skip_existing_base = False
         super().__init__(*args, **kwargs)
         self._track_signals = track_signals
+        # Live "do I already have this" lookup (tidaler/ownership.py's
+        # ownership_of, which re-checks the disk) plus the rank of the quality
+        # this run targets: downloads skip what is owned at equal-or-better
+        # quality and overwrite in place when the run is a genuine upgrade, so
+        # raising the quality setting re-fetches, a plain re-click does not.
+        self._ownership_of = ownership_of
+        self._target_rank = int(target_rank)
         # Count tracks that actually wrote a file. The engine returns ok=False
         # WITHOUT raising when a stream URL can't be fetched (e.g. an unentitled
         # free account whose playback requests are rejected), so the job worker
@@ -352,6 +394,37 @@ class _TrackedDownload(Download):
         # this tally instead. items() fans item() out on a pool, so guard it.
         self._outcome_lock = Lock()
         self.ok_count = 0
+        # Delivered-quality snapshots captured in _get_track_stream_info, keyed by
+        # str(track id), popped by item() onto the completion event. Only a real
+        # download (a stream was fetched) populates this; a skip_existing
+        # short-circuit never does, so a skipped file records no invented quality.
+        self._delivered: dict[str, dict] = {}
+        self._delivered_lock = Lock()
+
+    @property
+    def skip_existing(self) -> bool:
+        """Base path-collision safety, with a per-thread override so a quality
+        upgrade can force a re-download for exactly the track being upgraded
+        (override False, the engine overwrites in place instead of skipping or
+        uniquifying) without disturbing tracks downloading on sibling threads."""
+        override = getattr(self._tls, "skip_existing", None)
+        return self._skip_existing_base if override is None else override
+
+    @skip_existing.setter
+    def skip_existing(self, value: bool) -> None:
+        self._skip_existing_base = bool(value)
+
+    @contextlib.contextmanager
+    def _force_download(self):
+        """Turn path-based skipping off for the current thread's item() call, so
+        an intended upgrade overwrites the old copy in place. Scoped to one track
+        on one pool thread; restored on exit."""
+        prev = getattr(self._tls, "skip_existing", None)
+        self._tls.skip_existing = False
+        try:
+            yield
+        finally:
+            self._tls.skip_existing = prev
 
     def _note_outcome(self, ok: bool) -> None:
         """Tally a finished track (thread-safe: items() runs these on a pool)."""
@@ -359,10 +432,94 @@ class _TrackedDownload(Download):
             with self._outcome_lock:
                 self.ok_count += 1
 
+    def _get_track_stream_info(self, media):
+        """Capture the delivered stream's quality as a side effect, without
+        touching download.py. The engine calls this (tracks only, only when a
+        stream is actually fetched) inside super().item(); stashing the real
+        delivered tier/mode/depth lets item() record what was written, not merely
+        what was requested. A private-method override, so it degrades to "no
+        quality captured" (never a crash) if upstream ever renames it."""
+        info = super()._get_track_stream_info(media)
+        mid = getattr(media, "id", None)
+        if mid is not None and getattr(info, "media_stream", None) is not None:
+            with self._delivered_lock:
+                self._delivered[str(mid)] = _stream_quality(info)
+        return info
+
+    def _get_media_urls(self, media, stream_manifest=None):
+        """Capture that a video is really being fetched, as a side effect. Videos
+        never pass through _get_track_stream_info, so without this the completion
+        event carries no quality and the sink cannot tell a real video write from
+        an existing-file skip (and would record nothing). The engine only asks for
+        URLs when it is about to download, so a stash here means a real fetch. The
+        tier stays None: TIDAL reports no delivered quality for videos."""
+        urls = super()._get_media_urls(media, stream_manifest=stream_manifest)
+        mid = getattr(media, "id", None)
+        if urls and mid is not None and isinstance(media, Video):
+            with self._delivered_lock:
+                self._delivered[str(mid)] = {"tier": None}
+        return urls
+
+    def _ownership_verdict(self, media) -> str | None:
+        """Ownership gate for one item: 'skip' (owned at equal-or-better quality,
+        or a video, which has no quality tiers: never re-fetch), 'force' (owned
+        at lower quality than this run targets: re-download and overwrite the old
+        copy in place), or None (not owned: normal download). A record only comes
+        back while the earlier download's file still exists on disk (ownership_of
+        re-checks), so a deleted file downloads again. Any lookup failure means
+        no gate: downloading twice beats not downloading at all."""
+        if self._ownership_of is None or media is None or getattr(media, "id", None) is None:
+            return None
+        try:
+            rec = self._ownership_of(str(media.id))
+        except Exception:
+            logger.debug("Ownership lookup failed; not gating", exc_info=True)
+            return None
+        if not rec:
+            return None
+        # Rank -1 means no quality concept (a video's tier-less record): nothing
+        # to upgrade to, so owned simply means skip.
+        rank = int(rec.get("quality_rank", -1))
+        return "skip" if rank < 0 or rank >= self._target_rank else "force"
+
+    def _emit_skip(self, media):
+        """Report a track skipped because its earlier download is still on disk:
+        no stream is fetched, nothing new is recorded. Counted as a handled
+        outcome so an all-owned collection completes as a success, not a false
+        'nothing downloaded'. Returns an empty path on purpose: the owned copy
+        may live outside this collection's folder (a playlist track owned via an
+        album download), and items() feeds returned parents to playlist_populate,
+        which would write an m3u into that foreign folder."""
+        self._note_outcome(True)
+        relay = self._track_signals
+        if relay is not None:
+            name = name_builder_item(media)
+            relay.track_event.emit(
+                {
+                    "id": str(media.id),
+                    "title": name_builder_title(media),
+                    "num": int(getattr(media, "track_num", 0) or 0),
+                    "vol": int(getattr(media, "volume_num", 1) or 1),
+                    "duration": _fmt_duration(getattr(media, "duration", 0)),
+                    "desc": f"[blue]Item '{name[:30]}'",
+                    "status": "skipped",
+                }
+            )
+        return True, ""
+
     def item(self, *args, media=None, event_stop=None, **kwargs):
+        # Ownership gate first, before any stream is fetched: an item owned at
+        # equal-or-better quality is skipped without a network round-trip; an
+        # upgrade run forces the path skip off so the engine overwrites the old
+        # copy in place.
+        verdict = self._ownership_verdict(media)
+        if verdict == "skip":
+            return self._emit_skip(media)
+        force = self._force_download() if verdict == "force" else contextlib.nullcontext()
         relay = self._track_signals
         if relay is None or media is None or getattr(media, "id", None) is None:
-            ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
+            with force:
+                ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
             self._note_outcome(ok)
             return ok, path
         name = name_builder_item(media)
@@ -377,14 +534,25 @@ class _TrackedDownload(Download):
         }
         relay.track_event.emit({**base, "status": "running"})
         try:
-            ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
+            with force:
+                ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
         except Exception:
+            self._delivered.pop(str(media.id), None)
             relay.track_event.emit({**base, "status": "failed"})
             raise
         aborted = self.event_abort.is_set() or (event_stop is not None and event_stop.is_set())
         status = "done" if ok else ("cancelled" if aborted else "failed")
         self._note_outcome(ok)
-        relay.track_event.emit({**base, "status": status})
+        with self._delivered_lock:
+            quality = self._delivered.pop(str(media.id), None)
+        event = {**base, "status": status}
+        # Carry the final path + delivered quality only for a real, successful
+        # write, so the bridge records ownership from reality. A skip has no
+        # captured quality and is deliberately not recorded here.
+        if status == "done" and quality is not None and path:
+            event["path"] = str(path)
+            event["quality"] = quality
+        relay.track_event.emit(event)
         return ok, path
 
 
@@ -1027,6 +1195,9 @@ class WavesBridge(QObject):
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
+    # A track's ownership or delivered quality changed (a fresh download landed);
+    # QML re-queries ownershipOf for that id to refresh an "in your library" badge.
+    ownershipChanged = Signal(str)
     # Download-folder gating. downloadFolderMissing → no folder is set at all
     # (blocking: the download did not start); downloadFolderDefault → the user is
     # still on the historical "~/download" default (a one-time, non-blocking
@@ -1304,6 +1475,23 @@ class WavesBridge(QObject):
         self._tracksQueued.connect(self._enqueue_tracks)
         self._waves_prefs_path = os.path.join(os.path.dirname(self.settings.file_path), "waves.json")
         self._waves_prefs = self._load_waves_prefs()
+        # Reality-checked record of what has actually been downloaded (see
+        # tidaler.ownership). Kept across logout: it describes files on THIS disk,
+        # and every query re-checks the filesystem, so the account has no bearing
+        # on correctness.
+        self._ownership = OwnershipStore(os.path.join(os.path.dirname(self.settings.file_path), "ownership.sqlite3"))
+        # GUI-facing ownership answers come from this cache, refreshed on a tiny
+        # dedicated pool: ownership_of stats the recorded file, and a stat on a
+        # dropped network mount can block for many seconds, so it must never run
+        # on the GUI thread (the download workers query the store directly; they
+        # are about to touch that volume anyway). Two threads, so one wedged
+        # mount stat cannot serialize every other lookup behind it.
+        self._own_cache: dict[str, tuple[float, dict | None]] = {}
+        self._own_pending: set[str] = set()
+        self._own_lock = Lock()
+        self._own_pool = QtCore.QThreadPool()
+        self._own_pool.setMaxThreadCount(2)
+        diagnostics.register_pool("ownership", self._own_pool)
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
         # Now that the pref is known, raise diagnostics to verbose if asked
         # (starts the freeze watchdog + perf sampler; GUI thread required).
@@ -3379,6 +3567,13 @@ class WavesBridge(QObject):
         """Fan a per-track progress tick out to the media button, the queue row
         and any artist-discography aggregate. Called on the GUI thread via the
         _ProgressSignals bound slot."""
+        item = self._queue_item(qid)
+        if item is not None:
+            # download.py's exact finished/total marks lag the smooth poller
+            # (finished + running fractions) whenever several tracks are in
+            # flight, so a lower tick would snap the bar backward: clamp to
+            # keep every fan-out target monotonic per job.
+            pct = max(float(pct), float(item.get("progress", 0.0)))
         self.downloadProgress.emit(media_id, float(pct))
         self._set_queue_progress(qid, float(pct))
         self._bump_artist_group(media_id, float(pct), None)
@@ -3397,9 +3592,107 @@ class WavesBridge(QObject):
             row["status"] = ev["status"]
             if ev.get("desc"):
                 row["desc"] = ev["desc"]
-        if ev["status"] == "done":
+        # An ownership skip is complete work (nothing to fetch), so it fills the
+        # bar; it records nothing new (the file is already owned and the event
+        # carries no freshly delivered quality).
+        if ev["status"] in ("done", "skipped"):
             row["pct"] = 100.0
+        if ev["status"] == "done":
+            self._record_ownership(ev)
         self.queueTrackState.emit(qid, dict(row))
+
+    def _record_ownership(self, ev: dict) -> None:
+        """Record a freshly downloaded track into the ownership store: the actual
+        final path plus the delivered quality (reality, not a plan). Only real
+        downloads carry a path + quality here, so this no-ops for a skip. Records
+        the resolved real file, so symlink-to-track mode stores the bytes, not the
+        link. Best-effort: a store failure must never disrupt a download."""
+        path = ev.get("path")
+        quality = ev.get("quality")
+        if not path or not quality:
+            return
+        try:
+            self._ownership.record(
+                str(ev.get("id")),
+                os.path.realpath(path),
+                quality.get("tier"),
+                audio_mode=quality.get("audio_mode"),
+                bit_depth=quality.get("bit_depth"),
+                sample_rate=quality.get("sample_rate"),
+                codecs=quality.get("codecs"),
+            )
+            # The file was written this instant, so assert the cache entry
+            # directly (no stat needed) and let QML flip the button now. The
+            # next TTL refresh reconciles against the store's full row set.
+            tier = (quality.get("tier") or "").upper() or None
+            rec = {
+                "owned": True,
+                "path": os.path.realpath(path),
+                "quality_tier": tier,
+                "quality_rank": quality_rank(tier),
+                "audio_mode": quality.get("audio_mode"),
+                "bit_depth": quality.get("bit_depth"),
+                "sample_rate": quality.get("sample_rate"),
+                "codecs": quality.get("codecs"),
+            }
+            with self._own_lock:
+                self._own_cache[str(ev.get("id"))] = (time.monotonic(), rec)
+            self.ownershipChanged.emit(str(ev.get("id")))
+        except Exception:
+            logger.debug("Could not record ownership", exc_info=True)
+
+    # Ownership answers older than this are re-checked (in the background) on the
+    # next query, so a file the user deleted reads as not owned within seconds of
+    # the UI looking at it again, without ever statting on the GUI thread.
+    _OWN_TTL = 5.0
+
+    def _target_quality_rank(self) -> int:
+        """Rank of the audio quality this run targets, for "already have
+        equal-or-better". The Quality enum's value is the TIDAL tier string
+        ownership.py ranks."""
+        q = self.settings.data.quality_audio
+        return quality_rank(getattr(q, "value", q))
+
+    def _own_refresh(self, tid: str) -> None:
+        """Worker-thread cache refresh: the store query plus the disk stat run
+        here, and QML is nudged (queued, cross-thread) only when the answer
+        actually changed."""
+        try:
+            rec = self._ownership.ownership_of(tid)
+        except Exception:
+            logger.debug("Ownership refresh failed", exc_info=True)
+            rec = None
+        with self._own_lock:
+            prev = self._own_cache.get(tid)
+            self._own_cache[tid] = (time.monotonic(), rec)
+            self._own_pending.discard(tid)
+        if (prev[1] if prev else None) != rec:
+            self.ownershipChanged.emit(tid)
+
+    @Slot(str, result="QVariant")
+    def ownershipOf(self, track_id: str):
+        """Ownership + delivered quality for an exact TIDAL media id, served from
+        the cache so the GUI thread never touches the disk (a stat on a dropped
+        network mount can hang for seconds). A missing or stale entry answers
+        with what is known now and refreshes in the background; ownershipChanged
+        re-asks once the truth lands. up_to_date says whether the copy matches
+        the CURRENT audio quality setting (computed per call, so a quality change
+        re-evaluates instantly); tier-less records (videos) are always current.
+        Returns {owned, up_to_date, path, quality_tier, ...} or {owned: False}."""
+        tid = str(track_id)
+        now = time.monotonic()
+        with self._own_lock:
+            hit = self._own_cache.get(tid)
+            rec = hit[1] if hit else None
+            need = (hit is None or now - hit[0] >= self._OWN_TTL) and tid not in self._own_pending
+            if need:
+                self._own_pending.add(tid)
+        if need:
+            self._own_pool.start(Worker(lambda: self._own_refresh(tid)))
+        if not rec:
+            return {"owned": False}
+        rank = int(rec.get("quality_rank", -1))
+        return {**rec, "up_to_date": rank < 0 or rank >= self._target_quality_rank()}
 
     @Slot()
     def _poll_track_progress(self) -> None:
@@ -3438,8 +3731,9 @@ class WavesBridge(QObject):
         """Fold the in-flight tracks' fractional progress into an album or
         playlist row's roll-up so the bar creeps between track completions
         instead of jumping once per finished track: (consumed + running
-        fractions) / total. Monotonic (only ever raises the row's percent), so
-        the exact finished/total marks from list_item still land on top."""
+        fractions) / total. Monotonic (only ever raises the row's percent);
+        the exact finished/total marks from list_item are clamped the same way
+        in _report_pct so they can never drag the bar backward."""
         item = self._queue_item(qid)
         if item is None or not item.get("collection"):
             return
@@ -3836,6 +4130,8 @@ class WavesBridge(QObject):
             event_abort=event_abort or self._event_abort,
             event_run=self._event_run,
             track_signals=signals,
+            ownership_of=self._ownership.ownership_of,
+            target_rank=self._target_quality_rank(),
         )
         self._warn_if_ffmpeg_missing(dl)
         return dl
@@ -5040,6 +5336,10 @@ class WavesBridge(QObject):
         self.dl_pool.waitForDone(4000)
         self._scan_pool.waitForDone(1000)
         self.threadpool.waitForDone(1000)
+        try:
+            self._ownership.close()
+        except Exception:
+            logger.debug("shutdown: ownership store close failed", exc_info=True)
 
     # ----- in-app FFmpeg manager ----------------------------------------- #
     def _restore_ffmpeg_flags(self) -> None:
@@ -5807,6 +6107,12 @@ class WavesBridge(QObject):
         # the rest of the run (and persists like any other setting).
         if "quality_video" in values:
             self._video_user_quality = True
+        # A new audio quality changes which owned copies still count as current
+        # (up_to_date is computed against it). Empty id = broadcast: every
+        # DOWNLOADED button re-asks ownershipOf, no per-track invalidation needed
+        # because the cache stores raw records, not verdicts.
+        if "quality_audio" in values:
+            self.ownershipChanged.emit("")
         # The gated flags (video_convert_mp4 / extract_flac) get force-disabled in
         # memory by Download when ffmpeg is absent; persist the user's *real*
         # preference (tracked in _ffmpeg_flag_prefs), not that transient value, so
