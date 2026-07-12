@@ -9,4 +9,4 @@ upstream updates can be merged without touching the UI.
 # in-app updater (:mod:`tidaler.waves_ui.updater`) compares this against the
 # latest GitHub release tag. Bump it (and tag a matching ``vX.Y.Z`` release) on
 # every shipped build.
-__version__ = "0.1.6"
+__version__ = "0.1.7"
