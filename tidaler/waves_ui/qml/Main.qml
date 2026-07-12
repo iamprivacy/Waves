@@ -431,6 +431,23 @@ ApplicationWindow {
     function dlPct(id) { return dlProgress[id] !== undefined ? dlProgress[id] : -1 }
     function dlSt(id) { return dlState[id] !== undefined ? dlState[id] : "" }
 
+    // Flat list of every track/video id across a browse page's sections
+    // (multi-disc albums split into one "tracks" section per disc). Feeds
+    // DownloadButton.collectionIds so an album/playlist/mix header can show
+    // DOWNLOADED once every member track is owned, the same live-checked way
+    // a single track row already does.
+    function collectionTrackIds(sections) {
+        var ids = []
+        var secs = sections || []
+        for (var i = 0; i < secs.length; ++i) {
+            var items = secs[i].items || []
+            for (var j = 0; j < items.length; ++j) {
+                if (items[j].id) ids.push(items[j].id)
+            }
+        }
+        return ids
+    }
+
     // --- In-app video player (simple modal overlay; first-ship scope) -----
     // videoNow: {id, title, artist} while the overlay is up, else null. The
     // backend resolves the stream URL asynchronously (waves.playVideo); the
@@ -2199,21 +2216,45 @@ ApplicationWindow {
         property string label: "Download"
         property var onTap: (function(){})
         // Opt-in for track-scoped buttons only: the ownership store is keyed by
-        // exact track id, so album/playlist/artist buttons must not consult it.
+        // exact track id, so a plain album/playlist/artist mediaId must not be
+        // looked up as if it were one.
         property bool ownedCheck: false
+        // Collection rollup: when set (non-null array of member track/video
+        // ids), DOWNLOADED means every one of those ids is individually owned.
+        // Only set where the ids are already in hand (an opened album/playlist/
+        // mix page, an expanded album panel) — never triggers a fetch itself.
+        property var collectionIds: null
         property bool owned: false
         function refreshOwned() {
+            if (collectionIds !== null) {
+                var ids = collectionIds
+                if (ids.length === 0) { owned = false; return }
+                var n = 0
+                for (var i = 0; i < ids.length; ++i) {
+                    var oi = waves.ownershipOf(ids[i])
+                    if (oi.owned === true && oi.up_to_date === true) ++n
+                }
+                owned = n === ids.length
+                return
+            }
             var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
         Component.onCompleted: refreshOwned()
         onMediaIdChanged: refreshOwned()
         onOwnedCheckChanged: refreshOwned()
+        onCollectionIdsChanged: refreshOwned()
         Connections {
             target: waves
-            enabled: db.ownedCheck
+            enabled: db.ownedCheck || db.collectionIds !== null
             // Empty id = broadcast (the quality setting changed).
-            function onOwnershipChanged(tid) { if (tid === db.mediaId || tid === "") db.refreshOwned() }
+            function onOwnershipChanged(tid) {
+                if (db.collectionIds !== null) {
+                    if (tid === "" || db.collectionIds.indexOf(tid) !== -1) db.refreshOwned()
+                } else if (tid === db.mediaId || tid === "") {
+                    db.refreshOwned()
+                }
+            }
         }
         readonly property real pct: root.dlPct(mediaId)
         readonly property string liveSt: root.dlSt(mediaId)
@@ -3128,7 +3169,11 @@ ApplicationWindow {
                             // With the merge preference on the backend runs the
                             // best-of-both scan behind this same button; no
                             // separate action.
-                            DownloadButton { mediaId: albumId; label: "Download album"; onTap: function(){ waves.downloadAlbum(albumId) } }
+                            DownloadButton {
+                                mediaId: albumId; label: "Download album"
+                                collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : []
+                                onTap: function(){ waves.downloadAlbum(albumId) }
+                            }
                             Text {
                                 text: "Copy link"; color: root.textLo; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("album", albumId) }
@@ -4927,6 +4972,7 @@ ApplicationWindow {
                                        ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
                                           : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
                                        : ""
+                                collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
                                 onTap: function() {
                                     if (browseItemHeader.hd)
                                         root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
