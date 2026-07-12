@@ -10,6 +10,31 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 💾 v0.1.6 (2026-07-12)
+
+### ✨ Added
+
+- ⬇️ Waves now remembers what it has downloaded. Track and video download
+  buttons show DOWNLOADED across sessions when the file from an earlier
+  download still exists on disk, and clicking a DOWNLOADED button will not
+  re-download the file. Album, artist, playlist and mix downloads skip the
+  tracks you already have too (marked HAVE in the queue), fetching only
+  what is missing. The check follows the real file: delete or move it and
+  the item downloads again. Quality upgrades still work: raise the audio
+  quality setting and copies below it show DOWNLOAD again, and downloading
+  replaces the old file in place with the better one.
+
+  An honest limitation for now: this only knows about downloads made from
+  this version onward, so files downloaded before updating, or with other
+  tools, are not detected. Proper library detection and management
+  (recognizing music already in your folders, whatever put it there) is
+  coming in a bigger future update, no ETA yet.
+
+### 🐛 Fixed
+
+- 🐛 Download progress bars no longer flash or jump backward when a track finishes while others are still downloading or finalizing.
+- 🖥️ Checking whether a track is already downloaded no longer risks freezing the app when the download folder sits on a network drive that has dropped or gone slow: the check now answers from a short‑lived cache and refreshes in the background, so the interface stays responsive either way.
+
 ## ⚡ v0.1.5 (2026-07-11)
 
 <p align="center">
