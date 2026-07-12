@@ -5512,8 +5512,10 @@ class WavesBridge(QObject):
 
     @Slot()
     def installAppUpdate(self) -> None:
-        """Download, verify and stage the newest build on a worker thread. On
-        success the UI offers a restart (see ``restartForUpdate``)."""
+        """Download, verify and stage the newest build on a worker thread (or,
+        for a package-manager-owned copy, run the manager's own upgrade; the
+        updater routes internally). On success the UI offers a restart (see
+        ``restartForUpdate``)."""
 
         def work() -> None:
             self._app_update_abort.clear()
@@ -5531,7 +5533,12 @@ class WavesBridge(QObject):
                 logger.exception("App update failed")
                 self.appUpdateStateChanged.emit("failed", str(exc) or "Update failed")
                 return
-            self.appUpdateStateChanged.emit("done", f"Updated to {result.get('version', '')}. Restart to finish.")
+            # A managed upgrade may not know the version tag (offline resolve);
+            # "Updated to . Restart" reads broken, so degrade the message whole.
+            ver = result.get("version", "")
+            self.appUpdateStateChanged.emit(
+                "done", (f"Updated to {ver}. " if ver else "Updated. ") + "Restart to finish."
+            )
             self.appUpdateStatusChanged.emit()
 
         self.threadpool.start(Worker(work))

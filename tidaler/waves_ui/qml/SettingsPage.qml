@@ -902,7 +902,11 @@ Item {
                     implicitHeight: Math.max(auLeftCol.implicitHeight + 24, auTileR.rowImplicitHeight + 24, 108)
 
                     readonly property string st: page.appUp.state ? page.appUp.state : "not_configured"
+                    // Self-install, or a package-manager-owned copy whose
+                    // manager the app can run for you (brew upgrade): both
+                    // land on the same Update & restart button.
                     readonly property bool canInstall: page.appUp.can_self_install === true
+                                                       || page.appUp.can_managed_install === true
                     readonly property string cur: page.appUp.current_version ? page.appUp.current_version : ""
                     // Embedded field descriptors (may be null before the schema loads).
                     readonly property var afAuto: page.fieldByKey("auto_update")
@@ -934,6 +938,9 @@ Item {
                                             ? "automatic updates aren't available in this build"
                                           : auCard.st === "source"
                                             ? ("from source" + (page.auUpdate ? " · v" + page.auLatest + " available" : " · up to date"))
+                                          : auCard.st === "managed"
+                                            ? ("via " + (page.appUp.channel_label || "a package manager")
+                                               + (page.auUpdate ? " · v" + page.auLatest + " available" : " · up to date"))
                                           : (page.auUpdate ? "v" + page.auLatest + " available"
                                              : (page.auDone ? "installed; restart to finish" : "up to date"))
                                 }
@@ -946,7 +953,15 @@ Item {
                             }
                             Text {
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "Checks the public releases page and only notifies you; sends none of your data."
+                                text: auCard.st !== "managed"
+                                    ? "Checks the public releases page and only notifies you; sends none of your data."
+                                    : auCard.canInstall
+                                      ? ("This copy is managed by " + (page.appUp.channel_label || "a package manager")
+                                         + "; Update & restart runs its upgrade"
+                                         + (page.appUp.update_hint ? " (" + page.appUp.update_hint + ")" : "") + " for you.")
+                                      : ("This copy updates through " + (page.appUp.channel_label || "its package manager")
+                                         + (page.appUp.update_hint ? " (" + page.appUp.update_hint + ")" : "")
+                                         + "; checks here only notify you.")
                                 color: page.textDim; font.pixelSize: 12
                             }
 

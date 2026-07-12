@@ -24,6 +24,12 @@ Design rules baked in here:
   source checkout too (so a dev is told a newer release exists), but a real
   self-install only runs from a packaged/frozen build; from source the UI sends
   the user to the Releases page instead.
+* **Defer to a managing package manager.** An install owned by Homebrew, Scoop,
+  Snap, Flatpak or an AppImage (see :func:`managed_channel`) still gets update
+  *notices*, but the self-installer stands down so the two update paths never
+  fight over the same files; the UI points at the manager's upgrade command.
+  External updater tools that replace the app bundle themselves keep working
+  either way, nothing here locks the install.
 """
 
 from __future__ import annotations
@@ -44,7 +50,7 @@ import time
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 import requests
 
@@ -142,6 +148,124 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
 
 
+# Package managers that own the install and must not be fought with: the
+# self-updater swapping files under Snap/Flatpak/AppImage hits read-only
+# roots, and under Homebrew/Scoop it desyncs the manager's version records
+# (the next `brew upgrade` would clobber a newer self-installed build).
+_CHANNEL_LABELS = {
+    "homebrew-cask": "Homebrew",
+    "homebrew": "Homebrew",
+    "scoop": "Scoop",
+    "snap": "Snap",
+    "flatpak": "Flatpak",
+    "appimage": "AppImage",
+    "winget": "winget",
+    "aur": "the AUR",
+}
+_CHANNEL_HINTS = {
+    "homebrew-cask": "brew upgrade --cask waves",
+    "homebrew": "brew upgrade --cask waves",
+    "scoop": "scoop update waves",
+    "winget": "winget upgrade waves",
+}
+
+
+def channel_label(channel: str) -> str:
+    """Human name for an install channel ("Homebrew"), the raw id if unknown."""
+    return _CHANNEL_LABELS.get(channel, channel)
+
+
+def channel_hint(channel: str) -> str:
+    """The upgrade command for a channel, "" when there is no one-liner."""
+    return _CHANNEL_HINTS.get(channel, "")
+
+
+def _find_brew() -> str:
+    """The brew binary's path, "" when Homebrew isn't installed.
+
+    A GUI app's PATH usually misses Homebrew's bin dir (login-shell only), so
+    the two standard install prefixes are probed directly before which().
+    """
+    for cand in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew", "/home/linuxbrew/.linuxbrew/bin/brew"):
+        if os.access(cand, os.X_OK):
+            return cand
+    return shutil.which("brew") or ""
+
+
+def managed_upgrade_command(channel: str) -> list[str] | None:
+    """The argv that upgrades this install through its package manager, or
+    ``None`` when the channel has no runnable one-liner (containerized formats,
+    unknown channels, or the manager's binary is missing).
+
+    The cask is named fully qualified (tap/name) so a same-named formula in
+    another tap can never be upgraded by mistake.
+    """
+    if channel in ("homebrew-cask", "homebrew"):
+        brew = _find_brew()
+        if brew:
+            return [brew, "upgrade", "--cask", "iamprivacy/waves/waves"]
+    return None
+
+
+def managed_channel() -> str:
+    """Which external package manager owns this install; "" when none does.
+
+    Containerized formats announce themselves through the environment, Scoop
+    is recognisable from the install path, and everything path-undetectable
+    (chiefly Homebrew Cask, which moves the .app to /Applications) is covered
+    by an ``install_channel`` sentinel file the installer drops in the config
+    folder (content = channel id, e.g. ``homebrew-cask``). The sentinel lives
+    in config rather than inside the bundle because writing into a signed
+    .app would break its code signature.
+
+    Best-effort by design: any probe failure reads as "not managed", which
+    just means the self-updater stays available, today's behavior.
+    """
+    if os.environ.get("SNAP"):
+        return "snap"
+    if os.environ.get("FLATPAK_ID") or os.path.exists("/.flatpak-info"):
+        return "flatpak"
+    # An AppImage is deliberately NOT a managed channel: nothing owns the file,
+    # and the self-updater can replace it in place (it targets $APPIMAGE, the
+    # real .AppImage path, since the running executable lives on a read-only
+    # squashfs mount). See _apply.
+    try:
+        if "/scoop/apps/" in str(_current_exe()).replace("\\", "/").lower():
+            return "scoop"
+    except OSError:
+        logger.debug("updater: scoop probe failed", exc_info=True)
+    # System packages (AUR, deb, rpm) can't write user config at install time,
+    # so their sentinel sits next to the binary; user-scope installers
+    # (Homebrew Cask) drop theirs in the config folder instead.
+    try:
+        token = _read_channel_sentinel(_current_exe().parent / "install_channel")
+        if token:
+            return token
+    except OSError:
+        logger.debug("updater: app-dir install_channel probe failed", exc_info=True)
+    try:
+        from tidaler.helper.path import path_config_base
+
+        token = _read_channel_sentinel(Path(path_config_base()) / "install_channel")
+        if token:
+            return token
+    except OSError:
+        logger.debug("updater: config-dir install_channel probe failed", exc_info=True)
+    return ""
+
+
+def _read_channel_sentinel(sentinel: Path) -> str:
+    """The sanitized channel id from an ``install_channel`` file, "" if absent.
+
+    The file is plain text anyone could edit, so the value is reduced to one
+    lowercase token, bounded, before it can reach a UI string.
+    """
+    if not sentinel.is_file():
+        return ""
+    first = sentinel.read_text(encoding="utf-8", errors="replace").strip().lower().split()
+    return re.sub(r"[^a-z0-9_-]", "", first[0])[:32] if first else ""
+
+
 def _current_exe() -> Path:
     """Path of the running app binary.
 
@@ -202,13 +326,30 @@ def _manifest_version(manifest_text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _select_asset(assets: list[dict], os_key: str, arch: str) -> tuple[str, str, str | None]:
+def _running_appimage() -> str:
+    """The real .AppImage file's path when running from one, else "".
+
+    The AppImage runtime mounts the payload on a read-only squashfs and sets
+    ``$APPIMAGE`` to the actual file; the running executable's own path points
+    into the mount and must never be an update target.
+    """
+    return os.environ.get("APPIMAGE", "")
+
+
+def _select_asset(
+    assets: list[dict], os_key: str, arch: str, prefer_appimage: bool = False
+) -> tuple[str, str, str | None]:
     """Pick the best release asset for ``os_key``/``arch``.
 
     Returns ``(name, download_url, sha256_url)``, empty strings / ``None`` when
     nothing matches. Scores OS match (required), arch match (preferred), and an
     installable extension over sidecars, so it is robust to however CI names the
     files. The ``.sha256`` sidecar is paired by filename when present.
+
+    Format follows install: an AppImage install must only ever receive a
+    ``.AppImage`` (a zip's tree can't replace a single file), and a zip install
+    must never be switched to an AppImage just because the name sorts first, so
+    ``prefer_appimage`` hard-partitions the pool instead of merely ranking.
     """
     os_tokens = _OS_TOKENS.get(os_key, ())
     arch_tokens = _ARCH_TOKENS.get(arch, ())
@@ -219,6 +360,8 @@ def _select_asset(assets: list[dict], os_key: str, arch: str) -> tuple[str, str,
     for name in by_name:
         low = name.lower()
         if low.endswith(_SIDECAR_EXTS) or not any(t in low for t in os_tokens):
+            continue
+        if low.endswith(".appimage") != prefer_appimage:
             continue
         if any(t in low for t in arch_tokens):
             arch_match.append(name)
@@ -278,23 +421,36 @@ class AppUpdater:
     def status(self) -> dict:
         """Static snapshot for the UI (no network).
 
-        ``state`` ∈ {``not_configured``, ``source``, ``ready``}: ``ready`` means
-        a frozen, configured build that can self-install; ``source`` can still
-        *check* but not install; ``not_configured`` is fully dormant.
+        ``state`` ∈ {``not_configured``, ``source``, ``managed``, ``ready``}:
+        ``ready`` means a frozen, configured build that can self-install;
+        ``managed`` is a frozen build owned by a package manager (checks still
+        work, installs go through that manager); ``source`` can still *check*
+        but not install; ``not_configured`` is fully dormant.
         """
         frozen = is_frozen()
         configured = self.is_configured()
+        channel = managed_channel()
         if not configured:
             state = "not_configured"
         elif not frozen:
             state = "source"
+        elif channel:
+            state = "managed"
         else:
             state = "ready"
         return {
             "state": state,
             "configured": configured,
             "frozen": frozen,
-            "can_self_install": configured and frozen,
+            "can_self_install": configured and frozen and not channel,
+            # A managed install whose manager has a runnable upgrade command
+            # (and the manager's binary is present) still gets one-click
+            # updates; install() routes to the manager instead of the
+            # self-installer.
+            "can_managed_install": bool(configured and frozen and channel and managed_upgrade_command(channel)),
+            "channel": channel,
+            "channel_label": channel_label(channel) if channel else "",
+            "update_hint": channel_hint(channel),
             "current_version": self.current_version,
             "repo": self.repo,
             "releases_url": self.releases_url(),
@@ -318,7 +474,9 @@ class AppUpdater:
         if not tag:
             return None
         assets = data.get("assets", [])
-        name, asset_url, sha_url = _select_asset(assets, self.os_key, self.arch)
+        name, asset_url, sha_url = _select_asset(
+            assets, self.os_key, self.arch, prefer_appimage=bool(_running_appimage())
+        )
         # The signed manifest + its detached signature are single, fixed-named
         # assets shared by every platform in the release (see tools/sign_manifest.py).
         by_name = {a.get("name", ""): a.get("browser_download_url", "") for a in assets}
@@ -378,13 +536,25 @@ class AppUpdater:
             raise UpdaterError("Updates aren't configured for this build.")
         if not is_frozen():
             raise UpdaterError("Self-update is only available in packaged builds, open the Releases page to update.")
+        channel = managed_channel()
+        if channel:
+            cmd = managed_upgrade_command(channel)
+            if cmd is None:
+                hint = channel_hint(channel)
+                raise UpdaterError(
+                    f"This copy of Waves is managed by {channel_label(channel)}; update it there"
+                    + (f" ({hint})" if hint else "")
+                    + "."
+                )
+            return self._managed_upgrade(channel, cmd, progress_cb, _log, abort, session)
 
         sess = session or _session()
         if release is None:
             _log("resolving latest release")
             release = self.latest(sess)
         if release is None or not release.url:
-            raise UpdaterError(f"No Waves build is available for {self.os_key}/{self.arch}.")
+            kind = "AppImage build" if _running_appimage() else "build"
+            raise UpdaterError(f"No Waves {kind} is available for {self.os_key}/{self.arch}.")
 
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         _check_abort()
@@ -451,6 +621,96 @@ class AppUpdater:
         _log(f"installed {release.version}")
         return {"ok": True, "version": release.version, "applied_to": str(applied_to), "relaunch": True}
 
+    def _managed_upgrade(self, channel: str, cmd: list[str], progress_cb, log, abort: Event | None, session) -> dict:
+        """Upgrade a package-manager-owned install by running the manager itself.
+
+        The manager does its own download and checksum verification (Homebrew
+        checks the cask's sha256), so nothing is fetched or verified here; this
+        just runs the upgrade with its output streamed to the UI and coarse
+        progress milestones keyed off the output. Replacing a running .app is
+        safe on macOS (the process keeps its open files; the restart lands in
+        the new bundle). The command's argv is a fixed table entry, never
+        user input.
+        """
+        label = channel_label(channel)
+        # Version is cosmetic here (the completion message); the manager decides
+        # what it actually installs. Best-effort, never a reason to fail.
+        version = ""
+        try:
+            rel = self.latest(session or _session())
+            version = rel.version if rel else ""
+        except Exception:
+            logger.debug("managed upgrade: could not resolve the latest version tag", exc_info=True)
+
+        log(f"updating via {label}")
+        if progress_cb:
+            progress_cb(5.0)
+        env = dict(os.environ)
+        env.setdefault("HOMEBREW_NO_ENV_HINTS", "1")
+        env["PATH"] = os.path.dirname(cmd[0]) + os.pathsep + env.get("PATH", "")
+        proc = subprocess.Popen(  # - fixed argv from the table above
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=env,
+        )
+        # The line reader blocks while the manager downloads silently, so a
+        # watcher turns an abort into terminate() (which unblocks the reader
+        # at EOF) instead of waiting for the next output line.
+        reader_done = Event()
+        if abort is not None:
+
+            def _abort_watch() -> None:
+                while not reader_done.is_set():
+                    if abort.is_set():
+                        proc.terminate()
+                        return
+                    abort.wait(0.25)
+
+            Thread(target=_abort_watch, daemon=True).start()
+        lines: list[str] = []
+        try:
+            # stdout=PIPE above guarantees a stream; `or ()` keeps a typing
+            # stub / exotic Popen replacement from crashing the loop.
+            for raw in proc.stdout or ():
+                line = raw.strip()
+                if not line:
+                    continue
+                lines.append(line)
+                low = line.lower()
+                if progress_cb:
+                    if "downloading" in low or "fetching" in low:
+                        progress_cb(35.0)
+                    elif "installing" in low or "upgrading" in low or "moving" in low:
+                        progress_cb(70.0)
+                log(line[:160])
+            code = proc.wait()
+        finally:
+            reader_done.set()
+            if proc.poll() is None:
+                proc.terminate()
+        if abort is not None and abort.is_set():
+            raise UpdateCancelled()
+        output = "\n".join(lines)
+        if code != 0:
+            tail = "\n".join(lines[-4:])
+            raise UpdaterError(f"{label} reported an error:\n{tail}" if tail else f"{label} exited with code {code}.")
+        if re.search(r"already (installed|up-to-date)|not upgrading", output, re.IGNORECASE):
+            raise UpdaterError(
+                f"{label} does not see the new version yet; its package lists may be stale."
+                + (
+                    f" Try `{channel_hint(channel)}` in a terminal after `brew update`."
+                    if channel_hint(channel)
+                    else ""
+                )
+            )
+        if progress_cb:
+            progress_cb(100.0)
+        log(f"updated via {label}")
+        return {"ok": True, "version": version, "applied_to": "", "relaunch": True, "channel": channel}
+
     # ----- internals ----------------------------------------------------- #
     def _download(self, sess, url: str, dest: Path, progress_cb, abort: Event | None) -> None:
         with sess.get(url, stream=True, timeout=_TIMEOUT) as resp:
@@ -513,6 +773,15 @@ class AppUpdater:
     # running executable; Windows defers the swap to a helper because a running
     # .exe can't overwrite itself.
     def _apply(self, payload: Path, release: Release, log) -> Path:
+        # Running from an AppImage: the executable path is inside a read-only
+        # squashfs mount; the real install is the single .AppImage file, so
+        # swap that (asset selection already guaranteed an .AppImage payload).
+        appimage = _running_appimage()
+        if appimage:
+            staged = self._extract_payload(payload, release.asset, log)
+            if not staged.is_file():
+                raise UpdaterError("Refusing to install: expected a single-file AppImage payload.")
+            return self._apply_unix(staged, Path(appimage), log)
         target = _current_exe()
         staged = self._extract_payload(payload, release.asset, log)
         if self.os_key == "macos":
@@ -919,7 +1188,10 @@ class AppUpdater:
         """
         if self.os_key == "windows":
             return
-        exe = str(_current_exe())
+        # From an AppImage, exec the (freshly swapped) .AppImage file itself:
+        # _current_exe points into the old read-only mount, which unmounts the
+        # moment this process exits.
+        exe = _running_appimage() or str(_current_exe())
         try:
             if self.os_key == "macos" and ".app/" in exe:
                 bundle = exe.split(".app/")[0] + ".app"

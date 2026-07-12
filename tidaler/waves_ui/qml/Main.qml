@@ -7126,8 +7126,15 @@ ApplicationWindow {
         property real pct: 0
         property string stage: ""
         property string error: ""
+        // INSTALL works for a normal self-install AND for a package-manager
+        // copy whose manager the app can run (brew upgrade). Only channels
+        // without a runnable upgrade (Snap, Flatpak, an unknown sentinel)
+        // fall back to VIEW (releases page). Snapshotted at offer time.
+        property bool selfInstall: true
         function offer(v) {
             if (setupSettings.updateToastDismissed === v) return
+            var st = waves.appUpdateStatus()
+            selfInstall = st && (st.can_self_install === true || st.can_managed_install === true)
             version = v; pct = 0; phase = "offer"
         }
         function dismiss() {   // remembered for this version
@@ -7217,7 +7224,8 @@ ApplicationWindow {
                 id: utAct
                 Layout.alignment: Qt.AlignBaseline
                 textFormat: Text.PlainText
-                readonly property string realLabel: updateToast.face === "offer" ? "INSTALL"
+                readonly property string realLabel: updateToast.face === "offer"
+                      ? (updateToast.selfInstall ? "INSTALL" : "VIEW")
                     : updateToast.face === "installing" ? "CANCEL"
                     : updateToast.face === "ready" ? "RESTART NOW"
                     : "RETRY"
@@ -7251,7 +7259,13 @@ ApplicationWindow {
                     hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                     onEntered: if (updateToast.phase !== "installing") { utAct._gt = 0; utGlitch.restart() }
                     onClicked: {
-                        if (updateToast.phase === "offer" || updateToast.phase === "failed") {
+                        if ((updateToast.phase === "offer" || updateToast.phase === "failed")
+                                && !updateToast.selfInstall) {
+                            // Package-manager-owned install: hand off to the
+                            // releases page, never write over the managed copy.
+                            waves.openReleasesPage()
+                            updateToast.dismiss()
+                        } else if (updateToast.phase === "offer" || updateToast.phase === "failed") {
                             // acted on: stop re-showing at launch
                             setupSettings.updateToastDismissed = updateToast.version
                             updateToast.pct = 0; updateToast.error = ""; updateToast.stage = "Downloading update…"
