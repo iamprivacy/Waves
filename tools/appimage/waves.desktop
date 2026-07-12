@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Waves
+Comment=Download music from your own TIDAL account
+Exec=Waves
+Icon=waves
+Terminal=false
+Categories=AudioVideo;Audio;Music;

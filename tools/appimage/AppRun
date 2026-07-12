@@ -1,0 +1,6 @@
+#!/bin/sh
+# AppImage entry point. The whole Nuitka standalone tree lives at
+# usr/lib/waves inside the mounted image; exec the real binary so Waves is
+# the process (signal handling, /proc/self/exe, taskbar identity all sane).
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/waves/Waves" "$@"

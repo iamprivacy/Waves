@@ -193,6 +193,9 @@ jobs:
               cd dist &&
               zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
+          # Linux legs ship BOTH a zip of the standalone tree and a single-file
+          # AppImage of the same tree (tools/build_appimage.sh); the in-app
+          # updater keeps each install on its own format.
           - os: "ubuntu-24.04"
             TARGET: "ubuntu-24.04"
             OS_ARCH: ${{needs.compute.outputs.ARCH_LINUX_X64}}
@@ -202,6 +205,7 @@ jobs:
               cd dist &&
               mv waves.dist Waves &&
               zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}.AppImage &&
               cd ..
           - os: "ubuntu-24.04-arm"
             TARGET: "ubuntu-24.04-arm"
@@ -212,6 +216,7 @@ jobs:
               cd dist &&
               mv waves.dist Waves &&
               zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}.AppImage &&
               cd ..
           - os: "windows-2022"
             TARGET: "windows-2022"
@@ -309,29 +314,72 @@ jobs:
             ok=1
           fi
           [ "$ok" -eq 1 ] || { echo "::error::smoke-launch: $BIN never reached a healthy state"; exit 1; }
+      # The AppImage wraps AppRun + the runtime AROUND the already-smoked tree,
+      # so launch the finished file itself too (x64 only, same reason as above;
+      # --appimage-extract-and-run because runners have no FUSE).
+      - name: Smoke-launch AppImage
+        if: ${{ runner.os == 'Linux' && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_OPENGL: software
+        run: |
+          set -u
+          APPIMG="dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}.AppImage"
+          if [ ! -e "$APPIMG" ]; then
+            echo "::error::smoke-launch: built AppImage '$APPIMG' not found"; exit 1
+          fi
+          echo "Smoke-launching $APPIMG (offscreen)…"
+          "$APPIMG" --appimage-extract-and-run &
+          APP_PID=$!
+          ok=0
+          for _ in $(seq 1 15); do
+            sleep 1
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              wait "$APP_PID"; rc=$?
+              if [ "$rc" -eq 0 ]; then ok=1; else
+                echo "::error::smoke-launch: $APPIMG exited early with status $rc"; exit 1
+              fi
+              break
+            fi
+          done
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            echo "smoke-launch: AppImage still running after startup window; healthy."
+            kill "$APP_PID" 2>/dev/null || true
+            wait "$APP_PID" 2>/dev/null || true
+            ok=1
+          fi
+          [ "$ok" -eq 1 ] || { echo "::error::smoke-launch: $APPIMG never reached a healthy state"; exit 1; }
       - name: Checksum
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
         # Portable per-asset SHA256 (no coreutils dependency on Windows). The
         # line is "<hex>  <filename>": coreutils sha256sum format, which the
-        # signed SHA256SUMS manifest and the in-app updater both parse.
+        # signed SHA256SUMS manifest and the in-app updater both parse. Linux
+        # legs carry a second asset (the AppImage); the loop hashes whichever
+        # of the leg's assets exist.
         run: |
           cd dist
-          ASSET="${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}"
-          python -c "import hashlib,sys; p=sys.argv[1]; open(p+'.sha256','w').write(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p+chr(10))" "$ASSET"
-          cat "$ASSET.sha256"
+          BASE="${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}"
+          for ASSET in "${BASE}${{needs.compute.outputs.ASSET_EXTENSION}}" "${BASE}.AppImage"; do
+            [ -e "$ASSET" ] || continue
+            python -c "import hashlib,sys; p=sys.argv[1]; open(p+'.sha256','w').write(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p+chr(10))" "$ASSET"
+            cat "$ASSET.sha256"
+          done
       - name: Upload checksum artifact
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
-        # Tiny per-asset checksums collected by the sign job into one manifest.
+        # Tiny per-asset checksums collected by the sign job into one manifest
+        # (the glob picks up the AppImage's sidecar on the linux legs).
         uses: actions/upload-artifact@v4
         with:
           name: sha256-${{matrix.OS_ARCH}}
-          path: ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}.sha256
+          path: ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}*.sha256
       - name: Upload Build Artifact (workflow_dispatch / test-build)
         if: ${{ (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/test-build') && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}
-          path: ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}
+          path: |
+            ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}
+            ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}.AppImage
       - name: Upload Release Asset
         # Publish only when a release is actually being made: a tag PUSH (not a
         # dispatch that merely happens to run on a tag ref), OR a dispatch that
@@ -350,9 +398,11 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           draft: true
+          # One glob per leg: zip + .sha256 everywhere, plus the AppImage and
+          # its .sha256 on the linux legs. Each leg's OS_ARCH prefix is unique,
+          # so a leg can only ever attach its own files.
           files: |
-            ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}
-            ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}.sha256
+            ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}*
 
   sign-manifest:
     # Runs for any release (a tag PUSH or a dispatch+release_tag): gather every
