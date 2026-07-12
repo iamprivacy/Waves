@@ -87,6 +87,12 @@ class OwnershipStore:
                        PRIMARY KEY (track_id, path)
                    )""")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_track ON downloads(track_id)")
+            self._conn.execute("""CREATE TABLE IF NOT EXISTS collection_members (
+                       collection_id TEXT    NOT NULL,
+                       track_id      TEXT    NOT NULL,
+                       recorded_at   INTEGER NOT NULL DEFAULT 0,
+                       PRIMARY KEY (collection_id, track_id)
+                   )""")
             self._ensure_columns()
             self._conn.commit()
 
@@ -148,6 +154,70 @@ class OwnershipStore:
                 row,
             )
             self._conn.commit()
+
+    def record_members_replace(self, collection_id: str, track_ids: list[str]) -> None:
+        """Remember the exact, current track ids that make up ``collection_id``
+        (an album, playlist or mix), replacing any previous record for it.
+
+        Called wherever Waves already has the full track list in hand for a
+        reason other than this (opening the item's page, expanding an album
+        panel), so a later "is this fully owned" question elsewhere in the app
+        (e.g. a collapsed row that has never been opened) can be answered from
+        this local table alone, no re-fetch. A playlist's contents can change,
+        so this is a full replace, not an add.
+        """
+        cid = str(collection_id)
+        ids = [str(t) for t in track_ids if t]
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute("DELETE FROM collection_members WHERE collection_id = ?", (cid,))
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO collection_members (collection_id, track_id, recorded_at) VALUES (?, ?, ?)",
+                [(cid, tid, now) for tid in ids],
+            )
+            self._conn.commit()
+
+    def record_members_add(self, collection_id: str, track_ids: list[str]) -> None:
+        """Additively remember that ``track_ids`` belong to ``collection_id``,
+        without touching any other membership already recorded for it.
+
+        Called incrementally as a collection download progresses (see
+        ``record_members_replace`` for the alternative, authoritative case):
+        Waves observes each track as it is queued, so membership for a
+        downloaded album/playlist is learned for free, from data already
+        flowing through the download, no extra network call.
+        """
+        cid = str(collection_id)
+        ids = [str(t) for t in track_ids if t]
+        if not ids:
+            return
+        now = int(time.time())
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO collection_members (collection_id, track_id, recorded_at) VALUES (?, ?, ?)",
+                [(cid, tid, now) for tid in ids],
+            )
+            self._conn.commit()
+
+    def members_of(self, collection_id: str) -> list[str] | None:
+        """Known member track ids for ``collection_id``, or None if Waves has
+        never observed this collection's contents (never opened, never
+        downloaded) — distinct from an empty list, so a caller can tell
+        "unknown" apart from a genuinely empty collection.
+
+        A plain indexed lookup against Waves' own local database, not the
+        user's music folder: unlike ownership_of, there is no live filesystem
+        stat here, so this never risks hanging on a dropped network mount and
+        is safe to call directly.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT track_id FROM collection_members WHERE collection_id = ?",
+                (str(collection_id),),
+            ).fetchall()
+        if not rows:
+            return None
+        return [r[0] for r in rows]
 
     def ownership_of(self, track_id: str, *, user_id: str | None = None) -> dict | None:
         """Best surviving copy of ``track_id`` that still exists on disk right now,

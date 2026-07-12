@@ -1728,6 +1728,11 @@ ApplicationWindow {
         id: di
         property var onTap: (function(){})
         property string mediaId: ""
+        // Opt-in: mediaId is an album/playlist/mix id, not a track id, so it
+        // must be resolved through the locally learned collection membership
+        // instead of being looked up as if it were a track (see DownloadButton
+        // for the same distinction, and why this can never require a fetch).
+        property bool collectionCheck: false
         // A copy from an earlier session, straight from the ownership store
         // (checked against the disk, so a deleted file reads as not owned).
         // Live job state always wins; this only fills the idle state.
@@ -1735,15 +1740,31 @@ ApplicationWindow {
         // Owned AND current for today's quality setting: an owned copy below the
         // target quality shows Download again (clicking upgrades in place).
         function refreshOwned() {
+            if (collectionCheck) {
+                var ids = di.mediaId !== "" ? waves.collectionMemberIds(di.mediaId) : null
+                if (!ids || ids.length === 0) { owned = false; return }
+                var n = 0
+                for (var i = 0; i < ids.length; ++i) {
+                    var oi = waves.ownershipOf(ids[i])
+                    if (oi.owned === true && oi.up_to_date === true) ++n
+                }
+                owned = n === ids.length
+                return
+            }
             var o = di.mediaId !== "" ? waves.ownershipOf(di.mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
         Component.onCompleted: refreshOwned()
         onMediaIdChanged: refreshOwned()
+        onCollectionCheckChanged: refreshOwned()
         Connections {
             target: waves
             // Empty id = broadcast (the quality setting changed).
-            function onOwnershipChanged(tid) { if (tid === di.mediaId || tid === "") di.refreshOwned() }
+            function onOwnershipChanged(tid) {
+                if (di.collectionCheck) { di.refreshOwned() }
+                else if (tid === di.mediaId || tid === "") { di.refreshOwned() }
+            }
+            function onCollectionMembershipChanged(cid) { if (di.collectionCheck && cid === di.mediaId) di.refreshOwned() }
         }
         readonly property string liveSt: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
         readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
@@ -2221,22 +2242,32 @@ ApplicationWindow {
         property bool ownedCheck: false
         // Collection rollup: when set (non-null array of member track/video
         // ids), DOWNLOADED means every one of those ids is individually owned.
-        // Only set where the ids are already in hand (an opened album/playlist/
-        // mix page, an expanded album panel) — never triggers a fetch itself.
+        // Set where the caller already has the member ids in hand (an opened
+        // album/playlist/mix page, an expanded album panel) — never triggers
+        // a fetch itself.
         property var collectionIds: null
+        // Collection rollup, discovered locally: mediaId is a collection id
+        // (album/playlist/mix) and its member ids are looked up from what
+        // Waves has already LEARNED locally (see collectionMemberIds) — no
+        // caller-supplied list needed, so this also covers collapsed rows and
+        // shelf cards that have never had their track list fetched. A
+        // collection Waves has genuinely never opened or downloaded reads as
+        // unknown (not owned) until the first time it is: this is a local
+        // cache, not a live query, so it can never require a network call.
+        property bool collectionCheck: false
         property bool owned: false
-        function refreshOwned() {
-            if (collectionIds !== null) {
-                var ids = collectionIds
-                if (ids.length === 0) { owned = false; return }
-                var n = 0
-                for (var i = 0; i < ids.length; ++i) {
-                    var oi = waves.ownershipOf(ids[i])
-                    if (oi.owned === true && oi.up_to_date === true) ++n
-                }
-                owned = n === ids.length
-                return
+        function _rollup(ids) {
+            if (!ids || ids.length === 0) return false
+            var n = 0
+            for (var i = 0; i < ids.length; ++i) {
+                var oi = waves.ownershipOf(ids[i])
+                if (oi.owned === true && oi.up_to_date === true) ++n
             }
+            return n === ids.length
+        }
+        function refreshOwned() {
+            if (collectionIds !== null) { owned = _rollup(collectionIds); return }
+            if (collectionCheck && mediaId !== "") { owned = _rollup(waves.collectionMemberIds(mediaId)); return }
             var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
@@ -2244,16 +2275,22 @@ ApplicationWindow {
         onMediaIdChanged: refreshOwned()
         onOwnedCheckChanged: refreshOwned()
         onCollectionIdsChanged: refreshOwned()
+        onCollectionCheckChanged: refreshOwned()
         Connections {
             target: waves
-            enabled: db.ownedCheck || db.collectionIds !== null
+            enabled: db.ownedCheck || db.collectionIds !== null || db.collectionCheck
             // Empty id = broadcast (the quality setting changed).
             function onOwnershipChanged(tid) {
                 if (db.collectionIds !== null) {
                     if (tid === "" || db.collectionIds.indexOf(tid) !== -1) db.refreshOwned()
+                } else if (db.collectionCheck) {
+                    db.refreshOwned()
                 } else if (tid === db.mediaId || tid === "") {
                     db.refreshOwned()
                 }
+            }
+            function onCollectionMembershipChanged(cid) {
+                if (db.collectionCheck && cid === db.mediaId) db.refreshOwned()
             }
         }
         readonly property real pct: root.dlPct(mediaId)
@@ -3127,7 +3164,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
                     QualTag { id: abQt; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; q: quality; mix: qualMix }
                 }
-                DownloadButton { Layout.alignment: Qt.AlignVCenter; mediaId: albumId; label: "Download album"; onTap: function(){ waves.downloadAlbum(albumId) } }
+                DownloadButton { Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"; onTap: function(){ waves.downloadAlbum(albumId) } }
             }
             MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: toggle() }
         }
@@ -3668,6 +3705,7 @@ ApplicationWindow {
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: st === "running" ? parent.width : implicitWidth
                     mediaId: ac.card.id || ""
+                    collectionCheck: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
                     label: "Download " + acArt.kindLabel
                     onTap: function() { root.browseCardDownload(ac.card) }
                     Rectangle { anchors.fill: parent; z: -1; radius: root.btnRad; color: "#d90d0f12" }
@@ -3721,6 +3759,7 @@ ApplicationWindow {
                 DownIcon {
                     anchors.centerIn: parent
                     mediaId: ac.card.id || ""
+                    collectionCheck: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
                     onTap: function() { root.browseCardDownload(ac.card) }
                 }
             }
@@ -5496,7 +5535,7 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Text { textFormat: Text.PlainText; text: (model.tracks > 0 ? model.tracks + " tracks" : "Playlist") + (model.creator ? "  ·  " + model.creator : ""); color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
-                            DownloadButton { mediaId: model.id; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(model.id) } }
+                            DownloadButton { mediaId: model.id; collectionCheck: true; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(model.id) } }
                         }
                     }
                 }
@@ -5517,7 +5556,7 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Text { textFormat: Text.PlainText; text: model.subtitle ? model.subtitle : "Mix"; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
-                            DownloadButton { mediaId: model.id; label: "Download mix"; onTap: function(){ waves.downloadMix(model.id) } }
+                            DownloadButton { mediaId: model.id; collectionCheck: true; label: "Download mix"; onTap: function(){ waves.downloadMix(model.id) } }
                         }
                     }
                 }
@@ -6062,7 +6101,7 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Text { textFormat: Text.PlainText; text: (model.tracks > 0 ? model.tracks + " tracks" : "Playlist"); color: root.textLo; font.pixelSize: 12 }
                             }
-                            DownloadButton { mediaId: model.id; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(model.id) } }
+                            DownloadButton { mediaId: model.id; collectionCheck: true; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(model.id) } }
                         }
                     }
                 }
@@ -6079,7 +6118,7 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Text { textFormat: Text.PlainText; text: model.subtitle ? model.subtitle : "Mix"; color: root.textLo; font.pixelSize: 12 }
                             }
-                            DownloadButton { mediaId: model.id; label: "Download mix"; onTap: function(){ waves.downloadMix(model.id) } }
+                            DownloadButton { mediaId: model.id; collectionCheck: true; label: "Download mix"; onTap: function(){ waves.downloadMix(model.id) } }
                         }
                     }
                 }

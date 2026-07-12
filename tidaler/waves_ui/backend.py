@@ -321,6 +321,7 @@ class _ProgressSignals(QObject):
         self._bridge = bridge
         self._qid = qid
         self._media_id = media_id
+        self._collection = collection
         (self.list_item if collection else self.item).connect(self._on_pct)
         self.track_event.connect(self._on_track_event)
 
@@ -1198,6 +1199,10 @@ class WavesBridge(QObject):
     # A track's ownership or delivered quality changed (a fresh download landed);
     # QML re-queries ownershipOf for that id to refresh an "in your library" badge.
     ownershipChanged = Signal(str)
+    # A collection (album/playlist/mix) learned new member track ids (a
+    # download or browse-open just observed its contents); QML re-queries
+    # collectionMemberIds for that id to refresh a collapsed row's badge.
+    collectionMembershipChanged = Signal(str)
     # Download-folder gating. downloadFolderMissing → no folder is set at all
     # (blocking: the download did not start); downloadFolderDefault → the user is
     # still on the historical "~/download" default (a one-time, non-blocking
@@ -2178,6 +2183,11 @@ class WavesBridge(QObject):
                         "explicit": bool(getattr(track, "explicit", False)),
                     }
                 )
+            try:
+                self._ownership.record_members_replace(album_id, [row["id"] for row in out])
+                self.collectionMembershipChanged.emit(album_id)
+            except Exception:
+                logger.debug("Could not record collection membership", exc_info=True)
             self.albumTracksLoaded.emit(album_id, out)
             devlog.done("album", f"tracks id={album_id}", devlog.clock() - t0, n=len(out))
 
@@ -3230,6 +3240,11 @@ class WavesBridge(QObject):
                     for i, it in enumerate(items):
                         it["num"] = i + 1
                     sections = [{"rowKind": "tracks", "title": n_label if items else "Tracks", "items": items}]
+                try:
+                    self._ownership.record_members_replace(media_id, [it["id"] for it in items if it.get("id")])
+                    self.collectionMembershipChanged.emit(media_id)
+                except Exception:
+                    logger.debug("Could not record collection membership", exc_info=True)
                 payload = {
                     "key": key,
                     "title": name_builder_title(obj),
@@ -3588,6 +3603,17 @@ class WavesBridge(QObject):
         if row is None:
             row = {**ev, "pct": 0.0}
             reg[ev["id"]] = row
+            # First sight of this track in a collection job: it is a member of
+            # the collection being downloaded regardless of how the download
+            # itself turns out, so this is learned once, unconditionally on
+            # outcome. Free (no extra fetch): the id is already in ev.
+            sig = getattr(self, "_job_signals", {}).get(qid)
+            if sig is not None and getattr(sig, "_collection", False):
+                try:
+                    self._ownership.record_members_add(sig._media_id, [ev["id"]])
+                    self.collectionMembershipChanged.emit(sig._media_id)
+                except Exception:
+                    logger.debug("Could not record collection membership", exc_info=True)
         else:
             row["status"] = ev["status"]
             if ev.get("desc"):
@@ -3693,6 +3719,15 @@ class WavesBridge(QObject):
             return {"owned": False}
         rank = int(rec.get("quality_rank", -1))
         return {**rec, "up_to_date": rank < 0 or rank >= self._target_quality_rank()}
+
+    @Slot(str, result="QVariant")
+    def collectionMemberIds(self, collection_id: str):
+        """Locally learned member track ids for an album/playlist/mix id, or
+        None if Waves has never observed this collection's contents (never
+        opened, never downloaded). A plain local table lookup (see
+        OwnershipStore.members_of), safe to call directly from the GUI thread:
+        unlike ownershipOf it never stats the user's music folder."""
+        return self._ownership.members_of(str(collection_id))
 
     @Slot()
     def _poll_track_progress(self) -> None:

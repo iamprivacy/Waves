@@ -158,3 +158,63 @@ def test_concurrent_records_all_land(tmp_path):
         t.join()
     for i in range(40):
         assert store.ownership_of(str(i)) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Collection membership: which track ids make up an album/playlist/mix,
+# learned locally so a later "is this fully owned" question elsewhere in the
+# app never needs to re-fetch from TIDAL.
+# --------------------------------------------------------------------------- #
+def test_unknown_collection_is_none_not_empty(tmp_path):
+    store = _store(tmp_path)
+    assert store.members_of("album1") is None
+
+
+def test_replace_then_members_of(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_replace("album1", ["10", "11", "12"])
+    assert sorted(store.members_of("album1")) == ["10", "11", "12"]
+
+
+def test_replace_overwrites_previous_membership(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_replace("pl1", ["1", "2", "3"])
+    store.record_members_replace("pl1", ["1", "2"])  # a track was removed from the playlist
+    assert sorted(store.members_of("pl1")) == ["1", "2"]
+
+
+def test_add_is_additive_not_a_replace(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_add("album1", ["1"])
+    store.record_members_add("album1", ["2"])
+    assert sorted(store.members_of("album1")) == ["1", "2"]
+
+
+def test_add_ignores_duplicates(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_add("album1", ["1", "1", "2"])
+    store.record_members_add("album1", ["2"])
+    assert sorted(store.members_of("album1")) == ["1", "2"]
+
+
+def test_empty_track_list_replace_reads_back_as_unknown(tmp_path):
+    # An edge case (a genuinely empty collection) collapses to "unknown" rather
+    # than a real distinct state; documented as an accepted, low-consequence
+    # simplification (an empty collection has nothing to badge anyway).
+    store = _store(tmp_path)
+    store.record_members_replace("empty1", [])
+    assert store.members_of("empty1") is None
+
+
+def test_membership_is_scoped_per_collection(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_replace("album1", ["1", "2"])
+    store.record_members_replace("album2", ["3", "4"])
+    assert sorted(store.members_of("album1")) == ["1", "2"]
+    assert sorted(store.members_of("album2")) == ["3", "4"]
+
+
+def test_add_falsy_ids_are_skipped(tmp_path):
+    store = _store(tmp_path)
+    store.record_members_add("album1", ["1", "", None])
+    assert store.members_of("album1") == ["1"]

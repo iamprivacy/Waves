@@ -53,8 +53,10 @@ class _BridgeStub:
 
     def __init__(self, tmp_path, quality_audio="LOSSLESS"):
         self._job_tracks: dict = {}
+        self._job_signals: dict = {}
         self.queueTrackState = _Signal()
         self.ownershipChanged = _Signal()
+        self.collectionMembershipChanged = _Signal()
         self._ownership = OwnershipStore(str(tmp_path / "ownership.sqlite3"))
         self._own_cache: dict = {}
         self._own_pending: set = set()
@@ -62,7 +64,14 @@ class _BridgeStub:
         self._own_pool = _SyncPool()
         self._OWN_TTL = WavesBridge._OWN_TTL
         self.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=quality_audio))
-        for name in ("_track_lifecycle", "_record_ownership", "ownershipOf", "_own_refresh", "_target_quality_rank"):
+        for name in (
+            "_track_lifecycle",
+            "_record_ownership",
+            "ownershipOf",
+            "_own_refresh",
+            "_target_quality_rank",
+            "collectionMemberIds",
+        ):
             setattr(self, name, getattr(WavesBridge, name).__get__(self, _BridgeStub))
 
     def own(self, tid):
@@ -453,3 +462,50 @@ def test_ownership_of_never_stats_on_the_calling_thread(tmp_path, monkeypatch):
     assert stub._own_pool.started == 1
     assert stub.ownershipOf("42") == {"owned": False}
     assert stub._own_pool.started == 1, "a pending refresh must not be scheduled twice"
+
+
+# --------------------------------------------------------------------------- #
+# Collection membership learned for free from the per-track download event
+# stream: a collection job's tracks are remembered as belonging to its
+# media_id as they are first seen, with zero extra network cost.
+# --------------------------------------------------------------------------- #
+def test_collection_job_learns_membership_from_track_events(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._job_signals[1] = SimpleNamespace(_media_id="album1", _collection=True)
+    stub._track_lifecycle(1, {"id": "10", "status": "pending"})
+    stub._track_lifecycle(1, {"id": "11", "status": "pending"})
+    assert sorted(stub.collectionMemberIds("album1")) == ["10", "11"]
+    assert stub.collectionMembershipChanged.emits == ["album1", "album1"]
+
+
+def test_membership_is_learned_regardless_of_track_outcome(tmp_path):
+    # Membership is "this track belongs to the collection", independent of
+    # whether the download itself succeeded (a failed or skipped track is
+    # still a real member, e.g. for an "all owned" rollup elsewhere).
+    stub = _BridgeStub(tmp_path)
+    stub._job_signals[1] = SimpleNamespace(_media_id="album1", _collection=True)
+    stub._track_lifecycle(1, {"id": "10", "status": "failed"})
+    assert stub.collectionMemberIds("album1") == ["10"]
+
+
+def test_non_collection_job_does_not_record_membership(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._job_signals[1] = SimpleNamespace(_media_id="track10", _collection=False)
+    stub._track_lifecycle(1, {"id": "10", "status": "pending"})
+    assert stub.collectionMemberIds("track10") is None
+
+
+def test_membership_recorded_once_per_track_not_per_event(tmp_path):
+    # A track can report more than one lifecycle event (e.g. pending then
+    # done); membership is only written on first sight to avoid redundant
+    # writes, and repeats are harmless either way (INSERT OR IGNORE).
+    stub = _BridgeStub(tmp_path)
+    stub._job_signals[1] = SimpleNamespace(_media_id="album1", _collection=True)
+    stub._track_lifecycle(1, {"id": "10", "status": "pending"})
+    stub._track_lifecycle(1, {"id": "10", "status": "done"})
+    assert stub.collectionMembershipChanged.emits == ["album1"]
+
+
+def test_collection_member_ids_unknown_collection_is_none(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    assert stub.collectionMemberIds("never-seen") is None
