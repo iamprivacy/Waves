@@ -39,6 +39,16 @@ cutting a release renames that section to the new version.
   and the manager's records stay correct. Direct downloads keep the
   built-in updater, unchanged.
 
+### 🐛 Fixed
+
+- 🐛 Album, playlist and mix DOWNLOADED badges now reflect what is actually
+  on disk, not just the current session: an album downloaded on its own now
+  shows DOWNLOADED the same as one downloaded as part of a full discography,
+  and playlists and mixes pick up the badge too. Collapsed album rows and
+  browse shelf cards get the same accurate badge as an opened page, learned
+  locally the first time Waves sees that album, playlist or mix, so it never
+  needs a network check to answer.
+
 ## 💾 v0.1.6 (2026-07-12)
 
 ### ✨ Added
