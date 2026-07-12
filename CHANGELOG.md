@@ -10,6 +10,35 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 📦 v0.1.7 (2026-07-12)
+
+### ✨ Added
+
+- 🍺 Waves is now installable on macOS via Homebrew:
+
+  ```bash
+  brew tap iamprivacy/waves && brew install --cask waves
+  ```
+
+  Keeping it current is a `brew upgrade`, or just the usual Update & restart
+  button in the app.
+
+- 🐧 Linux releases now also ship as an AppImage: one file, no unzipping, no
+  install step, just download and run. The built-in one-click updater works
+  on it too, replacing the file in place.
+
+### 🔧 Changed
+
+- 📁 Waves settings now live where your system expects them: Application
+  Support on macOS and AppData on Windows (Linux keeps ~/.config). Existing
+  settings, login and history move over automatically the first time the new
+  version starts; nothing needs to be set up again.
+- 📦 Copies of Waves installed through a package manager (like the Homebrew
+  tap) update through that package manager instead: the familiar Update &
+  restart button simply runs its one-line upgrade for you, same one click,
+  and the manager's records stay correct. Direct downloads keep the
+  built-in updater, unchanged.
+
 ## 💾 v0.1.6 (2026-07-12)
 
 ### ✨ Added

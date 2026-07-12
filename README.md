@@ -144,6 +144,17 @@ Grab the build for your platform from the [**latest release**](../../releases/la
 
 Unzip and run: on macOS drag `waves.app` to Applications (first launch needs a one‑time approval in System Settings, see the note below); on Windows and Linux run `Waves` from the unzipped folder. Every asset ships with a SHA‑256 checksum, and the release carries a signed `SHA256SUMS` manifest.
 
+**macOS via Homebrew:**
+
+```bash
+brew tap iamprivacy/waves
+brew install --cask waves
+```
+
+Waves then knows it's Homebrew‑managed: the in‑app "Update & restart" button runs `brew upgrade` for you instead of downloading a new build itself.
+
+**Linux via AppImage:** download `waves_linux-x64.AppImage` (or `-arm64`) from the release, mark it executable (`chmod +x`), and run it directly, no unzip, no install step. The in‑app updater keeps it current in place.
+
 Prefer to run from source?
 
 ```bash
