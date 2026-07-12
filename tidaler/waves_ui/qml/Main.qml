@@ -1711,7 +1711,25 @@ ApplicationWindow {
         id: di
         property var onTap: (function(){})
         property string mediaId: ""
-        readonly property string st: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
+        // A copy from an earlier session, straight from the ownership store
+        // (checked against the disk, so a deleted file reads as not owned).
+        // Live job state always wins; this only fills the idle state.
+        property bool owned: false
+        // Owned AND current for today's quality setting: an owned copy below the
+        // target quality shows Download again (clicking upgrades in place).
+        function refreshOwned() {
+            var o = di.mediaId !== "" ? waves.ownershipOf(di.mediaId) : ({})
+            owned = o.owned === true && o.up_to_date === true
+        }
+        Component.onCompleted: refreshOwned()
+        onMediaIdChanged: refreshOwned()
+        Connections {
+            target: waves
+            // Empty id = broadcast (the quality setting changed).
+            function onOwnershipChanged(tid) { if (tid === di.mediaId || tid === "") di.refreshOwned() }
+        }
+        readonly property string liveSt: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
+        readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
         readonly property real pct: di.mediaId !== "" ? root.dlPct(di.mediaId) : -1
         implicitWidth: 32; implicitHeight: 30
         radius: root.btnRad; clip: true
@@ -2180,8 +2198,26 @@ ApplicationWindow {
         property string mediaId: ""
         property string label: "Download"
         property var onTap: (function(){})
+        // Opt-in for track-scoped buttons only: the ownership store is keyed by
+        // exact track id, so album/playlist/artist buttons must not consult it.
+        property bool ownedCheck: false
+        property bool owned: false
+        function refreshOwned() {
+            var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
+            owned = o.owned === true && o.up_to_date === true
+        }
+        Component.onCompleted: refreshOwned()
+        onMediaIdChanged: refreshOwned()
+        onOwnedCheckChanged: refreshOwned()
+        Connections {
+            target: waves
+            enabled: db.ownedCheck
+            // Empty id = broadcast (the quality setting changed).
+            function onOwnershipChanged(tid) { if (tid === db.mediaId || tid === "") db.refreshOwned() }
+        }
         readonly property real pct: root.dlPct(mediaId)
-        readonly property string st: root.dlSt(mediaId)
+        readonly property string liveSt: root.dlSt(mediaId)
+        readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
         implicitHeight: dbRow.implicitHeight + root.btnPadV * 2
         // Width is pinned to the idle label ("⭳ DOWNLOAD …") so the button
         // doesn't shrink when the state text changes to DONE/RETRY, keeps
@@ -3306,7 +3342,7 @@ ApplicationWindow {
                     QualTag { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; q: quality }
                 }
                 DownloadButton {
-                    Layout.alignment: Qt.AlignVCenter; mediaId: tId
+                    Layout.alignment: Qt.AlignVCenter; mediaId: tId; ownedCheck: true
                     label: trow.kind === "video" ? "Download video" : "Download track"
                     onTap: function(){ trow.kind === "video" ? waves.downloadVideo(tId) : waves.downloadTrack(tId) }
                 }
@@ -6625,9 +6661,11 @@ ApplicationWindow {
                                             text: modelData.status === "done" ? "✓"
                                                 : modelData.status === "running" ? Math.round(modelData.pct) + "%"
                                                 : modelData.status === "failed" ? "✕"
+                                                : modelData.status === "skipped" ? "HAVE"
                                                 : modelData.status === "cancelled" ? "-" : "·"
                                             color: modelData.status === "done" || modelData.status === "running" ? root.accent
-                                                 : modelData.status === "failed" ? root.red : root.textDim
+                                                 : modelData.status === "failed" ? root.red
+                                                 : modelData.status === "skipped" ? root.green : root.textDim
                                             font.family: root.mono; font.pixelSize: 10
                                             font.bold: modelData.status === "running"
                                             Layout.preferredWidth: 34; horizontalAlignment: Text.AlignRight
