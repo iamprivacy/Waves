@@ -35,7 +35,7 @@ from PySide6.QtCore import Property, QEvent, QObject, Qt, QTimer, Signal, Slot
 from rich.progress import Progress
 from tidalapi import page as tidal_page
 from tidalapi.album import Album
-from tidalapi.artist import Artist
+from tidalapi.artist import Artist, Role
 from tidalapi.media import Quality, Track, Video
 from tidalapi.mix import Mix
 from tidalapi.playlist import Playlist
@@ -58,6 +58,7 @@ from tidaler.constants import (
     QualityVideo,
 )
 from tidaler.download import Download
+from tidaler.helper.path import format_path_media, format_str_media
 from tidaler.helper.tidal import (
     get_tidal_media_id,
     get_tidal_media_type,
@@ -172,6 +173,127 @@ _BROWSE = {"download_base_path": "dir", "path_binary_ffmpeg": "file"}
 _ENUM_BY_FIELD = dict(_CHOICE_FIELDS)
 # Flags that do nothing without FFmpeg, greyed out on the page when it's absent.
 _FFMPEG_DEPENDENT = {"video_convert_mp4", "extract_flac"}
+
+# ---- Path-template helper data (File organization) -------------------------
+# Every template token, grouped for the "Want to know more?" reference table.
+# The sample values shown next to each are produced by the REAL formatter
+# (format_str_media) against the canned sample library below, so the reference
+# can never drift from what a download would actually be named.
+_TEMPLATE_TOKEN_GROUPS = ["Names", "Numbers", "Discs", "Dates", "Extras", "IDs & durations"]
+_TEMPLATE_TOKENS = [
+    ("artist_name", "Names", "Track artist(s), joined by your delimiter"),
+    ("album_artist", "Names", "First album artist only"),
+    ("album_artists", "Names", "All album artists"),
+    ("track_title", "Names", "Track title"),
+    ("album_title", "Names", "Album title"),
+    ("playlist_name", "Names", "Playlist name (playlist paths)"),
+    ("mix_name", "Names", "Mix name (mix paths)"),
+    ("album_track_num", "Numbers", "Track number, zero-padded"),
+    ("album_num_tracks", "Numbers", "Total tracks on the album"),
+    ("list_pos", "Numbers", "Position in the playlist / mix"),
+    ("track_volume_num_optional", "Discs", "Disc prefix, only on multi-disc albums"),
+    ("track_volume_num_optional_CD", "Discs", "Same, in CD2 style"),
+    ("track_volume_num", "Discs", "Disc number, always"),
+    ("album_num_volumes", "Discs", "Number of discs"),
+    ("album_year", "Dates", "Release year"),
+    ("album_date", "Dates", "Full release date"),
+    ("track_explicit", "Extras", "“ (Explicit)”, or nothing when clean"),
+    ("album_explicit", "Extras", "Same, for the album"),
+    ("track_quality", "Extras", "Audio quality tag"),
+    ("video_quality", "Extras", "Video quality (video paths)"),
+    ("media_type", "Extras", "ALBUM, EP or SINGLE"),
+    ("track_id", "IDs & durations", "TIDAL track id"),
+    ("album_id", "IDs & durations", "TIDAL album id"),
+    ("isrc", "IDs & durations", "Track ISRC code"),
+    ("playlist_id", "IDs & durations", "TIDAL playlist id"),
+    ("video_id", "IDs & durations", "TIDAL video id"),
+    ("album_artist_id", "IDs & durations", "Album artist id"),
+    ("track_artist_id", "IDs & durations", "Track artist id"),
+    ("track_duration_seconds", "IDs & durations", "Track length in seconds"),
+    ("track_duration_minutes", "IDs & durations", "Track length as M:SS"),
+    ("album_duration_seconds", "IDs & durations", "Album length in seconds"),
+    ("album_duration_minutes", "IDs & durations", "Album length as M:SS"),
+]
+
+
+class _TemplateSampleSession:
+    """Just enough of a tidalapi session for offline model construction."""
+
+    request = None
+
+    def album(self):
+        return Album(self, None)
+
+    def artist(self):
+        return Artist(self, None)
+
+
+def _build_template_sample():
+    """A fully generic sample library for the path-template previews.
+
+    Nothing real and self-evidently placeholder, but every trait a template
+    can react to is exercised: 2 discs (so the optional disc tokens render),
+    explicit flags on, and zero-padding against 24 tracks. Works with no
+    login, no downloads and no library folder.
+    """
+    import datetime as _dt
+
+    s = _TemplateSampleSession()
+    art = Artist(s, None)
+    art.name = "Example Artist"
+    art.id = 12345
+    art.roles = [Role.main]
+
+    alb = Album(s, None)
+    alb.name = "Example Album"
+    alb.release_date = _dt.datetime(2024, 5, 17)
+    alb.num_tracks = 24
+    alb.num_volumes = 2
+    alb.duration = 5400
+    alb.explicit = True
+    alb.artists = [art]
+    alb.artist = art
+    alb.id = 12345678
+    alb.type = "ALBUM"
+
+    trk = Track(s, None)
+    trk.name = "Example Track"
+    trk.full_name = "Example Track"
+    trk.version = None
+    trk.track_num = 6
+    trk.volume_num = 2
+    trk.duration = 210
+    trk.explicit = True
+    trk.isrc = "USEXA2400001"
+    trk.media_metadata_tags = ["HIRES_LOSSLESS"]
+    trk.id = 123456789
+    trk.album = alb
+    trk.artists = [art]
+    trk.artist = art
+
+    pl = Playlist(s, None)
+    pl.name = "Example Playlist"
+    pl.id = "1a2b3c4d"
+
+    mx = Mix(s, None)
+    mx.title = "Example Mix"
+
+    vid = Video(s, None)
+    vid.name = "Example Video"
+    vid.full_name = "Example Video"
+    vid.version = None
+    vid.artists = [art]
+    vid.artist = art
+    vid.explicit = True
+    vid.video_quality = "MP4_1080P"
+    vid.duration = 240
+    vid.id = 87654321
+    vid.track_num = 1
+    vid.volume_num = 1
+    vid.album = alb
+
+    return trk, alb, pl, mx, vid
+
 
 # Human field titles, overriding the auto-prettified key (e.g. "Api rate limit
 # delay sec"). Anything not listed falls back to _pretty(key).
@@ -1117,6 +1239,24 @@ def _artists_list(obj) -> list[dict]:
     return out
 
 
+def _scrub_browse_payload(payload: dict) -> dict:
+    """Retroactively apply builder-side drops to a rehydrated Browse payload,
+    so a stale disk cache cannot resurrect a tile the builders no longer emit
+    (the TIDAL Magazine link). The live revalidate would replace it seconds
+    later anyway; this keeps even the first paint clean."""
+
+    def keep(link: dict) -> bool:
+        return "magazine" not in str(link.get("title", "")).lower()
+
+    for group in ("genres", "moods", "decades"):
+        if isinstance(payload.get(group), list):
+            payload[group] = [ln for ln in payload[group] if keep(ln)]
+    for row in payload.get("sections") or []:
+        if isinstance(row, dict) and row.get("rowKind") == "links" and isinstance(row.get("items"), list):
+            row["items"] = [ln for ln in row["items"] if keep(ln)]
+    return payload
+
+
 class WavesBridge(QObject):
     """The single object exposed to QML as the ``waves`` context property.
 
@@ -1353,7 +1493,10 @@ class WavesBridge(QObject):
         self._event_run.set()
         self._dl: Download | None = None
         # Temp .m4a of the current preview clip (deleted when the next resolves).
-        self._preview_tmp: str | None = None
+        # Produced preview clips by (track id, whole-track flag), oldest first.
+        # A track's audio never changes, so a clip is reusable until evicted;
+        # files are deleted on eviction and at shutdown.
+        self._preview_clips: dict[tuple[str, bool], str] = {}
         self._logged_in = False
         # False until the startup cached-token check concludes (either way).
         # The QML login overlay is gated on this so it doesn't flash over the
@@ -1396,8 +1539,15 @@ class WavesBridge(QObject):
         # Favourite album/track id sets for the library-scoped artist page, built
         # lazily and cleared on logout (Waves never mutates favourites itself, so
         # the only staleness is an external edit, tolerated like the page caches).
-        self._fav_ids: dict[str, set] = {}
+        self._fav_ids: dict[str, tuple[float, set]] = {}
         self._search_gen = 0  # bumped per search / open-link to drop stale results
+        # Recent search payloads by lowercased needle: an identical re-search
+        # within the (short) TTL paints instantly with no network. Short on
+        # purpose, search is the front door to anything newly released.
+        self._search_cache: dict[str, tuple[float, dict]] = {}
+        # Artist popularity by id (the meters on search cards). Popularity
+        # drifts over days, so a day-long TTL keeps an always-on app honest.
+        self._artist_pop_cache: dict[str, tuple[float, int]] = {}
         # Browse (TIDAL editorial pages): the landing payload plus every page
         # drilled into so far, cached for the session. `_browse_loading` de-dupes
         # in-flight loads (keys: "root" or the page's api path); `_browse_lock`
@@ -1415,6 +1565,22 @@ class WavesBridge(QObject):
         # (stale-while-revalidate) so a new release shows up on return.
         self._artist_cache: dict[str, dict] = {}
         self._artist_loading: set[str] = set()
+        # Album track lists by album id, cached for the session. A released
+        # album's track list is immutable, so cached lists are served outright
+        # with no revalidation; the QML-side trackCache resets on every new
+        # search and category switch, this one keeps re-expansions free.
+        self._album_tracks_cache: dict[str, list] = {}
+        # The My Tidal "Home" landing, stale-while-revalidate like the artist
+        # pages and persisted to the disk snapshot for an instant first paint.
+        self._home_cache: list | None = None
+        self._home_loading = False
+        self._home_reval_ts = 0.0  # monotonic time of the last completed Home fetch
+        self._lib_reval_ts: dict[str, float] = {}  # per-category, quiet revisits only
+        # One full user_media_lists sweep (every playlist, root folder and
+        # mix). The playlists/mixes categories page and sort locally, so the
+        # sweep is fetched once and reused; see _media_lists for freshness.
+        self._media_lists_cache: tuple[float, dict] | None = None
+        self._media_lists_lock = Lock()
         # Disk snapshot of the page caches (browse / artist / library first
         # pages) so the next launch starts warm instead of spinner-first. The
         # file is account-tagged and deleted on logout, browse embeds
@@ -1539,6 +1705,10 @@ class WavesBridge(QObject):
     def _get_status(self) -> str:
         return self._status
 
+    def _get_app_version(self) -> str:
+        return _WAVES_VERSION
+
+    appVersion = Property(str, _get_app_version, constant=True)
     loggedIn = Property(bool, _get_logged_in, notify=loggedInChanged)
     sessionResolved = Property(bool, _get_session_resolved, notify=sessionResolvedChanged)
     busy = Property(bool, _get_busy, notify=busyChanged)
@@ -1905,6 +2075,14 @@ class WavesBridge(QObject):
         self._browse_gen += 1
         self._artist_cache.clear()
         self._artist_loading.clear()
+        self._album_tracks_cache.clear()
+        self._home_cache = None
+        self._home_loading = False
+        self._home_reval_ts = 0.0
+        self._lib_reval_ts.clear()
+        self._media_lists_cache = None
+        self._search_cache.clear()
+        self._artist_pop_cache.clear()
         # The disk snapshot holds the old account's personalized pages, drop it.
         with contextlib.suppress(OSError):
             os.remove(self._page_cache_path)
@@ -1951,6 +2129,7 @@ class WavesBridge(QObject):
             "browse_pages": self._browse_pages,
             "artists": self._artist_cache,
             "library": lib,
+            "home": self._home_cache,
         }
         try:
             with self._page_cache_lock:
@@ -1982,7 +2161,7 @@ class WavesBridge(QObject):
             return
         # Populate only what's still empty, never clobber fresher live data.
         if self._browse_root_cache is None and isinstance(data.get("browse_root"), dict):
-            self._browse_root_cache = data["browse_root"]
+            self._browse_root_cache = _scrub_browse_payload(data["browse_root"])
         for key, page in (data.get("browse_pages") or {}).items():
             if isinstance(page, dict):
                 self._browse_pages.setdefault(str(key), page)
@@ -1992,12 +2171,22 @@ class WavesBridge(QObject):
         for cat, entry in (data.get("library") or {}).items():
             if isinstance(entry, dict) and isinstance(entry.get("items"), list):
                 self._lib_cache.setdefault(str(cat), entry)
+        if self._home_cache is None and isinstance(data.get("home"), list) and data["home"]:
+            self._home_cache = data["home"]
         devlog.event("cache", "page cache restored", pages=len(self._browse_pages), artists=len(self._artist_cache))
 
     def _remember_artist_page(self, artist_id: str, payload: dict) -> None:
         d = self._artist_cache
         d[artist_id] = payload
         while len(d) > self._ARTIST_CACHE_MAX:
+            del d[next(iter(d))]  # evict oldest insert
+
+    _ALBUM_TRACKS_CACHE_MAX = 200  # small row dicts, a few hundred KB worst case
+
+    def _remember_album_tracks(self, album_id: str, rows: list) -> None:
+        d = self._album_tracks_cache
+        d[album_id] = rows
+        while len(d) > self._ALBUM_TRACKS_CACHE_MAX:
             del d[next(iter(d))]  # evict oldest insert
 
     # ----- search --------------------------------------------------------
@@ -2070,6 +2259,23 @@ class WavesBridge(QObject):
         # newer one's results (or re-fire its busy/status) once it finally returns.
         self._search_gen += 1
         gen = self._search_gen
+        cache_key = needle.lower()
+        hit = self._search_cache.get(cache_key)
+        if hit is not None and time.monotonic() - hit[0] < self._SEARCH_TTL:
+            # An identical recent search: repaint from the cached payload, no
+            # network. The live objects behind the rows may have been dropped
+            # meanwhile; the download/open slots re-resolve by id on a miss.
+            payload = hit[1]
+            self.searchResults.emit(payload)
+            total = sum(len(v) for v in payload.values())
+            self._set_status(f"{total} results")
+            self._set_busy(False)
+            devlog.event("search", "served from cache", n=total)
+            for card in payload["artists"]:
+                pop = self._pop_cached(card["id"])
+                if pop >= 0:
+                    self.artistMetaLoaded.emit(card["id"], pop)
+            return
         devlog.event("search", f"begin needle={needle}")
         self._set_busy(True)
         self._set_status(f"Searching “{needle}”…")
@@ -2113,17 +2319,18 @@ class WavesBridge(QObject):
 
             if gen != self._search_gen:
                 return  # superseded while building the payload
-            self.searchResults.emit(
-                {
-                    "artists": artists,
-                    "albums": albums,
-                    "tracks": tracks,
-                    "videos": videos,
-                    "playlists": playlists,
-                    "mixes": mixes,
-                }
-            )
+            payload = {
+                "artists": artists,
+                "albums": albums,
+                "tracks": tracks,
+                "videos": videos,
+                "playlists": playlists,
+                "mixes": mixes,
+            }
+            self.searchResults.emit(payload)
             total = len(artists) + len(albums) + len(tracks) + len(videos) + len(playlists) + len(mixes)
+            if total:  # an all-empty payload is more likely a failed fetch
+                self._remember_search(cache_key, payload)
             self._set_status(f"{total} results")
             self._set_busy(False)
             elapsed = devlog.clock() - t0
@@ -2146,18 +2353,52 @@ class WavesBridge(QObject):
             # round-trip at a time. Emits are thread-safe (queued to the GUI).
             def _enrich(item) -> None:
                 key, artist = item
-                pop = _artist_popularity(artist)
+                pop = self._pop_cached(key)  # memoized: one request per artist per day
+                if pop < 0:
+                    pop = _artist_popularity(artist)
+                    if pop >= 0:
+                        self._artist_pop_cache[key] = (time.monotonic(), pop)
                 if pop >= 0 and gen == self._search_gen:
                     self.artistMetaLoaded.emit(key, pop)
 
             if artist_objs and gen == self._search_gen:
                 with ThreadPoolExecutor(max_workers=min(6, len(artist_objs))) as pool:
                     list(pool.map(_enrich, artist_objs))
+                while len(self._artist_pop_cache) > self._ARTIST_POP_MAX:
+                    del self._artist_pop_cache[next(iter(self._artist_pop_cache))]
 
         self.threadpool.start(Worker(work))
 
+    # Search results are re-servable for a short window (the front door to
+    # anything new stays fresh); popularity drifts over days, so its memo can
+    # live a day, even in an app that never restarts.
+    _SEARCH_TTL = 90.0
+    _SEARCH_CACHE_MAX = 20
+    _ARTIST_POP_TTL = 24 * 3600.0
+    _ARTIST_POP_MAX = 500
+
+    def _remember_search(self, key: str, payload: dict) -> None:
+        d = self._search_cache
+        d[key] = (time.monotonic(), payload)
+        while len(d) > self._SEARCH_CACHE_MAX:
+            del d[next(iter(d))]  # evict oldest insert
+
+    def _pop_cached(self, artist_id: str) -> int:
+        """Memoized artist popularity, -1 when absent or expired."""
+        entry = self._artist_pop_cache.get(artist_id)
+        if entry is not None and time.monotonic() - entry[0] < self._ARTIST_POP_TTL:
+            return entry[1]
+        return -1
+
     @Slot(str)
     def loadAlbumTracks(self, album_id: str) -> None:
+        cached = self._album_tracks_cache.get(album_id)
+        if cached is not None:
+            # A released album's track list is immutable: serve the session
+            # cache outright, no network round-trip per re-expansion.
+            devlog.event("album", f"tracks id={album_id} from cache", n=len(cached))
+            self.albumTracksLoaded.emit(album_id, cached)
+            return
         album = self._objs["album"].get(album_id)
         if album is None:
             return
@@ -2188,6 +2429,8 @@ class WavesBridge(QObject):
                 self.collectionMembershipChanged.emit(album_id)
             except Exception:
                 logger.debug("Could not record collection membership", exc_info=True)
+            if out:  # never cache an empty list, it is more likely a fetch failure
+                self._remember_album_tracks(album_id, out)
             self.albumTracksLoaded.emit(album_id, out)
             devlog.done("album", f"tracks id={album_id}", devlog.clock() - t0, n=len(out))
 
@@ -2288,13 +2531,17 @@ class WavesBridge(QObject):
 
         self.threadpool.start(Worker(work))
 
+    # Favourites move only when the user acts; 10 minutes keeps an always-on
+    # app in step without re-paginating the library per artist-page open.
+    _FAV_IDS_TTL = 600.0
+
     def _favorite_ids(self, kind: str) -> set:
         """The user's favourite album or track ids (``kind`` = "albums"|"tracks"),
-        paginated once and cached for the session. Used to scope an artist page
-        to the user's library; cleared on logout."""
-        cached = self._fav_ids.get(kind)
-        if cached is not None:
-            return cached
+        paginated and cached behind a short TTL (a long-running app must pick
+        up favourites added elsewhere without a restart); cleared on logout."""
+        entry = self._fav_ids.get(kind)
+        if entry is not None and time.monotonic() - entry[0] < self._FAV_IDS_TTL:
+            return entry[1]
         ids: set[str] = set()
         try:
             favorites = self.tidal.session.user.favorites
@@ -2314,7 +2561,9 @@ class WavesBridge(QObject):
                 offset += _LIBRARY_PAGE
         except Exception:
             logger.exception("Could not load favourite %s ids", kind)
-        self._fav_ids[kind] = ids
+            if entry is not None:
+                return entry[1]  # a refresh blip serves the stale set, not an empty one
+        self._fav_ids[kind] = (time.monotonic(), ids)
         return ids
 
     @Slot(str)
@@ -2425,6 +2674,29 @@ class WavesBridge(QObject):
             return sorted(items, key=_date_added, reverse=rev)
         return items
 
+    # One sweep is every playlist page, every root folder and every mix, several
+    # round-trips; refreshing it more than once a minute buys nothing.
+    _MEDIA_LISTS_TTL = 60.0
+
+    def _media_lists(self, refresh: bool) -> dict:
+        """Session copy of the full playlists/folders/mixes listing.
+
+        The playlists and mixes categories are paged and sorted locally (see
+        :meth:`_library_page`), yet each page used to re-fetch the entire
+        listing just to slice one window from it. Now only first-page loads
+        (``refresh=True``, the tab's usual stale-while-revalidate entry) re-run
+        the sweep, and even those reuse a copy younger than
+        ``_MEDIA_LISTS_TTL``; scroll pages and re-sorts always work against
+        the copy in hand."""
+        with self._media_lists_lock:
+            entry = self._media_lists_cache
+        if entry is not None and (not refresh or time.monotonic() - entry[0] < self._MEDIA_LISTS_TTL):
+            return entry[1]
+        fresh = user_media_lists(self.tidal.session)
+        with self._media_lists_lock:
+            self._media_lists_cache = (time.monotonic(), fresh)
+        return fresh
+
     def _library_page(self, category: str, offset: int, limit: int, order_override=None) -> tuple[list, bool]:
         """Build one page of a library category for the API window
         ``[offset, offset+limit)``. Returns the rows and whether more items
@@ -2436,7 +2708,8 @@ class WavesBridge(QObject):
         - A ``limit``-N request can return *fewer* than N rows because tidalapi
           drops unavailable items within the window, so "more" must be derived
           from the total ``get_*_count``, not the returned length.
-        Playlists and mixes come back as one (small) list, paged locally."""
+        Playlists and mixes come back as one list, paged and sorted locally
+        against the cached sweep (see :meth:`_media_lists`)."""
         session = self.tidal.session
         # order_override lets a caller force a specific order (e.g. Home's date-desc
         # previews) without touching the category's own persistent sort. Otherwise
@@ -2450,11 +2723,12 @@ class WavesBridge(QObject):
         if order_spec is None:
             order_spec = ("date", "desc")
         if category in ("playlists", "mixes"):
+            lists = self._media_lists(refresh=offset == 0)
             if category == "playlists":
-                full = [p for p in user_media_lists(session).get("playlists", []) if hasattr(p, "num_tracks")]
+                full = [p for p in lists.get("playlists", []) if hasattr(p, "num_tracks")]
                 builder = self._playlist_dict
             else:
-                full = user_media_lists(session).get("mixes", [])
+                full = lists.get("mixes", [])
                 builder = self._mix_dict
             # Paged locally, so sort the whole list here before slicing.
             full = self._sort_local_library(full, order_spec)
@@ -2493,10 +2767,16 @@ class WavesBridge(QObject):
         return f"{count}{'+' if more else ''} {category}"
 
     @Slot(str)
-    def loadLibrary(self, category: str) -> None:
+    @Slot(str, bool)
+    def loadLibrary(self, category: str, quiet: bool = False) -> None:
         """Load the first page of a library category (or restore everything
         already loaded this session from cache). Subsequent pages come from
-        :meth:`loadMoreLibrary` as the user scrolls."""
+        :meth:`loadMoreLibrary` as the user scrolls.
+
+        ``quiet`` marks a revisit whose rows are already on screen (reopening
+        the My Tidal tab): the cached emit is skipped so the list keeps its
+        scroll and rows untouched, and only the background revalidation runs,
+        throttled, repainting solely when something actually changed."""
         if not self._logged_in:
             self._set_status("Sign in to view your library")
             return
@@ -2509,15 +2789,18 @@ class WavesBridge(QObject):
 
         cached = self._lib_cache.get(category)
         if cached is not None:
-            self._set_busy(False)
-            devlog.event("library", f"{category} from cache", n=len(cached["items"]))
-            self.libraryLoaded.emit(category, cached["items"], cached["more"])
-            self._set_status(self._lib_status(category, len(cached["items"]), cached["more"]))
+            if not quiet:
+                self._set_busy(False)
+                devlog.event("library", f"{category} from cache", n=len(cached["items"]))
+                self.libraryLoaded.emit(category, cached["items"], cached["more"])
+                self._set_status(self._lib_status(category, len(cached["items"]), cached["more"]))
             # Stale-while-revalidate, but only while the user is still on the
             # first page: re-emitting a fresh first page after infinite scroll
             # has appended more would truncate the list out from under them.
             if cached["offset"] != _LIBRARY_PAGE or category in self._lib_loading:
                 return
+            if quiet and time.monotonic() - self._lib_reval_ts.get(category, 0.0) < 60.0:
+                return  # revalidated moments ago; don't re-fetch per tab flip
             revalidate = True
         else:
             revalidate = False
@@ -2541,6 +2824,7 @@ class WavesBridge(QObject):
             # unfiltered-indexed, see _library_page).
             if revalidate:
                 self._lib_loading.discard(category)
+                self._lib_reval_ts[category] = time.monotonic()
                 entry = self._lib_cache.get(category)
                 if (
                     gen == self._lib_gen
@@ -2661,7 +2945,8 @@ class WavesBridge(QObject):
         self.threadpool.start(Worker(work))
 
     @Slot()
-    def loadHome(self) -> None:
+    @Slot(bool)
+    def loadHome(self, have_cached: bool = False) -> None:
         """Build the 'Home' tab: a Browse-style landing scoped to the account.
         Shelves are shaped like the Browse sections ({rowKind, title, items}),
         each with a ``target`` naming the My Tidal category it previews:
@@ -2671,10 +2956,27 @@ class WavesBridge(QObject):
         identically-sorted (newest-first) list in that category's own tab. No
         playlist/mix or artist shelf: those either lack a reliable added date or
         just echo the album a follow came from. Emitted via homeLoaded; empty
-        list when signed out."""
+        list when signed out.
+
+        Stale-while-revalidate like the artist pages: the cached landing
+        (session or restored from disk) is emitted immediately so the tab
+        paints instantly on launch, then the shelves are rebuilt in the
+        background and re-emitted only if the favourites actually changed.
+        ``have_cached`` marks a revisit whose shelves are already on screen:
+        the cached emit is skipped (no pointless repaint) and only the quiet,
+        throttled revalidation runs, so an app left running for weeks still
+        picks up new favourites without a restart."""
         if not self._logged_in:
             self.homeLoaded.emit([])
             return
+        cached = self._home_cache
+        if cached and not have_cached:
+            self.homeLoaded.emit(cached)
+        if self._home_loading:
+            return
+        if cached and time.monotonic() - self._home_reval_ts < 60.0:
+            return  # revalidated moments ago; don't re-fetch per tab flip
+        self._home_loading = True
         gen = self._browse_gen  # account generation, bumped on logout
 
         def tagged(rows: list, kind: str) -> list:
@@ -2703,7 +3005,19 @@ class WavesBridge(QObject):
             if tracks:
                 sections.append({"rowKind": "tracks", "title": "Recent tracks", "target": "tracks", "items": tracks})
 
-            if gen == self._browse_gen:
+            self._home_loading = False
+            self._home_reval_ts = time.monotonic()
+            if gen != self._browse_gen:
+                return  # logged out mid-fetch, see loadBrowse's work()
+            # An all-empty landing is more likely a transient fetch failure than
+            # a truly empty library: show it on a first load (the QML keeps its
+            # placeholder up for an empty emit) but never cache it or overwrite
+            # good shelves with it.
+            if sections and sections != cached:
+                self._home_cache = sections
+                self._save_page_cache()
+                self.homeLoaded.emit(sections)
+            elif not cached:
                 self.homeLoaded.emit(sections)
             devlog.done("library", "home", devlog.clock() - t0, n=len(sections))
 
@@ -2749,10 +3063,14 @@ class WavesBridge(QObject):
                 if "magazine" in str(getattr(cat, "title", "") or "").lower():
                     continue
                 if isinstance(cat, tidal_page.PageLinks):
+                    # The same Magazine rule applies per link: it also appears
+                    # as a single tile inside rows like Moods & Activities.
                     links = [
                         {"title": str(link.title or ""), "path": str(link.api_path or "")}
                         for link in cat.items or []
-                        if getattr(link, "api_path", None) and str(link.title or "").strip()
+                        if getattr(link, "api_path", None)
+                        and str(link.title or "").strip()
+                        and "magazine" not in str(link.title or "").lower()
                     ]
                     if links:
                         rows.append({"rowKind": "links", "title": str(cat.title or ""), "items": links})
@@ -2845,10 +3163,14 @@ class WavesBridge(QObject):
             if not isinstance(cat, tidal_page.PageLinks):
                 continue
             title = str(getattr(cat, "title", "") or "").strip().lower()
+            # Same Magazine rule as _page_rows: editorial articles, drills
+            # into a blank page, so it never becomes a chip or tile.
             links = [
                 {"title": str(link.title or ""), "path": str(link.api_path or "")}
                 for link in cat.items or []
-                if getattr(link, "api_path", None) and str(link.title or "").strip()
+                if getattr(link, "api_path", None)
+                and str(link.title or "").strip()
+                and "magazine" not in str(link.title or "").lower()
             ]
             if title == "genres":
                 chips["genres"] = links
@@ -4636,6 +4958,14 @@ class WavesBridge(QObject):
         or subsequent download is never silently downgraded. The slower ffmpeg
         fetch/remux runs *outside* the lock.
         """
+        clip_key = (str(getattr(track, "id", "") or ""), whole)
+        clip = self._preview_clips.get(clip_key)
+        if clip and os.path.exists(clip):
+            # The audio content of a track never changes: replaying a recent
+            # preview reuses its clip outright, no stream resolve, no remux.
+            self._preview_clips[clip_key] = self._preview_clips.pop(clip_key)  # LRU bump
+            devlog.event("preview", "clip reused")
+            return pathlib.Path(clip).as_uri()
         ffmpeg = self._preview_ffmpeg_bin()
         if not ffmpeg:
             raise RuntimeError("preview: ffmpeg unavailable")  # noqa: TRY003
@@ -4658,7 +4988,19 @@ class WavesBridge(QObject):
                 # Canonical resting quality, NOT restore_normal_session(), which
                 # leaves quality untouched in normal mode (config.py).
                 self.tidal.session.audio_quality = Quality(self.settings.data.quality_audio)
-        return self._remux_preview(ffmpeg, src, hls, whole)
+        out_path = self._remux_preview(ffmpeg, src, hls, whole)
+        self._remember_preview_clip(clip_key, out_path)
+        return pathlib.Path(out_path).as_uri()
+
+    _PREVIEW_CLIPS_MAX = 8  # a few MB each at LOW/AAC; evicted files are deleted
+
+    def _remember_preview_clip(self, key: tuple[str, bool], path: str) -> None:
+        d = self._preview_clips
+        d[key] = path
+        while len(d) > self._PREVIEW_CLIPS_MAX:
+            old = d.pop(next(iter(d)))  # evict least recently used
+            with contextlib.suppress(OSError):
+                os.remove(old)
 
     def _preview_ffmpeg_bin(self) -> str | None:
         """Path to an ffmpeg binary for the preview remux (managed → PATH)."""
@@ -4666,17 +5008,13 @@ class WavesBridge(QObject):
         return self.settings.data.path_binary_ffmpeg or shutil.which("ffmpeg")
 
     def _remux_preview(self, ffmpeg: str, src_url: str | None, hls: str | None, whole: bool) -> str:
-        """Fetch + remux a preview into a faststart local ``.m4a``; return file URL.
+        """Fetch + remux a preview into a faststart local ``.m4a``; return its path.
 
-        Exactly one preview plays at a time, so the previous clip is deleted when
-        a new one is produced. ``-c copy`` keeps it fast (no re-encode); the HLS
-        input needs the protocol whitelist so ffmpeg may open the https segments.
+        The produced clip is kept (see ``_remember_preview_clip``) so replaying
+        a recent preview is free. ``-c copy`` keeps it fast (no re-encode); the
+        HLS input needs the protocol whitelist so ffmpeg may open the https
+        segments.
         """
-        prev = self._preview_tmp
-        if prev:
-            with contextlib.suppress(OSError):
-                os.remove(prev)
-            self._preview_tmp = None
         m3u_path = None
         if hls is not None:
             fd, m3u_path = tempfile.mkstemp(prefix="waves_preview_", suffix=".m3u8")
@@ -4700,8 +5038,7 @@ class WavesBridge(QObject):
             if m3u_path is not None:
                 with contextlib.suppress(OSError):
                     os.remove(m3u_path)
-        self._preview_tmp = out_path
-        return pathlib.Path(out_path).as_uri()
+        return out_path
 
     def _probe_video_mbps(self, seg_url: str) -> float:
         """Measure downstream throughput by timing ~1.5 MB of a real stream
@@ -4739,10 +5076,8 @@ class WavesBridge(QObject):
         own default selection). The persisted setting is never lowered here:
         a video that lacks the preferred quality plays the next one down,
         the next video tries the preference again."""
-        import m3u8
-
         try:
-            master = m3u8.load(master_url)
+            master = self._load_playlist(master_url)
             if not master.is_variant:
                 return master_url, 0, []
             cands = sorted(
@@ -4764,17 +5099,38 @@ class WavesBridge(QObject):
             under = [c for c in cands if c[0] <= cap]
             height, url = under[-1] if under else cands[0]
             heights = sorted({c[0] for c in cands}, reverse=True)
-        except Exception:
-            logger.debug("video variant selection failed; using master playlist", exc_info=True)
+        except Exception as exc:
+            # Loud on purpose: this fallback means the quality menu goes dead
+            # (res 0 shows AUTO, picks re-resolve into the same fallback) and
+            # Qt plays whichever variant its ffmpeg backend prefers. It hid at
+            # DEBUG for months while packaged builds failed on every video.
+            logger.warning("video variant selection failed (%s); using master playlist", type(exc).__name__)
+            logger.debug("video variant selection failure detail", exc_info=True)
             return master_url, 0, []
         return url, height, heights
 
     @staticmethod
-    def _first_segment_url(playlist_url: str) -> str:
-        """First media-segment URI of a variant playlist (for the probe)."""
+    def _load_playlist(url: str):
+        """Fetch + parse an HLS playlist over the pooled requests session.
+
+        Never m3u8.load(): its urllib fetch verifies TLS against the
+        interpreter's compiled-in OpenSSL default paths, which exist on this
+        dev machine (Homebrew's cert.pem) but not inside a packaged build on
+        an end-user system (no Homebrew on other Macs, no /etc/ssl on
+        Windows), so every load raised SSLCertVerificationError and video
+        playback silently fell back to the master playlist. requests+certifi
+        carries its own CA bundle everywhere, and the pooled session skips
+        the per-call TLS handshake.
+        """
         import m3u8
 
-        pl = m3u8.load(playlist_url)
+        with _probe_http().get(url, timeout=10) as r:
+            r.raise_for_status()
+            return m3u8.loads(r.text, uri=url)
+
+    def _first_segment_url(self, playlist_url: str) -> str:
+        """First media-segment URI of a variant playlist (for the probe)."""
+        pl = self._load_playlist(playlist_url)
         if not pl.segments:
             raise RuntimeError("probe: empty media playlist")  # noqa: TRY003
         return str(pl.segments[0].absolute_uri)
@@ -5375,6 +5731,12 @@ class WavesBridge(QObject):
             self._ownership.close()
         except Exception:
             logger.debug("shutdown: ownership store close failed", exc_info=True)
+        # The kept preview clips are session files; sweep them on the way out
+        # (the pools are drained above, so no remux is still writing one).
+        for path in self._preview_clips.values():
+            with contextlib.suppress(OSError):
+                os.remove(path)
+        self._preview_clips.clear()
 
     # ----- in-app FFmpeg manager ----------------------------------------- #
     def _restore_ffmpeg_flags(self) -> None:
@@ -6107,6 +6469,77 @@ class WavesBridge(QObject):
         for sec in sections:
             sec["fields"] = [get_field(k) for k in sec["fields"]]
         return sections
+
+    # ---- Path-template preview + token reference -------------------------
+
+    def _template_sample(self):
+        smp = getattr(self, "_tpl_sample", None)
+        if smp is None:
+            smp = _build_template_sample()
+            self._tpl_sample = smp
+        return smp
+
+    @Slot(str, str, result=str)
+    def previewPathTemplate(self, kind: str, template: str) -> str:
+        """Resolve a path template against the canned sample library, exactly
+        the way download.py would name a real file.
+
+        ``kind`` is the template family ("track", "album", "playlist", "mix",
+        "video"). Collection kinds resolve in the same two passes as
+        ``_setup_collection_download_context``: the collection object first
+        (playlist/mix/album tokens), then the sample track for the rest.
+        """
+        trk, alb, pl, mx, vid = self._template_sample()
+        d = self.settings.data
+        kw = {
+            "delimiter_artist": d.filename_delimiter_artist,
+            "delimiter_album_artist": d.filename_delimiter_album_artist,
+            "use_primary_album_artist": bool(d.use_primary_album_artist),
+        }
+        pad = int(d.album_track_num_pad_min)
+        try:
+            if kind == "track":
+                out = format_path_media(template, trk, pad, **kw) + ".flac"
+            elif kind == "album":
+                out = format_path_media(format_path_media(template, alb, **kw), trk, pad, **kw) + ".flac"
+            elif kind == "playlist":
+                out = format_path_media(format_path_media(template, pl, **kw), trk, pad, 4, 23, **kw) + ".flac"
+            elif kind == "mix":
+                out = format_path_media(format_path_media(template, mx, **kw), trk, pad, 4, 23, **kw) + ".flac"
+            elif kind == "video":
+                out = format_path_media(template, vid, **kw) + ".mp4"
+            else:
+                out = ""
+        except Exception:
+            # A template mid-edit can be transiently unformattable; a blank
+            # preview reads better than an error.
+            return ""
+        return out
+
+    @Slot(result="QVariant")
+    def pathTemplateTokens(self) -> list:
+        """The full template-token reference, grouped, each with a sample
+        value produced by the real formatter against the sample library."""
+        cached = getattr(self, "_tpl_tokens_cache", None)
+        if cached is not None:
+            return cached
+        trk, alb, pl, mx, vid = self._template_sample()
+        groups: dict = {g: [] for g in _TEMPLATE_TOKEN_GROUPS}
+        for tok, group, desc in _TEMPLATE_TOKENS:
+            sample = None
+            for media, lp, lt in ((trk, 4, 23), (alb, 0, 0), (pl, 0, 0), (mx, 0, 0), (vid, 0, 0)):
+                value = format_str_media(tok, media, 1, lp, lt)
+                if value != tok:
+                    sample = value
+                    break
+            # An empty resolve is meaningful (a conditional token that shows
+            # nothing here); label the state instead of a blank cell.
+            groups[group].append(
+                {"token": "{" + tok + "}", "sample": sample if sample else "(empty here)", "desc": desc}
+            )
+        result = [{"group": g, "tokens": groups[g]} for g in _TEMPLATE_TOKEN_GROUPS]
+        self._tpl_tokens_cache = result
+        return result
 
     @Slot("QVariant")
     def applySettings(self, values) -> None:
