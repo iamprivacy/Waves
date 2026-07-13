@@ -94,7 +94,7 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - **Defense‑in‑depth by default**: helper binaries are verified before they run, FFmpeg against a published SHA‑256 and app updates against an Ed25519 signature that fails closed. Extra defensive input validation is layered in as general hygiene.
 - **Privacy‑guarded diagnostics** (opt‑in): a local activity log that scrubs identity information at the moment each line is written, not afterward, so an exported bug report is safe to post publicly. See [Diagnostics](#diagnostics) below.
 - **Silent background work on Windows**: every FFmpeg job (FLAC extraction, video conversion, previews) runs fully hidden. No more split‑second console pop‑ups stealing focus while you type, a long‑standing annoyance during downloads in the upstream app.
-- **Thoughtful touches**: smooth animations throughout, paste‑to‑open for TIDAL links, and metadata fixing for Plex users.
+- **Thoughtful touches**: a cinematic open‑water launch sequence (version readout included), smooth animations throughout, rows that fade and subtly tilt out of frame as you scroll, a floating back‑to‑top pill on every page, expanding an album scrolls its tracks into view, paste‑to‑open for TIDAL links, and metadata fixing for Plex users.
 
 ---
 

@@ -10,6 +10,76 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 🌊 v0.1.8 (2026-07-13)
+
+### ✨ Added
+
+- 🌊 Waves now makes a splash on open (pun intended): a new launch
+  sequence that also shows the version you are running.
+- 📁 Path templates now show a live example: each "path & name" field in
+  Settings → File organization displays the exact folders and file name a
+  download would get, updating as you type. The example uses a built-in
+  generic sample (Example Artist / Example Album), so it works before
+  anything is downloaded; unknown `{tokens}` are highlighted so typos jump
+  out.
+- 🏷️ New "Want to know more about these paths and tags?" reference under
+  Settings → File organization, below the path & name fields: every
+  available `{token}`, grouped by category, with a short description, an
+  example value, and a one-click copy button.
+
+### 🔧 Changed
+
+- 📜 Expanding an album now gently scrolls it up toward the top of the
+  window, so the track list it reveals is on screen instead of below the
+  fold. Rows already near the top stay where they are.
+- ⬆️ A subtle TOP pill rides the top of any page you scroll down; one
+  click glides you back to the top.
+- 🎞️ Pages now scroll with more depth: rows fade in and out of frame at
+  the top and bottom edges, with a subtle rolodex tilt as they cross,
+  instead of being cut off hard at the chrome edge.
+- 🗂️ The My Tidal tab now reopens in the category you left, exactly as you
+  left it; pressing it again returns to Home (like Browse's second press).
+
+### 🐛 Fixed
+
+- 📰 The TIDAL Magazine tile no longer appears in Browse rows like Moods &
+  Activities: it is editorial articles, so opening it always showed an empty
+  page.
+- ⚡ Expanding an album's track list is instant after the first time: track
+  lists are now remembered for the session instead of re-fetched each time.
+- 🏠 My Tidal opens instantly after launch: the Home shelves are remembered
+  from your last session and shown immediately, then quietly refreshed in
+  the background.
+- 🌱 Home and the library lists stay current while the app runs: new
+  favourites show up on their own, no restart needed.
+- 📜 Scrolling or re-sorting the Playlists and Mixes tabs no longer
+  re-downloads your entire collection for every page, so large collections
+  stay snappy.
+- 🔍 Search results no longer freeze the app while they appear: the cards
+  are built in the background and the finished page appears all at once,
+  same look as before.
+- 🔁 Repeating a recent search shows its results instantly, popularity
+  meters included.
+- ▶️ Replaying a recent track or artist preview starts instantly instead of
+  rebuilding the clip each time.
+- 🎯 Going Back to an artist page now lands exactly where you left it:
+  scroll position, expanded albums, expanded bio and top-tracks all come
+  back, with no visible jump. Opening a different artist also starts at the
+  top of the page instead of inheriting the previous page's scroll offset.
+- 🏄 Switching to the Browse tab no longer stutters: the shelves are built
+  in the background and the finished page appears all at once, same look as
+  before.
+- ⚡ Returning to Browse (and the My Tidal home) is instant: the cards stay
+  alive while the tab is hidden, so switching back just shows them.
+- 🖱️ Top-bar tabs (Browse, Search, My Tidal, Settings) now respond the
+  instant you click: the tube starts expanding on the click itself with the
+  static riding on top, and the outgoing tab collapses in half the time.
+  Same look, no dead time.
+- 📺 Video playback in installed builds now really selects a resolution:
+  videos start at the best your connection and Video-quality setting allow,
+  the quality menu works, and seeking jumps straight to the chosen spot.
+  Video downloads get the same fix.
+
 ## 📦 v0.1.7 (2026-07-12)
 
 ### ✨ Added
