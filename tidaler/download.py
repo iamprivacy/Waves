@@ -102,7 +102,11 @@ class RequestsClient:
         if not headers:
             headers = {}
 
-        o = requests.get(uri, timeout=timeout, headers=headers)
+        # The shared certifi-backed session, never a bare requests.get (cold
+        # SSLContext per call) and never m3u8's DefaultHTTPClient (urllib
+        # trusts the interpreter's compiled-in OpenSSL paths, which do not
+        # exist inside a packaged build, so every fetch fails TLS verify).
+        o = Download._shared_http().get(uri, timeout=timeout, headers=headers)
         o.raise_for_status()
 
         return o.text, o.url
@@ -308,7 +312,7 @@ class Download:
             return stream_manifest.get_urls()
         elif isinstance(media, Video):
             quality_video = self.settings.data.quality_video
-            m3u8_variant: m3u8.M3U8 = m3u8.load(media.get_url())
+            m3u8_variant: m3u8.M3U8 = m3u8.load(media.get_url(), http_client=RequestsClient())
             # Find the desired video resolution or the next best one.
             m3u8_playlist, _ = self._extract_video_stream(m3u8_variant, int(quality_video))
 
@@ -2337,7 +2341,7 @@ class Download:
             for playlist in m3u8_variant.playlists:
                 if resolution_best < playlist.stream_info.resolution[1]:
                     resolution_best = playlist.stream_info.resolution[1]
-                    m3u8_playlist = m3u8.load(playlist.uri)
+                    m3u8_playlist = m3u8.load(playlist.uri, http_client=RequestsClient())
                     mime_type = playlist.stream_info.codecs
 
                     if quality == playlist.stream_info.resolution[1]:
