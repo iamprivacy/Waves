@@ -448,6 +448,44 @@ Item {
         }
     }
 
+    // Clipboard write helper (copy only, never read): a hidden TextEdit is the
+    // pure-QML way to reach the system clipboard. Used by the template-token
+    // reference table's per-row copy buttons.
+    TextEdit { id: copyBuf; visible: false }
+    function copyText(t) { copyBuf.text = t; copyBuf.selectAll(); copyBuf.copy() }
+
+    // Live example line under a path-template field: folder › folder › file,
+    // resolved by the backend against a canned generic sample library through
+    // the app's REAL path formatter, so the preview is byte-for-byte what a
+    // download would be named. Folders render dim, the file name brighter,
+    // and any unresolved {token} goes gold so typos jump out while typing.
+    component PathPreviewLine: Flow {
+        id: pv
+        property string path: ""
+        spacing: 5
+        Text { text: "↳"; color: page.accentDim; font.family: page.mono; font.pixelSize: 11; textFormat: Text.PlainText }
+        Repeater {
+            model: pv.path.split("/")
+            delegate: Row {
+                required property string modelData
+                required property int index
+                spacing: 5
+                Text {
+                    text: modelData
+                    textFormat: Text.PlainText
+                    color: modelData.indexOf("{") >= 0 ? page.gold
+                         : index === pv.path.split("/").length - 1 ? page.textLo : page.textDim
+                    font.family: page.mono; font.pixelSize: 11
+                }
+                Text {
+                    visible: index < pv.path.split("/").length - 1
+                    text: "›"
+                    color: page.accentDim; font.family: page.mono; font.pixelSize: 11
+                }
+            }
+        }
+    }
+
     // The expand/collapse indicator lives in its own file (ExpandChevron.qml)
     // so it can be reused across the app, settings sections, the download
     // queue, album blocks, etc.
@@ -1357,10 +1395,15 @@ Item {
                                 sourceComponent: diagCardComp
                             }
 
-                            // Value-bearing settings (str / enum / int / float) as labelled rows
-                            Repeater {
-                                model: page.rowFields(card.modelData.fields)
-                                delegate: Rectangle {
+                            // Value-bearing settings (str / enum / int / float) as
+                            // labelled rows. One shared delegate feeds two Repeaters:
+                            // the File organization card renders its path-template
+                            // rows first, the token reference right under them, then
+                            // its remaining value rows; every other card renders all
+                            // of its rows in the first Repeater.
+                            Component {
+                                id: rowFieldComp
+                                Rectangle {
                                     required property var modelData
                                     visible: page.depOK(modelData)
                                     width: inner.width
@@ -1486,9 +1529,175 @@ Item {
                                                     }
                                                 }
                                             }
+                                            // Path-template fields get a live example of the
+                                            // final file location, re-resolved on every edit.
+                                            PathPreviewLine {
+                                                visible: modelData.key.indexOf("format_") === 0
+                                                width: parent.width
+                                                path: visible ? waves.previewPathTemplate(modelData.key.substring(7), String(page.val(modelData))) : ""
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            Repeater {
+                                model: card.modelData.id === "files"
+                                     ? page.rowFields(card.modelData.fields).filter(function(f) { return f.key.indexOf("format_") === 0 })
+                                     : page.rowFields(card.modelData.fields)
+                                delegate: rowFieldComp
+                            }
+
+                            // Template-token reference, File organization card
+                            // only: a progressive-disclosure table of every
+                            // {token}, grouped by category, each with a copy
+                            // button and a sample value from the real formatter.
+                            Column {
+                                id: tokRef
+                                visible: card.modelData.id === "files"
+                                width: inner.width; spacing: 10
+                                property bool expanded: false
+                                property var groups: []
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: (tokRef.expanded ? "▾  " : "▸  ") + "Want to know more about these paths and tags?"
+                                    color: page.accent; font.pixelSize: 12
+                                    MouseArea {
+                                        anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (!tokRef.expanded && tokRef.groups.length === 0)
+                                                tokRef.groups = waves.pathTemplateTokens()
+                                            tokRef.expanded = !tokRef.expanded
+                                        }
+                                    }
+                                }
+                                Column {
+                                    visible: tokRef.expanded
+                                    width: parent.width; spacing: 0
+                                    Repeater {
+                                        model: tokRef.groups
+                                        delegate: Column {
+                                            id: tokGroup
+                                            required property var modelData
+                                            required property int index
+                                            width: parent.width
+                                            Item { visible: tokGroup.index > 0; width: 1; height: 10 }
+                                            // Category band; the column labels ride on
+                                            // every band so the columns stay labelled
+                                            // wherever the user has scrolled.
+                                            Rectangle {
+                                                width: parent.width; height: 24; radius: 6
+                                                color: page.surface3
+                                                Rectangle { x: 8; width: 3; height: 11; radius: 1.5; anchors.verticalCenter: parent.verticalCenter; color: page.accent }
+                                                Text {
+                                                    x: 19; anchors.verticalCenter: parent.verticalCenter
+                                                    text: tokGroup.modelData.group.toUpperCase()
+                                                    textFormat: Text.PlainText
+                                                    color: page.textHi; font.family: page.mono; font.pixelSize: 12; font.letterSpacing: 1
+                                                }
+                                                Text {
+                                                    x: 256; anchors.verticalCenter: parent.verticalCenter
+                                                    text: "WHAT IT IS"
+                                                    color: page.textLo; font.family: page.mono; font.pixelSize: 10; font.letterSpacing: 1
+                                                }
+                                                Text {
+                                                    anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                                                    text: "EXAMPLE"
+                                                    color: page.textLo; font.family: page.mono; font.pixelSize: 10; font.letterSpacing: 1
+                                                }
+                                            }
+                                            Repeater {
+                                                model: tokGroup.modelData.tokens
+                                                delegate: Item {
+                                                    id: tokRow
+                                                    required property var modelData
+                                                    required property int index
+                                                    property bool copied: false
+                                                    width: parent.width; height: 24
+                                                    Timer { id: tokCopiedTimer; interval: 1400; onTriggered: tokRow.copied = false }
+                                                    // Hover wash so the row's three columns
+                                                    // read as one line across the wide gap.
+                                                    MouseArea {
+                                                        id: tokRowMa
+                                                        anchors.fill: parent
+                                                        hoverEnabled: true
+                                                        acceptedButtons: Qt.NoButton
+                                                    }
+                                                    Rectangle {
+                                                        visible: tokRowMa.containsMouse || tokCopyMa.containsMouse
+                                                        anchors.fill: parent; anchors.topMargin: 1
+                                                        radius: 4; color: "#1b1f26"
+                                                    }
+                                                    Text {
+                                                        id: tokName
+                                                        x: 8; anchors.verticalCenter: parent.verticalCenter
+                                                        width: Math.min(implicitWidth, 218)
+                                                        text: tokRow.modelData.token
+                                                        textFormat: Text.PlainText
+                                                        color: page.accent; font.family: page.mono; font.pixelSize: 11; elide: Text.ElideRight
+                                                    }
+                                                    // Copy button beside the token: copies the
+                                                    // {token} and flashes a confirmation tick.
+                                                    Item {
+                                                        x: tokName.x + tokName.width + 6; width: 16; height: 16
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        // Two offset outline squares: the classic
+                                                        // copy glyph, no icon font needed.
+                                                        Rectangle {
+                                                            visible: !tokRow.copied
+                                                            x: 4; y: 2; width: 9; height: 9; radius: 2
+                                                            color: "transparent"; border.width: 1
+                                                            border.color: tokCopyMa.containsMouse ? page.accent : page.textDim
+                                                        }
+                                                        Rectangle {
+                                                            visible: !tokRow.copied
+                                                            x: 1; y: 5; width: 9; height: 9; radius: 2
+                                                            color: page.surface
+                                                            border.width: 1
+                                                            border.color: tokCopyMa.containsMouse ? page.accent : page.textDim
+                                                        }
+                                                        Text {
+                                                            visible: tokRow.copied
+                                                            anchors.centerIn: parent
+                                                            text: "✓"; color: page.accent; font.family: page.mono; font.pixelSize: 12
+                                                        }
+                                                        MouseArea {
+                                                            id: tokCopyMa
+                                                            anchors.fill: parent; anchors.margins: -4
+                                                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: {
+                                                                page.copyText(tokRow.modelData.token)
+                                                                tokRow.copied = true
+                                                                tokCopiedTimer.restart()
+                                                            }
+                                                        }
+                                                    }
+                                                    Text {
+                                                        x: 256; width: parent.width - 256 - 200 - 16; anchors.verticalCenter: parent.verticalCenter
+                                                        text: tokRow.modelData.desc
+                                                        textFormat: Text.PlainText
+                                                        color: page.textDim; font.pixelSize: 11; elide: Text.ElideRight
+                                                    }
+                                                    Text {
+                                                        width: 200; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                                                        text: tokRow.modelData.sample
+                                                        textFormat: Text.PlainText
+                                                        horizontalAlignment: Text.AlignRight
+                                                        color: page.textLo; font.family: page.mono; font.pixelSize: 11; elide: Text.ElideRight
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // The File organization card's non-template value rows
+                            // (padding, delimiters) continue under the reference.
+                            Repeater {
+                                model: card.modelData.id === "files"
+                                     ? page.rowFields(card.modelData.fields).filter(function(f) { return f.key.indexOf("format_") !== 0 })
+                                     : []
+                                delegate: rowFieldComp
                             }
 
                             // On/off switches as a 2-column tile grid (keeps the look).
