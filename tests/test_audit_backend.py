@@ -56,6 +56,14 @@ class _Stub:
         self._lib_gen = 0
         self._lib_sort: dict = {}
         self._fav_ids: dict = {}
+        self._album_tracks_cache: dict = {}
+        self._home_cache: list | None = None
+        self._home_loading = False
+        self._home_reval_ts = 0.0
+        self._lib_reval_ts: dict = {}
+        self._media_lists_cache: tuple | None = None
+        self._search_cache: dict = {}
+        self._artist_pop_cache: dict = {}
         self.settings = type("S", (), {"data": type("D", (), {"path_binary_ffmpeg": ""})()})()
         self._ffmpeg_user_path = ""
         # Fake signals
