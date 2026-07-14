@@ -1351,7 +1351,7 @@ class WavesBridge(QObject):
     downloadFolderDefault = Signal()
     # A folder IS set but a write probe says it is not reachable right now (a
     # NAS that dropped off on sleep, an unplugged drive, a stale macOS mount
-    # point). Blocking: the download is held (see _pending_download) until the
+    # point). Blocking: the download is held (see _pending_downloads) until the
     # user reconnects and retries, or picks a new folder. Arg = the dead path,
     # for display in the dialog only (never logged).
     downloadFolderUnreachable = Signal(str)
@@ -1607,11 +1607,19 @@ class WavesBridge(QObject):
         self._queue: list[dict] = []
         self._queue_seq = 0
         self._paused = False
-        # A download deferred by the default-folder nudge: the user must decide
-        # (keep the default and continue, or choose a new folder and not download)
-        # before it runs. Holds a zero-arg replay of the exact download call, or
-        # None. Replayed by keepDownloadFolder(); cleared otherwise.
-        self._pending_download = None
+        # Downloads deferred by a gate dialog (default-folder nudge, FFmpeg
+        # missing, folder unreachable): (media_id, zero-arg replay) tuples, one
+        # per distinct item, so resolving the gate replays EVERY download the
+        # user asked for. A single-slot version silently dropped all but the
+        # last click when several downloads hit an unreachable mount together.
+        self._pending_downloads: list[tuple[str, object]] = []
+        self._pending_lock = Lock()
+        # (base path, monotonic stamp) of the last write known to have landed
+        # in the download folder: a finished track's file or a passed probe.
+        # _gate_reachability skips the write probe inside this freshness
+        # window, so queueing more downloads onto a busy share never times out
+        # against its own saturated I/O.
+        self._base_ok: tuple[str, float] = ("", 0.0)
         # Per-job abort events keyed by queue id, so a single running download
         # can be cancelled (the global _event_abort would stop everything).
         self._job_aborts: dict[int, Event] = {}
@@ -2067,7 +2075,8 @@ class WavesBridge(QObject):
         self._lib_loading.clear()
         self._lib_sort.clear()
         self._fav_ids.clear()
-        self._pending_download = None
+        with self._pending_lock:
+            self._pending_downloads = []
         self._lib_gen += 1
         self._browse_root_cache = None
         self._browse_pages.clear()
@@ -3946,7 +3955,18 @@ class WavesBridge(QObject):
         if ev["status"] in ("done", "skipped"):
             row["pct"] = 100.0
         if ev["status"] == "done":
-            self._record_ownership(ev)
+            # A finished track just proved the download folder writable: feed
+            # the reachability gate's liveness window (cheap, no I/O).
+            if ev.get("path"):
+                self._note_download_base_ok()
+            # Recording ownership resolves the real path (os.path.realpath
+            # walks and stats every component) and writes sqlite. Against a
+            # busy network mount that realpath alone can stall for seconds, so
+            # it must never run here on the GUI thread: it was freezing the
+            # whole UI for 5-10s per track during SMB album downloads (the
+            # 2026-07-13 diagnostics bundle caught it mid-stall).
+            ev_done = dict(ev)
+            self._own_pool.start(Worker(lambda: self._record_ownership(ev_done)))
         self.queueTrackState.emit(qid, dict(row))
 
     def _record_ownership(self, ev: dict) -> None:
@@ -3954,15 +3974,25 @@ class WavesBridge(QObject):
         final path plus the delivered quality (reality, not a plan). Only real
         downloads carry a path + quality here, so this no-ops for a skip. Records
         the resolved real file, so symlink-to-track mode stores the bytes, not the
-        link. Best-effort: a store failure must never disrupt a download."""
+        link. Best-effort: a store failure must never disrupt a download.
+
+        Runs on the ownership pool (realpath stats every path component, which
+        can hang on a network mount); the store and the answer cache are both
+        lock-guarded, and the cross-thread signal emit lands queued on QML."""
         path = ev.get("path")
         quality = ev.get("quality")
         if not path or not quality:
             return
         try:
+            # realpath lstats every path component, each one a network
+            # round-trip on an SMB destination (~6 per track), and it exists
+            # only so symlink-to-track mode records the real bytes instead of
+            # the link. With symlink mode off (the default) abspath gives the
+            # same answer as pure string work, zero filesystem calls.
+            real = os.path.realpath(path) if self.settings.data.symlink_to_track else os.path.abspath(path)
             self._ownership.record(
                 str(ev.get("id")),
-                os.path.realpath(path),
+                real,
                 quality.get("tier"),
                 audio_mode=quality.get("audio_mode"),
                 bit_depth=quality.get("bit_depth"),
@@ -3975,7 +4005,7 @@ class WavesBridge(QObject):
             tier = (quality.get("tier") or "").upper() or None
             rec = {
                 "owned": True,
-                "path": os.path.realpath(path),
+                "path": real,
                 "quality_tier": tier,
                 "quality_rank": quality_rank(tier),
                 "audio_mode": quality.get("audio_mode"),
@@ -3993,6 +4023,12 @@ class WavesBridge(QObject):
     # next query, so a file the user deleted reads as not owned within seconds of
     # the UI looking at it again, without ever statting on the GUI thread.
     _OWN_TTL = 5.0
+    # While downloads are running the refresh backs way off: every re-check
+    # stats the download volume, so scrolling a big page mid-download queued
+    # up to a stat per visible row behind the active copies on the same busy
+    # share. Tracks finishing during the download stay instant regardless:
+    # _record_ownership asserts their cache entries directly, no stat.
+    _OWN_TTL_BUSY = 45.0
 
     def _target_quality_rank(self) -> int:
         """Rank of the audio quality this run targets, for "already have
@@ -4029,10 +4065,11 @@ class WavesBridge(QObject):
         Returns {owned, up_to_date, path, quality_tier, ...} or {owned: False}."""
         tid = str(track_id)
         now = time.monotonic()
+        ttl = self._OWN_TTL_BUSY if self._downloads_running() else self._OWN_TTL
         with self._own_lock:
             hit = self._own_cache.get(tid)
             rec = hit[1] if hit else None
-            need = (hit is None or now - hit[0] >= self._OWN_TTL) and tid not in self._own_pending
+            need = (hit is None or now - hit[0] >= ttl) and tid not in self._own_pending
             if need:
                 self._own_pending.add(tid)
         if need:
@@ -4552,16 +4589,19 @@ class WavesBridge(QObject):
                         return ("healed", str(live))
         return ("dead", path)
 
-    def _probe_download_base(self, timeout_s: float = 4.0) -> tuple[str, str]:
+    def _probe_download_base(self, timeout_s: float = 8.0) -> tuple[str, str]:
         """Run :meth:`_probe_folder_verdict` with a hang guard: the probe runs
-        on a daemon thread and a timeout counts as dead, so the worst a stale
-        mount can cost the GUI is `timeout_s`, not a 30s+ SMB stall."""
+        on a daemon thread, so the worst a stale mount can cost the caller is
+        `timeout_s`, not a 30s+ SMB stall. A probe that misses the deadline
+        reports "timeout" rather than "dead": on a network share that is busy
+        (not broken) the write probe itself queues behind the download traffic,
+        and the caller must be able to tell the two apart."""
         path = self.settings.data.download_base_path
         result: list[tuple[str, str]] = []
         t = Thread(target=lambda: result.append(self._probe_folder_verdict(path)), daemon=True)
         t.start()
         t.join(timeout_s)
-        return result[0] if result else ("dead", path)
+        return result[0] if result else ("timeout", path)
 
     def _download_gate(self) -> str:
         """Apply :meth:`_folder_gate_action` with its side effects: set the status
@@ -4586,13 +4626,43 @@ class WavesBridge(QObject):
             self.downloadFolderDefault.emit()
         return action
 
-    def _gate_reachability(self, retry) -> bool:
+    # A real write that landed in the download base counts as proof of life
+    # for this long; clicks inside the window skip the write probe entirely.
+    _BASE_OK_TTL_SEC = 30.0
+
+    def _note_download_base_ok(self) -> None:
+        """Remember that a write to the download base just verifiably worked (a
+        finished track's file landed there, or a reachability probe passed).
+        Cheap (no I/O), callable from any thread; a lost race between two
+        writers only makes the stamp a moment older, which is harmless."""
+        self._base_ok = (self.settings.data.download_base_path, time.monotonic())
+
+    def _downloads_running(self) -> bool:
+        """True while any queue row is actively downloading. Read from download
+        workers; a one-tick-stale answer is fine (it is only the busy-vs-dead
+        tiebreak for a probe that timed out)."""
+        return any(it.get("status") == "running" for it in list(self._queue))
+
+    def _gate_reachability(self, retry, media_id: str = "") -> bool:
         """Worker-thread half of the download-folder gate: make sure the set
         folder actually works before tracks start failing one by one against a
         dead mount. Returns True to proceed. On a dead mount it shows the
-        unreachable dialog and stashes ``retry`` so "Try again" replays the
-        download; the caller unwinds its own queue state."""
+        unreachable dialog and stashes ``retry`` (keyed by ``media_id``) so
+        "Try again" replays the download; the caller unwinds its own queue
+        state.
+
+        Ordered so a busy-but-alive share never reads as dead (that misread
+        made every click during an album download bounce into retry dialogs):
+        first a freshness window fed by writes that actually landed, then the
+        probe, and a probe timeout only counts as dead when nothing else is
+        actively downloading."""
+        ok_path, ok_t = self._base_ok
+        if ok_path == self.settings.data.download_base_path and time.monotonic() - ok_t < self._BASE_OK_TTL_SEC:
+            return True
         verdict, live = self._probe_download_base()
+        if verdict == "ok":
+            self._note_download_base_ok()
+            return True
         if verdict == "healed":
             # Follow the live mount and persist it, exactly what re-picking the
             # folder in Settings would have done by hand. Path stays out of the
@@ -4600,54 +4670,70 @@ class WavesBridge(QObject):
             logger.info("Download folder auto-healed onto a remounted volume")
             self.settings.data.download_base_path = live
             self.settings.save()
+            self._note_download_base_ok()
             return True
-        if verdict == "dead":
-            self._set_status("Download folder isn't reachable")
-            self._pending_download = retry
-            self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
-            return False
-        return True
+        if verdict == "timeout" and self._downloads_running():
+            # The probe missed its deadline while other downloads are actively
+            # writing to the same folder: a saturated share, not a dead one.
+            # Proceed; if the mount really is wedged, each file operation still
+            # fails with its own retries and the job is marked failed.
+            logger.info("Download folder probe timed out under active download load; treating as busy, not dead")
+            return True
+        self._set_status("Download folder isn't reachable")
+        self._stash_pending_download(media_id, retry)
+        self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
+        return False
+
+    def _stash_pending_download(self, media_id: str, retry) -> None:
+        """Hold a gated download for later replay. Keyed by media id so a
+        re-click of the same item replaces its held copy (instead of queueing
+        it twice on resolve), while clicks on different items all survive."""
+        with self._pending_lock:
+            if media_id:
+                self._pending_downloads = [(mid, fn) for mid, fn in self._pending_downloads if mid != media_id]
+            self._pending_downloads.append((media_id, retry))
+
+    def _run_pending_downloads(self) -> None:
+        """Replay every held download in click order (GUI thread: the resolving
+        dialogs' slots run here, and the replays re-enter _download which
+        expects GUI-thread affinity)."""
+        with self._pending_lock:
+            pending, self._pending_downloads = self._pending_downloads, []
+        for _mid, fn in pending:
+            fn()
 
     @Slot()
     def keepDownloadFolder(self) -> None:
         """The user chose to keep the legacy default: remember the decision (so the
-        nudge never asks again) and run the download that was held back."""
+        nudge never asks again) and run the downloads that were held back."""
         self.settings.data.download_folder_prompted = True
         self.settings.save()
-        pending = self._pending_download
-        self._pending_download = None
-        if pending is not None:
-            pending()
+        self._run_pending_downloads()
 
     @Slot()
     def dismissDownloadFolderNudge(self) -> None:
         """The user chose to change the folder (or dismissed the nudge): drop the
-        held-back download. Nothing is queued; they re-initiate after choosing a
+        held-back downloads. Nothing is queued; they re-initiate after choosing a
         folder. The one-time flag is left unset so an unresolved default is asked
         about again next time."""
-        self._pending_download = None
+        with self._pending_lock:
+            self._pending_downloads = []
 
     @Slot()
     def bypassFfmpegGate(self) -> None:
         """The user chose "Continue anyway" on the FFmpeg-missing gate: remember
-        the decision for the session and run the held download degraded (the
+        the decision for the session and run the held downloads degraded (the
         breadcrumb from _warn_if_ffmpeg_missing still records the skip)."""
         self._ffmpeg_gate_bypassed = True
-        pending = self._pending_download
-        self._pending_download = None
-        if pending is not None:
-            pending()
+        self._run_pending_downloads()
 
     @Slot()
     def retryDownloadFolder(self) -> None:
         """The user reconnected the drive and hit "Try again" on the unreachable
-        dialog: re-run the held download. It re-enters the full gate, so if the
-        folder is still dead (or has healed onto a remounted volume) the right
-        thing happens again."""
-        pending = self._pending_download
-        self._pending_download = None
-        if pending is not None:
-            pending()
+        dialog: re-run every held download. Each re-enters the full gate, so if
+        the folder is still dead (or has healed onto a remounted volume) the
+        right thing happens again."""
+        self._run_pending_downloads()
 
     @Slot()
     def revealDownloadPath(self) -> None:
@@ -4701,8 +4787,9 @@ class WavesBridge(QObject):
             # user decides. The queue is untouched, so the download button
             # stays in its idle state. (A set-but-unreachable folder is caught
             # later, on the worker, by _gate_reachability.)
-            self._pending_download = lambda: self._download(
-                obj, type_media, name, file_template, collection, media_id, merge_plan
+            self._stash_pending_download(
+                media_id,
+                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
             )
             return
         # FFmpeg gate: without it the files come out degraded (no FLAC
@@ -4712,8 +4799,9 @@ class WavesBridge(QObject):
         if self._ffmpeg_source_label() == "none" and not self._ffmpeg_gate_bypassed:
             self._set_status("Set up FFmpeg to download at full quality")
             self.ffmpegMissingBlocked.emit()
-            self._pending_download = lambda: self._download(
-                obj, type_media, name, file_template, collection, media_id, merge_plan
+            self._stash_pending_download(
+                media_id,
+                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
             )
             return
         # Artist + total track count for the queue row label. Collections report
@@ -4721,6 +4809,13 @@ class WavesBridge(QObject):
         artist = _primary_artist_name(obj)
         tracks = len(merge_plan) if merge_plan is not None else (_track_count(obj) if collection else 1)
         qid = self._enqueue(name, type_media, media_id, file_template, collection, artist, tracks, _image(obj, 160))
+        # Acknowledge the click on the button itself, immediately: behind a
+        # saturated pool a worker may not pick this job up for minutes, and a
+        # queue row alone (one number in the header) reads as "nothing
+        # happened". The worker flips it to "running"; every bail-out path
+        # below emits "" or "failed", so a withdrawn row can't strand a button
+        # in the queued state.
+        self.downloadState.emit(media_id, "queued")
         # Per-job abort event so this one download can be cancelled on its own
         # (the shared _event_abort would stop every concurrent download).
         job_abort = Event()
@@ -4774,7 +4869,8 @@ class WavesBridge(QObject):
             # the optimistic queue row is withdrawn so the queue reads as if
             # the download never started (matching the pre-probe contract).
             if not self._gate_reachability(
-                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan)
+                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+                media_id,
             ):
                 self.downloadState.emit(media_id, "")
                 self._bump_artist_group(media_id, None, "failed")
@@ -5587,7 +5683,7 @@ class WavesBridge(QObject):
         if gate == "nudge":
             # Hold the whole-artist queue behind the same decision; replay re-runs
             # this scan once the user keeps the default folder.
-            self._pending_download = lambda: self.downloadArtist(artist_id)
+            self._stash_pending_download(artist_id, lambda: self.downloadArtist(artist_id))
             return
         self._set_status("Loading artist discography…")
         self.downloadProgress.emit(artist_id, 0.0)
@@ -5598,7 +5694,7 @@ class WavesBridge(QObject):
             # a dead mount; each album's own worker would re-probe anyway, but
             # this saves the whole scan. Runs here on the worker, not at click
             # time: the probe can cost seconds against a stale network mount.
-            if not self._gate_reachability(lambda: self.downloadArtist(artist_id)):
+            if not self._gate_reachability(lambda: self.downloadArtist(artist_id), artist_id):
                 self.downloadState.emit(artist_id, "")
                 return
             albums, guest = self._artist_releases(artist)
@@ -5825,6 +5921,21 @@ class WavesBridge(QObject):
         self.ffmpegStatusChanged.emit()
 
     # ----- in-app updater ----------------------------------------------- #
+    def _emit_from_worker(self, signal_name: str, *args) -> None:
+        """Emit a bridge signal from a pool worker that can outlive the bridge.
+
+        On quit the pools get bounded drains (see :meth:`shutdown`), so a
+        worker parked in a network read (the startup update checks) can finish
+        after the underlying QObject is gone; a plain emit then raises
+        RuntimeError ("Signal source has been deleted") and lands in the log
+        as a worker crash. Nobody is left to receive the result, so drop it
+        quietly. The signal is looked up by name INSIDE the guard because the
+        attribute access itself already touches the deleted C++ object."""
+        try:
+            getattr(self, signal_name).emit(*args)
+        except RuntimeError:
+            logger.debug("dropped %s: bridge already torn down", signal_name)
+
     @Slot(result="QVariant")
     def appUpdateStatus(self) -> dict:
         return self._updater.status()
@@ -5843,9 +5954,9 @@ class WavesBridge(QObject):
                 available, current, latest = self._updater.update_available()
             except Exception:
                 logger.debug("app update check failed", exc_info=True)
-                self.appUpdateChecked.emit(False, "", "", manual)
+                self._emit_from_worker("appUpdateChecked", False, "", "", manual)
                 return
-            self.appUpdateChecked.emit(bool(available), current, latest, manual)
+            self._emit_from_worker("appUpdateChecked", bool(available), current, latest, manual)
 
         self.threadpool.start(Worker(work))
 
@@ -5903,7 +6014,9 @@ class WavesBridge(QObject):
             except Exception:
                 logger.debug("automatic ffmpeg update check failed", exc_info=True)
                 return
-            self.ffmpegUpdateChecked.emit(bool(available), current, latest)
+            # Same teardown race as the app check: the bridge can be gone by
+            # the time this daily probe returns from the network.
+            self._emit_from_worker("ffmpegUpdateChecked", bool(available), current, latest)
 
         self.threadpool.start(Worker(work))
 

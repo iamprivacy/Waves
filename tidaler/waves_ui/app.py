@@ -50,6 +50,16 @@ class _CacheFirstNAM(QNetworkAccessManager):
                 QNetworkRequest.Attribute.CacheLoadControlAttribute,
                 QNetworkRequest.CacheLoadControl.PreferCache,
             )
+        # Plain HTTP/1.1 for cover fetches. Qt defaults to HTTP/2, which
+        # multiplexes a whole page of covers onto one connection; under load
+        # Qt's H2 client was observed desyncing ("HEADERS on invalid stream",
+        # then "HTTP/2 protocol error") and killing every art request in
+        # flight at once (8 streams in one burst in the 2026-07-13
+        # diagnostics export). HTTP/1.1 gives covers ~6 independent
+        # connections instead: no shared-connection failure mode, and during
+        # audio downloads those extra TCP flows also claim a fairer share of
+        # the link for the small image payloads.
+        request.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
         return super().createRequest(op, request, outgoingData)
 
 
