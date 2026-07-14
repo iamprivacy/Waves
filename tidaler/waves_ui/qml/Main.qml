@@ -569,6 +569,12 @@ ApplicationWindow {
     // Same stepped-clock discipline as ledPulse, one write per tick; when no
     // bar is finishing nothing binds it, so it costs nothing.
     property real shimmerPhase: 0
+    // Stepped tick counter for sequenced LED animations (the queued stack's
+    // walking highlight): consumers derive their step from a base tick they
+    // capture when they appear, so every instance starts its sequence from
+    // the beginning. Same one-write-per-tick discipline as ledPulse; when
+    // nothing is queued nothing binds it.
+    property int marchTick: 0
     Timer {
         running: root.active
         interval: 50; repeat: true
@@ -577,6 +583,7 @@ ApplicationWindow {
             phase = (phase + 0.05 / 1.04) % 1   // 1.04s breathe = 2 x 520ms
             root.ledPulse = 0.28 + 0.57 * (0.5 + 0.5 * Math.cos(2 * Math.PI * phase))
             root.shimmerPhase = (root.shimmerPhase + 0.05 / 1.6) % 1   // 1.6s twinkle cycle
+            root.marchTick = (root.marchTick + 1) % 100000
         }
     }
 
@@ -2030,6 +2037,32 @@ ApplicationWindow {
         }
     }
 
+    // Queued glyph (chosen in the queued-descent lab): a 3-bar list, your
+    // item is the bottom bar. The accent highlight ping-pongs down and back
+    // up the stack (350ms per step, never pausing), phase-aligned via
+    // baseTick so it always starts at the top bar the moment the queued
+    // state appears. Steps off root.marchTick, no per-frame animation.
+    component QueueStack: Column {
+        id: qs
+        property real barW: 12
+        property int baseTick: 0
+        Component.onCompleted: baseTick = root.marchTick
+        onVisibleChanged: if (visible) baseTick = root.marchTick
+        readonly property int step: Math.floor(((root.marchTick - baseTick + 100000) % 100000) / 7) % 4
+        readonly property int walk: step === 3 ? 1 : step   // 0,1,2,1 bounce
+        spacing: 2.5
+        Repeater {
+            model: 3
+            delegate: Rectangle {
+                required property int index
+                width: qs.barW; height: 2.5; radius: 0   // sharp LED bars
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: index === qs.walk ? root.accent : root.accentDim
+                opacity: index === qs.walk ? 1.0 : 0.45
+            }
+        }
+    }
+
     // Compact outlined terminal download icon (rows). Shows ↓ / mono % / ✓ / ↺
     // with a thin bottom progress line while running.
     component DownIcon: Rectangle {
@@ -2148,25 +2181,28 @@ ApplicationWindow {
             style: Text.Outline; styleColor: root.bg
         }
         Ico {
-            anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed"
+            anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed" && di.st !== "queued"
             name: di.st === "done" ? "check" : "arrow-down"
             color: di.st === "done" ? root.green : root.accent
             size: 15; bold: di.st === "done" ? 0 : 10
         }
+        // Queued: click acknowledged, waiting for a download slot; the stack
+        // glyph, your item is the bottom bar.
+        QueueStack { visible: di.st === "queued"; barW: 13; anchors.centerIn: parent }
         RetryMark { anchors.centerIn: parent; visible: di.st === "failed"; color: root.red; box: 15 }
         MouseArea {
             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: di.scale = 0.85
             onReleased: di.scale = 1.0
             onCanceled: di.scale = 1.0
-            onClicked: { if (di.st === "running" || di.st === "done") return; di.onTap() }
+            onClicked: { if (di.st === "running" || di.st === "done" || di.st === "queued") return; di.onTap() }
         }
     }
 
     // Track preview: the album art IS the play button. Idle it's just artwork;
-    // hover reveals a ▶ over a dark scrim; while previewing, a ring of dots hugging
-    // the art fills clockwise with playback position (⏸ over the scrim). Only the
-    // active track shows its ring, one shared player.
+    // hover reveals a ▶ over a dark scrim; while previewing, a ring of LED blocks
+    // hugging the art fills clockwise with playback position (⏸ over the scrim).
+    // Only the active track shows its ring, one shared player.
     component PreviewArt: Item {
         id: pa
         property string url: ""
@@ -2181,30 +2217,27 @@ ApplicationWindow {
         readonly property bool showGlyph: pa.hovered || pa.st === "loading" || pa.st === "error"
         implicitWidth: 48; implicitHeight: 48
 
-        // Circular cover + perimeter progress ring painted together. A Rectangle's
-        // clip ignores its radius (Qt draws children to the square bounds), so the
-        // art is clipped to a real circle here via ctx.arc; the ring hugs it and
-        // fills clockwise from 12 o'clock with playback. renderTarget Image keeps
-        // it a software raster, reliable everywhere and cheap at this size.
+        // Circular cover. A Rectangle's clip ignores its radius (Qt draws children
+        // to the square bounds), so the art is clipped to a real circle here via
+        // ctx.arc. renderTarget Image keeps it a software raster, reliable
+        // everywhere and cheap at this size. The progress ring lives outside the
+        // canvas (LED cells below) so it binds to the shared pulse clock without
+        // repainting the art.
         Canvas {
             id: pring
             anchors.fill: parent
             renderTarget: Canvas.Image
             antialiasing: true
             readonly property real artR: 17
-            readonly property real ringR: 22
             onImageLoaded: requestPaint()
             Component.onCompleted: if (pa.url) loadImage(pa.url)
             Connections {
                 target: pa
                 function onUrlChanged() { if (pa.url) pring.loadImage(pa.url); else pring.requestPaint() }
-                function onFracChanged() { pring.requestPaint() }
-                function onActiveChanged() { pring.requestPaint() }
             }
             onPaint: {
                 var ctx = getContext("2d"); ctx.reset()
                 var cx = width / 2, cy = height / 2
-                ctx.save()
                 ctx.beginPath(); ctx.arc(cx, cy, artR, 0, 2 * Math.PI); ctx.closePath()
                 if (pa.url !== "" && isImageLoaded(pa.url)) {
                     ctx.clip()
@@ -2213,16 +2246,34 @@ ApplicationWindow {
                 } else {
                     ctx.fillStyle = root.surface3; ctx.fill()
                 }
-                ctx.restore()
-                if (pa.active) {
-                    var n = 32, lit = Math.round(pa.frac * n)
-                    for (var i = 0; i < n; i++) {
-                        var ang = -Math.PI / 2 + i / n * 2 * Math.PI
-                        var x = cx + ringR * Math.cos(ang), y = cy + ringR * Math.sin(ang)
-                        ctx.beginPath(); ctx.arc(x, y, 1.6, 0, 2 * Math.PI)
-                        ctx.fillStyle = i < lit ? root.accent : root.surface3
-                        ctx.fill()
-                    }
+            }
+        }
+        // Playback ring: the same sharp LED cells as every DotMatrix bar, bent
+        // around the art. Cells fill clockwise from 12 o'clock with playback and
+        // the next cell breathes on the shared 20 Hz clock, matching the row
+        // scrubber and download bars. Geometry keeps every rotated corner within
+        // 22 of centre (outer edge 21.8, corners ~21.9), so the ring can never
+        // poke past the 44px thumb box and get clipped by neighbours.
+        Item {
+            id: ledRing
+            visible: pa.active
+            anchors.fill: parent
+            readonly property int cells: 24
+            readonly property real ringR: 19.8
+            readonly property int lit: Math.round(Math.max(0, Math.min(1, pa.frac)) * cells)
+            Repeater {
+                model: ledRing.visible ? ledRing.cells : 0
+                delegate: Rectangle {
+                    required property int index
+                    readonly property bool litCell: index < ledRing.lit
+                    readonly property bool pulsing: index === ledRing.lit && ledRing.lit < ledRing.cells
+                    readonly property real ang: -Math.PI / 2 + index / ledRing.cells * 2 * Math.PI
+                    x: ledRing.width / 2 + ledRing.ringR * Math.cos(ang) - width / 2
+                    y: ledRing.height / 2 + ledRing.ringR * Math.sin(ang) - height / 2
+                    width: 3; height: 4; radius: 0   // sharp LED cells, long side radial
+                    rotation: index / ledRing.cells * 360
+                    color: root.accent
+                    opacity: pulsing ? root.ledPulse : (litCell ? 1.0 : 0.16)
                 }
             }
         }
@@ -2651,21 +2702,26 @@ ApplicationWindow {
                 finishing: db.pct >= 99.9
             }
         }
-        // IDLE / DONE / FAILED, centered glyph + label
+        // IDLE / QUEUED / DONE / FAILED, centered glyph + label
+        // Queued: the click is in the queue but no download slot has picked
+        // it up yet; the stack glyph's walking highlight says the wait is
+        // alive, and the label keeps the media noun ("QUEUED ALBUM").
+        readonly property string queuedLabel: "QUEUED" + label.toUpperCase().replace("DOWNLOAD", "")
         Row {
             id: dbRow; anchors.centerIn: parent; spacing: 7
             visible: db.st !== "running"
             Ico {
-                visible: db.st !== "failed"
+                visible: db.st !== "failed" && db.st !== "queued"
                 name: db.st === "done" ? "check" : "arrow-down"
                 color: root.accent
                 size: 14; bold: db.st === "done" ? 0 : 10; anchors.verticalCenter: parent.verticalCenter
             }
+            QueueStack { visible: db.st === "queued"; anchors.verticalCenter: parent.verticalCenter }
             RetryMark { visible: db.st === "failed"; color: root.red; box: 16; anchors.verticalCenter: parent.verticalCenter }
             Text {
                 textFormat: Text.PlainText  // db.label carries a remote artist name
-                text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.label.toUpperCase()
-                color: db.st === "done" ? root.accent : db.st === "failed" ? root.red : root.accent
+                text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.st === "queued" ? db.queuedLabel : db.label.toUpperCase()
+                color: db.st === "done" ? root.accent : db.st === "failed" ? root.red : db.st === "queued" ? root.accentDim : root.accent
                 font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -2675,7 +2731,7 @@ ApplicationWindow {
             onPressed: db.scale = 0.96
             onReleased: db.scale = 1.0
             onCanceled: db.scale = 1.0
-            onClicked: { if (db.st === "running" || db.st === "done") return; db.onTap() }
+            onClicked: { if (db.st === "running" || db.st === "done" || db.st === "queued") return; db.onTap() }
         }
     }
 
@@ -3901,15 +3957,30 @@ ApplicationWindow {
             // ---- download: DOWNLOAD -> dot bar + fixed-width % -> ✓ DONE ----
             Item {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                width: Math.max(bcDlIdle.implicitWidth, bcDlRun.implicitWidth); height: 16
+                width: Math.max(bcDlIdle.implicitWidth, bcDlRun.implicitWidth, bcDlQueued.implicitWidth); height: 16
                 Text {
                     id: bcDlIdle
                     textFormat: Text.PlainText
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    visible: bc.dlSt !== "running"
+                    visible: bc.dlSt !== "running" && bc.dlSt !== "queued"
                     text: bc.dlSt === "done" ? "DONE" : bc.dlSt === "failed" ? "RETRY" : "DOWNLOAD"
                     color: bc.dlSt === "done" ? root.green : bc.dlSt === "failed" ? root.red : root.accent
                     font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
+                }
+                // Queued: the stack glyph + the media noun, same language as
+                // the full DownloadButton's queued state.
+                Row {
+                    id: bcDlQueued
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    visible: bc.dlSt === "queued"; spacing: 5
+                    QueueStack { barW: 9; anchors.verticalCenter: parent.verticalCenter }
+                    Text {
+                        textFormat: Text.PlainText
+                        text: "QUEUED" + (bc.kind ? " " + bc.kind.toUpperCase() : "")
+                        color: root.accentDim
+                        font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
                 }
                 Row {
                     id: bcDlRun
@@ -3929,7 +4000,7 @@ ApplicationWindow {
                 }
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: { if (bc.dlSt === "running" || bc.dlSt === "done") return; root.browseCardDownload(bc.card) }
+                    onClicked: { if (bc.dlSt === "running" || bc.dlSt === "done" || bc.dlSt === "queued") return; root.browseCardDownload(bc.card) }
                 }
             }
         }
