@@ -73,7 +73,10 @@ class Settings:
     extract_flac: bool = True
     downsample_enabled: bool = False
     downsample_target: DownsampleTarget = DownsampleTarget.BIT16_48
-    downloads_simultaneous_per_track_max: int = 20
+    # Values above the shared HTTP pool size (10 connections) are clamped at
+    # download time: extra workers can never hold a socket, they only cost
+    # threads and memory.
+    downloads_simultaneous_per_track_max: int = 10
     download_delay_sec_min: float = 3.0
     download_delay_sec_max: float = 5.0
     album_track_num_pad_min: int = 1
@@ -151,7 +154,9 @@ class HelpSettings:
     downsample_target: str = (
         "Downsample target when downsample_enabled is true: " "'16_48' (16 bit / 48 kHz) or '24_48' (24 bit / 48 kHz)."
     )
-    downloads_simultaneous_per_track_max: str = "Maximum number of simultaneous chunk downloads per track."
+    downloads_simultaneous_per_track_max: str = (
+        "Maximum number of simultaneous chunk downloads per track (capped at 10, the connection pool size)."
+    )
     download_delay_sec_min: str = "Lower boundary for the calculation of the download delay in seconds."
     download_delay_sec_max: str = "Upper boundary for the calculation of the download delay in seconds."
     album_track_num_pad_min: str = (

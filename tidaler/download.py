@@ -254,6 +254,15 @@ class Download:
         self.event_abort = event_abort
         self.event_run = event_run
 
+        # Destination directories already ensured by this instance (one
+        # instance = one queued item, so this resets naturally per album).
+        # On a network mount every makedirs(exist_ok=True) of an existing
+        # directory still costs real round-trips (mkdir->EEXIST plus a stat),
+        # and the moves used to re-ensure the same album directory for the
+        # audio, lyrics and cover of every track: dozens of pointless network
+        # calls per album. See _ensure_directory.
+        self._dirs_ensured: set[str] = set()
+
         # One pooled, keep-alive HTTP session shared by every segment download.
         # The old code built a fresh requests.Session() per segment, which forced
         # a full TLS handshake for each one. A HiRes album is served as dozens of
@@ -401,9 +410,14 @@ class Download:
         # progress bar zero times, so `finished` (completed >= total) never flips
         # and the loop re-downloaded the whole track forever. Success is derived
         # from the per-segment results below, not from the progress counter.
-        with futures.ThreadPoolExecutor(
-            max_workers=self.settings.data.downloads_simultaneous_per_track_max
-        ) as executor:
+        # Clamp the per-track fan-out to the shared connection pool: workers
+        # beyond _HTTP_POOL_MAXSIZE can never hold a socket (pool_block=True),
+        # they just sit blocked, so extra workers add threads and RAM with
+        # exactly zero throughput. The old default of 20 workers x 3 concurrent
+        # items produced 60 threads for 10 usable connections (a live session
+        # was caught at 118 process threads and 1.6 GB RSS mid-burst).
+        workers_max: int = max(1, min(self.settings.data.downloads_simultaneous_per_track_max, self._HTTP_POOL_MAXSIZE))
+        with futures.ThreadPoolExecutor(max_workers=workers_max) as executor:
             # Dispatch all download tasks to worker threads
             l_futures: list[futures.Future] = [
                 executor.submit(
@@ -1030,7 +1044,7 @@ class Download:
 
             return True, path_media_dst
 
-        os.makedirs(path_media_dst.parent, exist_ok=True)
+        self._ensure_directory(path_media_dst.parent)
 
         # Perform actual download.
         #
@@ -1387,7 +1401,7 @@ class Download:
         ).absolute()
         path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
 
-        os.makedirs(path_media_dst.parent, exist_ok=True)
+        self._ensure_directory(path_media_dst.parent)
 
         # Move item and symlink it
         if path_media_dst != path_media_src:
@@ -1501,6 +1515,77 @@ class Download:
 
         return self._retry_file_operation(operation, f"unlink {path_file}")
 
+    def _makedirs_with_retry(self, path_dir: pathlib.Path) -> None:
+        """Create a destination directory, retrying transient failures.
+
+        A network mount (macOS SMB in particular) can return a spurious EACCES
+        or EIO for a short window while it reconnects under I/O load; a bare
+        makedirs turns that blip into a whole failed track or album. Retries on
+        the shared file-operation cadence and re-raises the final error, so a
+        genuinely unwritable destination still fails the download loudly.
+
+        Args:
+            path_dir (pathlib.Path): Directory to create (parents included).
+        """
+        error_last: OSError | None = None
+
+        for attempt in range(self._FILE_OPERATION_RETRIES):
+            try:
+                os.makedirs(path_dir, exist_ok=True)
+            except OSError as error:
+                error_last = error
+                if attempt == self._FILE_OPERATION_RETRIES - 1:
+                    break
+                delay_sec: float = self._file_operation_retry_delay(attempt)
+                self.fn_logger.debug(f"Could not create directory ({path_dir}); retrying in {delay_sec:.1f}s: {error}")
+                time.sleep(delay_sec)
+            else:
+                return
+
+        raise error_last
+
+    def _ensure_directory(self, path_dir: pathlib.Path) -> None:
+        """Create a destination directory once per instance, then remember it.
+
+        Wraps :meth:`_makedirs_with_retry` with a memo so repeat calls for the
+        same directory (every track of an album ensures the album directory,
+        and each move re-ensures it for audio, lyrics and cover) skip the
+        filesystem entirely. If the directory vanishes mid-download the move's
+        FileNotFoundError handler evicts the memo entry, so the retry recreates
+        it (see :meth:`_move_file`).
+
+        Args:
+            path_dir (pathlib.Path): Directory to ensure (parents included).
+        """
+        key = str(path_dir)
+        if key in self._dirs_ensured:
+            return
+        self._makedirs_with_retry(path_dir)
+        self._dirs_ensured.add(key)
+
+    # Buffer for bulk copies onto the destination. shutil's default POSIX
+    # buffer is 64 KiB, which turns a 40 MB track into ~640 sequential write
+    # round-trips on a network mount (SMB especially); 8 MiB lets the mount's
+    # client coalesce the same file into a handful of large writes. Worst-case
+    # transient RAM is one buffer per concurrent move (downloads_concurrent_max,
+    # so typically 3 x 8 MiB).
+    _COPY_BUFFER_BYTES: int = 8 * 1024 * 1024
+
+    def _copy_file_contents(self, path_source: pathlib.Path, path_destination: pathlib.Path) -> None:
+        """Copy file bytes with a large buffer, without copying metadata.
+
+        Replaces shutil.copy2 for the temp-to-destination copy: copy2's
+        copystat tail issues chmod/utime/xattr calls the destination (a network
+        share) often cannot honor, and the source metadata is a meaningless
+        local temp-file timestamp anyway, so those round-trips bought nothing.
+
+        Args:
+            path_source (pathlib.Path): Local source file.
+            path_destination (pathlib.Path): Destination file (created/truncated).
+        """
+        with path_source.open("rb") as file_source, path_destination.open("wb") as file_destination:
+            shutil.copyfileobj(file_source, file_destination, length=self._COPY_BUFFER_BYTES)
+
     def _move_file(
         self,
         path_file_source: pathlib.Path,
@@ -1525,30 +1610,20 @@ class Download:
         if not path_file_source or not path_file_source.is_file():
             return False
 
-        path_destination.parent.mkdir(parents=True, exist_ok=True)
-
         def operation() -> bool:
+            # Ensured inside the retried operation (memoized, usually free): if
+            # the directory vanishes mid-download, the FileNotFoundError in
+            # _stage_and_swap evicts the memo and the next retry recreates it.
+            self._ensure_directory(path_destination.parent)
+
             if skip_if_exists and path_destination.exists():
                 path_file_source.unlink(missing_ok=True)
                 return True
 
-            if path_destination.exists() and overwrite:
-                path_destination_tmp: pathlib.Path = path_destination.with_name(
-                    f".{path_destination.name}.{uuid4()}.tmp"
-                )
-                try:
-                    shutil.copy2(path_file_source, path_destination_tmp)
-                    path_destination_tmp.replace(path_destination)
-                    path_file_source.unlink(missing_ok=True)
-                except OSError:
-                    # Best-effort cleanup: never let a failing cleanup mask the original error or leak the tmp file.
-                    with contextlib.suppress(OSError):
-                        path_destination_tmp.unlink(missing_ok=True)
-                    raise
-                return True
-
-            if path_destination.exists() and not overwrite:
-                return False
+            if path_destination.exists():
+                if not overwrite:
+                    return False
+                return self._stage_and_swap(path_file_source, path_destination, skip_if_exists)
 
             # Fresh destination. Prefer a single atomic rename within the same
             # filesystem. When the download temp dir and the library live on
@@ -1566,19 +1641,51 @@ class Download:
             else:
                 return True
 
-            path_destination_tmp: pathlib.Path = path_destination.with_name(f".{path_destination.name}.{uuid4()}.tmp")
-            try:
-                shutil.copy2(path_file_source, path_destination_tmp)
-                path_destination_tmp.replace(path_destination)
-                path_file_source.unlink(missing_ok=True)
-            except OSError:
-                # Best-effort cleanup: never leave a partial temp file behind.
-                with contextlib.suppress(OSError):
-                    path_destination_tmp.unlink(missing_ok=True)
-                raise
-            return True
+            return self._stage_and_swap(path_file_source, path_destination, skip_if_exists)
 
         return self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
+
+    def _stage_and_swap(
+        self,
+        path_file_source: pathlib.Path,
+        path_destination: pathlib.Path,
+        skip_if_exists: bool,
+    ) -> bool:
+        """Copy into a hidden temp sibling and atomically swap it into place.
+
+        On failure the temp file is cleaned up best-effort so no partial ever
+        sits under a name a later run would trust. A FileNotFoundError also
+        evicts the destination directory from the ensured-dirs memo (the user
+        deleted it mid-download; the caller's retry recreates it). Losing a
+        rename race when skip_if_exists is set counts as success: two tracks
+        of one album can land the shared cover.jpg together, and some network
+        filesystems answer rename-over-existing with EEXIST instead of
+        replacing, but the file we wanted is there either way.
+
+        Args:
+            path_file_source (pathlib.Path): Local source file (consumed on success).
+            path_destination (pathlib.Path): Final destination path.
+            skip_if_exists (bool): Whether an existing destination counts as success.
+
+        Returns:
+            bool: True if the destination file is in place.
+        """
+        path_destination_tmp: pathlib.Path = path_destination.with_name(f".{path_destination.name}.{uuid4()}.tmp")
+        try:
+            self._copy_file_contents(path_file_source, path_destination_tmp)
+            path_destination_tmp.replace(path_destination)
+            path_file_source.unlink(missing_ok=True)
+        except OSError as error:
+            if isinstance(error, FileNotFoundError):
+                self._dirs_ensured.discard(str(path_destination.parent))
+            # Best-effort cleanup: never let a failing cleanup mask the original error or leak the tmp file.
+            with contextlib.suppress(OSError):
+                path_destination_tmp.unlink(missing_ok=True)
+            if isinstance(error, FileExistsError) and skip_if_exists:
+                path_file_source.unlink(missing_ok=True)
+                return True
+            raise
+        return True
 
     def _move_lyrics(self, path_lyrics: pathlib.Path, file_media_dst: pathlib.Path) -> bool:
         """Move a lyrics file to the destination.
