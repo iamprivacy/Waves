@@ -10,6 +10,45 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 🚀 v0.1.9 (2026-07-14)
+
+### ✨ Added
+
+- ⏳ Download buttons acknowledge the click instantly with an animated
+  QUEUED state, then flip to the usual progress bar when the download
+  starts.
+
+### 🐛 Fixed
+
+- 🧊 No more multi-second freezes while downloading to a network drive
+  (macOS SMB shares especially): finished-track bookkeeping now runs fully
+  in the background.
+- 📡 A busy network share no longer trips the "Download folder isn't
+  reachable" dialog over and over: busy is no longer mistaken for dead, and
+  slow shares get more time to answer.
+- 🔁 "Try again" on the unreachable-folder dialog retries every queued
+  download, not just the most recent click.
+- 📂 A brief network-share hiccup no longer fails a whole album: creating
+  the destination folders now retries with backoff.
+- 🔄 Quitting during a background update check no longer records a bogus
+  "background worker crashed" error in the diagnostic log.
+- 🖼️ Cover art no longer stalls on its loading placeholder or fails in
+  batches while downloads are running.
+- 🏷️ Downloaded badges stop re-checking the download drive while you scroll
+  during a download; freshly finished tracks still update instantly.
+- 📸 Two tracks finishing at the same moment can no longer trip a "File
+  exists" error while writing the shared album cover to a network drive.
+
+### 🔧 Changed
+
+- 🚀 Finished tracks land on network drives much faster: a few large writes
+  instead of hundreds of tiny ones, with far less folder and bookkeeping
+  chatter per album.
+- 🧵 Downloads use fewer threads and less memory.
+- 🟩 The playback ring around track art in search results uses the same
+  square LED blocks as every other progress bar and stays inside the
+  artwork tile.
+
 ## 🌊 v0.1.8 (2026-07-13)
 
 ### ✨ Added
