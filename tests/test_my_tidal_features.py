@@ -49,14 +49,28 @@ def test_download_gate_never_probes_the_filesystem():
     fake._probe_download_base.assert_not_called()
 
 
-def test_gate_reachability_ok_proceeds():
+def _gate_fake():
+    """MagicMock bridge with the real pending-download helpers bound on, so the
+    gate/dialog tests exercise the genuine stash-and-replay behavior."""
+    from threading import Lock
+
     fake = MagicMock()
+    fake._base_ok = ("", 0.0)  # no recent write: the probe must be consulted
+    fake._pending_lock = Lock()
+    fake._pending_downloads = []
+    fake._stash_pending_download = WavesBridge._stash_pending_download.__get__(fake)
+    fake._run_pending_downloads = WavesBridge._run_pending_downloads.__get__(fake)
+    return fake
+
+
+def test_gate_reachability_ok_proceeds():
+    fake = _gate_fake()
     fake._probe_download_base = lambda: ("ok", "/some/folder")
     assert WavesBridge._gate_reachability(fake, lambda: None) is True
 
 
 def test_gate_reachability_healed_persists_live_path():
-    fake = MagicMock()
+    fake = _gate_fake()
     fake._probe_download_base = lambda: ("healed", "/Volumes/Music 1/Library")
     assert WavesBridge._gate_reachability(fake, lambda: None) is True
     assert fake.settings.data.download_base_path == "/Volumes/Music 1/Library"
@@ -64,35 +78,36 @@ def test_gate_reachability_healed_persists_live_path():
 
 
 def test_gate_reachability_dead_holds_retry_and_warns():
-    fake = MagicMock()
+    fake = _gate_fake()
     fake._probe_download_base = lambda: ("dead", "/Volumes/Gone/Library")
     retry = lambda: None
-    assert WavesBridge._gate_reachability(fake, retry) is False
-    assert fake._pending_download is retry
+    assert WavesBridge._gate_reachability(fake, retry, "m1") is False
+    assert fake._pending_downloads == [("m1", retry)]
     fake.downloadFolderUnreachable.emit.assert_called_once()
 
 
 def test_keep_download_folder_marks_prompted_and_replays():
-    # "Keep the default location": persist the decision and run the held download.
+    # "Keep the default location": persist the decision and run every held download.
     ran = []
-    fake = MagicMock()
-    fake._pending_download = lambda: ran.append("go")
+    fake = _gate_fake()
+    fake._stash_pending_download("a", lambda: ran.append("a"))
+    fake._stash_pending_download("b", lambda: ran.append("b"))
     WavesBridge.keepDownloadFolder(fake)
     assert fake.settings.data.download_folder_prompted is True
     fake.settings.save.assert_called_once()
-    assert ran == ["go"]  # the deferred download actually ran
-    assert fake._pending_download is None  # and was cleared
+    assert ran == ["a", "b"]  # every deferred download actually ran
+    assert fake._pending_downloads == []  # and the holds were cleared
 
 
 def test_dismiss_download_folder_nudge_drops_pending_without_running():
-    # "Choose a new location" / dismiss: abandon the held download, persist nothing
+    # "Choose a new location" / dismiss: abandon the held downloads, persist nothing
     # (so an unresolved default is asked about again next time).
     ran = []
-    fake = MagicMock()
-    fake._pending_download = lambda: ran.append("go")
+    fake = _gate_fake()
+    fake._stash_pending_download("a", lambda: ran.append("go"))
     WavesBridge.dismissDownloadFolderNudge(fake)
     assert ran == []  # nothing downloaded
-    assert fake._pending_download is None
+    assert fake._pending_downloads == []
     fake.settings.save.assert_not_called()
 
 

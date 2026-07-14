@@ -19,7 +19,7 @@ Covered findings:
 
 from __future__ import annotations
 
-from threading import Event
+from threading import Event, Lock
 
 import pytest
 
@@ -47,6 +47,8 @@ class _Stub:
         self._job_dls: dict = {}
         self._job_tracks: dict = {}
         self._merge_plans: dict = {}
+        self._pending_downloads: list = []
+        self._pending_lock = Lock()
         self._queue_emit_suspended = False
         self._paused = False
         self._event_run = Event()

@@ -19,6 +19,7 @@ def download_instance() -> Download:
     downloader.fn_logger = MagicMock()
     downloader._FILE_OPERATION_RETRIES = 2
     downloader._FILE_OPERATION_RETRY_DELAY_SEC = 0
+    downloader._dirs_ensured = set()
 
     return downloader
 
@@ -250,14 +251,14 @@ def test_move_file_interrupted_cross_filesystem_copy_leaves_no_partial(
             raise OSError("Invalid cross-device link")
         return replace_original(self, target)
 
-    def copy2_crash(src: str, dst: str) -> None:
+    def copy_crash(src: pathlib.Path, dst: pathlib.Path) -> None:
         # Write a partial temp file, then simulate a crash / power loss mid-copy.
-        pathlib.Path(dst).write_bytes(b"hi-r")
+        dst.write_bytes(b"hi-r")
         raise OSError("simulated interruption during copy")
 
     with (
         patch.object(pathlib.Path, "replace", replace_no_cross_device),
-        patch("tidaler.download.shutil.copy2", copy2_crash),
+        patch.object(download_instance, "_copy_file_contents", copy_crash),
     ):
         result: bool = download_instance._move_file(source_path, destination_path, overwrite=True)
 

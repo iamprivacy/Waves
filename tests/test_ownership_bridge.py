@@ -63,10 +63,16 @@ class _BridgeStub:
         self._own_lock = Lock()
         self._own_pool = _SyncPool()
         self._OWN_TTL = WavesBridge._OWN_TTL
-        self.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=quality_audio))
+        self._OWN_TTL_BUSY = WavesBridge._OWN_TTL_BUSY
+        self._downloads_running = lambda: False
+        self._base_ok = ("", 0.0)
+        self.settings = SimpleNamespace(
+            data=SimpleNamespace(quality_audio=quality_audio, download_base_path="", symlink_to_track=False)
+        )
         for name in (
             "_track_lifecycle",
             "_record_ownership",
+            "_note_download_base_ok",
             "ownershipOf",
             "_own_refresh",
             "_target_quality_rank",
@@ -242,6 +248,10 @@ def test_failed_event_is_not_recorded(tmp_path):
 
 def test_symlink_records_resolved_target(tmp_path):
     stub = _BridgeStub(tmp_path)
+    # realpath resolution is gated on symlink-to-track mode now (it is the
+    # only mode that ever hands a link to the sink, and realpath costs a
+    # network stat per path component on an SMB library).
+    stub.settings.data.symlink_to_track = True
     real = _make_file(tmp_path, "real.flac")
     link = tmp_path / "link.flac"
     link.symlink_to(real)
