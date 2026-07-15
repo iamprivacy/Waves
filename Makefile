@@ -72,7 +72,10 @@ gui-waves: ## Build the Waves QML app (standalone). On macOS this yields dist/wa
 	@# bundle layout (waves.app on macOS, waves.dist on Linux/Windows).
 	@if [ -d "$(app_path_dist)/waves.app" ]; then \
 		bash tools/trim_qt_bundle.sh "$(app_path_dist)/waves.app"; \
-		echo "🔏 Re-sealing macOS bundle (trim broke Nuitka's ad-hoc signature)"; \
+		echo "🔐 Declaring network/removable volume access so macOS shows a persistable consent prompt (no Full Disk Access needed)"; \
+		plutil -replace NSNetworkVolumesUsageDescription -string "Waves saves your downloads to the folder you choose, which can live on a network share (NAS/SMB)." "$(app_path_dist)/waves.app/Contents/Info.plist"; \
+		plutil -replace NSRemovableVolumesUsageDescription -string "Waves saves your downloads to the folder you choose, which can live on an external drive." "$(app_path_dist)/waves.app/Contents/Info.plist"; \
+		echo "🔏 Re-sealing macOS bundle (trim + plist edit broke Nuitka's ad-hoc signature)"; \
 		codesign --force --deep --sign - "$(app_path_dist)/waves.app"; \
 	elif [ -d "$(app_path_dist)/waves.dist" ]; then \
 		bash tools/trim_qt_bundle.sh "$(app_path_dist)/waves.dist"; \
