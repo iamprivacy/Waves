@@ -202,7 +202,7 @@ class OwnershipStore:
     def members_of(self, collection_id: str) -> list[str] | None:
         """Known member track ids for ``collection_id``, or None if Waves has
         never observed this collection's contents (never opened, never
-        downloaded) — distinct from an empty list, so a caller can tell
+        downloaded): distinct from an empty list, so a caller can tell
         "unknown" apart from a genuinely empty collection.
 
         A plain indexed lookup against Waves' own local database, not the
