@@ -494,3 +494,67 @@ jobs:
           files: |
             SHA256SUMS
             SHA256SUMS.sig
+
+  update-homebrew-tap:
+    # A published release must reach every install channel, so once the signed
+    # release is live this job bumps the Homebrew cask (Casks/waves.rb in the
+    # tap repo) to the new version with the freshly built macOS checksums.
+    # Without it, `brew upgrade` and Homebrew-managed in-app updates keep
+    # serving the previous version until someone edits the tap by hand (which
+    # is exactly how the cask once sat two releases stale).
+    #
+    # Auth: the TAP_PUSH_TOKEN secret, a fine-grained PAT with contents
+    # read/write on the tap repo only (GITHUB_TOKEN cannot push to another
+    # repo). If the secret is missing the job warns and exits green: the
+    # release itself is already complete, the tap just needs a manual bump.
+    needs: ["sign-manifest"]
+    if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '') }}
+    runs-on: ubuntu-24.04
+    env:
+      TAP_REPO: iamprivacy/homebrew-waves
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Collect per-asset checksums
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sha256-*
+          merge-multiple: true
+          path: sums
+      - name: Bump the cask to this release
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::TAP_PUSH_TOKEN is not set; the Homebrew cask was NOT bumped. Update ${TAP_REPO} Casks/waves.rb to ${RELEASE_TAG} by hand (version + both macOS sha256s from SHA256SUMS)."
+            exit 0
+          fi
+          VERSION="${RELEASE_TAG#v}"
+          # The cask covers the two macOS zips; their checksum artifacts must
+          # exist or the bump would write garbage, so fail loudly instead.
+          ARM_SHA="$(awk '{print $1}' sums/waves_macos-apple-silicon.zip.sha256)"
+          INTEL_SHA="$(awk '{print $1}' sums/waves_macos-intel.zip.sha256)"
+          case "$ARM_SHA$INTEL_SHA" in
+            *[!0-9a-f]*|"") echo "::error::macOS checksums missing or malformed; cask not bumped."; exit 1 ;;
+          esac
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+          sed -E -i \
+            -e "s/version \"[0-9][0-9.]*\"/version \"${VERSION}\"/" \
+            -e "s/arm:   \"[0-9a-f]{64}\"/arm:   \"${ARM_SHA}\"/" \
+            -e "s/intel: \"[0-9a-f]{64}\"/intel: \"${INTEL_SHA}\"/" \
+            Casks/waves.rb
+          # Every value must have landed; a silent partial edit would ship a
+          # cask whose checksum can never match the download.
+          grep -q "version \"${VERSION}\"" Casks/waves.rb || { echo "::error::version not updated in cask"; exit 1; }
+          grep -q "$ARM_SHA" Casks/waves.rb || { echo "::error::arm sha256 not updated in cask"; exit 1; }
+          grep -q "$INTEL_SHA" Casks/waves.rb || { echo "::error::intel sha256 not updated in cask"; exit 1; }
+          if git diff --quiet; then
+            echo "Cask already at ${VERSION}; nothing to push."
+            exit 0
+          fi
+          git config user.name "waves-release"
+          git config user.email "waves-release@users.noreply.github.com"
+          git add Casks/waves.rb
+          git commit -m "waves ${VERSION}"
+          git push
+          echo "Cask bumped to ${VERSION}."
