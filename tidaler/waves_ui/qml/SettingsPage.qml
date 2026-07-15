@@ -12,6 +12,12 @@ Item {
     id: page
     property bool active: false
     signal closed()
+    // Advanced-section reset actions. The page only asks; Main.qml shows the
+    // confirmation dialog and calls the backend, then (for the settings
+    // reset) tells the page to re-read the freshly-defaulted schema.
+    signal resetSettingsRequested()
+    signal factoryResetRequested()
+    function externalReset() { editMap = ({}); dirty = false; refreshSchema() }
 
     // Waves palette (kept local so this file is self-contained)
     readonly property color accent:       "#3dff6e"
@@ -1104,6 +1110,64 @@ Item {
                     }
                 }
 
+                // Reset row (Advanced section footer): explainer on the left,
+                // the two reset actions inline on the right. The buttons only
+                // raise page signals; Main.qml owns the confirmation dialogs
+                // and the backend calls, so nothing here is destructive.
+                Component {
+                    id: resetRowComp
+                    Rectangle {
+                        width: parent ? parent.width : 0
+                        radius: 10; color: page.surface; border.color: page.border1
+                        implicitHeight: rstRow.implicitHeight + 20
+                        RowLayout {
+                            id: rstRow
+                            anchors.left: parent.left; anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 2
+                                Text { text: "Start over"; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                Text {
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                    text: "Put every setting back to its default, or wipe everything Waves has saved on this computer. Downloaded music is never touched."
+                                    color: page.textDim; font.pixelSize: 12
+                                }
+                            }
+                            Rectangle {
+                                implicitWidth: rstDefTxt.implicitWidth + page.btnPadH * 2
+                                implicitHeight: rstDefTxt.implicitHeight + page.btnPadV * 2
+                                radius: page.btnRad; Layout.alignment: Qt.AlignVCenter
+                                color: page.accentCont; border.color: page.accentDim
+                                Text {
+                                    id: rstDefTxt; anchors.centerIn: parent
+                                    text: "RESET ALL SETTINGS"; color: page.accent
+                                    font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
+                                }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: page.resetSettingsRequested()
+                                }
+                            }
+                            Rectangle {
+                                implicitWidth: rstAppTxt.implicitWidth + page.btnPadH * 2
+                                implicitHeight: rstAppTxt.implicitHeight + page.btnPadV * 2
+                                radius: page.btnRad; Layout.alignment: Qt.AlignVCenter
+                                color: page.redCont; border.color: Qt.alpha(page.red, 0.55)
+                                Text {
+                                    id: rstAppTxt; anchors.centerIn: parent
+                                    text: "RESET APPLICATION"; color: page.red
+                                    font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
+                                }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: page.factoryResetRequested()
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Diagnostics card: status + export on the left, the two
                 // privacy toggles on the right (its `embedded` schema fields).
                 // Identity PII never reaches the log, so the card's job is
@@ -1499,14 +1563,26 @@ Item {
                                             Row {
                                                 width: parent.width; spacing: 8
                                                 SText {
-                                                    width: modelData.browse ? parent.width - 108 : parent.width
+                                                    width: modelData.browse ? parent.width - browseBtn.width - 8 : parent.width
                                                     text: page.val(modelData)
                                                     onEdited: function(t){ page.setv(modelData.key, t) }
                                                 }
                                                 Rectangle {
+                                                    id: browseBtn
                                                     visible: modelData.browse !== ""
-                                                    width: 100; height: 36; radius: 8; color: page.surface2; border.color: page.border1
-                                                    Text { anchors.centerIn: parent; text: "Browse…"; color: page.textLo; font.pixelSize: 13 }
+                                                    // SAVE CHANGES button vocabulary: accent-container fill,
+                                                    // accentDim border, uppercase accent label; full strength
+                                                    // while the field still needs a value (Browse IS the action
+                                                    // to take), faded once one is set. String(): this binding
+                                                    // also evaluates in the hidden non-str branches of the
+                                                    // delegate, where val() is a number or bool.
+                                                    readonly property bool needsValue: String(page.val(modelData) ?? "").trim() === ""
+                                                    width: browseTxt.width + page.btnPadH * 2; height: browseTxt.height + page.btnPadV * 2; radius: page.btnRad
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    color: page.accentCont
+                                                    border.color: page.accentDim; border.width: 1
+                                                    opacity: needsValue ? 1 : 0.4
+                                                    Text { id: browseTxt; anchors.centerIn: parent; text: "BROWSE"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
                                                     MouseArea {
                                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                         onClicked: {
@@ -1828,6 +1904,18 @@ Item {
                                         }
                                     }
                                 }
+                            }
+
+                            // Reset actions, Advanced section only, at the very
+                            // bottom: put settings back to factory defaults, or
+                            // wipe the whole app state. Both confirm first (the
+                            // dialogs live in Main.qml, full-window overlays).
+                            Loader {
+                                active: card.modelData.id === "advanced"
+                                visible: active
+                                width: inner.width
+                                height: (active && item) ? item.implicitHeight : 0
+                                sourceComponent: resetRowComp
                             }
                         }
                     }

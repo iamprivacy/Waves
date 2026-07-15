@@ -7,8 +7,14 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
-    visible: true
-    width: 1120
+    // Starts hidden and is shown from Component.onCompleted once the saved
+    // frame (issue #6) has been applied, so a remembered size/position takes
+    // effect BEFORE the first present: the window opens where it was left with
+    // no jump from the default frame. On a fresh install there is nothing to
+    // restore and it shows at the default (4:3, 1040x780), centered on the
+    // screen by onCompleted.
+    visible: false
+    width: 1040
     height: 780
     // Never allow a width that clips the header: the top bar's content
     // (logo, wordmark, nav tabs, queue, connection pill, sign out) sets the
@@ -91,7 +97,91 @@ ApplicationWindow {
     // re-fetches whenever the user is sitting on the Browse tab), or right
     // away below if the bridge finished its token login before QML loaded.
     property bool browseOpen: true
+
+    // ---- Window geometry persistence (issue #6) ------------------------
+    // Remember the window's size, position and maximized state across launches.
+    // Saves route through the bridge's waves.json store (the channel every
+    // other pref uses; it writes synchronously so it survives the standalone
+    // os._exit teardown) and are debounced: a drag/resize fires a change per
+    // pixel, so one settled write per gesture is enough. The NORMAL
+    // (non-maximized) frame is tracked separately from the maximized flag so
+    // un-maximizing lands on a sane size, and the backend clamps a restored
+    // frame back onto a live screen. _geomReady gates saves so the restore
+    // itself never triggers one, and so the initial show is not saved as a
+    // change.
+    property int  _winNormalX: x
+    property int  _winNormalY: y
+    property int  _winNormalW: width
+    property int  _winNormalH: height
+    property bool _geomReady: false
+    function _winIsMax() {
+        return visibility === Window.Maximized || visibility === Window.FullScreen
+    }
+    function _winCaptureNormalIfWindowed() {
+        // Capture the normal frame only from a SETTLED windowed state, and only
+        // at persist time (not on every raw geometry signal). On X11 a maximize
+        // arrives as two independent, unordered events (the maximized
+        // ConfigureNotify and the _NET_WM_STATE change); capturing eagerly could
+        // record the transitional maximized geometry as the "normal" frame if
+        // the geometry event landed first. By the time the debounce fires the
+        // state has settled, so visibility here is coherent with the geometry.
+        if (visibility === Window.Windowed) {
+            _winNormalX = x; _winNormalY = y
+            _winNormalW = width; _winNormalH = height
+        }
+    }
+    function _winPersist() {
+        if (!_geomReady) return
+        // Don't persist while minimized/hidden: visibility collapses the
+        // maximized substate to Minimized there, so a save would wrongly record
+        // max=false, and there is no fresh frame to capture. The last
+        // visible-state save stands, so maximize then minimize then quit still
+        // restores maximized.
+        if (visibility === Window.Minimized || visibility === Window.Hidden) return
+        // Maximized keeps the last known normal frame (capture is skipped); only
+        // the flag changes. windowSaveGeometry ignores a 0x0 teardown frame.
+        _winCaptureNormalIfWindowed()
+        waves.windowSaveGeometry(_winNormalX, _winNormalY, _winNormalW, _winNormalH, _winIsMax())
+    }
+    Timer { id: winGeomSaveTimer; interval: 600; onTriggered: root._winPersist() }
+    onXChanged:          if (_geomReady) winGeomSaveTimer.restart()
+    onYChanged:          if (_geomReady) winGeomSaveTimer.restart()
+    onWidthChanged:      if (_geomReady) winGeomSaveTimer.restart()
+    onHeightChanged:     if (_geomReady) winGeomSaveTimer.restart()
+    onVisibilityChanged: if (_geomReady) winGeomSaveTimer.restart()
+    onClosing:           _winPersist()   // best-effort final flush; not the only save path
+
     Component.onCompleted: {
+        // Restore the saved window frame BEFORE the first present (see the
+        // block above): apply the frame, seed the normal-frame trackers, then
+        // show. The try/catch guarantees the window is shown even if the
+        // restore hiccups, so a geometry glitch can never leave it hidden.
+        var showMax = false
+        var restored = false
+        try {
+            var g = waves.windowRestoreGeometry()
+            if (g && g.w > 0 && g.h > 0) {
+                root.x = g.x; root.y = g.y
+                root.width = g.w; root.height = g.h
+                root._winNormalX = g.x; root._winNormalY = g.y
+                root._winNormalW = g.w; root._winNormalH = g.h
+                showMax = g.maximized === true
+                restored = true
+            }
+        } catch (e) {
+            // fall through to a plain show
+        }
+        if (!restored) {
+            // Nothing remembered yet: center the default 4:3 frame on the
+            // screen instead of taking the OS's corner placement.
+            root.x = Math.round(Screen.virtualX + (Screen.width - root.width) / 2)
+            root.y = Math.round(Screen.virtualY + (Screen.height - root.height) / 2)
+            root._winNormalX = root.x; root._winNormalY = root.y
+        }
+        if (showMax) root.visibility = Window.Maximized
+        else root.visible = true
+        root._geomReady = true
+
         if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true
             waves.loadBrowse()
@@ -136,6 +226,26 @@ ApplicationWindow {
         expandScrollAnim.start()
     }
     NumberAnimation { id: expandScrollAnim; property: "contentY"; duration: 300; easing.type: Easing.OutCubic }
+    // Collapsing a SHOW ALL section from deep inside it would otherwise leave
+    // the view clamped to the page bottom, a random spot with no relation to
+    // what was clicked. Land the view back at the section's header instead
+    // (same padding sliver as expandAnchor), so SHOW LESS reads as returning
+    // to the section you were browsing. Measured before the rows disappear
+    // (the header sits above them, its y is unchanged by the collapse) and
+    // applied via callLater, after the Column has relaid out, so the clamp
+    // sees the new contentHeight; that still lands pre-paint (no visible
+    // scroll). A view already above the section stays put.
+    function scrollCollapsedToSection(item) {
+        var f = item.parent
+        while (f && f.contentY === undefined) f = f.parent
+        if (!f) return
+        var target = Math.max(0, item.mapToItem(f.contentItem, 0, 0).y - f.height * expandAnchor)
+        if (f.contentY <= target + 1) return
+        expandScrollAnim.stop()
+        Qt.callLater(function() {
+            f.contentY = Math.min(target, Math.max(0, f.contentHeight - f.height))
+        })
+    }
     // Scroll-edge dressing plus the "back to top" badge, one window-level
     // instance serving whichever view is on screen. Three pieces:
     //   1. LIP edge fades: a short dense darkening at the top and bottom of
@@ -163,10 +273,18 @@ ApplicationWindow {
         readonly property real fBottom: live ? fTop + flick.height : 0
 
         // ---- LIP edge fades ------------------------------------------------
+        // Scroll-gated: a fade exists to soften rows being cut off by the
+        // viewport edge, so when nothing is cut off there must be no fade.
+        // At the very top of a page (contentY 0) the top fade is fully
+        // transparent, so heroes, artist art and the back bar are never
+        // dimmed for no reason; it ramps in over the first fadeH pixels of
+        // scroll. Mirrored at the bottom: the fade lifts as the end of the
+        // page arrives, and a page too short to scroll shows no fades at all.
         readonly property real fadeH: 34
         Rectangle {
             x: btt.fX; y: btt.fTop; width: btt.fW; height: btt.fadeH
-            visible: btt.live
+            visible: btt.live && opacity > 0
+            opacity: btt.live ? Math.min(1, Math.max(0, btt.flick.contentY) / btt.fadeH) : 0
             gradient: Gradient {
                 GradientStop { position: 0; color: "#0d0f12" }
                 GradientStop { position: 0.25; color: Qt.alpha("#0d0f12", 0.82) }
@@ -176,7 +294,9 @@ ApplicationWindow {
         }
         Rectangle {
             x: btt.fX; y: btt.fBottom - btt.fadeH; width: btt.fW; height: btt.fadeH
-            visible: btt.live
+            visible: btt.live && opacity > 0
+            opacity: btt.live ? Math.min(1, Math.max(0,
+                         btt.flick.contentHeight - btt.flick.height - btt.flick.contentY) / btt.fadeH) : 0
             rotation: 180
             gradient: Gradient {
                 GradientStop { position: 0; color: "#0d0f12" }
@@ -191,6 +311,13 @@ ApplicationWindow {
         // so rows on backgrounded pages keep working when the user returns).
         readonly property real rollMax: 9
         readonly property real rollBand: 56
+        // The tilt angle below reads row.mapToItem(fl), which is NOT reactive, so
+        // the binding only re-evaluates on its one live dependency: fl.contentY
+        // (a scroll). A tab switch or a filter change repositions rows without
+        // moving contentY, which would leave every angle frozen at its old value
+        // until the next scroll. Bumping rollTick on those events (see armRoll and
+        // onFlickChanged) is the dependency that forces a recompute on demand.
+        property int rollTick: 0
         Component {
             id: bttRollComp
             Rotation {
@@ -200,6 +327,7 @@ ApplicationWindow {
                 origin.y: row ? row.height / 2 : 0
                 axis { x: 1; y: 0; z: 0 }
                 angle: {
+                    var _t = btt.rollTick  // re-eval on tab switch / filter / reflow, not only scroll
                     if (!row || !fl) return 0
                     // Only row-sized items may tilt. Anything taller (a shelf
                     // section, an expanded album panel) projects far outside
@@ -240,8 +368,14 @@ ApplicationWindow {
                     if (row.width > 100 && row.height > 24 && row.height <= 160) armRow(row, fl)
                 }
             }
+            // Rows may have moved (a fresh arm, a reflow, a returning tab), so
+            // force every armed angle to recompute now, not on the next scroll.
+            rollTick++
         }
-        onFlickChanged: Qt.callLater(armRoll)
+        // Bump synchronously too: on a tab switch the returning pane is already
+        // laid out, so its rows can re-tilt correctly in the same frame it
+        // appears (no stale-then-correct flash); armRoll then re-checks post-layout.
+        onFlickChanged: { btt.rollTick++; Qt.callLater(armRoll) }
         Component.onCompleted: Qt.callLater(armRoll)
         // Delegates recycle and result columns repopulate; contentHeight moves
         // in both cases, so it doubles as the re-arm signal.
@@ -313,6 +447,10 @@ ApplicationWindow {
     // downloadFolderMissing / downloadFolderDefault signals.
     property bool folderGateBlocking: false
     property bool folderNudge: false
+    // Advanced-settings reset confirmations. Both actions are destructive, so
+    // nothing happens until the user confirms in these dialogs.
+    property bool confirmSettingsReset: false
+    property bool confirmFactoryReset: false
     // The set folder failed the reachability probe (NAS asleep, stale mount);
     // the download is held backend-side until Try again / a new folder.
     property bool folderUnreachable: false
@@ -337,11 +475,51 @@ ApplicationWindow {
     // Top tracks show only the first 5; SHOW ALL reveals the rest for this
     // page visit only (deliberately not persisted).
     property bool topTracksExpanded: false
+    // The search page (mixed All view) shows each section's first 5 results with
+    // a SHOW ALL beneath it, so the page reads as a quick overview instead of a
+    // wall. A section the user expands is remembered (prefs) and stays expanded
+    // on the next search, per section, the same way the artist page remembers a
+    // folded section. A specific section filter always shows everything (no cap).
+    //
+    // ARTISTS is the exception to the layout: its collapsed view is a horizontal
+    // scroll strip of fixed-size cards (a resize reveals more cards, never
+    // re-fits the ones on screen, which is what keeps it smooth) and SHOW ALL
+    // expands it to a fill grid. stripMode drives which layout is live and gates
+    // the two layouts' Loaders so exactly one set is active, which keeps the
+    // build veil's one-tick-per-artist accounting balanced. Its expanded state
+    // persists the same as the list sections.
+    property bool searchArtistsExpanded: waves.wavesPref("search_sec_artists_expanded") === true
+    readonly property bool searchArtistsStripMode: root.filterType === "all" && !root.searchArtistsExpanded
+    property bool searchAlbumsExpanded: waves.wavesPref("search_sec_albums_expanded") === true
+    property bool searchTracksExpanded: waves.wavesPref("search_sec_tracks_expanded") === true
+    property bool searchVideosExpanded: waves.wavesPref("search_sec_videos_expanded") === true
+    property bool searchPlaylistsExpanded: waves.wavesPref("search_sec_playlists_expanded") === true
+    property bool searchMixesExpanded: waves.wavesPref("search_sec_mixes_expanded") === true
+    function toggleSearchSection(which) {
+        var v
+        if (which === "artists") v = searchArtistsExpanded = !searchArtistsExpanded
+        else if (which === "albums") v = searchAlbumsExpanded = !searchAlbumsExpanded
+        else if (which === "tracks") v = searchTracksExpanded = !searchTracksExpanded
+        else if (which === "videos") v = searchVideosExpanded = !searchVideosExpanded
+        else if (which === "playlists") v = searchPlaylistsExpanded = !searchPlaylistsExpanded
+        else v = searchMixesExpanded = !searchMixesExpanded
+        waves.setWavesPref("search_sec_" + which + "_expanded", v)
+    }
+    // A per-section cap for the mixed All view: the section's first 5 rows, or
+    // everything once it is expanded; a specific section filter is never capped.
+    function searchRowVisible(name, count, index, expanded) {
+        return sectionVisible(name, count) && (filterType !== "all" || expanded || index < 5)
+    }
     // ---- Download state (mirrors the bridge) ----------------------------
-    // mediaId -> percent / state ("running"|"done"|"failed"), fed by the
-    // downloadProgress and downloadState signals; dlPct()/dlSt() read these.
-    property var dlProgress: ({})
-    property var dlState: ({})
+    // mediaId -> a small reactive holder { real pct; string st }, created lazily
+    // when a download for that id first reports. dlPct()/dlSt() read the holder;
+    // the downloadProgress/downloadState handlers set exactly one holder's
+    // property, so a progress tick re-binds only the controls showing THAT id.
+    // (The previous whole-map reassignment invalidated the pct/state binding of
+    // every instantiated download control on every tick, which under a burst of
+    // per-segment ticks stole GUI-thread frames from scrolling and cover art.)
+    property var dlHolders: ({})
+    Component { id: dlHolderComp; QtObject { property real pct: -1; property string st: "" } }
     // In-app preview: exactly one preview plays at a time, addressed by
     // (previewKind, previewId), kind "track" or "artist". previewStopMs caps
     // playback (0 = whole track, the norm; a positive value clips it, same path).
@@ -425,6 +603,25 @@ ApplicationWindow {
     }
     // A loader that errors (or a miscount) must never pin the veil.
     Timer { id: browseBuildGuard; interval: 800; onTriggered: root.browseBuilding = false }
+    // Always-on freshness: revalidate-on-tab-return alone lets the landing
+    // freeze for a user who parks on Browse. The backend's 60s throttle is a
+    // floor (don't re-hit the API more often than this), not a ceiling, so
+    // nothing forces a refresh while the tab just sits there. This timer is
+    // that ceiling: while the Browse landing is the on-screen view, it re-pokes
+    // the (throttled) revalidation on a cadence so New / For You track TIDAL
+    // instead of staying pinned to the first load of a weeks-long session.
+    // refreshBrowse repaints only on an actual change, so a quiet landing costs
+    // one background request per tick and no visible flash. Bound to run only
+    // when the landing is visible (browsePageKey === "" and no overlay), so
+    // drill-in pages, other tabs and a backgrounded app make no requests.
+    Timer {
+        id: browseLandingFreshTimer
+        interval: 5 * 60 * 1000    // max-age: editorial rows move a few times a day
+        repeat: true
+        running: waves.loggedIn && root.browseOpen && root.browsePageKey === ""
+                 && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
+        onTriggered: waves.refreshBrowse()   // silent, throttled; repaints only on change
+    }
     // --- Search results build veil ----------------------------------------
     // Same treatment for a fresh search: every result card (artists, albums,
     // tracks, videos, playlists, mixes) incubates through an asynchronous
@@ -447,6 +644,27 @@ ApplicationWindow {
     }
     // A loader that errors (or a miscount) must never pin the veil.
     Timer { id: searchBuildGuard; interval: 800; onTriggered: root.searchBuilding = false }
+    // The veil's visual: every veiled element binds its opacity to this one
+    // animated value instead of the raw building flag, so when the veil drops
+    // the whole page fades in quickly (over the ambient water, which stays
+    // visible behind the "Reading the wire…" hint) rather than snapping in
+    // as one hard paint. The animation runs in ONE direction only: raising
+    // the veil for a new build snaps the value to 0 in the same frame. A
+    // two-way Behavior here let the freshly refilled headers and SHOW ALL
+    // links ghost-fade for 180ms over the loading hint on every new search,
+    // a glitchy flash of half-transparent furniture between pages.
+    property real searchReveal: 1
+    onSearchBuildingChanged: {
+        if (searchBuilding) { searchRevealRise.stop(); searchReveal = 0 }
+        else searchRevealRise.restart()
+    }
+    NumberAnimation { id: searchRevealRise; target: root; property: "searchReveal"; to: 1; duration: 180; easing.type: Easing.OutQuad }
+    property real browseReveal: 1
+    onBrowseBuildingChanged: {
+        if (browseBuilding) { browseRevealRise.stop(); browseReveal = 0 }
+        else browseRevealRise.restart()
+    }
+    NumberAnimation { id: browseRevealRise; target: root; property: "browseReveal"; to: 1; duration: 180; easing.type: Easing.OutQuad }
     property var browseChips: ({ genres: [], moods: [], decades: [] })
     property bool browseLoading: false
     property bool browseError: false
@@ -696,8 +914,21 @@ ApplicationWindow {
         }
     }
 
-    function dlPct(id) { return dlProgress[id] !== undefined ? dlProgress[id] : -1 }
-    function dlSt(id) { return dlState[id] !== undefined ? dlState[id] : "" }
+    // Create-or-get the reactive holder for a media id (writers only). Cloning
+    // dlHolders on creation forces a change notification so any control already
+    // bound to dlPct(id)/dlSt(id) starts tracking the new holder; that O(N)
+    // rebind happens once per download start, not once per progress tick.
+    function dlHolder(id) {
+        var h = dlHolders[id]
+        if (h === undefined) {
+            h = dlHolderComp.createObject(root, { pct: -1, st: "" })
+            if (h === null) return null
+            var m = Object.assign({}, dlHolders); m[id] = h; dlHolders = m
+        }
+        return h
+    }
+    function dlPct(id) { var h = dlHolders[id]; return h !== undefined ? h.pct : -1 }
+    function dlSt(id) { var h = dlHolders[id]; return h !== undefined ? h.st : "" }
 
     // Flat list of every track/video id across a browse page's sections
     // (multi-disc albums split into one "tracks" section per disc). Feeds
@@ -1740,11 +1971,41 @@ ApplicationWindow {
         // Recycled delegates keep component state, a new cover starts its
         // own grace window instead of inheriting the previous one's verdict.
         onUrlChanged: artWaited = false
+        // Never fetch a cover the user has never been shown. Rows hidden
+        // behind a section cap (search's first-5) still instantiate, and
+        // their fetches used to queue ahead of the on-screen art on the six
+        // shared connections, so a big search left visible covers hanging
+        // while invisible ones downloaded. `visible` here reads EFFECTIVE
+        // visibility (ancestors included), so the latch flips the first time
+        // the element is actually shown and the fetch starts then. Once
+        // latched it never drops: a tab switch or filter change must keep
+        // repainting instantly from the cache, never unload.
+        property bool everShown: false
+        onVisibleChanged: if (visible) everShown = true
         Timer {
             interval: 250
-            running: artRoot.artState === "loading"
+            // everShown gates the fetch itself (below), so a hidden row is
+            // not "waiting" yet; its grace window starts when it first shows.
+            running: artRoot.artState === "loading" && artRoot.everShown
             onTriggered: artRoot.artWaited = true
         }
+        // Fixed decode size for the cover. The art is only for viewing, so it is
+        // decoded ONCE at (roughly) its first display size and then just scaled to
+        // fit. Binding the decode size to the live element width made a window
+        // resize re-request the Image on every step, and since opacity follows the
+        // load state (below) that blinked the cover to the grey placeholder. With a
+        // fixed size a resize never touches the Image, so it simply stays put.
+        // Seeded at first layout; ×2 keeps it crisp on HiDPI screens.
+        property int decodeW: 96
+        property bool _decodeSeeded: false
+        function _seedDecode() {
+            if (!_decodeSeeded && width > 0) {
+                _decodeSeeded = true
+                decodeW = Math.round(width * 2)
+            }
+        }
+        onWidthChanged: _seedDecode()
+        Component.onCompleted: { _seedDecode(); if (visible) everShown = true }
         color: surface3
         radius: 6
         border.color: border1
@@ -1753,7 +2014,7 @@ ApplicationWindow {
         Image {
             id: artImg
             anchors.fill: parent
-            source: parent.url
+            source: artRoot.everShown ? artRoot.url : ""
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: true
@@ -1761,12 +2022,12 @@ ApplicationWindow {
             opacity: artRoot.artState === "ready" ? 1 : 0
             visible: opacity > 0
             Behavior on opacity { enabled: artRoot.artWaited; NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
-            // Decode covers at (roughly) display resolution instead of the full
-            // 320-480px source. Without this each tiny 34-54px thumbnail keeps a
-            // full-size bitmap in memory and burns decode time, the main reason
-            // image-heavy lists felt heavy. ×2 keeps it crisp on HiDPI screens.
-            sourceSize.width: parent.width > 0 ? Math.round(parent.width * 2) : 96
-            sourceSize.height: parent.height > 0 ? Math.round(parent.height * 2) : 96
+            // Decode at (roughly) display resolution instead of the full 320-480px
+            // source (each tiny thumbnail would otherwise keep a full-size bitmap and
+            // burn decode time). Art is square, so one decode dimension covers both,
+            // and decodeW is fixed once (see above) so a resize never re-requests it.
+            sourceSize.width: artRoot.decodeW
+            sourceSize.height: artRoot.decodeW
             // Pin this cover's decoded pixels in the warm pool so the next
             // page that shows it (or a revisit) paints without a re-decode.
             onStatusChanged: if (status === Image.Ready) root.warmArt("" + source, sourceSize.width, sourceSize.height)
@@ -2216,36 +2477,79 @@ ApplicationWindow {
         // playback shows through the ring alone, keeping the cover unobscured.
         readonly property bool showGlyph: pa.hovered || pa.st === "loading" || pa.st === "error"
         implicitWidth: 48; implicitHeight: 48
+        // Same lazy-fetch latch as Art: rows hidden behind the search page's
+        // first-5 cap must not spend a connection on a disc nobody can see.
+        // Latches on first real show, never unloads after that.
+        property bool everShown: false
+        Component.onCompleted: if (visible) everShown = true
+        onVisibleChanged: if (visible) everShown = true
 
         // Circular cover. A Rectangle's clip ignores its radius (Qt draws children
-        // to the square bounds), so the art is clipped to a real circle here via
-        // ctx.arc. renderTarget Image keeps it a software raster, reliable
-        // everywhere and cheap at this size. The progress ring lives outside the
-        // canvas (LED cells below) so it binds to the shared pulse clock without
-        // repainting the art.
-        Canvas {
-            id: pring
-            anchors.fill: parent
-            renderTarget: Canvas.Image
-            antialiasing: true
-            readonly property real artR: 17
-            onImageLoaded: requestPaint()
-            Component.onCompleted: if (pa.url) loadImage(pa.url)
-            Connections {
-                target: pa
-                function onUrlChanged() { if (pa.url) pring.loadImage(pa.url); else pring.requestPaint() }
-            }
-            onPaint: {
-                var ctx = getContext("2d"); ctx.reset()
-                var cx = width / 2, cy = height / 2
-                ctx.beginPath(); ctx.arc(cx, cy, artR, 0, 2 * Math.PI); ctx.closePath()
-                if (pa.url !== "" && isImageLoaded(pa.url)) {
-                    ctx.clip()
-                    var d = artR * 2
-                    ctx.drawImage(pa.url, cx - artR, cy - artR, d, d)
-                } else {
-                    ctx.fillStyle = root.surface3; ctx.fill()
+        // to the square bounds), so the square crop is clipped to a real circle
+        // with a MultiEffect mask (the same pattern the download grid uses above).
+        // This rides Qt's Image lifecycle (async + cache + warm-pool + an
+        // observable error state) instead of a hand-painted Canvas: the Canvas
+        // had only a success signal and no retry, so any fetch that failed during
+        // the search build's concurrent load burst left the disc grey forever, and
+        // some rows lost that lottery at random. The progress ring and glyph are
+        // separate siblings below and paint on top of this art.
+        Item {
+            id: coverWrap
+            anchors.centerIn: parent
+            width: 34; height: 34   // artR * 2: a 34px circle centred in the 48px box
+            // Grey disc under the art: shows while a cover is still decoding and
+            // stays when there is no url, matching the old surface3 fill.
+            Rectangle { anchors.fill: parent; radius: width / 2; color: root.surface3 }
+            Image {
+                id: paImg
+                anchors.fill: parent
+                source: pa.everShown ? pa.url : ""
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                cache: true
+                visible: status === Image.Ready
+                // Decode near display size (x2 for HiDPI crispness on the disc).
+                sourceSize.width: 68
+                sourceSize.height: 68
+                // Pin decoded pixels in the warm pool so a rebuilt row (tab switch,
+                // filter change, SHOW ALL) repaints without a re-decode. On a
+                // transient error, re-request a bounded number of times (the Canvas
+                // never did, hence the permanent grey): a cache/warm-pool hit makes
+                // the retry instant. Qt.binding keeps the `source: pa.url` binding
+                // alive across the reload so a later url change still propagates.
+                property int retries: 0
+                onStatusChanged: {
+                    if (status === Image.Ready)
+                        root.warmArt("" + source, sourceSize.width, sourceSize.height)
+                    else if (status === Image.Error && retries < 3)
+                        paRetry.restart()
                 }
+                Timer {
+                    id: paRetry
+                    interval: 600
+                    onTriggered: {
+                        paImg.retries += 1
+                        paImg.source = ""
+                        paImg.source = Qt.binding(function () { return pa.everShown ? pa.url : "" })
+                    }
+                }
+                Connections {
+                    target: pa
+                    function onUrlChanged() { paImg.retries = 0 }
+                }
+                // Clip the square crop to a real circle: MultiEffect keeps only
+                // what the white mask disc covers.
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: ShaderEffectSource { sourceItem: paMask; hideSource: false }
+                }
+            }
+            Item {
+                id: paMask
+                anchors.fill: parent
+                visible: false
+                Rectangle { anchors.fill: parent; radius: width / 2; color: "#ffffff" }
             }
         }
         // Playback ring: the same sharp LED cells as every DotMatrix bar, bent
@@ -2602,12 +2906,12 @@ ApplicationWindow {
         // Collection rollup: when set (non-null array of member track/video
         // ids), DOWNLOADED means every one of those ids is individually owned.
         // Set where the caller already has the member ids in hand (an opened
-        // album/playlist/mix page, an expanded album panel) — never triggers
+        // album/playlist/mix page, an expanded album panel), never triggers
         // a fetch itself.
         property var collectionIds: null
         // Collection rollup, discovered locally: mediaId is a collection id
         // (album/playlist/mix) and its member ids are looked up from what
-        // Waves has already LEARNED locally (see collectionMemberIds) — no
+        // Waves has already LEARNED locally (see collectionMemberIds): no
         // caller-supplied list needed, so this also covers collapsed rows and
         // shelf cards that have never had their track list fetched. A
         // collection Waves has genuinely never opened or downloaded reads as
@@ -2751,12 +3055,20 @@ ApplicationWindow {
         // (96 frames @ 14 fps), so box and banner show the same water.
         property real loopSecs: 96 / 14
         property real t: 0
+        // Idle-lightning clock: its own slow loop (the storyboard below spans
+        // 20s, longer than the water's ~6.9s loop, so strikes drift across
+        // different wave positions instead of always hitting the same crest).
+        readonly property real idleLoopSecs: 20
+        property real idleT: 0
         Timer {
             // Pause while the window is unfocused/minimised, no one's watching
             // the logo then, so don't burn CPU animating it. Resumes on refocus.
             running: wm.visible && root.active
             interval: 50; repeat: true                // 20 Hz step (see delegate note)
-            onTriggered: wm.t = (wm.t + 0.05 / wm.loopSecs) % 1
+            onTriggered: {
+                wm.t = (wm.t + 0.05 / wm.loopSecs) % 1
+                wm.idleT = (wm.idleT + 0.05 / wm.idleLoopSecs) % 1
+            }
         }
         property bool storm: false                    // hover -> ascii lightning strikes
         // Content is clipped by an inner item inset past the rounded corners, so a
@@ -2855,6 +3167,56 @@ ApplicationWindow {
                         target: wm
                         function onStormChanged() { if (wm.storm && !bolt.running && !pauseT.running) boltTx.rearm(true) }
                     }
+                }
+            }
+
+            // Idle lightning: a fixed 20-second storm storyboard that loops
+            // identically, seven strikes spread far apart. Big bolts frame the
+            // box left and right, smaller ones scatter between, and the tall
+            // centre strike lights the whole box with a brief sheet flash.
+            // Every strike lives the same ~280ms flicker (near-full pre-flash,
+            // dark beat, full flash, dim afterglow, the cadence read from the
+            // README banner). Deliberately sparse: the free-running random
+            // storm above stays a hover-only reward, and these hide while it
+            // runs. `at` is milliseconds into the loop.
+            Rectangle {
+                // Sheet flash for the big centre strike: the whole clip blinks
+                // faintly white during that bolt's full-flash beat.
+                anchors.fill: parent
+                color: "#eafff1"
+                readonly property real ms: wm.idleT * wm.idleLoopSecs * 1000 - 9600
+                opacity: wm.storm || ms < 140 || ms >= 280 ? 0 : ms < 210 ? 0.13 : 0.05
+            }
+            Repeater {
+                // Every bolt hangs from the box's top edge (yf 0): with no
+                // clouds drawn, the frame itself is the sky, so a bolt starting
+                // mid-air would read as coming from nowhere. Short bolts are
+                // distant strikes; the tall ones reach down toward the swell.
+                model: [
+                    { at: 1400,  shape: "\\\n \\\n /\n/",          xf: 0.06, yf: 0, px: 9 },   // big, far left
+                    { at: 4200,  shape: "\\\n \\",                 xf: 0.56, yf: 0, px: 5 },   // small
+                    { at: 6800,  shape: " /\n/\n\\",               xf: 0.30, yf: 0, px: 5.5 }, // small
+                    { at: 9600,  shape: "\\\n \\\n  \\/\n  /\n /", xf: 0.45, yf: 0, px: 10 },  // big centre + flash
+                    { at: 13000, shape: "\\\n/\n\\\n \\",          xf: 0.74, yf: 0, px: 5 },   // small
+                    { at: 15800, shape: "/\n \\\n  \\\n  /",       xf: 0.88, yf: 0, px: 9 },   // big, far right
+                    { at: 18200, shape: " /\n/\n\\",               xf: 0.18, yf: 0, px: 4.5 }  // small
+                ]
+                delegate: Text {
+                    required property var modelData
+                    readonly property real ms: wm.idleT * wm.idleLoopSecs * 1000 - modelData.at
+                    textFormat: Text.PlainText
+                    text: modelData.shape
+                    x: Math.round((wm.boxW - 2 * wm.inset) * modelData.xf)
+                    y: Math.round((wm.boxH - 2 * wm.inset) * modelData.yf)
+                    color: "#eafff1"
+                    font.family: root.mono
+                    font.bold: true
+                    font.pixelSize: Math.max(4, Math.round(modelData.px * wm.uscale))
+                    lineHeight: 0.78
+                    opacity: wm.storm || ms < 0 || ms >= 280 ? 0
+                        : ms < 70 ? 0.85
+                        : ms < 140 ? 0
+                        : ms < 210 ? 1 : 0.45
                 }
             }
         }
@@ -3301,6 +3663,55 @@ ApplicationWindow {
         }
     }
 
+    // SHOW ALL / SHOW LESS label used beneath every capped list (top tracks,
+    // search sections, artist strip). Mint green at rest (accentContTx, the
+    // soft container green) so it reads as clickable without shouting; hover
+    // brightens to full accent. Static by user choice: the sheen sweep from
+    // scratchpad/showall_design_lab2.qml was tried and pulled as distracting.
+    component ShowAllLabel: Item {
+        id: sa
+        property bool expanded: false
+        property int count: 0
+        // The section's header item: SHOW LESS scrolls the view back to it
+        // (root.scrollCollapsedToSection) instead of leaving the page clamped
+        // to the bottom after the rows vanish.
+        property Item sectionTop: null
+        signal toggled()
+        implicitWidth: saText.implicitWidth
+        implicitHeight: saText.implicitHeight
+        width: implicitWidth; height: implicitHeight
+        Text {
+            id: saText
+            textFormat: Text.PlainText
+            text: sa.expanded ? "SHOW LESS" : "SHOW ALL " + sa.count
+            color: saMa.containsMouse ? root.accent : root.accentContTx
+            font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.4
+            Behavior on color { ColorAnimation { duration: 90 } }
+        }
+        MouseArea {
+            id: saMa
+            anchors.fill: parent; anchors.margins: -4
+            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                // Capture before toggled() flips the bound expanded state.
+                var collapsing = sa.expanded
+                sa.toggled()
+                if (collapsing && sa.sectionTop) root.scrollCollapsedToSection(sa.sectionTop)
+            }
+        }
+    }
+
+    // SHOW ALL / SHOW LESS toggle for a search-page list section (Albums,
+    // Tracks, Videos, Playlists, Mixes). Shows only in the mixed All view and
+    // only when the section has more than the 5 rows shown by default; clicking
+    // flips (and persists) that section's expanded flag via toggleSearchSection.
+    component SearchSectionMore: ShowAllLabel {
+        property string section: ""
+        opacity: root.searchReveal
+        visible: root.filterType === "all" && count > 5
+        onToggled: root.toggleSearchSection(section)
+    }
+
     // Video thumbnail: 16:9-ish art with a scanline play strip.
     // The one video-play affordance: a green data-strip along the bottom edge
     // of the art with an ink triangle and PLAY label, like a terminal status
@@ -3722,7 +4133,20 @@ ApplicationWindow {
             radius: 10
             color: trowMa.containsMouse ? root.surface2 : root.surface
             border.color: root.border1
-            MouseArea { id: trowMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+            // Blank space anywhere on the row navigates like the title does
+            // (the track's album page, or the video player): most of the row
+            // is clickable, while the artist/album links, meters and buttons
+            // stacked above still take their own clicks first.
+            MouseArea {
+                id: trowMa
+                anchors.fill: parent; hoverEnabled: true
+                readonly property bool linkable: trow.kind === "video"
+                                                 || (trow.albumId !== "" && !root.onAlbumPage(trow.albumId))
+                acceptedButtons: linkable ? Qt.LeftButton : Qt.NoButton
+                cursorShape: linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: trow.kind === "video" ? root.openVideo(trow.tId, trow.title, trow.artistName)
+                                                 : root.openAlbumPage(trow.albumId, trow.tId)
+            }
             // Highlight = the "Fade" treatment: a green tint strongest at the
             // left, gone before the metadata columns so numbers and badges sit
             // on clean background.
@@ -3741,9 +4165,9 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                     visible: num > 0
                     text: num + "."
-                    // textLo, not textDim: the number must stay readable over the
-                    // highlight fade too (brightest on the highlighted row itself).
-                    color: hi ? root.textHi : root.textLo
+                    // textHi to match the title's resting colour (set to the same
+                    // value, not bound to the title, which whitens on hover).
+                    color: root.textHi
                     font.family: root.mono; font.pixelSize: 12
                     horizontalAlignment: Text.AlignRight
                     Layout.preferredWidth: 24; Layout.alignment: Qt.AlignVCenter
@@ -3769,7 +4193,11 @@ ApplicationWindow {
                         id: trTitle
                         textFormat: Text.PlainText; text: title
                         color: trTitleMa.containsMouse ? "#ffffff" : root.textHi
-                        font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true
+                        // A step above the 12px subtitle in both size and weight
+                        // so the title leads the row (the green artist link used
+                        // to outshine it).
+                        font.pixelSize: 14; font.weight: Font.Medium
+                        elide: Text.ElideRight; Layout.fillWidth: true
                         // Title -> the track's album page (highlighting this track);
                         // for a video row it opens the in-app video player instead.
                         MouseArea {
@@ -3835,6 +4263,42 @@ ApplicationWindow {
             }
             ev.accepted = true
         }
+    }
+
+    // Shared artist search-result card. Used by both the collapsed horizontal
+    // strip and the expanded fill grid, so its data comes in as plain properties
+    // (not model roles): a top-level component sits outside the Repeater delegate
+    // scope, so the delegate wires model.art/name/popularity/id into these.
+    component ArtistSearchCard: Rectangle {
+        property string aArt: ""
+        property string aName: ""
+        property real aPop: 0
+        property string aId: ""
+        radius: 12; color: root.surface; border.color: root.border1
+        // Size to the content (plus the 8px top and bottom margins) so the card
+        // height matches art + name + meter + preview + download exactly.
+        implicitHeight: cardCol.implicitHeight + 16
+        Column {
+            id: cardCol
+            anchors.fill: parent; anchors.margins: 8; spacing: 8
+            Item {
+                width: parent.width; height: parent.width
+                Art { anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width; url: aArt }
+            }
+            Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
+            PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: aPop }
+            // Preview + Download live in the card body (never overlaid on the
+            // photo); each has its own MouseArea that consumes the click so the
+            // card-wide open-artist MouseArea (z:-1, below) only fires elsewhere.
+            // Preview plays the artist's top track and doubles as a scrubber.
+            PreviewBar { width: parent.width; pid: aId }
+            DownloadButton {
+                width: parent.width
+                mediaId: aId; label: "Download artist"
+                onTap: function(){ waves.downloadArtist(aId) }
+            }
+        }
+        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: waves.loadArtist(aId) }
     }
 
     component BrowseCard: Rectangle {
@@ -4777,6 +5241,9 @@ ApplicationWindow {
             root.libraryOpen = false
             root.trackCache = ({})
             root.expandedAlbums = ({})
+            // A section a user expanded stays expanded on the next search
+            // (searchArtistsExpanded and the list-section flags are pref-backed),
+            // so nothing is reset here.
             // Arm the build veil BEFORE the fills: the Loaders each delegate
             // creates read searchBuilding for their asynchronous flag, and the
             // ready ticks only ever arrive on later frames, never mid-fill.
@@ -4878,8 +5345,8 @@ ApplicationWindow {
             if (!hit) return
             var m = Object.assign({}, root.queueTracks); m[qid] = copy; root.queueTracks = m
         }
-        function onDownloadProgress(id, pct) { var p = Object.assign({}, root.dlProgress); p[id] = pct; root.dlProgress = p }
-        function onDownloadState(id, st) { var s = Object.assign({}, root.dlState); s[id] = st; root.dlState = s }
+        function onDownloadProgress(id, pct) { var h = root.dlHolder(id); if (h) h.pct = pct }
+        function onDownloadState(id, st) { var h = root.dlHolder(id); if (h) h.st = st }
         // Preview resolves are async; drop any that arrive after the user moved
         // on to a different preview (guard on the current kind+id).
         function onPreviewReady(kind, id, url) {
@@ -5089,6 +5556,12 @@ ApplicationWindow {
                                     placeholderTextColor: root.textLo; font.pixelSize: 15
                                     background: Rectangle { color: "transparent" }
                                     onAccepted: waves.search(text)
+                                    // A click or Tab into a box that already holds a term selects
+                                    // the whole term (deferred one tick past the click's own caret
+                                    // placement, which would otherwise clear it) so the next
+                                    // keystroke replaces it. Only fires on the focus transition, so
+                                    // clicking again to reposition the caret mid-edit is left alone.
+                                    onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { searchField.selectAll() })
                                     // A standard paste (a multi-char jump typing can't produce) is
                                     // detected and animated in, without ever reading the clipboard.
                                     onTextChanged: searchDecoder.noteTextChanged()
@@ -5180,11 +5653,14 @@ ApplicationWindow {
                                     Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: tchip.modelData[1]; color: tchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
                                 }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.filterType = tchip.modelData[0] }
-                                // Cascade in left-to-right once results exist (and the build
-                                // veil has dropped, so chips land WITH the cards); reset when
-                                // cleared.
+                                // Cascade in left-to-right the moment results land, decoupled
+                                // from the card build veil (searchBuilding): gating the chips on
+                                // the veil made them arrive late on a cold first search and flicker
+                                // out then back in on every re-search. They now appear as soon as
+                                // results exist and stay put while the cards paint behind the veil.
+                                // Reset when cleared.
                                 states: State {
-                                    name: "in"; when: root.hasResults && !root.searchBuilding
+                                    name: "in"; when: root.hasResults
                                     PropertyChanges { target: tchip; opacity: 1 }
                                     PropertyChanges { target: chipTr; y: 0 }
                                 }
@@ -5312,6 +5788,10 @@ ApplicationWindow {
                 }
             }
 
+            // While the page loads or builds, the ambient wave video behind this
+            // transparent pane stays in view on purpose: the "Reading the wire…"
+            // hint sits on the living water and the finished rows then fade in
+            // over it (browseReveal), instead of a black floor snapping to rows.
             Column {
                 id: browseCol
                 x: 22; y: 8; width: browsePane.width - 44; spacing: 8
@@ -5511,7 +5991,7 @@ ApplicationWindow {
                         required property var modelData
                         width: browseCol.width
                         asynchronous: root._browseAsyncBuild
-                        opacity: root.browseBuilding ? 0 : 1
+                        opacity: root.browseReveal
                         onLoaded: root._browseBuildTick()
                         sourceComponent: chipGroupComp
                         Component {
@@ -5832,7 +6312,7 @@ ApplicationWindow {
                         required property var modelData
                         width: browseCol.width
                         asynchronous: root._browseAsyncBuild
-                        opacity: root.browseBuilding ? 0 : 1
+                        opacity: root.browseReveal
                         onLoaded: root._browseBuildTick()
                         sourceComponent: tileGroupComp
                         Component {
@@ -5893,6 +6373,35 @@ ApplicationWindow {
             ScrollBar.vertical: ScrollBar {}
             boundsBehavior: Flickable.StopAtBounds
 
+            // Hold the scroll position steady across a window resize. The ARTISTS
+            // row fills the width, so its cards (and the page height) grow and
+            // shrink as the window is dragged; without this a shrink clamps
+            // contentY to the new bottom and the page visibly jumps. Capture the
+            // scroll ratio once at the start of a resize gesture and re-apply it on
+            // every height change until the drag settles (140ms after the last
+            // width change), so the view stays put. Scoped to an active resize, so
+            // the build-in reveal of a fresh search (height grows with no width
+            // change) is never touched.
+            property real _resizeRatio: -1
+            Timer { id: resizeSettle; interval: 140; onTriggered: results._resizeRatio = -1 }
+            onWidthChanged: {
+                if (_resizeRatio < 0) {
+                    var span = contentHeight - height
+                    _resizeRatio = span > 0 ? contentY / span : 0
+                }
+                resizeSettle.restart()
+            }
+            onContentHeightChanged: {
+                if (_resizeRatio < 0) return
+                var maxY = Math.max(0, contentHeight - height)
+                contentY = Math.min(_resizeRatio * maxY, maxY)
+            }
+
+            // While a search builds, the ambient wave video behind this
+            // transparent pane stays in view on purpose: the "Reading the
+            // wire…" hint sits on the living water and the finished result
+            // cards then fade in over it (searchReveal), instead of a black
+            // floor snapping to cards in one hard paint.
             Column {
                 id: contentCol
                 x: 22; y: 8; width: results.width - 44; spacing: 8
@@ -5926,66 +6435,107 @@ ApplicationWindow {
                 }
 
                 // ARTISTS
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("artists", artistsModel.count); label: "ARTISTS"; count: artistsModel.count }
+                SectionHeader { id: artistsHead; opacity: root.searchReveal; visible: root.sectionVisible("artists", artistsModel.count); label: "ARTISTS"; count: artistsModel.count }
+                // Collapsed default (the mixed All view): a horizontal strip of
+                // fixed-width cards that scrolls left/right, like the browse
+                // shelves. A window resize reveals more or fewer cards but never
+                // resizes the ones on screen, so it stays smooth (the browse tabs
+                // are smooth for the same reason). SHOW ALL switches to the fill
+                // grid below. The strip is a plain Row (not a virtualized
+                // ListView) so all cards instantiate and each still fires one
+                // build-veil tick; only ~12 artist cards, so that is cheap.
+                Flickable {
+                    id: artistStrip
+                    visible: root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
+                    width: parent.width; height: artistRow.height
+                    contentWidth: artistRow.width; contentHeight: artistRow.height
+                    clip: true
+                    flickableDirection: Flickable.HorizontalFlick
+                    boundsBehavior: Flickable.StopAtBounds
+                    readonly property real cardW: 200
+                    Row {
+                        id: artistRow
+                        spacing: 12
+                        Repeater {
+                            model: artistsModel
+                            delegate: Loader {
+                                width: artistStrip.cardW
+                                // Reserve a fixed cell (width + 142) while the async Loader is
+                                // still empty (item null) so the strip does not collapse behind
+                                // the build veil; snap to the card's exact height once loaded.
+                                height: item ? item.implicitHeight : width + 142
+                                // Live only in strip mode, so exactly one of the strip and the
+                                // grid instantiates its cards. That keeps the build veil's
+                                // one-tick-per-artist count exact (never zero, never doubled).
+                                active: root.searchArtistsStripMode
+                                asynchronous: root.searchBuilding
+                                opacity: root.searchReveal
+                                onLoaded: root._searchBuildTick()
+                                sourceComponent: ArtistSearchCard {
+                                    aArt: model.art; aName: model.name; aPop: model.popularity; aId: model.id
+                                }
+                            }
+                        }
+                    }
+                    // Vertical wheel scrolls the page, sideways wheel/trackpad
+                    // scrolls the strip (shared with the browse shelves).
+                    ShelfWheelRedirect { pane: results }
+                }
+                // Expanded (SHOW ALL) or the Artists filter: the fill grid. Cards
+                // stretch edge-to-edge and the column count snaps at whole-column
+                // boundaries (shared gridCols). A resize here re-fits the cards
+                // (the previous method), which the user opts into by expanding;
+                // the results Flickable anchors its scroll (see _resizeRatio) so
+                // the page below does not jump.
                 Flow {
                     id: artistFlow
-                    visible: root.sectionVisible("artists", artistsModel.count)
+                    visible: !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
                     width: parent.width; spacing: 12
-                    property int cols: Math.max(2, Math.floor((width + spacing) / (190 + spacing)))
+                    property int cols: root.gridCols(190, spacing, artistsModel.count, width)
                     property real cardW: (width - (cols - 1) * spacing) / cols
-                    // Each result card sits behind an asynchronous Loader (fresh
-                    // search only, see the build-veil block): the fill turn stays
-                    // cheap and the page reveals complete in one paint. No
-                    // `required property` on the delegates: the Loaders' inline
-                    // components read the model roles through the delegate
-                    // context, which `required` would switch off.
                     Repeater {
                         model: artistsModel
                         delegate: Loader {
                             width: artistFlow.cardW
-                            height: width + 142   // reserve the cell so the Flow lays out once
+                            height: item ? item.implicitHeight : width + 142
+                            // Complement of the strip: live only when NOT in strip mode.
+                            active: !root.searchArtistsStripMode
                             asynchronous: root.searchBuilding
-                            opacity: root.searchBuilding ? 0 : 1
+                            opacity: root.searchReveal
                             onLoaded: root._searchBuildTick()
-                            sourceComponent: Rectangle {
-                            radius: 12; color: root.surface; border.color: root.border1
-                            Column {
-                                anchors.fill: parent; anchors.margins: 8; spacing: 8
-                                Item {
-                                    width: parent.width; height: parent.width
-                                    Art { anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width; url: model.art }
-                                }
-                                Text { textFormat: Text.PlainText; text: model.name; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
-                                PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: model.popularity }
-                                // Preview + Download live in the card body (never overlaid on the
-                                // photo); each has its own MouseArea that consumes the click so the
-                                // card-wide open-artist MouseArea (z:-1, below) only fires elsewhere.
-                                // Preview plays the artist's top track and doubles as a scrubber.
-                                PreviewBar { width: parent.width; pid: model.id }
-                                DownloadButton {
-                                    width: parent.width
-                                    mediaId: model.id; label: "Download artist"
-                                    onTap: function(){ waves.downloadArtist(model.id) }
-                                }
-                            }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: waves.loadArtist(model.id) }
+                            sourceComponent: ArtistSearchCard {
+                                aArt: model.art; aName: model.name; aPop: model.popularity; aId: model.id
                             }
                         }
                     }
                 }
+                ShowAllLabel {
+                    opacity: root.searchReveal
+                    sectionTop: artistsHead
+                    // Offer SHOW ALL only when the strip overflows (there is more
+                    // to reveal than fits); SHOW LESS collapses the grid back to
+                    // the strip. Mixed (All) view only.
+                    visible: root.filterType === "all" && (root.searchArtistsExpanded || artistStrip.contentWidth > artistStrip.width + 1)
+                    expanded: root.searchArtistsExpanded
+                    count: artistsModel.count
+                    onToggled: root.toggleSearchSection("artists")
+                }
 
                 // ALBUMS
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("albums", albumsModel.count); label: "ALBUMS"; count: albumsModel.count }
+                SectionHeader { id: albumsHead; opacity: root.searchReveal; visible: root.sectionVisible("albums", albumsModel.count); label: "ALBUMS"; count: albumsModel.count }
                 Repeater {
                     model: albumsModel
                     delegate: Loader {
                         // The section filter must hide the LOADER (the Column
                         // child); an invisible item inside a sized Loader would
-                        // still occupy its row.
-                        visible: root.sectionVisible("albums", albumsModel.count)
+                        // still occupy its row. In the mixed All view only the
+                        // first 5 show until SHOW ALL; the delegate still loads
+                        // (and fires its build-veil tick) while hidden, so the
+                        // one-tick-per-item count stays exact.
+                        visible: root.searchRowVisible("albums", albumsModel.count, index, root.searchAlbumsExpanded)
                         width: contentCol.width
                         asynchronous: root.searchBuilding
-                        opacity: root.searchBuilding ? 0 : 1
+                        opacity: root.searchReveal
                         onLoaded: root._searchBuildTick()
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
@@ -5993,16 +6543,17 @@ ApplicationWindow {
                         }
                     }
                 }
+                SearchSectionMore { section: "albums"; sectionTop: albumsHead; count: albumsModel.count; expanded: root.searchAlbumsExpanded }
 
                 // TRACKS
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("tracks", tracksModel.count); label: "TRACKS"; count: tracksModel.count }
+                SectionHeader { id: tracksHead; opacity: root.searchReveal; visible: root.sectionVisible("tracks", tracksModel.count); label: "TRACKS"; count: tracksModel.count }
                 Repeater {
                     model: tracksModel
                     delegate: Loader {
-                        visible: root.sectionVisible("tracks", tracksModel.count)
+                        visible: root.searchRowVisible("tracks", tracksModel.count, index, root.searchTracksExpanded)
                         width: contentCol.width
                         asynchronous: root.searchBuilding
-                        opacity: root.searchBuilding ? 0 : 1
+                        opacity: root.searchReveal
                         onLoaded: root._searchBuildTick()
                         sourceComponent: TrackRow {
                             tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
@@ -6011,16 +6562,17 @@ ApplicationWindow {
                         }
                     }
                 }
+                SearchSectionMore { section: "tracks"; sectionTop: tracksHead; count: tracksModel.count; expanded: root.searchTracksExpanded }
 
                 // VIDEOS
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("videos", videosModel.count); label: "VIDEOS"; count: videosModel.count }
+                SectionHeader { id: videosHead; opacity: root.searchReveal; visible: root.sectionVisible("videos", videosModel.count); label: "VIDEOS"; count: videosModel.count }
                 Repeater {
                     model: videosModel
                     delegate: Loader {
-                        visible: root.sectionVisible("videos", videosModel.count)
+                        visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded)
                         width: contentCol.width; height: 50
                         asynchronous: root.searchBuilding
-                        opacity: root.searchBuilding ? 0 : 1
+                        opacity: root.searchReveal
                         onLoaded: root._searchBuildTick()
                         sourceComponent: Rectangle {
                         color: "transparent"
@@ -6041,16 +6593,17 @@ ApplicationWindow {
                         }
                     }
                 }
+                SearchSectionMore { section: "videos"; sectionTop: videosHead; count: videosModel.count; expanded: root.searchVideosExpanded }
 
                 // PLAYLISTS
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("playlists", playlistsModel.count); label: "PLAYLISTS"; count: playlistsModel.count }
+                SectionHeader { id: playlistsHead; opacity: root.searchReveal; visible: root.sectionVisible("playlists", playlistsModel.count); label: "PLAYLISTS"; count: playlistsModel.count }
                 Repeater {
                     model: playlistsModel
                     delegate: Loader {
-                        visible: root.sectionVisible("playlists", playlistsModel.count)
+                        visible: root.searchRowVisible("playlists", playlistsModel.count, index, root.searchPlaylistsExpanded)
                         width: contentCol.width; height: 66
                         asynchronous: root.searchBuilding
-                        opacity: root.searchBuilding ? 0 : 1
+                        opacity: root.searchReveal
                         onLoaded: root._searchBuildTick()
                         sourceComponent: Rectangle {
                         radius: 10; color: root.surface; border.color: root.border1
@@ -6067,16 +6620,17 @@ ApplicationWindow {
                         }
                     }
                 }
+                SearchSectionMore { section: "playlists"; sectionTop: playlistsHead; count: playlistsModel.count; expanded: root.searchPlaylistsExpanded }
 
                 // MIXES
-                SectionHeader { opacity: root.searchBuilding ? 0 : 1; visible: root.sectionVisible("mixes", mixesModel.count); label: "MIXES"; count: mixesModel.count }
+                SectionHeader { id: mixesHead; opacity: root.searchReveal; visible: root.sectionVisible("mixes", mixesModel.count); label: "MIXES"; count: mixesModel.count }
                 Repeater {
                     model: mixesModel
                     delegate: Loader {
-                        visible: root.sectionVisible("mixes", mixesModel.count)
+                        visible: root.searchRowVisible("mixes", mixesModel.count, index, root.searchMixesExpanded)
                         width: contentCol.width; height: 66
                         asynchronous: root.searchBuilding
-                        opacity: root.searchBuilding ? 0 : 1
+                        opacity: root.searchReveal
                         onLoaded: root._searchBuildTick()
                         sourceComponent: Rectangle {
                         radius: 10; color: root.surface; border.color: root.border1
@@ -6093,6 +6647,7 @@ ApplicationWindow {
                         }
                     }
                 }
+                SearchSectionMore { section: "mixes"; sectionTop: mixesHead; count: mixesModel.count; expanded: root.searchMixesExpanded }
             }
         }
 
@@ -6223,6 +6778,7 @@ ApplicationWindow {
                 // Top tracks: first 5 only, SHOW ALL reveals the rest for this
                 // visit. Collapsed state persists across artist pages (prefs).
                 SectionHeader {
+                    id: topTracksHead
                     visible: artistTracksModel.count > 0
                     label: "TOP TRACKS"; count: artistTracksModel.count
                     collapsible: true; collapsed: root.artistTracksCollapsed
@@ -6242,18 +6798,12 @@ ApplicationWindow {
                         albumId: model.album_id || ""
                     }
                 }
-                Text {
-                    textFormat: Text.PlainText
+                ShowAllLabel {
                     visible: !root.artistTracksCollapsed && artistTracksModel.count > 5
-                    text: root.topTracksExpanded ? "SHOW LESS" : "SHOW ALL " + artistTracksModel.count
-                    color: showAllMa.containsMouse ? root.accent : root.textDim
-                    font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.4
-                    MouseArea {
-                        id: showAllMa
-                        anchors.fill: parent; anchors.margins: -4
-                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: root.topTracksExpanded = !root.topTracksExpanded
-                    }
+                    sectionTop: topTracksHead
+                    expanded: root.topTracksExpanded
+                    count: artistTracksModel.count
+                    onToggled: root.topTracksExpanded = !root.topTracksExpanded
                 }
 
                 // Albums (expand inline)
@@ -6301,6 +6851,8 @@ ApplicationWindow {
             active: root.settingsOpen
             ff: appFfmpeg            // share the one app-wide FFmpeg manager
             onClosed: root.settingsOpen = false
+            onResetSettingsRequested: root.confirmSettingsReset = true
+            onFactoryResetRequested: root.confirmFactoryReset = true
         }
 
         // ---- Library page ----------------------------------------------
@@ -6830,15 +7382,22 @@ ApplicationWindow {
                     Behavior on opacity { NumberAnimation { duration: 180 } }
                 }
             }
-            // Now playing, centered, persists across every view so playback can
-            // always be paused/stopped, and clicking the title/artist jumps back to
-            // the artist page (and expands the track's album). One shared player.
+            // Now playing, persists across every view so playback can always be
+            // paused/stopped, and clicking the title/artist jumps back to the
+            // artist page (and expands the track's album). One shared player.
+            // It docks to the bar's right corner whenever that corner is free
+            // (the wordmark hides while playing) and slides to the centre only
+            // when the update notice needs the corner, one animated move each
+            // way so the controls never look like they are bouncing around.
             // Hovering anywhere on the bottom bar (not just the ✕) reveals the
             // mini player's "[stop]" label while something is playing.
             HoverHandler { id: npBarHover }
             Row {
                 id: nowPlaying
-                anchors.centerIn: parent
+                anchors.verticalCenter: parent.verticalCenter
+                x: statusUpdate.visible ? (statusBar.width - width) / 2
+                                        : statusBar.width - width - 22
+                Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
                 spacing: 9
                 visible: root.previewKind !== ""
                 // Fixed box so swapping > / || / … never nudges the art + text. The
@@ -6886,7 +7445,12 @@ ApplicationWindow {
                     // side claims more so the centred row stays clear of both.
                     readonly property real rightGuard: 22 + (statusUpdate.visible ? statusUpdate.implicitWidth + 24 : 0)
                     readonly property real fixedParts: 20 + 18 + stopMetrics.width + 27
-                    readonly property real budget: Math.max(120, statusBar.width - 2 * Math.max(leftGuard, rightGuard) - fixedParts)
+                    // Docked right (no update notice) the row spans from the
+                    // status text's guard to the bar's right margin; centred
+                    // (notice up) it is bounded symmetrically by the wider side.
+                    readonly property real budget: Math.max(120, statusUpdate.visible
+                        ? statusBar.width - 2 * Math.max(leftGuard, rightGuard) - fixedParts
+                        : statusBar.width - leftGuard - 22 - fixedParts)
                     readonly property real sepW: npSep.implicitWidth + 12
                     readonly property real avail: Math.max(60, budget - sepW)
                     readonly property bool bothFit: (npTitle.implicitWidth + npArtist.implicitWidth) <= avail
@@ -6990,24 +7554,37 @@ ApplicationWindow {
         }
     }
 
-    // Clicking anywhere outside the search field while it is focused releases
-    // focus (caret stops blinking, accent outline fades back); the press is
-    // declined so the underlying control still receives the click.
-    // It MUST be `visible:`-gated, not just `enabled:`-gated: a full-window
-    // MouseArea sits topmost (z:1000) and, even while disabled, carries the
-    // default Arrow cursor, which overrides every button's pointing-hand
-    // cursor across the whole app. Hiding it when the field isn't focused
-    // removes it from cursor resolution entirely.
-    MouseArea {
+    // Clicking anywhere outside a focused text field releases its focus (caret
+    // stops blinking, outline fades back), the way native fields behave. Covers
+    // the search box and every settings path field alike. A PointHandler, and
+    // specifically NOT the two obvious alternatives, both tried and measured
+    // (scratchpad/focus_catcher_probe.py): a full-window MouseArea carries the
+    // default Arrow cursor and overrode every button's pointing hand while the
+    // search field held focus (which openSearch's auto-focus makes permanent on
+    // that page), and a TapHandler SWALLOWS the click, so navigating away from
+    // search took one click to unfocus and a second to actually land. A
+    // PointHandler only observes: the same press both releases focus and
+    // reaches the control under it, and no cursor is overridden.
+    Item {
+        id: focusDismissCatcher
         anchors.fill: parent; z: 1000
-        visible: searchField.activeFocus
-        enabled: searchField.activeFocus
-        acceptedButtons: Qt.AllButtons
-        onPressed: function (mouse) {
-            var p = mapToItem(searchBox, mouse.x, mouse.y)
-            if (p.x < 0 || p.y < 0 || p.x > searchBox.width || p.y > searchBox.height)
-                searchField.focus = false
-            mouse.accepted = false
+        PointHandler {
+            enabled: {
+                var i = root.activeFocusItem
+                return i !== null && (i instanceof TextInput || i instanceof TextEdit)
+            }
+            acceptedButtons: Qt.AllButtons
+            onActiveChanged: {
+                if (!active) return
+                var t = root.activeFocusItem
+                if (!t || !(t instanceof TextInput || t instanceof TextEdit)) return
+                // The search field's bounds are its whole styled box, so a click
+                // on the box chrome (paste glyph and friends) keeps focus.
+                var bounds = (t === searchField) ? searchBox : t
+                var p = focusDismissCatcher.mapToItem(bounds, point.position.x, point.position.y)
+                if (p.x < 0 || p.y < 0 || p.x > bounds.width || p.y > bounds.height)
+                    t.focus = false
+            }
         }
     }
 
@@ -7556,6 +8133,84 @@ ApplicationWindow {
                     Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
                     GateAction { showArrow: false; label: "Choose a new location"; onClicked: { root.folderNudge = false; waves.dismissDownloadFolderNudge(); root.openDownloadSetting() } }
                     GateAction { showArrow: false; neutral: true; label: "Keep the default location"; onClicked: { root.folderNudge = false; waves.keepDownloadFolder() } }
+                }
+            }
+        }
+    }
+
+    // Reset all settings to default (Advanced settings). Confirms before
+    // anything happens; the reset keeps the account signed in and only puts
+    // the settings-page values back to their factory defaults.
+    Rectangle {
+        id: settingsResetGate
+        objectName: "settingsResetGate"
+        anchors.fill: parent
+        visible: root.confirmSettingsReset
+        color: "#06070ecc"
+        MouseArea { anchors.fill: parent; onClicked: root.confirmSettingsReset = false }   // click-away cancels
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: srCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: srCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "Reset all settings to default?" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "Every option in Settings goes back to its factory value, including your download folder and quality choices. You stay signed in, and your downloaded music is not touched."
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
+                    GateAction {
+                        showArrow: false; label: "Reset settings"
+                        onClicked: {
+                            root.confirmSettingsReset = false
+                            waves.resetSettingsDefaults()
+                            settingsPage.externalReset()
+                        }
+                    }
+                    GateAction { showArrow: false; neutral: true; label: "Cancel"; onClicked: root.confirmSettingsReset = false }
+                }
+            }
+        }
+    }
+
+    // Reset application (Advanced settings): the factory wipe. Confirms with
+    // an explicit description of what is erased; on confirm the backend wipes
+    // its saved state and the app closes so the next launch is a first run.
+    Rectangle {
+        id: factoryResetGate
+        objectName: "factoryResetGate"
+        anchors.fill: parent
+        visible: root.confirmFactoryReset
+        color: "#06070ecc"
+        MouseArea { anchors.fill: parent; onClicked: root.confirmFactoryReset = false }   // click-away cancels
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: frCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: frCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "Reset Waves completely?" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "This signs you out and permanently erases everything Waves has saved on this computer: all settings, the record of which tracks you own, caches and logs. Your downloaded music files are not touched. Waves closes when it finishes, and the next launch starts like a brand-new install."
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
+                    GateAction {
+                        showArrow: false; danger: true; label: "Erase everything and close"
+                        onClicked: {
+                            root.confirmFactoryReset = false
+                            waves.factoryReset()
+                            Qt.quit()
+                        }
+                    }
+                    GateAction { showArrow: false; neutral: true; label: "Cancel"; onClicked: root.confirmFactoryReset = false }
                 }
             }
         }
