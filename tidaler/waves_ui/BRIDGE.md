@@ -13,12 +13,16 @@ feature.
 
 ## Session and status
 
-| Signal               | Fires when                                   |
-| -------------------- | -------------------------------------------- |
-| `loggedInChanged`    | Login/logout completes (property `loggedIn`) |
-| `statusChanged`      | The status-bar text changes                  |
-| `busyChanged`        | A blocking operation starts/ends             |
-| `loginUrlReady(url)` | The browser-login URL is ready to open       |
+| Signal                      | Fires when                                                             |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `loggedInChanged`           | Login/logout completes (property `loggedIn`)                           |
+| `sessionResolvedChanged`    | The restored session finishes resolving (property `sessionResolved`)   |
+| `statusChanged`             | The status-bar text changes                                            |
+| `busyChanged`               | A blocking operation starts/ends                                       |
+| `loginUrlReady(url)`        | The browser-login URL is ready to open                                 |
+| `backRequested`             | The platform back gesture (macOS trackpad swipe) asks to navigate back |
+| `motionBgChanged`           | The motion-background preference flipped; Main.qml re-reads it         |
+| `diagnosticsExported(path)` | A diagnostics export finished (`""` = failed)                          |
 
 ## Search, artist pages, library
 
@@ -30,6 +34,8 @@ feature.
 | `artistMetaLoaded(artistId, popularity)`  | Late-arriving artist metadata                                                         |
 | `libraryLoaded(category, items, hasMore)` | First page of a My Tidal category (replace)                                           |
 | `libraryMore(category, items, hasMore)`   | Next page (append, infinite scroll)                                                   |
+| `homeLoaded(sections)`                    | My Tidal's Home landing (Browse-shaped shelves, account-scoped)                       |
+| `recentlyAddedLoaded(items)`              | The merged newest-favourites strip on Home                                            |
 
 ## Browse (editorial pages)
 
@@ -51,6 +57,12 @@ feature.
 | `queueTrackPct(qid, map)`                                          | Batched live percentages for downloading tracks                                  |
 | `pausedChanged`                                                    | Global pause/resume toggled                                                      |
 | `downloadProgress(mediaId, pct)` / `downloadState(mediaId, state)` | Per-media progress/state, drives the buttons and card controls outside the queue |
+| `ownershipChanged(trackId)`                                        | A track's ownership or delivered quality changed; QML re-queries `ownershipOf`   |
+| `collectionMembershipChanged(id)`                                  | A collection learned its member track ids; QML re-queries `collectionMemberIds`  |
+| `downloadFolderMissing` / `downloadFolderDefault`                  | The download folder is invalid (blocking) / still the historical default (nudge) |
+| `downloadFolderUnreachable(path)`                                  | The folder is an unreachable network share; queued work held for "Try again"     |
+| `ffmpegMissingBlocked`                                             | A download would come out degraded without FFmpeg; a blocking choice is shown    |
+| `editionMergeChanged`                                              | The "best of both" edition-merge opt-in flipped                                  |
 
 ## Preview and video playback
 
@@ -78,6 +90,7 @@ state instead of offering a restart (see `pvActive` in Main.qml).
 
 Signals prefixed `_` are not for QML; they marshal work back onto the GUI
 thread: `_albumsQueued` (batch-enqueue a resolved discography),
+`_tracksQueued` (same batch marshalling for individual tracks),
 `_mediaRefetched` (re-dispatch a download whose object was evicted from the
 cache), `_queueTracksFetched` (merge a track snapshot without racing live
 events).

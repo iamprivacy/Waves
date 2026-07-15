@@ -58,7 +58,7 @@ from tidaler.constants import (
     QualityVideo,
 )
 from tidaler.download import Download
-from tidaler.helper.path import format_path_media, format_str_media
+from tidaler.helper.path import format_path_media, format_str_media, path_config_base
 from tidaler.helper.tidal import (
     get_tidal_media_id,
     get_tidal_media_type,
@@ -72,6 +72,7 @@ from tidaler.helper.tidal import (
     user_media_lists,
 )
 from tidaler.model.cfg import HelpSettings
+from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.gui_data import ProgressBars
 from tidaler.ownership import OwnershipStore, quality_rank
 from tidaler.waves_ui import proc
@@ -83,6 +84,52 @@ from .ffmpeg_manager import FfmpegCancelled, FfmpegManager
 from .updater import AppUpdater, UpdateCancelled
 
 logger = logging.getLogger("waves")
+# Window geometry persistence (issue #6). Its own child logger so restore/save
+# breadcrumbs are attributable in a crash report. Coordinates and sizes are not
+# PII, so they are logged in the clear (no register_secret / content wrapping).
+_win_log = logging.getLogger("waves.window")
+
+
+def _fit_frame(frame, screens):
+    """Clamp a saved window frame onto the connected screen it best belongs to.
+
+    ``frame`` is ``(x, y, w, h)``; ``screens`` is a list of ``(x, y, w, h)``
+    available-geometry rects (docks/taskbars already excluded), in the same
+    virtual-desktop coordinate space. Returns an ``(x, y, w, h)`` that sits
+    fully inside the chosen screen, or ``None`` when ``screens`` is empty.
+
+    This is the "is the window still reachable?" guard the feature request asks
+    for: after a monitor is unplugged, or a resolution shrinks, a frame saved
+    on the old layout can land off every screen. The window is snapped onto the
+    screen it overlaps most (or the first/primary screen when it overlaps none),
+    its size capped to that screen, and its position clamped so the whole frame
+    is visible. A frame that already fits is returned unchanged, so an ordinary
+    multi-monitor position is preserved untouched.
+
+    Kept as a pure function (plain tuples, no Qt) so the geometry math is unit
+    tested without a display; :meth:`WavesBridge._fit_geometry_to_screens`
+    gathers the live ``QScreen`` layout and delegates here.
+    """
+    if not screens:
+        return None
+    fx, fy, fw, fh = frame
+
+    def overlap(s):
+        sx, sy, sw, sh = s
+        ix = max(0, min(fx + fw, sx + sw) - max(fx, sx))
+        iy = max(0, min(fy + fh, sy + sh) - max(fy, sy))
+        return ix * iy
+
+    best = max(screens, key=overlap)
+    if overlap(best) <= 0:
+        best = screens[0]  # frame is off every screen: recentre on the primary
+    sx, sy, sw, sh = best
+    w = min(fw, sw)
+    h = min(fh, sh)
+    x = min(max(fx, sx), sx + sw - w)
+    y = min(max(fy, sy), sy + sh - h)
+    return (x, y, w, h)
+
 
 # One keep-alive session for the video bandwidth probe, built on first use.
 # Same preloaded-SSLContext trick as the download engine (a bare
@@ -151,6 +198,58 @@ _NUMBER_FIELDS = [
 ]
 # Second-scale floats (Advanced), rendered as a decimal stepper.
 _FLOAT_FIELDS = ["download_delay_sec_min", "download_delay_sec_max", "api_rate_limit_delay_sec"]
+# Waves' opinionated defaults layered over tidaler's stock dataclass defaults.
+# Applied once on a brand-new install (_apply_first_run_defaults) and restored
+# by the Advanced-settings "reset all settings" action, so the two always agree
+# on what "factory default" means.
+_FIRST_RUN_OVERRIDES = {
+    "use_primary_album_artist": True,  # library-friendly Artist/Album folders
+    "video_download": False,  # audio-first out of the box
+    "quality_video": QualityVideo.P720,
+    "mark_explicit": True,
+    "metadata_write_url": False,
+}
+
+# Factory reset deletes ONLY these files: the exact names Waves itself writes
+# into its config directory. The wipe is allowlist-only with no recursive
+# deletion anywhere (os.remove on named files, os.rmdir on Waves' own subdirs,
+# which fails on anything non-empty), so a foreign file that somehow lands in
+# the folder is structurally impossible to touch, let alone anything outside
+# it. install_channel is deliberately absent: the installer owns it and a
+# fresh install of the same channel would have it too.
+_FACTORY_WIPE_FILES = (
+    "settings.json",
+    "settings.json.bak",
+    "token.json",
+    "token.json.bak",
+    "waves.json",
+    "waves.json.tmp",
+    "page_cache.json",
+    "page_cache.json.tmp",
+    "browse_tile_art.json",
+    "ownership.sqlite3",
+    "ownership.sqlite3-wal",
+    "ownership.sqlite3-shm",
+    "app.log",
+    "crash.log",
+    "waves_dev.log",
+)
+# The two rotating logs number their backups (crash.log.1, waves_dev.log.1..N).
+_FACTORY_WIPE_LOG_PATTERNS = (
+    re.compile(r"crash\.log\.\d+\Z"),
+    re.compile(r"waves_dev\.log\.\d+\Z"),
+)
+# Waves-created subdirectories and the exact files Waves puts in them,
+# leaf-first so an emptied child lets its parent's rmdir succeed. Random-named
+# staging leftovers (a crashed FFmpeg download's tmp zip, an unapplied update
+# blob) are deliberately NOT matched: deleting by pattern is how a wipe grows
+# the capability to eat a user's file, so those rare crumbs stay behind and
+# keep their directory alive instead.
+_FACTORY_WIPE_SUBDIRS = (
+    (os.path.join("updates", "staged"), ()),
+    ("updates", ("applied.json",)),
+    ("bin", ("ffmpeg", "ffmpeg.exe", "ffmpeg.new", "ffmpeg.exe.new", "ffmpeg.json")),
+)
 # Per-bucket cap for the live tidalapi object cache (_objs). A new search clears
 # the buckets, but browsing artists/albums without searching keeps appending, so
 # cap each bucket far above any realistic single view and evict oldest-first.
@@ -1635,6 +1734,10 @@ class WavesBridge(QObject):
         # rich Progress tasks for per-track percentages (thread-safe: rich
         # guards its task list with an internal lock).
         self._job_dls: dict[int, Download] = {}
+        # Coalesce the broadcast progress fan-out (see _report_pct). Keyed by
+        # media id -> (last_broadcast_pct, monotonic_time). GUI-thread only, so
+        # no lock; cleared when the queue drains (in _poll_track_progress).
+        self._pct_last: dict[str, tuple[float, float]] = {}
         self._track_poll = QTimer(self)
         self._track_poll.setInterval(500)
         self._track_poll.timeout.connect(self._poll_track_progress)
@@ -1654,6 +1757,11 @@ class WavesBridge(QObject):
         self._tracksQueued.connect(self._enqueue_tracks)
         self._waves_prefs_path = os.path.join(os.path.dirname(self.settings.file_path), "waves.json")
         self._waves_prefs = self._load_waves_prefs()
+        # Latched by factoryReset: once the config dir is being wiped, every
+        # persistence path below must stay silent so nothing (a debounced
+        # window-geometry save, a page-cache snapshot) re-creates the files
+        # between the wipe and the quit that immediately follows.
+        self._factory_reset = False
         # Reality-checked record of what has actually been downloaded (see
         # tidaler.ownership). Kept across logout: it describes files on THIS disk,
         # and every query re-checks the filesystem, so the account has no bearing
@@ -2082,6 +2190,7 @@ class WavesBridge(QObject):
         self._browse_pages.clear()
         self._browse_loading.clear()
         self._browse_gen += 1
+        self._browse_reval_ts = 0.0  # twin of _home_reval_ts below: next account starts un-throttled
         self._artist_cache.clear()
         self._artist_loading.clear()
         self._album_tracks_cache.clear()
@@ -2115,7 +2224,7 @@ class WavesBridge(QObject):
         plain JSON-safe dicts by construction (they cross the QML bridge).
         Library categories persist only their first page, the accumulated
         infinite-scroll tail can be huge and re-pages naturally."""
-        if not self._logged_in:
+        if not self._logged_in or getattr(self, "_factory_reset", False):
             return
         lib = {
             cat: {
@@ -3782,7 +3891,7 @@ class WavesBridge(QObject):
                     time.sleep(0.1)  # polite pacing between page fetches
             finally:
                 self._tile_art_running = False
-                if fetched:
+                if fetched and not getattr(self, "_factory_reset", False):
                     try:
                         with open(self._tile_art_path, "w", encoding="utf-8") as handle:
                             json.dump(disk, handle, indent=1)
@@ -3920,9 +4029,35 @@ class WavesBridge(QObject):
             # flight, so a lower tick would snap the bar backward: clamp to
             # keep every fan-out target monotonic per job.
             pct = max(float(pct), float(item.get("progress", 0.0)))
-        self.downloadProgress.emit(media_id, float(pct))
-        self._set_queue_progress(qid, float(pct))
-        self._bump_artist_group(media_id, float(pct), None)
+        pct = float(pct)
+        # Coalesce only the broadcast fan-out. downloadProgress reaches every
+        # instantiated download control (each re-reads it on change), and a
+        # single DASH-delivered track emits item() per segment with no throttle,
+        # so an ungated broadcast fires dozens of GUI-thread rebinds in a burst.
+        # Gate it to a 0.5% min delta or a ~10 Hz ceiling per media id, but never
+        # swallow the terminal 100% (a bar must be able to complete). The queue
+        # row and artist-group updates below stay every-tick: the first is
+        # already targeted (queueItemProgress) and keeps item["progress"] fresh
+        # for the monotonic clamp above.
+        if self._should_broadcast_pct(media_id, pct):
+            self.downloadProgress.emit(media_id, pct)
+        self._set_queue_progress(qid, pct)
+        self._bump_artist_group(media_id, pct, None)
+
+    def _should_broadcast_pct(self, media_id: str, pct: float) -> bool:
+        """Rate-gate the downloadProgress broadcast for one media id. GUI-thread
+        only (no lock). Always lets the first tick and the terminal 100% through,
+        so a bar neither starts blank nor stalls just short of complete."""
+        prev = self._pct_last.get(media_id)
+        now = time.monotonic()
+        if prev is None or pct >= 100.0:
+            self._pct_last[media_id] = (pct, now)
+            return True
+        prev_pct, prev_t = prev
+        if abs(pct - prev_pct) >= 0.5 or (now - prev_t) >= 0.1:
+            self._pct_last[media_id] = (pct, now)
+            return True
+        return False
 
     # ----- per-track queue view (queue drawer album expansion) ------------
 
@@ -4094,6 +4229,7 @@ class WavesBridge(QObject):
         Progress (tasks are keyed by the description _TrackedDownload mirrors)."""
         if not self._job_dls:
             self._track_poll.stop()
+            self._pct_last.clear()  # bound the broadcast-gate memo to one session
             return
         for qid, dl in list(self._job_dls.items()):
             reg = self._job_tracks.get(qid)
@@ -4224,17 +4360,17 @@ class WavesBridge(QObject):
     def _apply_first_run_defaults(self) -> None:
         """Waves' opinionated defaults for a brand-new install, layered over
         tidaler's stock dataclass defaults and persisted. Only called when no
-        settings file existed yet, an existing user's choices are never touched."""
+        settings file existed yet, an existing user's choices are never touched.
+        resetSettingsDefaults restores the same values, so keep the two in step
+        via _FIRST_RUN_OVERRIDES."""
         d = self.settings.data
-        d.use_primary_album_artist = True  # library-friendly Artist/Album folders
-        d.video_download = False  # audio-first out of the box
-        d.quality_video = QualityVideo.P720
-        d.mark_explicit = True
-        d.metadata_write_url = False
+        for key, value in _FIRST_RUN_OVERRIDES.items():
+            setattr(d, key, value)
         self.settings.save()
 
-    def _load_waves_prefs(self) -> dict:
-        prefs = {
+    def _default_waves_prefs(self) -> dict:
+        """The factory-default waves.json prefs (also the key whitelist)."""
+        return {
             "explicit_mode": "explicit",
             "collapse_editions": True,
             "edition_conflict": "merge",
@@ -4272,7 +4408,33 @@ class WavesBridge(QObject):
             "artist_sec_tracks_collapsed": False,
             "artist_sec_albums_collapsed": False,
             "artist_sec_eps_collapsed": False,
+            # Search-page sections (mixed All view): each shows its first 5
+            # results with a SHOW ALL beneath. A section the user expands stays
+            # expanded on the next search until collapsed again.
+            "search_sec_artists_expanded": False,
+            "search_sec_albums_expanded": False,
+            "search_sec_tracks_expanded": False,
+            "search_sec_videos_expanded": False,
+            "search_sec_playlists_expanded": False,
+            "search_sec_mixes_expanded": False,
+            # Window geometry, remembered across launches (issue #6). These
+            # store the NORMAL (non-maximized) frame so an un-maximize returns
+            # to a sane size; win_max restores the maximized state on top. A
+            # zero win_w/win_h is the "never saved" sentinel: a fresh install
+            # then opens at the default size, placed by the OS. Housekeeping
+            # state, not a user-facing setting, so not in settingsSchema. The
+            # frame is written by windowSaveGeometry (real ints, bypassing the
+            # str-coercing setWavesPref) and validated against the live screen
+            # layout by windowRestoreGeometry.
+            "win_x": 0,
+            "win_y": 0,
+            "win_w": 0,
+            "win_h": 0,
+            "win_max": False,
         }
+
+    def _load_waves_prefs(self) -> dict:
+        prefs = self._default_waves_prefs()
         try:
             with open(self._waves_prefs_path, encoding="utf-8") as handle:
                 stored = json.load(handle)
@@ -4282,12 +4444,24 @@ class WavesBridge(QObject):
         return prefs
 
     def _save_waves_prefs(self) -> None:
+        # Atomic write (temp sibling + os.replace). Window geometry saves land
+        # often, a debounced write per drag/resize gesture, so a process death
+        # mid-write must not truncate waves.json and wipe every pref (a partial
+        # file fails json.load and falls back to defaults). os.replace is atomic
+        # within the same directory. tmp is named before the try so the failure
+        # cleanup below can reference it even if makedirs raised.
+        if getattr(self, "_factory_reset", False):
+            return
+        tmp = self._waves_prefs_path + ".tmp"
         try:
             os.makedirs(os.path.dirname(self._waves_prefs_path), exist_ok=True)
-            with open(self._waves_prefs_path, "w", encoding="utf-8") as handle:
+            with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump(self._waves_prefs, handle, indent=2)
+            os.replace(tmp, self._waves_prefs_path)
         except Exception:
             logger.exception("Could not save Waves prefs")
+            with contextlib.suppress(OSError):
+                os.remove(tmp)  # don't leave a partial sibling behind
 
     @Slot(str, result="QVariant")
     def wavesPref(self, key: str):
@@ -4314,6 +4488,75 @@ class WavesBridge(QObject):
     def _waves_pref_bool(self, key: str) -> bool:
         v = self._waves_prefs.get(key, False)
         return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    # ----- window geometry (issue #6) ------------------------------------
+
+    def _fit_geometry_to_screens(self, x: int, y: int, w: int, h: int):
+        """Clamp a restored frame onto a currently-connected screen.
+
+        Reads the live ``QScreen`` layout (available geometry, so docks and
+        taskbars are already excluded) and defers the math to :func:`_fit_frame`.
+        Returns a fitted ``(x, y, w, h)``, or the input unchanged when the screen
+        list cannot be read (never block a restore on a screen-query hiccup)."""
+        try:
+            screens = [
+                (g.x(), g.y(), g.width(), g.height())
+                for g in (s.availableGeometry() for s in QtGui.QGuiApplication.screens())
+            ]
+        except Exception:
+            logger.debug("could not read screen layout for window restore", exc_info=True)
+            return (x, y, w, h)
+        return _fit_frame((x, y, w, h), screens) or (x, y, w, h)
+
+    @Slot(result="QVariant")
+    def windowRestoreGeometry(self):
+        """The sanitized window frame to apply at startup, or ``{}`` on a fresh
+        install or an unreadable save (issue #6).
+
+        The saved NORMAL frame is clamped onto a live screen so a window last
+        positioned on a monitor that is now gone, or on a resolution that has
+        since shrunk, can never open off-screen. QML applies this before the
+        first present, so the window opens where it was left with no jump."""
+        try:
+            w = int(self._waves_prefs.get("win_w") or 0)
+            h = int(self._waves_prefs.get("win_h") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if w <= 0 or h <= 0:
+            return {}  # never saved (the zero sentinel), or a corrupt size
+        try:
+            x = int(self._waves_prefs.get("win_x") or 0)
+            y = int(self._waves_prefs.get("win_y") or 0)
+        except (TypeError, ValueError):
+            x = y = 0
+        maximized = self._waves_pref_bool("win_max")
+        x, y, w, h = self._fit_geometry_to_screens(x, y, w, h)
+        _win_log.info("restore window %dx%d @ %d,%d max=%s", w, h, x, y, maximized)
+        return {"x": x, "y": y, "w": w, "h": h, "maximized": maximized}
+
+    @Slot(int, int, int, int, bool)
+    def windowSaveGeometry(self, x: int, y: int, w: int, h: int, maximized: bool) -> None:
+        """Persist the window's NORMAL frame and maximized state (issue #6).
+
+        QML sends the last non-maximized frame (never the maximized one, which
+        would un-maximize to fullscreen size) and debounces the per-pixel change
+        storm of a drag/resize into one settled call. Values are written as real
+        ints, bypassing setWavesPref's non-bool str() coercion. One file write
+        per call, and only when something actually changed."""
+        if w <= 0 or h <= 0:
+            return  # a 0x0 during teardown must never clobber a good save
+        changed = False
+        for key, val in (("win_x", int(x)), ("win_y", int(y)), ("win_w", int(w)), ("win_h", int(h))):
+            if self._waves_prefs.get(key) != val:
+                self._waves_prefs[key] = val
+                changed = True
+        mx = bool(maximized)
+        if self._waves_prefs.get("win_max") != mx:
+            self._waves_prefs["win_max"] = mx
+            changed = True
+        if changed:
+            self._save_waves_prefs()
+            _win_log.debug("save window %dx%d @ %d,%d max=%s", w, h, x, y, mx)
 
     # ----- diagnostics export --------------------------------------------
 
@@ -6732,6 +6975,126 @@ class WavesBridge(QObject):
             self._init_download()
         self._set_status("Settings saved")
         devlog.done("save", f"{len(values)} keys", devlog.clock() - t0, keys=",".join(values))
+
+    def _factory_default_values(self) -> dict:
+        """The factory-default value for every key settingsSchema exposes
+        (including composite sub-keys), shaped the way applySettings expects
+        them (enums by name). Keys outside the schema, housekeeping state,
+        are deliberately absent."""
+        stock = ModelSettings()
+        for key, value in _FIRST_RUN_OVERRIDES.items():
+            setattr(stock, key, value)
+        pref_defaults = self._default_waves_prefs()
+        values: dict = {}
+        for section in self.settingsSchema():
+            for field in section["fields"]:
+                for key in (field.get("key"), field.get("file_key"), field.get("child_key")):
+                    if not key or key in values:
+                        continue
+                    if key in pref_defaults:
+                        values[key] = pref_defaults[key]
+                    elif hasattr(stock, key):
+                        default = getattr(stock, key)
+                        values[key] = getattr(default, "name", default)
+        return values
+
+    @Slot()
+    def resetSettingsDefaults(self) -> None:
+        """Put every user-facing setting back to its factory default (Advanced
+        settings "reset all settings").
+
+        Factory default = tidaler's stock dataclass values with Waves'
+        first-run overrides on top (_FIRST_RUN_OVERRIDES), plus the waves.json
+        pref defaults. Only keys that appear in settingsSchema are touched:
+        housekeeping state (window frame, section collapse memory, update-check
+        timestamps) is not a setting and survives. The reset is routed through
+        applySettings so every save side effect (ffmpeg path restore, pool
+        resize, Download re-init, change signals) stays on the one code path.
+        The account stays signed in."""
+        values = self._factory_default_values()
+        logger.info("resetting %d settings to factory defaults", len(values))
+        self.applySettings(values)
+        # A reset is not an explicit quality choice: let the bandwidth
+        # auto-cap manage video quality again (applySettings latched it).
+        self._video_user_quality = False
+        self._set_status("Settings reset to defaults")
+
+    @Slot()
+    def factoryReset(self) -> None:
+        """Erase what Waves keeps on this machine (Advanced settings "reset
+        application"): settings, prefs, the sign-in token, the ownership
+        store, disk caches, logs and the QSettings setup flags. Downloaded
+        music is never touched. The UI quits right after this returns (its
+        aboutToQuit shutdown aborts any in-flight downloads), so the next
+        launch starts like a brand-new install.
+
+        Safety property, load-bearing: the wipe can only ever delete Waves'
+        own files. It works from the _FACTORY_WIPE_* allowlists of exact
+        names, uses os.remove (a single file) and os.rmdir (fails on any
+        non-empty directory), and contains no recursive delete, so a user
+        file that somehow sits inside the config folder survives by
+        construction, and nothing outside it is reachable at all.
+
+        The installer-owned install_channel sentinel is kept: a genuinely
+        fresh install of the same channel (e.g. the Homebrew cask) would lay
+        it down too. Open log handles are detached first so the files delete
+        cleanly everywhere; crash.log stays held by faulthandler for the
+        process lifetime, which is fine on POSIX (unlink works) and means at
+        worst a leftover crash.log on Windows."""
+        self._factory_reset = True
+        logger.info("factory reset requested; wiping the config directory")
+        with contextlib.suppress(Exception):
+            self._ownership.close()
+        # Any straggler ownership query between now and the quit hits a
+        # throwaway in-memory store instead of a closed connection.
+        with contextlib.suppress(Exception):
+            self._ownership = OwnershipStore(":memory:")
+        with contextlib.suppress(Exception):
+            diagnostics.detach_disk_log()
+        base = path_config_base()
+
+        def unlink(path: str) -> None:
+            # os.remove never touches directories and never follows a
+            # symlink (at most the link itself, inside our namespace, goes).
+            with contextlib.suppress(OSError):
+                os.remove(path)
+
+        try:
+            names = set(os.listdir(base))
+        except OSError:
+            names = set()
+        for name in _FACTORY_WIPE_FILES:
+            if name in names:
+                unlink(os.path.join(base, name))
+        for name in names:
+            if any(pat.match(name) for pat in _FACTORY_WIPE_LOG_PATTERNS):
+                unlink(os.path.join(base, name))
+        for rel, files in _FACTORY_WIPE_SUBDIRS:
+            sub = os.path.join(base, rel)
+            # A symlink where our real subdir should be is foreign: skip it
+            # entirely rather than delete through it into someone else's dir.
+            if not os.path.isdir(sub) or os.path.islink(sub):
+                continue
+            for name in files:
+                unlink(os.path.join(sub, name))
+            # Only an empty directory can fall; anything foreign keeps it (and
+            # its parents) alive.
+            with contextlib.suppress(OSError):
+                os.rmdir(sub)
+        # QSettings backs the QML-side setup flags (first-run FFmpeg gate,
+        # update-toast memory); clearing it only edits Waves' own preferences
+        # store, no file deletion involved.
+        with contextlib.suppress(Exception):
+            qsettings = QtCore.QSettings()
+            qsettings.clear()
+            qsettings.sync()
+        try:
+            leftover = sum(1 for n in os.listdir(base) if n != "install_channel")
+        except OSError:
+            leftover = 0
+        if leftover:
+            logger.info("factory reset: %d foreign or busy entries left in place", leftover)
+        logger.info("factory reset complete; the app will now close")
 
     @Slot(str, str, float)
     def uiLog(self, category: str, message: str, ms: float = -1.0) -> None:

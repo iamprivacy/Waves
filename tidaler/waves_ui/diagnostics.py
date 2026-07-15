@@ -84,6 +84,12 @@ _WATCHDOG_WARN_GAP_SEC = 3.5
 
 _SAMPLER_INTERVAL_MS = 5_000
 
+# Event-loop occupancy probe: a fast GUI-thread timer whose own lateness reveals
+# how saturated the main loop is (a coarse 2s watchdog tick cannot). Verbose
+# only; reported as a bucket in the perf line, never a raw number tied to an
+# action. See _PerfSampler._probe_tick.
+_PROBE_INTERVAL_MS = 250
+
 
 def content(text: object) -> str:
     """Mark ``text`` as user content (search text, a title) in a log message.
@@ -377,6 +383,22 @@ class _Watchdog:
             faulthandler.dump_traceback_later(_WATCHDOG_DUMP_SEC, repeat=False, **kwargs)
 
 
+def _occ_bucket(ratio: float) -> str:
+    """Coarsen an event-loop occupancy ratio into a low-cardinality bucket."""
+    for hi, label in ((0.1, "<10%"), (0.3, "10-30%"), (0.6, "30-60%"), (0.9, "60-90%")):
+        if ratio < hi:
+            return label
+    return ">90%"
+
+
+def _stall_bucket(sec: float) -> str:
+    """Coarsen the worst single event-loop stall in a window into a bucket."""
+    for hi, label in ((0.1, "<0.1s"), (0.25, "0.1-0.25s"), (0.5, "0.25-0.5s"), (1.0, "0.5-1s")):
+        if sec < hi:
+            return label
+    return ">1s"
+
+
 class _PerfSampler:
     """Low-rate resource snapshot (verbose only): RSS plus per-pool activity.
 
@@ -387,6 +409,14 @@ class _PerfSampler:
     def __init__(self) -> None:
         self._timer = None
         self._pools: list[tuple[str, object]] = []
+        # Event-loop occupancy accumulators, drained each _sample (see
+        # _probe_tick). Busy = time the fast probe fired later than scheduled;
+        # wall = total elapsed; max_stall = worst single overrun in the window.
+        self._probe_timer = None
+        self._probe_last = 0.0
+        self._probe_busy = 0.0
+        self._probe_wall = 0.0
+        self._probe_max_stall = 0.0
 
     def register_pool(self, name: str, pool) -> None:
         self._pools.append((name, pool))
@@ -402,11 +432,19 @@ class _PerfSampler:
         self._timer.setInterval(_SAMPLER_INTERVAL_MS)
         self._timer.timeout.connect(self._sample)
         self._timer.start()
+        self._probe_last = time.monotonic()
+        self._probe_timer = QTimer()
+        self._probe_timer.setInterval(_PROBE_INTERVAL_MS)
+        self._probe_timer.timeout.connect(self._probe_tick)
+        self._probe_timer.start()
 
     def stop(self) -> None:
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        if self._probe_timer is not None:
+            self._probe_timer.stop()
+            self._probe_timer = None
 
     @staticmethod
     def _rss_mb() -> float | None:
@@ -419,6 +457,22 @@ class _PerfSampler:
         except Exception:
             return None  # Windows: no resource module; skip rather than dep on psutil
 
+    def _probe_tick(self) -> None:
+        """Measure GUI-thread event-loop occupancy. This fixed-interval timer
+        lives on the GUI thread, so however much later than _PROBE_INTERVAL_MS it
+        actually fires is time the loop spent busy (or CPU-starved) instead of
+        servicing it. sum(overrun)/sum(elapsed) approximates occupancy. Records
+        only aggregate durations, never an identity, path, or content."""
+        now = time.monotonic()
+        elapsed = now - self._probe_last
+        self._probe_last = now
+        overrun = elapsed - (_PROBE_INTERVAL_MS / 1000.0)
+        if overrun > 0.0:
+            self._probe_busy += overrun
+            if overrun > self._probe_max_stall:
+                self._probe_max_stall = overrun
+        self._probe_wall += elapsed
+
     def _sample(self) -> None:
         # Sampling is best-effort; a probe failure must never surface.
         with contextlib.suppress(Exception):
@@ -429,6 +483,12 @@ class _PerfSampler:
             for name, pool in self._pools:
                 with contextlib.suppress(Exception):
                     parts.append(f"{name}={pool.activeThreadCount()}/{pool.maxThreadCount()}")
+            if self._probe_wall > 0.0:
+                occ = max(0.0, min(1.0, self._probe_busy / self._probe_wall))
+                parts.append(f"uiloop_busy={_occ_bucket(occ)} uiloop_maxstall={_stall_bucket(self._probe_max_stall)}")
+                self._probe_busy = 0.0
+                self._probe_wall = 0.0
+                self._probe_max_stall = 0.0
             if parts:
                 logger.debug("[sys] %s threads=%d", " ".join(parts), threading.active_count())
 
@@ -551,6 +611,28 @@ def set_verbose(on: bool) -> None:
 
 def is_verbose() -> bool:
     return _verbose
+
+
+def detach_disk_log() -> None:
+    """Close and detach the on-disk log handlers (factory reset).
+
+    The open RotatingFileHandler would otherwise re-create waves_dev.log on
+    the first warning after the config wipe, and holds the file open on
+    Windows where an open file cannot be deleted. Breadcrumbs and the stderr
+    handler keep running; only disk output stops. One-way: the app quits
+    right after a factory reset, so nothing re-attaches."""
+    global _file_handler
+    if _file_handler is None:
+        return
+    _watchdog.stop()
+    _sampler.stop()
+    for target in (logging.getLogger("waves"), logging.getLogger()):
+        for handler in list(target.handlers):
+            if handler is _file_handler or isinstance(handler, _CrumbDumpHandler):
+                target.removeHandler(handler)
+    with contextlib.suppress(Exception):
+        _file_handler.close()
+    _file_handler = None
 
 
 # --------------------------------------------------------------------------
