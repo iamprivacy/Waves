@@ -5,6 +5,38 @@ from mutagen import flac, id3, mp4
 from mutagen.id3 import APIC, SYLT, TALB, TBPM, TCOM, TCOP, TDRC, TIT2, TKEY, TOPE, TPE1, TRCK, TSRC, TXXX, USLT, WOAS
 
 
+def _rg_missing(value) -> bool:
+    """True when a ReplayGain value was never actually measured.
+
+    tidalapi substitutes a literal 1.0 whenever TIDAL omits a loudness field,
+    so a 1.0 (or None) means "unknown", not a real reading. Writing it would
+    stamp a phantom +1 dB gain (and a full-scale peak that claims zero headroom)
+    onto every unmeasured track, which is worse than writing nothing. A genuine
+    track sitting at exactly 1.0 is astronomically rare and benign to skip.
+    """
+    return value is None or value == 1.0
+
+
+def _replay_gain_tags(album_gain, album_peak, track_gain, track_peak):
+    """Yield (REPLAYGAIN_* name, text) for each value TIDAL actually measured.
+
+    Gain is emitted in the ReplayGain 2.0 writer form ("-7.36 dB": two decimals
+    plus the unit, what loudgain and strict readers expect); peak stays a bare
+    linear amplitude (1.0 = full scale, no unit). Sentinel or missing values are
+    dropped (see _rg_missing) so the tags never carry data TIDAL did not supply.
+    """
+    for kind, value in (
+        ("ALBUM_GAIN", album_gain),
+        ("ALBUM_PEAK", album_peak),
+        ("TRACK_GAIN", track_gain),
+        ("TRACK_PEAK", track_peak),
+    ):
+        if _rg_missing(value):
+            continue
+        text = f"{value:.2f} dB" if kind.endswith("GAIN") else str(value)
+        yield f"REPLAYGAIN_{kind}", text
+
+
 class MetadataUnreadable(Exception):
     """Raised when the audio file cannot be parsed for tagging.
 
@@ -155,6 +187,16 @@ class Metadata:
 
         return True
 
+    def _rg_pairs(self):
+        # One place to guard and format the four ReplayGain values before each
+        # container maps them into its own tag scheme.
+        return _replay_gain_tags(
+            self.album_replay_gain,
+            self.album_peak_amplitude,
+            self.track_replay_gain,
+            self.track_peak_amplitude,
+        )
+
     def set_flac(self):
         self.m.tags["TITLE"] = self.title
         self.m.tags["ALBUM"] = self.album
@@ -178,10 +220,8 @@ class Metadata:
         self.m.tags["RELEASETYPE"] = self.release_type
 
         if self.replay_gain_write:
-            self.m.tags["REPLAYGAIN_ALBUM_GAIN"] = str(self.album_replay_gain)
-            self.m.tags["REPLAYGAIN_ALBUM_PEAK"] = str(self.album_peak_amplitude)
-            self.m.tags["REPLAYGAIN_TRACK_GAIN"] = str(self.track_replay_gain)
-            self.m.tags["REPLAYGAIN_TRACK_PEAK"] = str(self.track_peak_amplitude)
+            for key, text in self._rg_pairs():
+                self.m.tags[key] = text
 
     def set_mp3(self):
         # ID3 Frame (tags) overview: https://exiftool.org/TagNames/ID3.html / https://id3.org/id3v2.3.0
@@ -204,10 +244,8 @@ class Metadata:
         self.m.tags.add(TXXX(encoding=3, desc="MusicBrainz Album Type", text=self.release_type))
 
         if self.replay_gain_write:
-            self.m.tags.add(TXXX(encoding=3, desc="REPLAYGAIN_ALBUM_GAIN", text=str(self.album_replay_gain)))
-            self.m.tags.add(TXXX(encoding=3, desc="REPLAYGAIN_ALBUM_PEAK", text=str(self.album_peak_amplitude)))
-            self.m.tags.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=str(self.track_replay_gain)))
-            self.m.tags.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK", text=str(self.track_peak_amplitude)))
+            for key, text in self._rg_pairs():
+                self.m.tags.add(TXXX(encoding=3, desc=key, text=text))
 
     def set_mp4(self):
         self.m.tags["\xa9nam"] = self.title
@@ -233,10 +271,8 @@ class Metadata:
         self.m.tags["----:com.apple.iTunes:MusicBrainz Album Type"] = self.release_type.encode("utf-8")
 
         if self.replay_gain_write:
-            self.m.tags["----:com.apple.iTunes:REPLAYGAIN_ALBUM_GAIN"] = str(self.album_replay_gain).encode("utf-8")
-            self.m.tags["----:com.apple.iTunes:REPLAYGAIN_ALBUM_PEAK"] = str(self.album_peak_amplitude).encode("utf-8")
-            self.m.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN"] = str(self.track_replay_gain).encode("utf-8")
-            self.m.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK"] = str(self.track_peak_amplitude).encode("utf-8")
+            for key, text in self._rg_pairs():
+                self.m.tags[f"----:com.apple.iTunes:{key}"] = text.encode("utf-8")
 
     def cleanup_tags(self):
         # Collect keys to delete first to avoid RuntimeError during iteration

@@ -85,11 +85,34 @@ class BaseConfig:
         return result
 
 
+def _migrate_settings(data: ModelSettings) -> bool:
+    """Apply one-time upgrade steps to an already-loaded settings model.
+
+    Returns True when something changed, so the caller persists it. Each step is
+    guarded by a marker stored in the config, so it runs at most once and never
+    overrides a choice the user makes afterwards.
+    """
+    changed = False
+
+    # ReplayGain became on-by-default. Configs created before that carry an
+    # explicit False that is really just the old default, so switch them on once.
+    # A user who turns it back off later keeps it off: the marker stops this from
+    # firing again.
+    if not data.replay_gain_default_migrated:
+        data.metadata_replay_gain = True
+        data.replay_gain_default_migrated = True
+        changed = True
+
+    return changed
+
+
 class Settings(BaseConfig, metaclass=SingletonMeta):
     def __init__(self):
         self.cls_model = ModelSettings
         self.file_path = path_file_settings()
         self.read(self.file_path)
+        if _migrate_settings(self.data):
+            self.save()
 
 
 class Tidal(BaseConfig, metaclass=SingletonMeta):

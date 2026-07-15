@@ -83,7 +83,12 @@ class Settings:
     downloads_concurrent_max: int = 3
     symlink_to_track: bool = False
     playlist_create: bool = False
-    metadata_replay_gain: bool = False
+    metadata_replay_gain: bool = True
+    # Internal upgrade marker (not a user setting, not shown in the UI): records
+    # the one-time flip that turned metadata_replay_gain on for configs created
+    # before it became the default. Once set, the migration leaves the user's
+    # own choice alone.
+    replay_gain_default_migrated: bool = False
     metadata_write_url: bool = True
     window_x: int = 50
     window_y: int = 50
