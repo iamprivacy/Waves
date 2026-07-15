@@ -5,10 +5,119 @@ Each release section becomes the GitHub Release notes for that version, so keep
 bullets short, objective, and written for end users.
 
 Format per release: `## vX.Y.Z (YYYY-MM-DD)` followed by any of the subheadings
-**Added**, **Changed**, **Fixed**, **Removed**, each a bullet list. Section
+**Added**, **Changed**, **Fixed**, **Removed**, each a bullet list, always in
+that order (a test enforces it). Section
 headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
+
+## 🔎 v0.1.10 (2026-07-15)
+
+### ✨ Added
+
+- 🧹 Advanced settings gained two reset actions at the bottom of the section:
+  "Reset all settings" puts every option back to its factory default (you stay
+  signed in), and "Reset application" erases everything Waves has saved on
+  this computer (settings, sign-in, caches, ownership history and logs, never
+  your downloaded music) and closes the app so the next launch starts like a
+  brand-new install. Both ask for confirmation before anything happens.
+
+- 🪟 Waves now remembers its window size, position and maximized state, and
+  restores them the next time you open it. If the monitor it was on is gone or
+  its resolution changed, the window is nudged back onto a visible screen so it
+  can never open off-screen. On a first launch, before anything has been
+  remembered, the window opens centered at a 4:3 size instead of wherever the
+  OS drops it.
+- 🖱️ Clicking the blank space of a track row now goes where clicking the
+  track title goes (the track's album page, or the video player), so most of
+  the row is clickable while the artist and album links beneath the title
+  still drill into their own pages.
+- 🔎 Clicking or tabbing into the search box selects the whole current term,
+  so you can start typing to replace it (no highlighting or backspacing first).
+
+### 🔧 Changed
+
+- 🌊 While a page loads, the finished page now fades in gently over the ambient
+  water animation rather than snapping on in one hard paint. The "Reading the
+  wire…" hint rides that same living water while it works.
+- 🎚️ The mini player in the bottom bar now sits in the right corner while that
+  corner is free, leaving the middle of the bar clear. If an update notice
+  needs the corner, the player slides to the centre in one smooth move and
+  slides back when the corner frees up again.
+- ⚡ The wave-logo box now carries an occasional lightning storm at rest:
+  seven strikes spread across a slow 20-second loop, tall bolts framing the
+  box at the left and right, smaller ones scattered between, and a big centre
+  strike that lights the whole box with a brief flash. Hovering the box still
+  summons the full storm.
+- 🕶️ The soft darkening at the top and bottom scroll edges now appears only
+  while rows are actually being cut off there. At the top or bottom of a page
+  it fully lifts, so artist artwork, heroes and the back bar are no longer
+  dimmed when the page is not scrolled.
+- 🧭 Collapsing an expanded section with SHOW LESS now brings you back to the
+  top of that section (with a little breathing room above), instead of
+  dropping you at whatever the bottom of the shorter page happens to be.
+- 🔤 Track titles in track rows (search results, top tracks, album pages,
+  recent tracks) are now slightly larger and a touch heavier than the artist
+  and album line beneath them, so the title leads the row at a glance.
+- 📂 The Browse… button next to folder and file settings lights up green while
+  the field is still empty (it is the thing to click) and settles to a faded
+  green once a value is set.
+- ✳️ The SHOW ALL links under top tracks, search sections and the artist strip
+  are now a soft mint green at rest, so it is clear at a glance that they can
+  be clicked (they used to sit grey until hovered).
+- 🔊 ReplayGain tags are now written by default, so players that support it can
+  level volume across your library without changing the audio. This update
+  switches it on for existing installs too; you can turn it back off any time
+  under Settings > Advanced > Write ReplayGain tags. Tracks TIDAL never measured
+  are left untagged instead of stamped with a wrong level, and gain is written
+  in the standard "-7.36 dB" form.
+- 🔎 Every section on the search page now shows just its first few results with a
+  SHOW ALL beneath it, so the page reads as a quick overview instead of a long
+  page you scroll past: albums, tracks, videos, playlists, and mixes each show
+  their first 5, and artists sit in a single sideways-scrolling row. Whichever
+  sections you open are remembered and stay open on your next search, per
+  section, so you do not have to expand them again each time. Picking a single
+  category from the filters still shows everything in it. Results collapsed
+  behind a SHOW ALL do not download their covers until you expand them, so the
+  art you can actually see loads sooner on a new search.
+
+### 🐛 Fixed
+
+- 🖼️ Cover art keeps loading and the app stays smooth to scroll while
+  downloads run: progress updates no longer redraw every download control on
+  the screen dozens of times a second.
+- 📁 On macOS, a download folder on a NAS or external drive stays valid
+  between launches instead of reading as unreachable until you re-pick the
+  same folder. macOS grants that access when you pick the folder (usually
+  silently, sometimes with a one-time prompt) and now remembers it.
+- 🖱️ The mouse cursor works normally on the search page again: buttons show
+  the pointing hand instead of the plain arrow. The focused search box was
+  quietly overriding the cursor for the whole window.
+- ⌨️ Clicking outside any text field now releases it, the blinking cursor and
+  green outline go away, matching how the search box already behaved. Settings
+  fields like the download folder path used to hold their outline until you
+  clicked another field.
+- 🏷️ The search category filters (All, Artists, Albums, and so on) stay put
+  instead of fading out and back in on every search, and they appear as soon
+  as results arrive instead of only after the result cards finish drawing.
+- 🖼️ Artist artwork no longer flickers to grey boxes while you resize the
+  window; covers hold their image steadily instead of reloading on every frame
+  of the drag.
+- 🎞️ Result rows no longer hold a stale look after switching tabs or changing
+  the result filter; the subtle curve at the top and bottom edges now settles
+  into place right away instead of only correcting once you scroll.
+- 🪟 Resizing the window on the search page no longer stutters or jumps: the
+  matching and similar artist cards now hold a fixed size, so a resize reveals
+  more or fewer of them instead of rescaling every card on screen as you drag.
+- 🖼️ Track rows in search results no longer show an occasional blank grey circle
+  where the album cover should be. The small round covers now load the same
+  reliable way as the rest of the app (with caching and a retry), instead of a
+  one-shot fetch that could silently fail and leave the circle empty until you
+  reopened the album.
+- 🧭 Browse stays current while you keep it open. Its New, Top, and For You rows
+  now refresh on a timer as well as when you return to the tab, so an app left
+  running for days follows what TIDAL is featuring instead of staying pinned to
+  whatever loaded when you first opened it.
 
 ## 🚀 v0.1.9 (2026-07-14)
 
@@ -17,6 +126,16 @@ cutting a release renames that section to the new version.
 - ⏳ Download buttons acknowledge the click instantly with an animated
   QUEUED state, then flip to the usual progress bar when the download
   starts.
+
+### 🔧 Changed
+
+- 🚀 Finished tracks land on network drives much faster: a few large writes
+  instead of hundreds of tiny ones, with far less folder and bookkeeping
+  chatter per album.
+- 🧵 Downloads use fewer threads and less memory.
+- 🟩 The playback ring around track art in search results uses the same
+  square LED blocks as every other progress bar and stays inside the
+  artwork tile.
 
 ### 🐛 Fixed
 
@@ -38,16 +157,6 @@ cutting a release renames that section to the new version.
   during a download; freshly finished tracks still update instantly.
 - 📸 Two tracks finishing at the same moment can no longer trip a "File
   exists" error while writing the shared album cover to a network drive.
-
-### 🔧 Changed
-
-- 🚀 Finished tracks land on network drives much faster: a few large writes
-  instead of hundreds of tiny ones, with far less folder and bookkeeping
-  chatter per album.
-- 🧵 Downloads use fewer threads and less memory.
-- 🟩 The playback ring around track art in search results uses the same
-  square LED blocks as every other progress bar and stays inside the
-  artwork tile.
 
 ## 🌊 v0.1.8 (2026-07-13)
 
@@ -257,6 +366,27 @@ cutting a release renames that section to the new version.
   artist's top track (with the elapsed counter and STOP control), filling the
   blank strip at the bottom of each card.
 
+### 🔧 Changed
+
+- 🔍 The Search tab now remembers where you were. Coming back from My Tidal or
+  Browse returns you to the exact page you left, artist page, expanded album,
+  scroll position and all, instead of dropping you back on the results list.
+  Pressing Search again while already on it starts a fresh, blank search, the
+  same two-step behaviour the Browse tab already had.
+- 📊 Album, playlist, and discography progress bars now move continuously.
+  They used to sit still and then jump each time a whole track finished; the
+  bar (and the matching media buttons) now creeps along with the tracks that
+  are currently downloading, and the "N/total tracks" count only ticks up
+  when a track really completes.
+- 🛠️ When FFmpeg is missing, Waves says so instead of quietly degrading. Without
+  FFmpeg it cannot extract FLAC, convert video, or repair track length, so it now
+  warns once per session, and it records which FFmpeg it used (managed, custom,
+  system, or none) in your settings file so a pasted config shows whether FFmpeg
+  was available. The FFmpeg path field itself is left untouched.
+- 💡 The dot-matrix progress pill's status text now sits on a dark backing
+  plate, so it stays readable as the lit cells fill in behind it (updater
+  cards, FFmpeg installs, and the new update toast all share the fix).
+
 ### 🐛 Fixed
 
 - 🔥 Downloads no longer peg the CPU or freeze the window. Every track segment
@@ -298,27 +428,6 @@ cutting a release renames that section to the new version.
   and the flag that keeps that process windowless was being discarded before the
   process started, so a console popped up (and vanished) for each one. It now
   runs fully hidden.
-
-### 🔧 Changed
-
-- 🔍 The Search tab now remembers where you were. Coming back from My Tidal or
-  Browse returns you to the exact page you left, artist page, expanded album,
-  scroll position and all, instead of dropping you back on the results list.
-  Pressing Search again while already on it starts a fresh, blank search, the
-  same two-step behaviour the Browse tab already had.
-- 📊 Album, playlist, and discography progress bars now move continuously.
-  They used to sit still and then jump each time a whole track finished; the
-  bar (and the matching media buttons) now creeps along with the tracks that
-  are currently downloading, and the "N/total tracks" count only ticks up
-  when a track really completes.
-- 🛠️ When FFmpeg is missing, Waves says so instead of quietly degrading. Without
-  FFmpeg it cannot extract FLAC, convert video, or repair track length, so it now
-  warns once per session, and it records which FFmpeg it used (managed, custom,
-  system, or none) in your settings file so a pasted config shows whether FFmpeg
-  was available. The FFmpeg path field itself is left untouched.
-- 💡 The dot-matrix progress pill's status text now sits on a dark backing
-  plate, so it stays readable as the lit cells fill in behind it (updater
-  cards, FFmpeg installs, and the new update toast all share the fix).
 
 ## 🔄 v0.1.3 (2026-07-10)
 

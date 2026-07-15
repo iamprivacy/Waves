@@ -34,8 +34,10 @@ Waves is a fork of Tidaler that
 replaces the GUI and keeps the download engine. The Python package keeps the
 upstream name so engine bug fixes merge in cleanly (the merge is one-way,
 upstream to Waves). Everything Waves-specific lives in `tidaler/waves_ui/`;
-user-facing state is fully separated (config lives under `~/.config/Waves`,
-see `__config_dirname__` in `tidaler/__init__.py`).
+user-facing state is fully separated (config lives in its own `Waves` folder:
+`~/.config/Waves` on Linux, `~/Library/Application Support/Waves` on macOS,
+`%APPDATA%\Waves` on Windows; see `__config_dirname__` in
+`tidaler/__init__.py`).
 
 ## Threading model
 
