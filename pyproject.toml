@@ -137,6 +137,10 @@ ignore = [
 # Tests use asserts (S101), terse error messages (TRY003) and throwaway temp
 # paths like "/tmp/x" as never-touched dummy dirs (S108).
 "tests/*" = ["S101", "TRY003", "S108"]
+# The Back-to-Browse scroll guard re-runs itself in a subprocess to isolate the
+# Qt boot (S603, fixed argv), and its boot -> drive -> assert scenario is one
+# deliberately linear function (C901).
+"tests/test_browse_back_scroll.py" = ["S603", "C901"]
 "tidaler/cli.py" = ["UP007"]
 # The Waves bridge has several inherently branchy but linear functions (the
 # settings-schema builder, the settings dispatcher and the search/discography

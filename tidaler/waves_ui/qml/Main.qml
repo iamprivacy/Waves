@@ -5746,19 +5746,27 @@ ApplicationWindow {
             readonly property string _pageKey: root.browsePageKey
             property real pendingRestoreY: -1
             property string pendingRestoreKey: ""
-            function applyRestore() {
+            // mayDisarm: only a real layout pass may spend the restore. On the
+            // page-key change contentHeight is still the OUTGOING page's (the
+            // key binding here is notified before the section Repeater's
+            // model), so a tall page like a playlist would clear the
+            // "reached the target" check against a height the landing does not
+            // have yet. The landing's shelves then incubate across frames:
+            // contentHeight collapses, contentY is clamped to the top, and the
+            // re-apply that should have caught it finds the restore spent.
+            function applyRestore(mayDisarm) {
                 if (pendingRestoreY < 0 || root.browsePageKey !== pendingRestoreKey) return
                 var maxY = Math.max(0, contentHeight - height)
                 contentY = Math.min(pendingRestoreY, maxY)
-                if (maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
+                if (mayDisarm && maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
             }
             on_PageKeyChanged: {
-                if (pendingRestoreY >= 0 && root.browsePageKey === pendingRestoreKey) applyRestore()
+                if (pendingRestoreY >= 0 && root.browsePageKey === pendingRestoreKey) applyRestore(false)
                 else contentY = 0
             }
             onMovingChanged: root.browseMoving = moving
             onPendingRestoreYChanged: if (pendingRestoreY >= 0) restoreGiveUp.restart()
-            onContentHeightChanged: { applyRestore(); maybeGrow() }
+            onContentHeightChanged: { applyRestore(true); maybeGrow() }
             Timer { id: restoreGiveUp; interval: 800; onTriggered: browsePane.pendingRestoreY = -1 }
             // Endless scroll on a drilled listing page (a full-listing grid or
             // track list, one section that fills the page). Nearing the bottom
@@ -6690,18 +6698,22 @@ ApplicationWindow {
                 readonly property string _artistKey: root.artistData ? "" + (root.artistData.id || "") : ""
                 property real pendingRestoreY: -1
                 property string pendingRestoreKey: ""
-                function applyRestore() {
+                // mayDisarm: as on browsePane, only a real layout pass may spend
+                // the restore. On the id change contentHeight still belongs to
+                // the outgoing page, so a tall one would disarm it before the
+                // incoming artist has laid out.
+                function applyRestore(mayDisarm) {
                     if (pendingRestoreY < 0 || _artistKey !== pendingRestoreKey) return
                     var maxY = Math.max(0, contentHeight - height)
                     contentY = Math.min(pendingRestoreY, maxY)
-                    if (maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
+                    if (mayDisarm && maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
                 }
                 on_ArtistKeyChanged: {
-                    if (pendingRestoreY >= 0 && _artistKey === pendingRestoreKey) applyRestore()
+                    if (pendingRestoreY >= 0 && _artistKey === pendingRestoreKey) applyRestore(false)
                     else contentY = 0
                 }
                 onPendingRestoreYChanged: if (pendingRestoreY >= 0) artistRestoreGiveUp.restart()
-                onContentHeightChanged: applyRestore()
+                onContentHeightChanged: applyRestore(true)
                 Timer { id: artistRestoreGiveUp; interval: 800; onTriggered: artistView.pendingRestoreY = -1 }
 
                 Column {

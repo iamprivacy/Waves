@@ -11,6 +11,13 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+## 🚧 Unreleased
+
+### 🐛 Fixed
+
+- ↩️ Going Back from a playlist (or any long page) to Browse now returns you to
+  the spot you left, instead of jumping to the top of the page.
+
 ## 🔎 v0.1.10 (2026-07-15)
 
 ### ✨ Added
