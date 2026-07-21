@@ -78,6 +78,7 @@ from tidaler.helper.tidal import (
 from tidaler.metadata import Metadata, MetadataUnreadable
 from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from tidaler.model.gui_data import ProgressBars
+from tidaler.waves_ui.manifest import overgenerated_tail_urls
 
 
 # TODO: Set appropriate client string and use it for video download.
@@ -385,6 +386,7 @@ class Download:
         p_task: TaskID,
         progress_to_stdout: bool,
         event_stop: Event | None = None,
+        n_tail_spurious: int | None = None,
     ) -> tuple[bool, list[DownloadSegmentResult]]:
         """Download all segments with progress reporting and abort handling.
 
@@ -395,6 +397,10 @@ class Download:
             p_task (TaskID): Progress bar task ID.
             progress_to_stdout (bool): Whether to show progress in stdout.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
+            n_tail_spurious (int | None, optional): How many trailing URLs the manifest
+                proves are over-generated padding (0 means none, so a failed final
+                segment is a real failure). None means unproven and keeps the legacy
+                last-segment leniency. Defaults to None.
 
         Returns:
             tuple[bool, list[DownloadSegmentResult]]: (result_segments, list of segment results)
@@ -435,13 +441,23 @@ class Download:
 
                 # Check for a link that failed.
                 if not result_dl_segment.result:
-                    # Sometimes, if a track is very short (< 8 seconds or so), the *last* URL of a
-                    # MULTI-segment track is a spurious tail (HTTP Error 500) that isn't needed; the
-                    # file won't be corrupt. Only that narrow case is exempt. A single-URL (BTS) track
-                    # has exactly one required segment which also happens to be `urls[-1]`, so a failure
-                    # there is a real failure and must NOT be exempted, otherwise a fully failed GET
-                    # (expired link, 403/500, network failure) would masquerade as success.
-                    is_spurious_tail: bool = len(urls) > 1 and result_dl_segment.url is urls[-1]
+                    # On very short tracks (< 8 seconds or so) the *last* URL of a MULTI-segment
+                    # track is a spurious tail (HTTP Error 500) that isn't needed; the file won't
+                    # be corrupt. That is tidalapi's segment-count arithmetic over-generating one
+                    # URL past the end of the audio (see waves_ui/manifest.py), so when the
+                    # manifest was parseable, n_tail_spurious says exactly whether the final URL
+                    # is padding (> 0) or required audio (0): a required final segment failing is
+                    # a REAL failure (a silently truncated file), not a tolerable quirk. Only when
+                    # the manifest proved nothing (None) does the legacy blanket leniency apply.
+                    # A single-URL (BTS) track has exactly one required segment which also happens
+                    # to be `urls[-1]`, so a failure there is a real failure and must NOT be
+                    # exempted, otherwise a fully failed GET (expired link, 403/500, network
+                    # failure) would masquerade as success.
+                    is_spurious_tail: bool = (
+                        len(urls) > 1
+                        and result_dl_segment.url is urls[-1]
+                        and (n_tail_spurious is None or n_tail_spurious > 0)
+                    )
 
                     if not is_spurious_tail:
                         result_segments = False
@@ -479,6 +495,7 @@ class Download:
         dl_segment_results: list[DownloadSegmentResult],
         media: Track | Video,
         stream_manifest: StreamManifest | None = None,
+        n_tail_spurious: int | None = None,
     ) -> tuple[bool, pathlib.Path]:
         """Merge segments, decrypt if needed, and return the final file path.
 
@@ -488,6 +505,8 @@ class Download:
             dl_segment_results (list[DownloadSegmentResult]): List of segment download results.
             media (Track | Video): The media item.
             stream_manifest (StreamManifest | None, optional): Stream manifest for tracks. Defaults to None.
+            n_tail_spurious (int | None, optional): Manifest-proven count of over-generated
+                trailing URLs; see ``_download_segments``. Defaults to None.
 
         Returns:
             tuple[bool, pathlib.Path]: (Success, path to downloaded or decrypted file)
@@ -500,7 +519,7 @@ class Download:
             # Bring list into right order, so segments can be easily merged.
             dl_segment_results.sort(key=lambda x: x.id_segment)
 
-            result_merge = self._segments_merge(path_file, dl_segment_results)
+            result_merge = self._segments_merge(path_file, dl_segment_results, n_tail_spurious)
 
             if not result_merge:
                 self.fn_logger.error(f"Something went wrong while writing to {media.name}. File is corrupt!")
@@ -537,6 +556,12 @@ class Download:
         except Exception:
             return False, path_file
 
+        # How many trailing URLs the manifest arithmetic proves are
+        # over-generated padding (tracks only; see waves_ui/manifest.py).
+        # None means unproven (video m3u8, BTS, or an unparseable manifest)
+        # and preserves the legacy last-segment leniency downstream.
+        n_tail_spurious: int | None = overgenerated_tail_urls(stream_manifest) if stream_manifest else None
+
         # Set the correct progress output channel.
         if self.progress_gui is None:
             progress_to_stdout: bool = True
@@ -551,21 +576,28 @@ class Download:
             return False, path_file
 
         result_segments, dl_segment_results = self._download_segments(
-            urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop
+            urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop, n_tail_spurious
         )
 
         result_merge, tmp_path_file_decrypted = self._download_postprocess(
-            result_segments, path_file, dl_segment_results, media, stream_manifest
+            result_segments, path_file, dl_segment_results, media, stream_manifest, n_tail_spurious
         )
 
         return result_merge, tmp_path_file_decrypted
 
-    def _segments_merge(self, path_file: pathlib.Path, dl_segment_results: list[DownloadSegmentResult]) -> bool:
+    def _segments_merge(
+        self,
+        path_file: pathlib.Path,
+        dl_segment_results: list[DownloadSegmentResult],
+        n_tail_spurious: int | None = None,
+    ) -> bool:
         """Merge downloaded segments into a single file and clean up segment files.
 
         Args:
             path_file (pathlib.Path): Path to the output file.
             dl_segment_results (list[DownloadSegmentResult]): List of segment download results.
+            n_tail_spurious (int | None, optional): Manifest-proven count of over-generated
+                trailing URLs; see ``_download_segments``. Defaults to None.
 
         Returns:
             bool: True if merge succeeded, False otherwise.
@@ -585,10 +617,15 @@ class Download:
                     dl_segment_result.path_segment.unlink()
 
         except Exception:
-            # Mirror the download-time leniency: only a spurious *tail* segment of a
+            # Mirror the download-time leniency: only a manifest-proven (or, when the
+            # manifest proved nothing, presumed) spurious *tail* segment of a
             # MULTI-segment track may be missing without corrupting the file. A merge
             # failure on the sole segment of a single-URL (BTS) track is a real failure.
-            is_spurious_tail: bool = len(dl_segment_results) > 1 and dl_segment_result is dl_segment_results[-1]
+            is_spurious_tail: bool = (
+                len(dl_segment_results) > 1
+                and dl_segment_result is dl_segment_results[-1]
+                and (n_tail_spurious is None or n_tail_spurious > 0)
+            )
 
             if not is_spurious_tail:
                 result = False

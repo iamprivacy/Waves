@@ -15,6 +15,33 @@ cutting a release renames that section to the new version.
 
 ### 🐛 Fixed
 
+- ✂️ A download whose final piece fails can no longer be saved short and
+  reported as done. TIDAL delivers tracks in pieces, and on very short tracks
+  the server lists one piece more than the audio actually has, so a failure on
+  the last piece used to be waved through for every track. Waves now reads the
+  track's manifest to tell the harmless extra piece apart from a real final
+  piece, and a genuine failure there marks the download failed instead of
+  leaving a truncated file.
+- 🚀 Waves can no longer hang on "Signing in…" at launch. If an internal cache
+  file had been damaged, the sign-in never finished: the startup screen sat
+  there forever and you stayed signed out. An unreadable cache is now discarded
+  and start-up carries on without it.
+- 🔑 A network problem at launch no longer signs you out for good. If Waves
+  could not reach TIDAL while restoring your saved sign-in, it deleted the
+  saved credential, so the only way back was a full re-login. It now keeps the
+  credential and simply reports you as signed out; retrying, or restarting once
+  you are back online, restores the session. A real rejected or damaged sign-in
+  is still cleared, as before.
+- 💾 Your settings and saved sign-in are now written whole or not at all. A
+  crash or power cut during a save could leave a half-written file, which meant
+  corrupted settings or a lost sign-in on the next launch. Waves now writes to a
+  temporary file and swaps it in, so what is on disk is always either the old
+  version or the new one.
+- ⬇️ An album or playlist where some tracks failed no longer reports a clean
+  "Done". A 20-track album that lost one track rode its 19 successes to a green
+  done and dropped the missing one silently. It now shows as failed and says
+  "1 of 20 tracks failed"; retrying re-downloads only the tracks you are
+  missing, so it is cheap.
 - 🚨 A download of a partially owned album now reports a failure when none of
   its new tracks could be fetched (for example on an account without download
   entitlement). Before, the tracks skipped as already-in-your-library counted
