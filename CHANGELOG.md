@@ -11,7 +11,7 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
-## 🚧 Unreleased
+## 🖱️ v0.1.11 (2026-07-21)
 
 ### ✨ Added
 
