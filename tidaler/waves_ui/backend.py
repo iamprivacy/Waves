@@ -803,6 +803,26 @@ def _raise_download_incomplete(message: str) -> None:
     raise RuntimeError(message)
 
 
+def _collection_incomplete_reason(write_count: int, ok_count: int, fail_count: int) -> str | None:
+    """Why a finished collection download is incomplete, or None if it succeeded.
+
+    dl.items() swallows a per-track stream failure as ok=False without raising,
+    so the job worker judges the outcome from the counters:
+      * fail_count > 0: at least one track failed, so the collection is
+        incomplete even if other tracks were written or skipped (the 19-of-20
+        case, which previously rode its successes to a green done).
+      * no writes and nothing handled ok: nothing happened at all, e.g. an
+        unentitled or free account that rejected every stream.
+    An all-owned collection (ownership skips count as ok, no failures, no writes)
+    is a real success, so it returns None.
+    """
+    if fail_count > 0:
+        return f"{fail_count} of {ok_count + fail_count} tracks failed"
+    if write_count == 0 and ok_count == 0:
+        return "no tracks were downloaded"
+    return None
+
+
 def _fmt_duration(seconds: int | None) -> str:
     seconds = int(seconds or 0)
     return f"{seconds // 60}:{seconds % 60:02d}"
@@ -5168,17 +5188,16 @@ class WavesBridge(QObject):
                     self._download_merge_plan(dl, signals, job_abort, obj, file_template, merge_plan)
                 elif collection:
                     dl.items(file_template=file_template, media=obj)
-                    # items() returns None and swallows a per-track stream failure
-                    # as ok=False WITHOUT raising, so an album whose every track is
-                    # rejected (e.g. an unentitled/free account) would otherwise be
-                    # reported as a clean success. Judge on write_count, not
-                    # ok_count: ownership skips count as handled but wrote
-                    # nothing, so a partially owned album whose NEW tracks all
-                    # failed silently must not ride its skips to a green done.
-                    # An all-owned collection (skips, no failures) is a real
-                    # success; an empty one (nothing handled at all) is not.
-                    if dl.write_count == 0 and (dl.fail_count > 0 or dl.ok_count == 0) and not job_abort.is_set():
-                        _raise_download_incomplete("no tracks were downloaded")
+                    # A collection reports success or failure per track without
+                    # raising, so judge the outcome from the counters and surface
+                    # any shortfall (see _collection_incomplete_reason). A single
+                    # failed track no longer hides behind the others' successes.
+                    # Skip-existing makes the retry cheap: it re-attempts only the
+                    # missing tracks.
+                    if not job_abort.is_set():
+                        reason = _collection_incomplete_reason(dl.write_count, dl.ok_count, dl.fail_count)
+                        if reason:
+                            _raise_download_incomplete(reason)
                 else:
                     # A single track: honor item()'s (ok, path). The engine returns
                     # ok=False without raising when the stream URL can't be fetched
