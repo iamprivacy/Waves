@@ -610,13 +610,21 @@ class _TrackedDownload(Download):
         # raising the quality setting re-fetches, a plain re-click does not.
         self._ownership_of = ownership_of
         self._target_rank = int(target_rank)
-        # Count tracks that actually wrote a file. The engine returns ok=False
-        # WITHOUT raising when a stream URL can't be fetched (e.g. an unentitled
-        # free account whose playback requests are rejected), so the job worker
-        # cannot tell success from silent failure by exceptions alone; it reads
-        # this tally instead. items() fans item() out on a pool, so guard it.
+        # Per-track outcome tallies. The engine returns ok=False WITHOUT raising
+        # when a stream URL can't be fetched (e.g. an unentitled free account
+        # whose playback requests are rejected), so the job worker cannot tell
+        # success from silent failure by exceptions alone; it reads these
+        # tallies instead. ok_count is every handled track (writes plus
+        # ownership skips), kept for the queue's notion of progress;
+        # write_count only counts tracks the engine really handled a file for,
+        # so an all-new-tracks-failed collection cannot hide behind its owned
+        # skips and report a false "done" (skips fill ok_count but never
+        # write_count). items() fans item() out on a pool, so guard them.
         self._outcome_lock = Lock()
         self.ok_count = 0
+        self.write_count = 0
+        self.skip_count = 0
+        self.fail_count = 0
         # Delivered-quality snapshots captured in _get_track_stream_info, keyed by
         # str(track id), popped by item() onto the completion event. Only a real
         # download (a stream was fetched) populates this; a skip_existing
@@ -650,10 +658,17 @@ class _TrackedDownload(Download):
             self._tls.skip_existing = prev
 
     def _note_outcome(self, ok: bool) -> None:
-        """Tally a finished track (thread-safe: items() runs these on a pool)."""
-        if ok:
-            with self._outcome_lock:
+        """Tally a track the ENGINE finished (thread-safe: items() runs these on
+        a pool). An engine ok covers a real write and a path-collision skip of a
+        file that exists on disk; both mean "the job's file is there", so both
+        count as writes. Ownership skips never come through here (see
+        _emit_skip): they fetched nothing and must not mask silent failures."""
+        with self._outcome_lock:
+            if ok:
                 self.ok_count += 1
+                self.write_count += 1
+            else:
+                self.fail_count += 1
 
     def _get_track_stream_info(self, media):
         """Capture the delivered stream's quality as a side effect, without
@@ -713,7 +728,9 @@ class _TrackedDownload(Download):
         may live outside this collection's folder (a playlist track owned via an
         album download), and items() feeds returned parents to playlist_populate,
         which would write an m3u into that foreign folder."""
-        self._note_outcome(True)
+        with self._outcome_lock:
+            self.ok_count += 1
+            self.skip_count += 1
         relay = self._track_signals
         if relay is not None:
             name = name_builder_item(media)
@@ -5154,9 +5171,13 @@ class WavesBridge(QObject):
                     # items() returns None and swallows a per-track stream failure
                     # as ok=False WITHOUT raising, so an album whose every track is
                     # rejected (e.g. an unentitled/free account) would otherwise be
-                    # reported as a clean success. The relay counted every track
-                    # that actually wrote a file; zero means nothing downloaded.
-                    if dl.ok_count == 0 and not job_abort.is_set():
+                    # reported as a clean success. Judge on write_count, not
+                    # ok_count: ownership skips count as handled but wrote
+                    # nothing, so a partially owned album whose NEW tracks all
+                    # failed silently must not ride its skips to a green done.
+                    # An all-owned collection (skips, no failures) is a real
+                    # success; an empty one (nothing handled at all) is not.
+                    if dl.write_count == 0 and (dl.fail_count > 0 or dl.ok_count == 0) and not job_abort.is_set():
                         _raise_download_incomplete("no tracks were downloaded")
                 else:
                     # A single track: honor item()'s (ok, path). The engine returns

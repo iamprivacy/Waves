@@ -15,6 +15,12 @@ cutting a release renames that section to the new version.
 
 ### 🐛 Fixed
 
+- 🚨 A download of a partially owned album now reports a failure when none of
+  its new tracks could be fetched (for example on an account without download
+  entitlement). Before, the tracks skipped as already-in-your-library counted
+  as successes, so the job could show a green "done" while every new track had
+  silently failed. An album where everything is already owned still completes
+  as a success.
 - 🎚️ Changing the audio quality in Settings now applies to the very next
   download; previously new downloads kept the old quality until the app was
   restarted (#9).

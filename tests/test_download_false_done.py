@@ -109,3 +109,53 @@ def test_ok_count_accumulates_across_tracks():
         for _ in outcomes:
             dl.item(media=_media())
     assert dl.ok_count == 2  # only the two that wrote a file
+
+
+# --- write_count vs ownership skips (the silent-DONE guard's real signal) ----
+# The job worker raises incomplete when write_count == 0 and
+# (fail_count > 0 or ok_count == 0): owned-track skips fill ok_count but must
+# never mask a collection whose NEW tracks all failed silently.
+
+
+def _incomplete_predicate(dl) -> bool:
+    """The exact collection-level guard the job worker applies after items()."""
+    return dl.write_count == 0 and (dl.fail_count > 0 or dl.ok_count == 0)
+
+
+def test_ownership_skips_do_not_mask_silent_failures():
+    # A partially owned album on an account whose new-track streams are all
+    # rejected: the skips are handled work, but nothing was written, so the
+    # job must be reported incomplete, not a green done.
+    dl, _relay = _make_tracked()
+    dl._emit_skip(_media())  # the owned track
+    with patch.object(Download, "item", return_value=(False, "")):
+        ok, _ = dl.item(media=_media())  # the new track, silently rejected
+    assert ok is False
+    assert dl.ok_count == 1  # the skip still counts as handled progress
+    assert dl.write_count == 0  # but no file was produced this run
+    assert dl.fail_count == 1
+    assert _incomplete_predicate(dl) is True
+
+
+def test_all_owned_collection_stays_a_clean_success():
+    dl, _relay = _make_tracked()
+    dl._emit_skip(_media())
+    dl._emit_skip(_media())
+    assert (dl.ok_count, dl.write_count, dl.skip_count, dl.fail_count) == (2, 0, 2, 0)
+    assert _incomplete_predicate(dl) is False
+
+
+def test_empty_collection_is_still_incomplete():
+    dl, _relay = _make_tracked()
+    assert _incomplete_predicate(dl) is True
+
+
+def test_a_single_real_write_keeps_the_job_green():
+    dl, _relay = _make_tracked()
+    dl._emit_skip(_media())
+    with patch.object(Download, "item", return_value=(False, "")):
+        dl.item(media=_media())
+    with patch.object(Download, "item", return_value=(True, "/tmp/song.flac")):
+        dl.item(media=_media())
+    assert dl.write_count == 1
+    assert _incomplete_predicate(dl) is False

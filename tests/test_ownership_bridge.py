@@ -101,6 +101,9 @@ def _new_tracked():
     td._track_signals = None
     td._outcome_lock = Lock()
     td.ok_count = 0
+    td.write_count = 0
+    td.skip_count = 0
+    td.fail_count = 0
     td._delivered = {}
     td._delivered_lock = Lock()
     td.event_abort = Event()
