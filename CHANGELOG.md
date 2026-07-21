@@ -13,6 +13,11 @@ cutting a release renames that section to the new version.
 
 ## 🚧 Unreleased
 
+### ✨ Added
+
+- 🖱️ The mouse "back" side button now navigates back, same as the Back bar
+  and the macOS three-finger swipe (#8).
+
 ### 🐛 Fixed
 
 - ✂️ A download whose final piece fails can no longer be saved short and

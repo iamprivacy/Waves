@@ -1826,25 +1826,37 @@ class WavesBridge(QObject):
         self._try_token_login()
 
     def eventFilter(self, obj, event) -> bool:
-        """App-level, non-consuming filter for the macOS back gesture.
+        """App-level filter for back navigation input.
 
-        Only the discrete three-finger swipe (NativeGesture) maps to "back".
-        Two-finger horizontal scrolling is deliberately NOT treated as back,
-        the browse shelves scroll horizontally, and a scroll→back mapping
-        hijacks them. Always returns False so scrolling is never affected.
-        (NativeGesture events only ever fire on macOS.)
+        Two triggers map to "back":
+        - The mouse "back" side button (XButton1 on Windows/Linux mice),
+          consumed so the press never click-throughs to the view below.
+        - The discrete macOS three-finger swipe (NativeGesture). Two-finger
+          horizontal scrolling is deliberately NOT treated as back, the
+          browse shelves scroll horizontally, and a scroll→back mapping
+          hijacks them; the gesture path always returns False so scrolling
+          is never affected. (NativeGesture events only fire on macOS.)
         """
-        if not _IS_MACOS:
-            return False
         try:
             if (
-                event.type() == QEvent.Type.NativeGesture
+                event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+                and event.button() == Qt.MouseButton.BackButton
+            ):
+                # DblClick included: Qt reports a rapid second press as a
+                # double-click, which would otherwise drop every second back.
+                self.backRequested.emit()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.BackButton:
+                return True
+            if (
+                _IS_MACOS
+                and event.type() == QEvent.Type.NativeGesture
                 and event.gestureType() == Qt.NativeGestureType.SwipeNativeGesture
                 and event.value() > 0
             ):
                 self.backRequested.emit()
         except Exception:
-            logger.debug("Gesture filter error", exc_info=True)
+            logger.debug("Back-navigation filter error", exc_info=True)
         return False
 
     # ----- Qt properties -------------------------------------------------

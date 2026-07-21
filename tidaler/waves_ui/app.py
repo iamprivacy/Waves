@@ -361,7 +361,8 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine.rootContext().setContextProperty("uiFontFamily", _ui_font())
     # Keep a reference so it isn't garbage-collected.
     app._waves_bridge = bridge  # type: ignore[attr-defined]
-    # Non-consuming filter for the back-swipe gesture (won't affect scrolling).
+    # Back-navigation filter: consumes mouse back-button presses, passes the
+    # macOS back-swipe gesture through non-consuming (won't affect scrolling).
     app.installEventFilter(bridge)
     # Abort downloads and drain the worker pools before the Qt object graph is
     # torn down, otherwise quitting mid-download hangs in QThreadPool teardown.
