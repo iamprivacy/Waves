@@ -37,10 +37,18 @@ class BaseConfig:
         # Try to create the base folder.
         os.makedirs(self.path_base, exist_ok=True)
 
-        with open(self.file_path, encoding="utf-8", mode="w") as f:
-            # Save it in a pretty format
-            obj_json_config = json.loads(data_json)
+        # Write atomically. A settings.json or token.json truncated by a crash
+        # mid-write corrupts the config or loses the login. Serialize to a temp
+        # sibling, flush it to disk, then os.replace (atomic on POSIX and
+        # Windows), so a reader (or the next launch) only ever sees a complete
+        # file. This mirrors the page_cache write in the Waves bridge.
+        obj_json_config = json.loads(data_json)  # pretty format
+        tmp_path = f"{self.file_path}.tmp"
+        with open(tmp_path, encoding="utf-8", mode="w") as f:
             json.dump(obj_json_config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self.file_path)
 
     def set_option(self, key: str, value: Any) -> None:
         value_old: Any = getattr(self.data, key)
