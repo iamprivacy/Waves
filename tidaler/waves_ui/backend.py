@@ -1976,17 +1976,30 @@ class WavesBridge(QObject):
         self._set_status("Signing in…")
 
         def work() -> None:
+            ok = False
             try:
-                ok = bool(self.tidal.login_token())
-            except Exception:
-                logger.exception("Cached token login failed")
-                ok = False
-            if ok:
-                self._load_page_cache()  # before loggedIn flips: first loads hit a warm cache
-                self._set_logged_in(True)
-                self._set_status("Signed in")
-            self._session_resolved = True
-            self.sessionResolvedChanged.emit()
+                try:
+                    ok = bool(self.tidal.login_token())
+                except Exception:
+                    logger.exception("Cached token login failed")
+                    ok = False
+                if ok:
+                    # Warm the page cache before loggedIn flips so the launch's
+                    # first loads hit it. Guard it: a corrupt page_cache.json must
+                    # never block the login, or the overlay latches on
+                    # "Signing in…" forever (login succeeded, the warmup did not).
+                    try:
+                        self._load_page_cache()
+                    except Exception:
+                        logger.exception("Warming the page cache failed; continuing without it")
+                    self._set_logged_in(True)
+                    self._set_status("Signed in")
+            finally:
+                # Always resolve the session latch, even if the block above raised,
+                # so the login overlay can never hang. This is the safety net for
+                # the corrupt-page-cache stall described above.
+                self._session_resolved = True
+                self.sessionResolvedChanged.emit()
             if ok:
                 self._init_download()
                 self._prefetch_tile_art()
