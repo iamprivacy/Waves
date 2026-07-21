@@ -76,6 +76,7 @@ from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.gui_data import ProgressBars
 from tidaler.ownership import OwnershipStore, quality_rank
 from tidaler.waves_ui import proc
+from tidaler.waves_ui.session import WavesTidal
 from tidaler.worker import Worker
 
 from . import __version__ as _WAVES_VERSION
@@ -1523,7 +1524,9 @@ class WavesBridge(QObject):
         log_path = devlog.init(log_dir=os.path.dirname(self.settings.file_path))
         devlog.event("app", "WavesBridge starting", log=str(log_path or "stderr"))
         self._help = HelpSettings()
-        self.tidal = tidal or Tidal(self.settings)
+        # WavesTidal (a Tidal subclass) keeps the saved token through a transient
+        # network at launch instead of deleting it and forcing a full re-login.
+        self.tidal = tidal or WavesTidal(self.settings)
         # Quick metadata/UI work (search, album tracks, artist pages) runs on
         # one pool; downloads run on a separate pool so a long album download
         # can never starve the UI of threads.
