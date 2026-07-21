@@ -15,6 +15,9 @@ cutting a release renames that section to the new version.
 
 ### 🐛 Fixed
 
+- 🎚️ Changing the audio quality in Settings now applies to the very next
+  download; previously new downloads kept the old quality until the app was
+  restarted (#9).
 - ↩️ Going Back from a playlist (or any long page) to Browse now returns you to
   the spot you left, instead of jumping to the top of the page.
 

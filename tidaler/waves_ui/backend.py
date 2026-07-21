@@ -6944,6 +6944,12 @@ class WavesBridge(QObject):
         # because the cache stores raw records, not verdicts.
         if "quality_audio" in values:
             self.ownershipChanged.emit("")
+            # Streams are requested at the SESSION's audio quality (the UI never
+            # passes a per-download quality), and that was only set at startup.
+            # Re-apply it now so the next download honours the new choice without
+            # a restart. settings_apply skips the write while an Atmos-credential
+            # session is active; restore_normal_session re-reads the setting then.
+            self.tidal.settings_apply()
         # The gated flags (video_convert_mp4 / extract_flac) get force-disabled in
         # memory by Download when ffmpeg is absent; persist the user's *real*
         # preference (tracked in _ffmpeg_flag_prefs), not that transient value, so
