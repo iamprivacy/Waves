@@ -1,7 +1,10 @@
 [project]
 name = "tidaler"
 authors = [{ name = "iamprivacy" }]
-version = "0.1.10"
+# Kept equal to tidaler.waves_ui.__version__, which is the version the app and
+# the updater actually report; tests/test_package_version.py fails the build if
+# the two drift. Bump both in the same commit that cuts a release.
+version = "0.1.12"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -141,6 +144,21 @@ ignore = [
 # Qt boot (S603, fixed argv), and its boot -> drive -> assert scenario is one
 # deliberately linear function (C901).
 "tests/test_browse_back_scroll.py" = ["S603", "C901"]
+# Same subprocess-isolation + linear-scenario shape as the scroll guard.
+"tests/test_forward_history_account_switch.py" = ["S603", "C901"]
+"tests/test_playlist_folder_qml.py" = ["S603", "C901"]
+"tests/test_folder_back_navigation.py" = ["S603", "C901"]
+"tests/test_search_results_surface_steal.py" = ["S603", "C901"]
+"tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
+"tests/test_boot_handover_gate.py" = ["S603", "C901"]
+"tests/test_boot_version_drain_order.py" = ["S603", "C901"]
+"tests/test_nav_seq_and_history_guards.py" = ["S603", "C901"]
+"tests/test_folder_badge_and_crumb_labels.py" = ["S603", "C901"]
+"tests/test_hover_swell_fade.py" = ["S603", "C901"]
+"tests/test_browse_console_wayfinding.py" = ["S603", "C901"]
+# Drives the real release.sh (bash) and git against throwaway sandbox repos;
+# both are resolved from PATH on purpose (S603/S607, fixed argv).
+"tests/test_release_star_history.py" = ["S603", "S607"]
 "tidaler/cli.py" = ["UP007"]
 # The Waves bridge has several inherently branchy but linear functions (the
 # settings-schema builder, the settings dispatcher and the search/discography
