@@ -30,7 +30,10 @@ def get_album_artists(media: Track | Album) -> [str]:
     artists: [Artist] = media.album.artists if isinstance(media, Track) else media.artists
 
     for artist in artists:
-        if Role.main in artist.roles:
+        # Albums from TIDAL's V2 home feed carry artists without a role/type
+        # field, so tidalapi leaves .roles as None: treat the missing
+        # information as a main credit rather than crashing on the lookup.
+        if artist.roles is None or Role.main in artist.roles:
             artists_tmp.append(artist.name)
 
     return artists_tmp

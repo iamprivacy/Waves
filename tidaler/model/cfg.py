@@ -42,7 +42,9 @@ class Settings:
         "{artist_name}/[{album_year}] {album_title}{album_explicit}/{track_volume_num_optional}"
         "{album_track_num}. {artist_name} - {track_title}{track_explicit}"
     )
-    format_playlist: str = "Playlists/{playlist_name}/{list_pos}. {artist_name} - {track_title}"
+    # {folder_path} mirrors the playlist's TIDAL folder tree on disk (empty for
+    # playlists not in a folder, so those land exactly where they always did).
+    format_playlist: str = "Playlists/{folder_path}{playlist_name}/{list_pos}. {artist_name} - {track_title}"
     format_mix: str = "Mix/{mix_name}/{artist_name} - {track_title}"
     format_track: str = (
         "{artist_name}/[{album_year}] {album_title}{album_explicit}/{track_volume_num_optional}"
@@ -89,6 +91,14 @@ class Settings:
     # before it became the default. Once set, the migration leaves the user's
     # own choice alone.
     replay_gain_default_migrated: bool = False
+    # Internal upgrade marker (not a user setting): records the one-time
+    # rewrite that added {folder_path} to format_playlist. Only a stored value
+    # equal to the OLD default is rewritten; a customized template is left
+    # exactly as the user wrote it.
+    format_playlist_folder_migrated: bool = False
+    # DOWNLOAD ALL on a Browse playlist category asks before queueing the
+    # whole set; the dialog's "Don't ask again" flips this off.
+    confirm_category_download: bool = True
     metadata_write_url: bool = True
     window_x: int = 50
     window_y: int = 50
@@ -107,6 +117,11 @@ class Settings:
 @dataclass
 class HelpSettings:
     skip_existing: str = "Skip download if file already exists."
+    confirm_category_download: str = (
+        "Ask before queueing a whole Browse playlist category with DOWNLOAD ALL. "
+        'Turning the dialog off with its "Don\'t ask again" box switches this off; '
+        "switch it back on here."
+    )
     album_cover_save: str = "Save cover to album folder."
     lyrics_embed: str = "Embed lyrics in audio file, if lyrics are available."
     use_primary_album_artist: str = "Use only the primary album artist for folder paths instead of track artists."
@@ -126,7 +141,10 @@ class HelpSettings:
     download_dolby_atmos: str = "Download Dolby Atmos audio streams if available."
     # TODO: Describe possible variables.
     format_album: str = "Where to download albums and how to name the items."
-    format_playlist: str = "Where to download playlists and how to name the items."
+    format_playlist: str = (
+        "Where to download playlists and how to name the items. {folder_path} mirrors the "
+        "playlist's TIDAL folder tree (empty when the playlist is not in a folder)."
+    )
     format_mix: str = "Where to download mixes and how to name the items."
     format_track: str = "Where to download tracks and how to name the items."
     format_video: str = "Where to download videos and how to name the items."

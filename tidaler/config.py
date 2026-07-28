@@ -111,6 +111,18 @@ def _migrate_settings(data: ModelSettings) -> bool:
         data.replay_gain_default_migrated = True
         changed = True
 
+    # The playlist template default grew {folder_path}. Defaults are persisted
+    # verbatim, so an untouched install stores the old default string: only
+    # that exact value is upgraded. Anything else is a customized template the
+    # user owns, and it is never rewritten (they can add {folder_path} where
+    # they want it).
+    if not data.format_playlist_folder_migrated:
+        old_default = "Playlists/{playlist_name}/{list_pos}. {artist_name} - {track_title}"
+        if data.format_playlist == old_default:
+            data.format_playlist = ModelSettings().format_playlist
+        data.format_playlist_folder_migrated = True
+        changed = True
+
     return changed
 
 
