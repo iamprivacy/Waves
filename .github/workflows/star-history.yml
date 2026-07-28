@@ -1,0 +1,34 @@
+# Renders the star-history chart for the public repo and commits it into
+# assets/star-history/, filling the markers in README.md. The hosted
+# api.star-history.com badge went blank when GitHub restricted the
+# stargazers endpoint (2026-06-30), so the chart is rendered in our own CI
+# instead and the README embeds a static file.
+name: Star History
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily; the chart only changes when stars do
+  workflow_dispatch:
+
+# The job pushes the regenerated chart (and the README embed) back to the
+# branch it runs on; nothing else needs write access.
+permissions:
+  contents: write
+
+concurrency:
+  group: star-history
+  cancel-in-progress: true
+
+jobs:
+  star-history:
+    # Public repo only: the private dev mirror meters Actions minutes (and its
+    # budget blocks runs), while the public repo runs free. Skipping here also
+    # keeps the daily schedule from failing noisily on the mirror.
+    if: github.repository == 'iamprivacy/Waves'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: narayann7/star-history-action@ffcb7d0219c8ccc46f21f6e0f530b17782a73f04 # v1, pinned
+        with:
+          # Always chart the public repo's stars, wherever this runs.
+          repos: iamprivacy/Waves
