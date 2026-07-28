@@ -128,7 +128,10 @@ Item {
     // Within a section, on/off switches render as a tile grid and everything
     // else as labelled rows.
     function boolFields(fields) { return fields.filter(function(f){ return f.type === "bool" && f.embedded !== true }) }
-    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true }) }
+    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.half !== true }) }
+    // Fields whose value is a character or two (the artist delimiters): a
+    // full-width box for a comma wastes the row, so they pair up two per line.
+    function halfFields(fields) { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.half === true }) }
     // Fields marked `embedded` are rendered inside a section card (the updater
     // card hosts auto_update + update_cadence); look their descriptors up here.
     function fieldByKey(key) {
@@ -1470,7 +1473,8 @@ Item {
                                 Rectangle {
                                     required property var modelData
                                     visible: page.depOK(modelData)
-                                    width: inner.width
+                                    // Half fields sit two-up in the paired Flow below.
+                                    width: modelData.half === true ? (inner.width - 10) / 2 : inner.width
                                     radius: 10; color: page.surface; border.color: page.border1
                                     implicitHeight: body.implicitHeight + 20
                                     Item {
@@ -1558,11 +1562,59 @@ Item {
                                             id: strCol
                                             visible: modelData.type === "str"
                                             width: parent.width; spacing: 6
-                                            Text { text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                            Row {
+                                                width: parent.width; spacing: 10
+                                                Text {
+                                                    id: strLabel
+                                                    text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium
+                                                }
+                                                // Puts just THIS field back to what a fresh install
+                                                // ships with, so a mangled template doesn't cost you
+                                                // every other setting. Always shown (otherwise nobody
+                                                // discovers it), but inert and faded while the field
+                                                // already matches: it reads as the field's status.
+                                                Text {
+                                                    id: strDefaultLink
+                                                    readonly property bool changed: modelData.default_value !== undefined
+                                                                                    && String(page.val(modelData)) !== String(modelData.default_value)
+                                                    visible: modelData.default_value !== undefined
+                                                    anchors.verticalCenter: strLabel.verticalCenter
+                                                    textFormat: Text.PlainText
+                                                    text: changed ? "Restore default" : "Default"
+                                                    color: !changed ? page.textDim
+                                                                    : strDefaultMa.containsMouse ? page.accent : page.accentDim
+                                                    opacity: changed ? 1 : 0.5
+                                                    font.pixelSize: 12
+                                                    font.underline: changed && strDefaultMa.containsMouse
+                                                    MouseArea {
+                                                        id: strDefaultMa
+                                                        anchors.fill: parent; anchors.margins: -4
+                                                        enabled: strDefaultLink.changed
+                                                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                        // Set the edit map, then RE-BIND the box rather than
+                                                        // writing its text. Typing into a TextField breaks
+                                                        // its text binding, so setv alone would not reach a
+                                                        // field already edited; but a plain imperative write
+                                                        // destroys the binding for good, and delegates are
+                                                        // kept alive across close/reopen (refreshSchema only
+                                                        // runs after a save), so Restore default followed by
+                                                        // Cancel left the box showing the default for the
+                                                        // rest of the session while the config, and every
+                                                        // download, still used the custom value. Qt.binding
+                                                        // does both jobs: it shows the default now and
+                                                        // repairs a binding the user's typing had broken.
+                                                        onClicked: {
+                                                            page.setv(modelData.key, modelData.default_value)
+                                                            strField.text = Qt.binding(function() { return page.val(modelData) })
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap }
                                             Row {
                                                 width: parent.width; spacing: 8
                                                 SText {
+                                                    id: strField
                                                     width: modelData.browse ? parent.width - browseBtn.width - 8 : parent.width
                                                     text: page.val(modelData)
                                                     onEdited: function(t){ page.setv(modelData.key, t) }
@@ -1774,6 +1826,18 @@ Item {
                                      ? page.rowFields(card.modelData.fields).filter(function(f) { return f.key.indexOf("format_") !== 0 })
                                      : []
                                 delegate: rowFieldComp
+                            }
+
+                            // Short-value fields (the two artist delimiters) two
+                            // per line, in the same 2-column rhythm as the switch
+                            // tiles under them.
+                            Flow {
+                                visible: page.halfFields(card.modelData.fields).length > 0
+                                width: parent.width; spacing: 10
+                                Repeater {
+                                    model: page.halfFields(card.modelData.fields)
+                                    delegate: rowFieldComp
+                                }
                             }
 
                             // On/off switches as a 2-column tile grid (keeps the look).
