@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import json
 import logging
 import os
@@ -58,6 +59,7 @@ from tidaler.constants import (
     QualityVideo,
 )
 from tidaler.download import Download
+from tidaler.helper.folders import FOLDER_PATH_TOKEN, apply_folder_path, walk_playlist_tree
 from tidaler.helper.path import format_path_media, format_str_media, path_config_base
 from tidaler.helper.tidal import (
     get_tidal_media_id,
@@ -72,6 +74,7 @@ from tidaler.helper.tidal import (
     user_media_lists,
 )
 from tidaler.model.cfg import HelpSettings
+from tidaler.model.cfg import Settings as CfgSettings
 from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.gui_data import ProgressBars
 from tidaler.ownership import OwnershipStore, quality_rank
@@ -171,6 +174,7 @@ _FLAG_FIELDS = [
     # than as its own tile; listed here so applySettings persists it as a bool.
     "cover_single_track_file",
     "skip_existing",
+    "confirm_category_download",
     "symlink_to_track",
     "playlist_create",
     "mark_explicit",
@@ -270,6 +274,29 @@ _PATH_FIELDS = [
     "path_binary_ffmpeg",
 ]
 _BROWSE = {"download_base_path": "dir", "path_binary_ffmpeg": "file"}
+# String fields whose value is a character or two: they share a row two-up
+# instead of each taking a full-width box (see SettingsPage's half-field Flow).
+_HALF_WIDTH_FIELDS = {"filename_delimiter_artist", "filename_delimiter_album_artist"}
+
+
+def _shipped_default(key: str):
+    """The value a field has on a fresh install, or None if it has no useful one.
+
+    Read straight off the ``Settings`` dataclass so it can never drift from
+    what a new install actually gets. Feeds the per-field "Default" link on the
+    settings page: a mistyped template is one click from the shipped one, with
+    no need to reset every other setting to get there.
+    """
+    for f in dataclasses.fields(CfgSettings):
+        if f.name != key:
+            continue
+        default = f.default
+        if default is dataclasses.MISSING or not isinstance(default, str) or default == "":
+            return None
+        return default
+    return None
+
+
 _ENUM_BY_FIELD = dict(_CHOICE_FIELDS)
 # Flags that do nothing without FFmpeg, greyed out on the page when it's absent.
 _FFMPEG_DEPENDENT = {"video_convert_mp4", "extract_flac"}
@@ -280,6 +307,10 @@ _FFMPEG_DEPENDENT = {"video_convert_mp4", "extract_flac"}
 # (format_str_media) against the canned sample library below, so the reference
 # can never drift from what a download would actually be named.
 _TEMPLATE_TOKEN_GROUPS = ["Names", "Numbers", "Discs", "Dates", "Extras", "IDs & durations"]
+# Demo value for the {folder_path} token in the Settings reference table and
+# the live playlist-template preview (the token resolves in the bridge, so the
+# sample library cannot carry it).
+_SAMPLE_FOLDER_PATH = "Country/Bluegrass"
 _TEMPLATE_TOKENS = [
     ("artist_name", "Names", "Track artist(s), joined by your delimiter"),
     ("album_artist", "Names", "First album artist only"),
@@ -287,6 +318,7 @@ _TEMPLATE_TOKENS = [
     ("track_title", "Names", "Track title"),
     ("album_title", "Names", "Album title"),
     ("playlist_name", "Names", "Playlist name (playlist paths)"),
+    ("folder_path", "Names", "TIDAL playlist folder path, empty outside folders (playlist paths)"),
     ("mix_name", "Names", "Mix name (mix paths)"),
     ("album_track_num", "Numbers", "Track number, zero-padded"),
     ("album_num_tracks", "Numbers", "Total tracks on the album"),
@@ -404,6 +436,7 @@ _FIELD_LABELS = {
     "quality_video": "Video quality",
     "downloads_concurrent_max": "Concurrent downloads",
     "download_dolby_atmos": "Download Dolby Atmos",
+    "confirm_category_download": "Confirm bulk downloads",
     # File organization
     "format_track": "Track path & name",
     "format_album": "Album path & name",
@@ -1470,9 +1503,18 @@ class WavesBridge(QObject):
     _queueTracksFetched = Signal(int, "QVariantList")
     pausedChanged = Signal()
     motionBgChanged = Signal()  # motion_background pref flipped; Main.qml re-reads it
+    hoverMotionChanged = Signal()  # hover_control_motion pref flipped; Main.qml re-reads it
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
+    # Folder "download all" badge: playlists remaining in the rollup. Emitted
+    # on every member completion (and once at start), under the folder id.
+    folderRemaining = Signal(str, int, int)  # folder_id, remaining, total
+    playlistCategoryResolved = Signal(str, str, int, str)  # api_path, title, count, first playlist id
+    confirmCategoryDlChanged = Signal()
+    # One drilled-into folder's rows (subfolders first, then its playlists),
+    # served from the cached sweep: no network, so no staleness to guard.
+    playlistFolderLoaded = Signal(str, "QVariant", str)  # folder_id, rows, path
     # A track's ownership or delivered quality changed (a fresh download landed);
     # QML re-queries ownershipOf for that id to refresh an "in your library" badge.
     ownershipChanged = Signal(str)
@@ -1544,7 +1586,13 @@ class WavesBridge(QObject):
     # download slot on the GUI thread (downloads must start with GUI affinity
     # so their progress relays get GUI-thread delivery, see _albumsQueued).
     _mediaRefetched = Signal(str, str)  # bucket, media_id
+    # Internal twin of the above for the playlist-folder tree: something needed
+    # the tree before any library sweep had run, so the sweep was kicked off on
+    # a worker and this queued hop replays the waiting callers on the GUI
+    # thread (see _warm_folder_tree).
+    _folderTreeWarmed = Signal()
     backRequested = Signal()
+    forwardRequested = Signal()
 
     def __init__(self, tidal: Tidal | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -1594,6 +1642,11 @@ class WavesBridge(QObject):
         # failed, prog} so the artist button shows a bar averaged over its albums.
         self._artist_groups: dict[str, dict] = {}
         self._artist_lock = Lock()
+        # Aggregate progress for "download all" on a playlist folder:
+        # folder_id -> {keys, done, failed, prog, weights, total}. Progress is
+        # track-weighted; done/failed drive the badge countdown signal.
+        self._folder_groups: dict[str, dict] = {}
+        self._folder_lock = Lock()
         # In-app FFmpeg manager: downloads/updates a trusted static ffmpeg into
         # the app data dir so users don't have to install one manually.
         self._ffmpeg = FfmpegManager(os.path.dirname(self.settings.file_path))
@@ -1699,6 +1752,14 @@ class WavesBridge(QObject):
         self._browse_gen = 0  # bumped on logout so in-flight loads can't cache
         self._browse_reval_ts = 0.0  # monotonic time of the last completed landing fetch
         self._browse_lock = Lock()
+        # Browse playlist categories resolved for DOWNLOAD ALL: api path ->
+        # (monotonic timestamp, full list of Playlist objects paged to the end
+        # of each listing). Timestamped because the app runs for weeks: an
+        # entry older than _CATEGORY_PL_TTL is re-resolved rather than served,
+        # so the confirm's count and the queued list match what the drilled
+        # grid is showing. Capped because probing many tiles would otherwise
+        # hold a full Playlist list per api path for the whole session.
+        self._category_pl: dict[str, tuple[float, list]] = {}
         # Artist pages, cached for the session like browse pages so revisits
         # render instantly; every visit still revalidates in the background
         # (stale-while-revalidate) so a new release shows up on return.
@@ -1718,8 +1779,11 @@ class WavesBridge(QObject):
         # One full user_media_lists sweep (every playlist, root folder and
         # mix). The playlists/mixes categories page and sort locally, so the
         # sweep is fetched once and reused; see _media_lists for freshness.
-        self._media_lists_cache: tuple[float, dict] | None = None
+        self._media_lists_cache: tuple[float, dict, object] | None = None
         self._media_lists_lock = Lock()
+        # Playlist-folder tree from the same sweep (all levels + the
+        # playlist-id -> folder-path map that mirrors folders on disk).
+        self._folder_tree = None
         # Disk snapshot of the page caches (browse / artist / library first
         # pages) so the next launch starts warm instead of spinner-first. The
         # file is account-tagged and deleted on logout, browse embeds
@@ -1743,6 +1807,11 @@ class WavesBridge(QObject):
         # so a double-click can't spawn two network fetches for the same item.
         self._refetch_inflight: set[tuple[str, str]] = set()
         self._mediaRefetched.connect(self._on_media_refetched)
+        # Callers parked until the first folder sweep lands, drained on the GUI
+        # thread by _on_folder_tree_warmed.
+        self._tree_warm_waiting: list = []
+        self._tree_warm_inflight = False
+        self._folderTreeWarmed.connect(self._on_folder_tree_warmed)
         self._queue: list[dict] = []
         self._queue_seq = 0
         self._paused = False
@@ -1826,27 +1895,35 @@ class WavesBridge(QObject):
         self._try_token_login()
 
     def eventFilter(self, obj, event) -> bool:
-        """App-level filter for back navigation input.
+        """App-level filter for back/forward navigation input.
 
-        Two triggers map to "back":
-        - The mouse "back" side button (XButton1 on Windows/Linux mice),
-          consumed so the press never click-throughs to the view below.
+        Two triggers map to "back", and one of them also has a "forward"
+        counterpart:
+        - The mouse "back" and "forward" side buttons (XButton1/XButton2 on
+          Windows/Linux mice), each consumed so the press never click-throughs
+          to the view below.
         - The discrete macOS three-finger swipe (NativeGesture). Two-finger
           horizontal scrolling is deliberately NOT treated as back, the
           browse shelves scroll horizontally, and a scroll→back mapping
           hijacks them; the gesture path always returns False so scrolling
-          is never affected. (NativeGesture events only fire on macOS.)
+          is never affected. (NativeGesture events only fire on macOS.) The
+          swipe stays back-only, there is no forward swipe gesture.
         """
         try:
-            if (
-                event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
-                and event.button() == Qt.MouseButton.BackButton
-            ):
+            if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
                 # DblClick included: Qt reports a rapid second press as a
-                # double-click, which would otherwise drop every second back.
-                self.backRequested.emit()
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.BackButton:
+                # double-click, which would otherwise drop every second
+                # back/forward.
+                if event.button() == Qt.MouseButton.BackButton:
+                    self.backRequested.emit()
+                    return True
+                if event.button() == Qt.MouseButton.ForwardButton:
+                    self.forwardRequested.emit()
+                    return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() in (
+                Qt.MouseButton.BackButton,
+                Qt.MouseButton.ForwardButton,
+            ):
                 return True
             if (
                 _IS_MACOS
@@ -2141,6 +2218,37 @@ class WavesBridge(QObject):
             "tracks": int(getattr(playlist, "num_tracks", 0) or 0),
             "creator": str(getattr(creator, "name", "") or "") if creator is not None else "",
             "added": _date_added(playlist),
+            # Folder rows share this model; a QML ListModel freezes its roles
+            # on the first appended row, so every row carries the full key set.
+            "kind": "playlist",
+            "sub": "",
+            "path": "",
+            # plCount, not "count": a QML delegate reads roles through the
+            # `model` context object where "count" is too easy to shadow.
+            "plCount": 0,
+        }
+
+    def _folder_dict(self, node, tree) -> dict:
+        """Row for a playlist folder (same key set as _playlist_dict; QML
+        branches on kind). No art: folders draw their own tile."""
+        parts = []
+        if node.subfolder_count:
+            parts.append(f"{node.subfolder_count} folder{'s' if node.subfolder_count != 1 else ''}")
+        count = len(node.playlists)
+        parts.append(f"{count} playlist{'s' if count != 1 else ''}")
+        return {
+            "id": node.id,
+            "title": node.name,
+            "art": "",
+            "tracks": 0,
+            "creator": "",
+            "added": "",
+            "kind": "folder",
+            "sub": " · ".join(parts),
+            "path": node.path,
+            # Recursive playlist total: what "download all" would queue, and
+            # the badge's idle number.
+            "plCount": len(tree.playlists_under(node.id)),
         }
 
     def _mix_dict(self, mix) -> dict:
@@ -2254,6 +2362,7 @@ class WavesBridge(QObject):
         self._browse_root_cache = None
         self._browse_pages.clear()
         self._browse_loading.clear()
+        self._category_pl.clear()
         self._browse_gen += 1
         self._browse_reval_ts = 0.0  # twin of _home_reval_ts below: next account starts un-throttled
         self._artist_cache.clear()
@@ -2264,6 +2373,11 @@ class WavesBridge(QObject):
         self._home_reval_ts = 0.0
         self._lib_reval_ts.clear()
         self._media_lists_cache = None
+        self._folder_tree = None  # next account must not inherit this tree
+        # Anything parked on the old account's tree must not replay on the new
+        # one; the in-flight flag is left alone so the running sweep still
+        # clears it when it lands.
+        self._tree_warm_waiting = []
         self._search_cache.clear()
         self._artist_pop_cache.clear()
         # The disk snapshot holds the old account's personalized pages, drop it.
@@ -2306,7 +2420,9 @@ class WavesBridge(QObject):
             # v2: the persisted default-sort library pages are now date-added
             # descending (v1 held tidalapi's raw, non-date order), so drop v1
             # snapshots rather than restore a stale order on launch.
-            "version": 2,
+            # v3: playlists rows carry kind/sub/path (folder rows share the
+            # model); older snapshots would render rows the delegate misreads.
+            "version": 3,
             "user": self._cache_user_id(),
             "browse_root": self._browse_root_cache,
             "browse_pages": self._browse_pages,
@@ -2338,7 +2454,7 @@ class WavesBridge(QObject):
         except Exception:
             logger.debug("page cache load failed", exc_info=True)
             return
-        if not isinstance(data, dict) or data.get("version") != 2:
+        if not isinstance(data, dict) or data.get("version") != 3:
             return
         if str(data.get("user", "")) != self._cache_user_id():
             return
@@ -2861,8 +2977,9 @@ class WavesBridge(QObject):
     # round-trips; refreshing it more than once a minute buys nothing.
     _MEDIA_LISTS_TTL = 60.0
 
-    def _media_lists(self, refresh: bool) -> dict:
-        """Session copy of the full playlists/folders/mixes listing.
+    def _media_lists(self, refresh: bool, walk: bool = True) -> tuple[dict, object]:
+        """Session copy of the full playlists/folders/mixes listing, paired with
+        the folder tree walked in the SAME sweep.
 
         The playlists and mixes categories are paged and sorted locally (see
         :meth:`_library_page`), yet each page used to re-fetch the entire
@@ -2870,15 +2987,103 @@ class WavesBridge(QObject):
         (``refresh=True``, the tab's usual stale-while-revalidate entry) re-run
         the sweep, and even those reuse a copy younger than
         ``_MEDIA_LISTS_TTL``; scroll pages and re-sorts always work against
-        the copy in hand."""
+        the copy in hand.
+
+        The tree is returned alongside the listing rather than read separately:
+        the playlists page interleaves folder rows with playlists by index, so
+        a tree from a newer sweep than the listing in hand would shift the
+        window and skip (or repeat) a playlist.
+
+        ``walk=False`` refreshes the listing without re-walking the folders.
+        The mixes tab has no use for the tree, and the walk costs a request per
+        folder, so paying it there only risks a rate-limit that would replace a
+        good tree with a partial one."""
         with self._media_lists_lock:
             entry = self._media_lists_cache
         if entry is not None and (not refresh or time.monotonic() - entry[0] < self._MEDIA_LISTS_TTL):
-            return entry[1]
+            return entry[1], entry[2]
         fresh = user_media_lists(self.tidal.session)
+        if not walk:
+            with self._media_lists_lock:
+                tree = self._folder_tree
+                self._media_lists_cache = (time.monotonic(), fresh, tree)
+            return fresh, tree
+        # Walk the folder tree in the same sweep (reusing the root folders
+        # already fetched): every nested level's rows plus the playlist-id ->
+        # folder-path map that mirrors the tree on disk. Zero extra requests
+        # for accounts without folders.
+        root_folders = [p for p in fresh.get("playlists", []) if not hasattr(p, "num_tracks")]
+        t0 = devlog.clock()
+        tree = walk_playlist_tree(self.tidal.session, root_folders=root_folders)
+        if tree.nodes:
+            devlog.done(
+                "library",
+                "folder sweep",
+                devlog.clock() - t0,
+                folders=len(tree.nodes),
+                playlists=len(tree.playlist_paths),
+                partial=tree.partial,
+            )
         with self._media_lists_lock:
-            self._media_lists_cache = (time.monotonic(), fresh)
-        return fresh
+            prev = self._folder_tree
+            # A rate-limited sweep returns what it managed to walk. Caching that
+            # as authoritative makes the unwalked folders (and every playlist
+            # inside them) vanish from My Tidal, and resolves {folder_path} to
+            # "" for them so their downloads land outside their folder. Keep the
+            # last complete tree until a complete sweep replaces it.
+            if tree.partial and prev is not None and not prev.partial and prev.nodes:
+                tree = prev
+            self._media_lists_cache = (time.monotonic(), fresh, tree)
+            self._folder_tree = tree
+        return fresh, tree
+
+    def _current_folder_tree(self):
+        with self._media_lists_lock:
+            return self._folder_tree
+
+    def _warm_folder_tree(self, then) -> bool:
+        """Run the library sweep for its folder tree, then replay ``then``.
+
+        The tree is written in exactly one place (the sweep in
+        :meth:`_media_lists`), so anything that needs it before the user has
+        opened My Tidal, or straight after a sign-in that nulled it, finds it
+        None. Two callers used to fail silently in that window: a folder tile
+        restored from the disk page cache drilled into a permanently blank
+        list, and a playlist downloaded from search resolved ``{folder_path}``
+        to "" and landed in a second directory alongside its real one.
+
+        Returns False when no warm could be started (signed out), so the caller
+        can keep its old not-ready behaviour. ``then`` runs on the GUI thread,
+        exactly once, whether this call started the sweep or joined one already
+        running.
+        """
+        if not self._logged_in:
+            return False
+        self._tree_warm_waiting.append(then)
+        if self._tree_warm_inflight:
+            return True
+        self._tree_warm_inflight = True
+        self._set_busy(True)
+
+        def work() -> None:
+            try:
+                self._media_lists(refresh=True)
+            except Exception:
+                logger.exception("Could not warm the playlist-folder tree")
+            self._folderTreeWarmed.emit()
+
+        self.threadpool.start(Worker(work))
+        return True
+
+    def _on_folder_tree_warmed(self) -> None:
+        self._tree_warm_inflight = False
+        self._set_busy(False)
+        waiting, self._tree_warm_waiting = self._tree_warm_waiting, []
+        for then in waiting:
+            try:
+                then()
+            except Exception:
+                logger.exception("Folder-tree warm follow-up failed")
 
     def _library_page(self, category: str, offset: int, limit: int, order_override=None) -> tuple[list, bool]:
         """Build one page of a library category for the API window
@@ -2906,17 +3111,30 @@ class WavesBridge(QObject):
         if order_spec is None:
             order_spec = ("date", "desc")
         if category in ("playlists", "mixes"):
-            lists = self._media_lists(refresh=offset == 0)
+            lists, tree = self._media_lists(refresh=offset == 0, walk=category == "playlists")
             if category == "playlists":
+                # Folders first (file-manager convention, name order), then the
+                # playlists under the chosen sort. Folder rows come from the
+                # tree walked in the same sweep; drill-in is served separately
+                # (see openPlaylistFolder), this level lists only the root.
                 full = [p for p in lists.get("playlists", []) if hasattr(p, "num_tracks")]
-                builder = self._playlist_dict
-            else:
-                full = lists.get("mixes", [])
-                builder = self._mix_dict
+                full = self._sort_local_library(full, order_spec)
+                roots = sorted(
+                    (n for n in (tree.nodes if tree is not None else []) if n.parent_id == "root"),
+                    key=lambda n: n.name.lower(),
+                )
+                folder_rows = [self._folder_dict(n, tree) for n in roots]
+                total = len(folder_rows) + len(full)
+                page = [
+                    folder_rows[i] if i < len(folder_rows) else self._playlist_dict(full[i - len(folder_rows)])
+                    for i in range(offset, min(offset + limit, total))
+                ]
+                return page, offset + limit < total
+            full = lists.get("mixes", [])
             # Paged locally, so sort the whole list here before slicing.
             full = self._sort_local_library(full, order_spec)
             page = full[offset : offset + limit]
-            return [builder(m) for m in page], offset + limit < len(full)
+            return [self._mix_dict(m) for m in page], offset + limit < len(full)
         # (favourites method, total-count method, row builder)
         specs = {
             "tracks": ("tracks", "get_tracks_count", self._track_dict),
@@ -2949,6 +3167,36 @@ class WavesBridge(QObject):
     def _lib_status(self, category: str, count: int, more: bool) -> str:
         return f"{count}{'+' if more else ''} {category}"
 
+    @staticmethod
+    def _lib_count(category: str, items: list) -> int:
+        """Row count for the status line. Folder rows share the playlists
+        category but are not playlists; don't count them as such."""
+        if category == "playlists":
+            return sum(1 for r in items if not (isinstance(r, dict) and r.get("kind") == "folder"))
+        return len(items)
+
+    @Slot(str)
+    def openPlaylistFolder(self, folder_id: str) -> None:
+        """One folder's rows for the drill-in view: subfolders (name order)
+        first, then its playlists. Pure cache read of the sweep's tree, so it
+        answers instantly and a background revalidate of the root list can
+        never wipe it (the drilled-in view has its own model in QML)."""
+        tree = self._current_folder_tree()
+        if tree is None and self._warm_folder_tree(lambda: self.openPlaylistFolder(folder_id)):
+            # Warm launch: the page cache restores the folder rows (and makes
+            # them clickable) before any sweep has run, and the drill-in view
+            # has no empty state, no spinner and no retry. Emitting nothing here
+            # would leave it blank until the user crumbed out and back in.
+            return
+        node = tree.node_by_id(folder_id) if tree is not None else None
+        if node is None:
+            self.playlistFolderLoaded.emit(folder_id, [], "")
+            return
+        subs = sorted(tree.children_of(folder_id), key=lambda n: n.name.lower())
+        rows = [self._folder_dict(n, tree) for n in subs] + [self._playlist_dict(p) for p in node.playlists]
+        devlog.event("library", "folder open", id=folder_id, n=len(rows))
+        self.playlistFolderLoaded.emit(folder_id, rows, node.path)
+
     @Slot(str)
     @Slot(str, bool)
     def loadLibrary(self, category: str, quiet: bool = False) -> None:
@@ -2976,7 +3224,7 @@ class WavesBridge(QObject):
                 self._set_busy(False)
                 devlog.event("library", f"{category} from cache", n=len(cached["items"]))
                 self.libraryLoaded.emit(category, cached["items"], cached["more"])
-                self._set_status(self._lib_status(category, len(cached["items"]), cached["more"]))
+                self._set_status(self._lib_status(category, self._lib_count(category, cached["items"]), cached["more"]))
             # Stale-while-revalidate, but only while the user is still on the
             # first page: re-emitting a fresh first page after infinite scroll
             # has appended more would truncate the list out from under them.
@@ -3018,14 +3266,14 @@ class WavesBridge(QObject):
                     self._lib_cache[category] = {"items": items, "offset": _LIBRARY_PAGE, "more": more}
                     self._save_page_cache()
                     self.libraryLoaded.emit(category, items, more)
-                    self._set_status(self._lib_status(category, len(items), more))
+                    self._set_status(self._lib_status(category, self._lib_count(category, items), more))
                 devlog.done("library", f"{category} revalidate", devlog.clock() - t0, n=len(items))
                 return
             if gen == self._lib_gen:
                 self._lib_cache[category] = {"items": items, "offset": _LIBRARY_PAGE, "more": more}
                 self._save_page_cache()
                 self.libraryLoaded.emit(category, items, more)
-                self._set_status(self._lib_status(category, len(items), more))
+                self._set_status(self._lib_status(category, self._lib_count(category, items), more))
                 self._set_busy(False)
             devlog.done("library", category, devlog.clock() - t0, n=len(items), more=more)
 
@@ -3065,9 +3313,9 @@ class WavesBridge(QObject):
                 if not failed:
                     entry["offset"] = offset + _LIBRARY_PAGE
                 entry["more"] = more
-                shown = len(entry["items"])
+                shown = self._lib_count(category, entry["items"])
             else:
-                shown = len(items)
+                shown = self._lib_count(category, items)
             self._lib_loading.discard(category)
             self.libraryMore.emit(category, items, more)
             self._set_status(self._lib_status(category, shown, more))
@@ -3365,13 +3613,55 @@ class WavesBridge(QObject):
                 quick.update({link["title"]: link["path"] for link in links})
         return chips, quick
 
+    def _home_v2_rows(self) -> list[dict]:
+        """The V2 home feed's shelves, the personalized landing the web player
+        shows ("Essentials to explore", "Popular playlists on TIDAL", "Albums
+        you'll enjoy", "Your forgotten favorites", ...). Parsed tolerantly per
+        row like ``_browse_fetch``: one module type tidalapi doesn't know is
+        dropped and logged, the rest of the feed lives.
+
+        Two deliberate drops: MIX rows parse to MixV2, which tidaler's
+        ``Download.items()`` silently rejects, so ``_browse_card`` returns
+        None for them and all-mix rows (Custom mixes, Personal radio
+        stations) fall away whole; and the rows' view-all handles are V2
+        ``home/...`` paths the v1 page drill-in cannot open, so every row
+        ships without a ``more`` link (or paging handle) rather than with a
+        headline that drills into an error page."""
+        with self._browse_lock:
+            session = self.tidal.session
+            json_obj = session.request.request(
+                "GET",
+                "home/feed/static",
+                base_url=session.config.api_v2_location,
+                params={"deviceType": "BROWSER", "locale": session.locale, "platform": "WEB"},
+            ).json()
+            # A private parser instance for the same reason as _browse_fetch:
+            # the shared session.page mutates itself on every parse.
+            parser = tidal_page.PageCategoryV2(session)
+            page = tidal_page.Page(session, "Home")
+            categories = []
+            for item in json_obj.get("items") or []:
+                try:
+                    categories.append(parser.parse_item(item))
+                except Exception:
+                    logger.debug("Skipped an unparseable home module", exc_info=True)
+            page.categories = categories
+            rows = self._page_rows(page)
+        for r in rows:
+            r["more"] = ""
+            r.pop("data", None)
+            r.pop("total", None)
+            r.pop("offset", None)
+            r.pop("modType", None)
+        return rows
+
     def _browse_root(self) -> dict:
         """Assemble the Browse landing payload: the Genres / Moods / Decades
         chip sets from the Explore page, the New and Top editorial pages
-        inlined as content rows, then the personalized For You rows. (The V2
-        home feed is deliberately not used: its mixes come back as MixV2,
-        which tidaler can't download, For You carries the same personalized
-        rows as real Mix objects.)"""
+        inlined as content rows, the personalized For You rows, then the V2
+        home feed's shelves (its mix rows come back as MixV2, which tidaler
+        can't download, so they drop and For You keeps carrying the custom
+        mixes as real Mix objects)."""
         explore = self._browse_fetch("Explore", "pages/explore")
         chips, quick = self._chips_from_explore(explore)
         sections: list[dict] = []
@@ -3387,9 +3677,59 @@ class WavesBridge(QObject):
             sections.extend(self._page_rows(self._browse_fetch("For You", "pages/for_you")))
         except Exception:
             logger.exception("Browse: could not load the For You page")
+        # The home feed lands last (the least editorial, most account-shaped
+        # shelves), deduped by title: TIDAL repeats a few rows across the
+        # feed and the editorial pages, and the first copy wins.
+        try:
+            seen = {str(r.get("title") or "").strip().lower() for r in sections}
+            for r in self._home_v2_rows():
+                title = str(r.get("title") or "").strip().lower()
+                if title and title in seen:
+                    continue
+                seen.add(title)
+                sections.append(r)
+        except Exception:
+            logger.exception("Browse: could not load the home feed")
         # A links row inside the landing sections would duplicate the chip sets.
         sections = [r for r in sections if r["rowKind"] != "links"]
+        sections = self._drop_contained_rows(sections)
         return {"sections": sections, **chips, "error": False}
+
+    # A row of fewer than this many items reads as a curated highlight rather
+    # than a shelf, and a short one can sit inside a big generic row by pure
+    # chance (a three-album pick is very likely all in "Top Albums"), so it is
+    # never dropped as a duplicate however contained it is.
+    _DUPE_MIN_ITEMS = 4
+
+    @classmethod
+    def _drop_contained_rows(cls, sections: list[dict]) -> list[dict]:
+        """Drop rows whose items are all carried by another row.
+
+        TIDAL serves the same covers under several headlines, so the landing
+        arrives with the same shelf two or three times: "New Albums" (12
+        albums), "Suggested new albums for you" (10) and "New releases for
+        you" (25) can be one set of releases, the smaller rows being strict
+        subsets of the largest. Matching whole item sets misses that, so
+        containment is the test: the row carrying the most of a set survives,
+        ties keep the first, and survivors hold their original order.
+
+        Rows that merely overlap are left alone (on the same account "Top
+        playlists" and "The Hits" share 42% of their playlists and are still
+        two different shelves), and a row keeps its own view-all and paging
+        handles: a headline must drill into the listing it actually shows,
+        never into a dropped row's.
+        """
+        keys = [(r["rowKind"], frozenset((c["kind"], c["id"]) for c in r["items"])) for r in sections]
+        kept = []
+        for i, (kind, ids) in enumerate(keys):
+            contained = len(ids) >= cls._DUPE_MIN_ITEMS and any(
+                kind == other_kind and ids <= other_ids and (ids != other_ids or j < i)
+                for j, (other_kind, other_ids) in enumerate(keys)
+                if j != i
+            )
+            if not contained:
+                kept.append(sections[i])
+        return kept
 
     @Slot()
     def loadBrowse(self) -> None:
@@ -3611,6 +3951,93 @@ class WavesBridge(QObject):
                 ]
                 if link_tiles:
                     self._sample_links_art(link_tiles, gen)
+
+        self.threadpool.start(Worker(work))
+
+    @Slot(str, str)
+    def openBrowsePlaylists(self, api_path: str, title: str) -> None:
+        """Drill into one editorial page keeping only its playlists: the leaf
+        grid of Browse's folder-style Playlists view. A mood / genre / decade
+        page mixes albums, tracks and mixes into its rows; opened from the
+        Playlists folders it should read as "the playlists in here", so the
+        other kinds are filtered out and the survivors flatten into one grid
+        (cached under its own pl: key so the unfiltered page stays intact)."""
+        api_path = str(api_path or "")
+        title = str(title or "")
+        if not self._logged_in or not api_path.startswith("pages/"):
+            return
+        key = f"pl:{api_path}"
+        cached = self._browse_pages.get(key)
+        if cached is not None:
+            self.browsePageLoaded.emit(cached)
+        if key in self._browse_loading:
+            return
+        self._browse_loading.add(key)
+        revalidate = cached is not None
+        gen = self._browse_gen
+        if not revalidate:
+            self._set_busy(True)
+            self._set_status(f"Loading {title}…" if title else "Loading…")
+
+        def work() -> None:
+            t0 = devlog.clock()
+            try:
+                page = self._browse_fetch(title, api_path)
+                sections: list[dict] = []
+                for row in self._page_rows(page):
+                    if row.get("rowKind") != "cards":
+                        continue
+                    cards = list(row.get("items", []))
+                    kept = [it for it in cards if it.get("kind") == "playlist" and it.get("id")]
+                    if not kept:
+                        continue
+                    sec = dict(row)
+                    sec["items"] = kept
+                    if len(kept) != len(cards):
+                        # A mixed row's paged list would grow back unfiltered
+                        # (loadBrowseSectionMore appends whatever the window
+                        # holds), so only all-playlist rows keep their paging
+                        # handle and "show more" path; a mixed row contributes
+                        # its inline playlists and stays fixed.
+                        sec["more"] = ""
+                        sec.pop("data", None)
+                        sec.pop("total", None)
+                        sec.pop("offset", None)
+                        sec.pop("modType", None)
+                    sections.append(sec)
+                if len(sections) == 1:
+                    # A lone section renders as the drilled wrapping grid, and
+                    # the grid suppresses its headline; blank the title so the
+                    # back bar (which already names the page) is the label.
+                    sections[0] = {**sections[0], "title": ""}
+                page_title = str(getattr(page, "title", "") or "") or title
+                payload = {"key": key, "title": page_title, "sections": sections, "error": False}
+            except Exception:
+                logger.exception("Could not load browse playlists for %s", api_path)
+                payload = {"key": key, "title": title, "sections": [], "error": True}
+            if gen != self._browse_gen:
+                # Stale cross-account load, see loadBrowse's work() for why
+                # this returns without emitting or touching shared state.
+                return
+            self._browse_loading.discard(key)
+            if revalidate:
+                # Silent refresh of a cached page: re-emit only on real change
+                # (the QML's key guard drops it if the user already left).
+                if not payload["error"] and payload["sections"] and payload != cached:
+                    self._browse_pages[key] = payload
+                    self._save_page_cache()
+                    self.browsePageLoaded.emit(payload)
+                devlog.done("browse", f"{key} revalidate", devlog.clock() - t0, n=len(payload["sections"]))
+                return
+            if not payload["error"] and payload["sections"]:
+                # Same no-empty-cache rule as the landing: a page whose rows
+                # all failed to normalize shouldn't be pinned for the session.
+                self._browse_pages[key] = payload
+                self._save_page_cache()
+            self.browsePageLoaded.emit(payload)
+            self._set_status(payload["title"] if not payload["error"] else f"Could not load {title}")
+            self._set_busy(False)
+            devlog.done("browse", key, devlog.clock() - t0, n=len(payload["sections"]))
 
         self.threadpool.start(Worker(work))
 
@@ -4107,7 +4534,7 @@ class WavesBridge(QObject):
         if self._should_broadcast_pct(media_id, pct):
             self.downloadProgress.emit(media_id, pct)
         self._set_queue_progress(qid, pct)
-        self._bump_artist_group(media_id, pct, None)
+        self._bump_download_groups(media_id, pct, None)
 
     def _should_broadcast_pct(self, media_id: str, pct: float) -> bool:
         """Rate-gate the downloadProgress broadcast for one media id. GUI-thread
@@ -4462,6 +4889,9 @@ class WavesBridge(QObject):
             # Ambient wave-loop video behind the UI; on by default, the toggle
             # fully stops the decode pipeline (not just hides it).
             "motion_background": True,
+            # Hover controls (preview / download over artwork) rise in with a
+            # soft bounce; off restores the plain fade they used before.
+            "hover_control_motion": True,
             # Diagnostics (Settings > Diagnostics). Verbose is off by default:
             # the on-disk log then carries only warnings/errors plus breadcrumb
             # dumps. The redact-content flag applies to exported bundles only.
@@ -4547,6 +4977,8 @@ class WavesBridge(QObject):
         self._save_waves_prefs()
         if key == "motion_background":
             self.motionBgChanged.emit()
+        elif key == "hover_control_motion":
+            self.hoverMotionChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
 
@@ -5164,7 +5596,7 @@ class WavesBridge(QObject):
             if job_abort.is_set():
                 self._set_queue_status(qid, "cancelled")
                 self.downloadState.emit(media_id, "")
-                self._bump_artist_group(media_id, None, "failed")
+                self._bump_download_groups(media_id, None, "failed")
                 self._job_aborts.pop(qid, None)
                 self._release_job_signals(qid)
                 # Drop the track-poll registration too, or the 500 ms per-track
@@ -5181,7 +5613,7 @@ class WavesBridge(QObject):
                 media_id,
             ):
                 self.downloadState.emit(media_id, "")
-                self._bump_artist_group(media_id, None, "failed")
+                self._bump_download_groups(media_id, None, "failed")
                 self._job_aborts.pop(qid, None)
                 self._release_job_signals(qid)
                 self._job_dls.pop(qid, None)
@@ -5222,7 +5654,7 @@ class WavesBridge(QObject):
                     # Cancelled mid-download, don't report success.
                     self.downloadState.emit(media_id, "")
                     self._set_queue_status(qid, "cancelled")
-                    self._bump_artist_group(media_id, None, "failed")
+                    self._bump_download_groups(media_id, None, "failed")
                     self._set_status(f"Cancelled {name}")
                 else:
                     # Merge succeeded → the stashed plan (kept for a possible
@@ -5233,20 +5665,20 @@ class WavesBridge(QObject):
                     self._set_queue_progress(qid, 100.0)
                     self.downloadState.emit(media_id, "done")
                     self._set_queue_status(qid, "done")
-                    self._bump_artist_group(media_id, 100.0, "done")
+                    self._bump_download_groups(media_id, 100.0, "done")
                     self._set_status(f"Finished {name}")
                     devlog.done("download", f"done {type_media} id={media_id}", devlog.clock() - t0)
             except Exception:
                 if job_abort.is_set():
                     self.downloadState.emit(media_id, "")
                     self._set_queue_status(qid, "cancelled")
-                    self._bump_artist_group(media_id, None, "failed")
+                    self._bump_download_groups(media_id, None, "failed")
                     self._set_status(f"Cancelled {name}")
                 else:
                     logger.exception("Download failed for %s", name)
                     self.downloadState.emit(media_id, "failed")
                     self._set_queue_status(qid, "failed")
-                    self._bump_artist_group(media_id, None, "failed")
+                    self._bump_download_groups(media_id, None, "failed")
                     self._set_status(f"Failed {name}")
                     devlog.done("download", f"FAILED {type_media} id={media_id}", devlog.clock() - t0)
             finally:
@@ -5307,6 +5739,58 @@ class WavesBridge(QObject):
         # separately as a cancellation.
         if failures and not job_abort.is_set():
             raise RuntimeError(f"{failures}/{total} merged tracks failed to download")  # noqa: TRY003
+
+    def _bump_download_groups(self, media_id: str, pct, state) -> None:
+        """Roll one member download's tick into every rollup kind. Each is a
+        cheap no-op when no group of that kind is live."""
+        self._bump_artist_group(media_id, pct, state)
+        self._bump_folder_group(media_id, pct, state)
+
+    def _bump_folder_group(self, media_id: str, pct, state) -> None:
+        """Roll a playlist's progress into EVERY folder 'download all' group it
+        belongs to. The folder button's bar is track-weighted (a 200-track
+        playlist moves it more than a 5-track one); the badge countdown
+        (folderRemaining) ticks on each member completing or failing.
+
+        Groups legitimately overlap, so this must not stop at the first match:
+        :meth:`FolderTree.playlists_under` is recursive (a parent folder's key
+        set contains every subfolder's), and a Browse category rollup shares no
+        membership rule at all with the library folders. Crediting one group
+        only would leave the other permanently one member short: never
+        finished, never deleted, its button stuck at "running"."""
+        if not self._folder_groups:
+            return
+        updates: list[tuple] = []
+        with self._folder_lock:
+            for fid in [f for f, g in self._folder_groups.items() if media_id in g["keys"]]:
+                grp = self._folder_groups[fid]
+                if state == "done":
+                    grp["prog"][media_id] = 100.0
+                    grp["done"].add(media_id)
+                elif state == "failed":
+                    grp["done"].add(media_id)
+                    grp["failed"].add(media_id)
+                elif pct is not None:
+                    grp["prog"][media_id] = float(pct)
+                weight_sum = sum(grp["weights"].get(k, 1) for k in grp["keys"]) or 1
+                agg = sum(grp["prog"].get(k, 0.0) * grp["weights"].get(k, 1) for k in grp["keys"]) / weight_sum
+                remaining = len(grp["keys"]) - len(grp["done"])
+                finished = len(grp["done"]) >= len(grp["keys"])
+                updates.append((fid, remaining, grp["total"], agg, finished, bool(grp["failed"])))
+                if finished:
+                    del self._folder_groups[fid]
+        for fid, remaining, total, agg, finished, any_failed in updates:
+            if state in ("done", "failed"):
+                self.folderRemaining.emit(fid, remaining, total)
+            if finished:
+                if any_failed:
+                    self.downloadState.emit(fid, "failed")
+                else:
+                    self.downloadProgress.emit(fid, 100.0)
+                    self.downloadState.emit(fid, "done")
+            else:
+                self.downloadProgress.emit(fid, float(agg))
+                self.downloadState.emit(fid, "running")
 
     def _bump_artist_group(self, media_id: str, pct, state) -> None:
         """Roll an album's progress into any 'download discography' group it
@@ -5901,13 +6385,310 @@ class WavesBridge(QObject):
         # serialise it on the same single-thread pool.
         self._scan_pool.start(Worker(work))
 
+    def _playlist_template(self, playlist_id: str) -> str:
+        """The playlist path template with {folder_path} already resolved.
+
+        Resolved here, before the path formatter, because the formatter
+        sanitizes every token value with the slashes deleted; the folder path
+        is the one value whose separators must survive (each segment is
+        sanitized individually instead). Playlists outside any folder, and
+        downloads before the library sweep has run (cold session, download
+        from search), resolve to "" and land exactly where they always did.
+
+        Callers that can afford to wait should warm the tree first (see
+        :meth:`_needs_folder_tree`): resolving to "" for a playlist that IS in
+        a folder writes a second, complete copy of it outside that folder,
+        which skip_existing cannot see because it only checks the destination
+        it was handed."""
+        tree = self._current_folder_tree()
+        folder_path = tree.folder_path_of(playlist_id) if tree is not None else ""
+        return apply_folder_path(self.settings.data.format_playlist, folder_path)
+
+    def _needs_folder_tree(self) -> bool:
+        """Whether a playlist download would resolve {folder_path} blind."""
+        return FOLDER_PATH_TOKEN in str(self.settings.data.format_playlist) and self._current_folder_tree() is None
+
     @Slot(str)
     def downloadPlaylist(self, playlist_id: str) -> None:
         obj = self._objs["playlist"].get(playlist_id)
         if obj is None:
             self._refetch_for_download("playlist", playlist_id)
             return
-        self._download(obj, "playlist", name_builder_title(obj), self.settings.data.format_playlist, True, playlist_id)
+        # Paste a share link on a cold session and this is the whole story: no
+        # tree, so the tracks land outside the playlist's folder, and the same
+        # download after opening My Tidal writes a second full copy inside it.
+        if self._needs_folder_tree() and self._warm_folder_tree(lambda: self.downloadPlaylist(playlist_id)):
+            self.downloadState.emit(playlist_id, "running")  # button feedback, _download re-emits
+            return
+        self._download(
+            obj, "playlist", name_builder_title(obj), self._playlist_template(playlist_id), True, playlist_id
+        )
+
+    @Slot(str)
+    def downloadFolder(self, folder_id: str) -> None:
+        """Download every playlist in a folder (subfolders included), each as
+        its own queue row, aggregated under the folder id: the folder button
+        shows a track-weighted bar and folderRemaining drives the badge
+        countdown. Mirrors the downloadArtist rollup, in its own group dict so
+        neither rollup can absorb the other's members."""
+        tree = self._current_folder_tree()
+        node = tree.node_by_id(folder_id) if tree is not None else None
+        if node is None:
+            self._set_status("Folder not loaded yet")
+            return
+        playlists = tree.playlists_under(folder_id)
+        if not playlists:
+            self._set_status("Folder has no playlists")
+            return
+        # Bail before publishing any rollup state if there's nowhere to save to.
+        # _download would reject every member anyway, and then no queue row ever
+        # exists to tick the group back down: the folder button would sit at
+        # "running" (unclickable) with a frozen badge for the rest of the
+        # session, since only stopAll clears a group and STOP is hidden while
+        # the queue is empty. Same pre-gate downloadArtist uses.
+        gate = self._download_gate()
+        if gate == "block":
+            return
+        if gate == "nudge":
+            self._stash_pending_download(folder_id, lambda: self.downloadFolder(folder_id))
+            return
+        keys: list[str] = []
+        weights: dict[str, int] = {}
+        for playlist in playlists:
+            key = str(playlist.id)
+            self._remember("playlist", key, playlist)
+            keys.append(key)
+            weights[key] = max(1, _track_count(playlist))
+        # Register the aggregate BEFORE queueing so the first member's
+        # progress already rolls up (same order downloadArtist uses).
+        with self._folder_lock:
+            self._folder_groups[folder_id] = {
+                "keys": set(keys),
+                "done": set(),
+                "failed": set(),
+                "prog": {},
+                "weights": weights,
+                "total": len(keys),
+            }
+        self.downloadProgress.emit(folder_id, 0.0)
+        # Badge first, same order downloadPlaylistCategory documents: the badge
+        # only appears once the button leaves idle, and the map it reads is
+        # never pruned per run, so announcing "running" first shows the PREVIOUS
+        # run's count (or its finished checkmark) until this line lands, and the
+        # odometer then rolls away from a number that was never true.
+        self.folderRemaining.emit(folder_id, len(keys), len(keys))
+        self.downloadState.emit(folder_id, "running")
+        devlog.event("download", "folder start", id=folder_id, playlists=len(keys))
+        # GUI thread already (slot): batch the queue emits like the
+        # discography path so the queue appears at once, not 0 -> N.
+        self._queue_emit_suspended = True
+        try:
+            for key in keys:
+                obj = self._objs["playlist"].get(key)
+                if obj is not None:
+                    self._download(obj, "playlist", name_builder_title(obj), self._playlist_template(key), True, key)
+        finally:
+            self._queue_emit_suspended = False
+        self._emit_queue()
+        self._set_status(f"Downloading {len(keys)} playlists…")
+
+    @Property(bool, notify=confirmCategoryDlChanged)
+    def confirmCategoryDl(self) -> bool:
+        """Whether DOWNLOAD ALL on a Browse playlist category still confirms."""
+        return bool(getattr(self.settings.data, "confirm_category_download", True))
+
+    @Slot()
+    def muteCategoryDlConfirm(self) -> None:
+        """The confirm dialog's "Don't ask again": persist the opt-out."""
+        self.settings.data.confirm_category_download = False
+        self.settings.save()
+        self.confirmCategoryDlChanged.emit()
+
+    def _category_page_rest(self, pl: dict, gen: int) -> list:
+        """Fetch the remainder of one row's paged list (past the inline
+        window), returning its Playlist objects. Capped at 500 as a runaway
+        guard; editorial listings are tens, not hundreds."""
+        out: list = []
+        offset = int(pl.get("n") or 0)
+        total = min(int(pl.get("total") or 0), 500)
+        data_path = str(pl.get("data") or "")
+        mod_type = str(pl.get("modType") or "")
+        while offset < total and gen == self._browse_gen:
+            with self._browse_lock:
+                page = tidal_page.Page(self.tidal.session, "category")
+                j = page.request.request(
+                    "GET",
+                    data_path,
+                    params={"deviceType": "BROWSER", "locale": "en_US", "offset": offset, "limit": 50},
+                ).json()
+                raw = j.get("items") or []
+                cat = page.page_category.parse({"type": mod_type, "title": "", "pagedList": {"items": raw}})
+            if not raw:
+                break
+            out.extend(o for o in cat.items or [] if isinstance(o, Playlist))
+            offset += len(raw)
+        return out
+
+    # Editorial categories are curated, not live, but the app runs for weeks:
+    # long enough for a category to gain or lose playlists between the day the
+    # user first opened DOWNLOAD ALL and the day they press it.
+    _CATEGORY_PL_TTL = 900.0
+    _CATEGORY_PL_MAX = 40
+
+    def _cached_category(self, api_path: str) -> list | None:
+        """A resolved category still young enough to act on, else None.
+
+        Stale entries are dropped rather than served-and-revalidated: the emit
+        this feeds runs whatever action the tile queued (the DOWNLOAD ALL
+        confirm, or PREVIEW), so acting on a count the user cannot see would be
+        worse than making them wait for the re-resolve.
+        """
+        entry = self._category_pl.get(api_path)
+        if entry is None:
+            return None
+        if time.monotonic() - entry[0] >= self._CATEGORY_PL_TTL:
+            del self._category_pl[api_path]
+            return None
+        return entry[1]
+
+    def _cache_category(self, api_path: str, playlists: list) -> None:
+        self._category_pl[api_path] = (time.monotonic(), playlists)
+        while len(self._category_pl) > self._CATEGORY_PL_MAX:
+            self._category_pl.pop(next(iter(self._category_pl)))
+
+    @Slot(str, str)
+    def resolvePlaylistCategory(self, api_path: str, title: str) -> None:
+        """Gather every playlist in one editorial category, following each
+        all-playlist row's paged list to the end, so the DOWNLOAD ALL confirm
+        can state the real count and the download queues the same list. Mixed
+        rows contribute only their inline playlists (paging one would bring
+        the albums back), the same rule as the drilled playlists grid."""
+        api_path = str(api_path or "")
+        title = str(title or "")
+        if not self._logged_in or not api_path.startswith("pages/"):
+            return
+        cached = self._cached_category(api_path)
+        if cached is not None:
+            first = str(cached[0].id) if cached else ""
+            self.playlistCategoryResolved.emit(api_path, title, len(cached), first)
+            return
+        load_key = f"cat:{api_path}"
+        if load_key in self._browse_loading:
+            return
+        self._browse_loading.add(load_key)
+        gen = self._browse_gen
+        self._set_busy(True)
+        self._set_status(f"Counting playlists in {title}…" if title else "Counting playlists…")
+
+        def work() -> None:
+            t0 = devlog.clock()
+            playlists: list = []
+            seen: set[str] = set()
+            failed = False
+            try:
+                page = self._browse_fetch(title, api_path)
+                for cat in list(getattr(page, "categories", None) or []):
+                    items = getattr(cat, "items", None)
+                    if not isinstance(items, list):
+                        continue
+                    real = [o for o in items if o is not None]
+                    kept = [o for o in real if isinstance(o, Playlist)]
+                    if not kept:
+                        continue
+                    pl = getattr(cat, "_waves_pl", None) or {}
+                    if len(kept) == len(real) and pl.get("data") and pl.get("total", 0) > pl.get("n", 0):
+                        kept = kept + self._category_page_rest(pl, gen)
+                    for obj in kept:
+                        key = str(getattr(obj, "id", "") or "")
+                        if not key or key in seen:
+                            continue
+                        seen.add(key)
+                        playlists.append(obj)
+            except Exception:
+                logger.exception("Could not resolve playlist category %s", api_path)
+                failed = True
+                playlists = []
+            if gen != self._browse_gen:
+                return  # cross-account stale load, drop silently (see loadBrowse)
+            self._browse_loading.discard(load_key)
+            for obj in playlists:
+                self._remember("playlist", str(obj.id), obj)
+            # Never pin a failure (or an empty read): one network blip would
+            # leave DOWNLOAD ALL and PREVIEW on this tile dead for a whole TTL
+            # window. Same no-empty-cache rule the landing and the drilled
+            # playlists grid follow.
+            if playlists:
+                self._cache_category(api_path, playlists)
+            self._set_busy(False)
+            # The QML handler drops a zero count silently, so the status line is
+            # the only feedback the click gets: leave it saying something.
+            if failed:
+                self._set_status("Could not load this category")
+            elif not playlists:
+                self._set_status("No playlists in this category")
+            else:
+                self._set_status("")
+            first = str(playlists[0].id) if playlists else ""
+            self.playlistCategoryResolved.emit(api_path, title, len(playlists), first)
+            devlog.done("browse", load_key, devlog.clock() - t0, n=len(playlists))
+
+        self.threadpool.start(Worker(work))
+
+    @Slot(str)
+    def downloadPlaylistCategory(self, api_path: str) -> None:
+        """Download every playlist in a resolved Browse category, each as its
+        own queue row, aggregated under a cat: rollup exactly like a library
+        folder: track-weighted bar plus the badge countdown."""
+        api_path = str(api_path or "")
+        # Deliberately the TTL-checked read: the confirm the user answered was
+        # built from this same entry, so rather than queue a list that has since
+        # gone stale, drop it and let the next DOWNLOAD ALL re-resolve. In
+        # practice the dialog is answered in seconds and the entry is minutes
+        # old, so this only bites a confirm left open.
+        playlists = self._cached_category(api_path) or []
+        if not playlists:
+            self._set_status("Nothing to download here, open the category again")
+            return
+        # Pre-gate before publishing any rollup state (see downloadFolder).
+        gate = self._download_gate()
+        if gate == "block":
+            return
+        if gate == "nudge":
+            self._stash_pending_download(f"cat:{api_path}", lambda: self.downloadPlaylistCategory(api_path))
+            return
+        group_id = f"cat:{api_path}"
+        keys: list[str] = []
+        weights: dict[str, int] = {}
+        for playlist in playlists:
+            key = str(playlist.id)
+            self._remember("playlist", key, playlist)
+            keys.append(key)
+            weights[key] = max(1, _track_count(playlist))
+        with self._folder_lock:
+            self._folder_groups[group_id] = {
+                "keys": set(keys),
+                "done": set(),
+                "failed": set(),
+                "prog": {},
+                "weights": weights,
+                "total": len(keys),
+            }
+        # Badge first: the tile's FolderBadge reads the remaining map as soon
+        # as the state flips, so the count must already be there.
+        self.folderRemaining.emit(group_id, len(keys), len(keys))
+        self.downloadProgress.emit(group_id, 0.0)
+        self.downloadState.emit(group_id, "running")
+        devlog.event("download", "category start", playlists=len(keys))
+        self._queue_emit_suspended = True
+        try:
+            for key in keys:
+                obj = self._objs["playlist"].get(key)
+                if obj is not None:
+                    self._download(obj, "playlist", name_builder_title(obj), self._playlist_template(key), True, key)
+        finally:
+            self._queue_emit_suspended = False
+        self._emit_queue()
+        self._set_status(f"Downloading {len(keys)} playlists…")
 
     @Slot(str)
     def downloadVideo(self, video_id: str) -> None:
@@ -6107,6 +6888,13 @@ class WavesBridge(QObject):
             self._artist_groups.clear()
         for aid in artist_ids:
             self.downloadState.emit(aid, "")
+        # Same for folder "download all" aggregates (badge resets to the
+        # folder's total via the idle binding once the state clears).
+        with self._folder_lock:
+            folder_ids = list(self._folder_groups.keys())
+            self._folder_groups.clear()
+        for fid in folder_ids:
+            self.downloadState.emit(fid, "")
         self._queue = []
         self._emit_queue()
         self._set_status("Downloads stopped")
@@ -6491,8 +7279,12 @@ class WavesBridge(QObject):
 
     def _help_for(self, key: str) -> str:
         # Pull the upstream help text, normalising any em dash to plain
-        # punctuation so the settings descriptions read consistently.
-        return str(getattr(self._help, key, "") or "").replace(", ", "; ")
+        # punctuation so the settings descriptions read consistently. Only the
+        # dash is rewritten: an earlier blanket sweep replaced ", " here
+        # instead, which turned every comma in every description into a
+        # semicolon ("16 Bit, 44,1 kHz" became "16 Bit; 44,1 kHz") and made
+        # the delimiter fields advertise a default they do not have.
+        return str(getattr(self._help, key, "") or "").replace(" — ", "; ")
 
     @Slot(result="QVariant")
     def settingsSchema(self) -> list:
@@ -6537,7 +7329,18 @@ class WavesBridge(QObject):
                 return field(key, "int", int(getattr(d, key)))
             if key in _FLAG_FIELDS:
                 return field(key, "bool", bool(getattr(d, key)))
-            return field(key, "str", str(getattr(d, key)), {"browse": _BROWSE.get(key, "")})
+            # "default" (when the field has a meaningful shipped value) drives
+            # the page's per-field Default link, so a mangled template can be
+            # restored without resetting every other setting.
+            extra = {"browse": _BROWSE.get(key, "")}
+            shipped = _shipped_default(key)
+            if shipped is not None:
+                extra["default_value"] = shipped
+            if key in _HALF_WIDTH_FIELDS:
+                # A one or two character value does not earn a full-width row;
+                # the page pairs these up into two columns.
+                extra["half"] = True
+            return field(key, "str", str(getattr(d, key)), extra)
 
         # Waves-only prefs (stored in waves.json) keep their hand-written labels
         # and help; indexed by key so sections can pick them in any order.
@@ -6635,6 +7438,17 @@ class WavesBridge(QObject):
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("motion_background"),
+                },
+                {
+                    "key": "hover_control_motion",
+                    "label": "Hover controls slide in",
+                    "help": (
+                        "Preview and download controls rise up from the bottom of a cover with a "
+                        "small bounce when you hover it. Turn this off to have them simply fade "
+                        "in and out instead."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("hover_control_motion"),
                 },
                 {
                     "key": "verbose_diagnostics",
@@ -6790,6 +7604,7 @@ class WavesBridge(QObject):
                     "video_download",
                     "download_dolby_atmos",
                     "skip_existing",
+                    "confirm_category_download",
                     "download_delay",
                 ],
             },
@@ -6876,6 +7691,7 @@ class WavesBridge(QObject):
                 "desc": "Power-user knobs. The defaults are right for almost everyone.",
                 "fields": [
                     "motion_background",
+                    "hover_control_motion",
                     "downsample_target",
                     "downloads_simultaneous_per_track_max",
                     "download_delay_sec_min",
@@ -6927,6 +7743,9 @@ class WavesBridge(QObject):
             elif kind == "album":
                 out = format_path_media(format_path_media(template, alb, **kw), trk, pad, **kw) + ".flac"
             elif kind == "playlist":
+                # {folder_path} is resolved before the formatter (its slashes
+                # must survive); the preview mirrors that with the sample path.
+                template = apply_folder_path(template, _SAMPLE_FOLDER_PATH)
                 out = format_path_media(format_path_media(template, pl, **kw), trk, pad, 4, 23, **kw) + ".flac"
             elif kind == "mix":
                 out = format_path_media(format_path_media(template, mx, **kw), trk, pad, 4, 23, **kw) + ".flac"
@@ -6951,6 +7770,11 @@ class WavesBridge(QObject):
         groups: dict = {g: [] for g in _TEMPLATE_TOKEN_GROUPS}
         for tok, group, desc in _TEMPLATE_TOKENS:
             sample = None
+            if tok == "folder_path":
+                # Resolved in the bridge (before the path formatter), not by
+                # format_str_media; sample it directly.
+                groups[group].append({"token": "{" + tok + "}", "sample": _SAMPLE_FOLDER_PATH + "/", "desc": desc})
+                continue
             for media, lp, lt in ((trk, 4, 23), (alb, 0, 0), (pl, 0, 0), (mx, 0, 0), (vid, 0, 0)):
                 value = format_str_media(tok, media, 1, lp, lt)
                 if value != tok:
@@ -7037,6 +7861,12 @@ class WavesBridge(QObject):
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
         # Let the album page re-evaluate whether to offer the merge action.
         self.editionMergeChanged.emit()
+        # The bulk-download confirm is read through a notifying property, and
+        # this is the only other way (besides the dialog's own "Don't ask
+        # again") for it to change: without the emit, turning it back on in
+        # Settings would not reach the tile until a relaunch.
+        if "confirm_category_download" in values:
+            self.confirmCategoryDlChanged.emit()
         # If the user linked/cleared their own ffmpeg path, tell the UI to re-read
         # status so the glyph + toggles update live (no reopen needed).
         if "path_binary_ffmpeg" in values:
