@@ -163,6 +163,7 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     stub._browse_root_cache = object()
     stub._browse_pages = {"root": []}
     stub._browse_loading = {"root"}
+    stub._category_pl = {"pages/x": []}
     stub._browse_gen = 2
     # ...and the artist/page-cache cleanup added with stale-while-revalidate.
     stub._artist_cache = {"1": {}}
@@ -271,6 +272,7 @@ def test_load_more_library_transient_error_keeps_more(monkeypatch):
     stub._lib_cache = {"albums": {"items": [1, 2], "offset": 100, "more": True}}
     stub.libraryMore = _Signal()
     stub._lib_status = lambda cat, count, more: f"{count} {cat}"
+    stub._lib_count = WavesBridge._lib_count
     stub._logged_in = True
 
     # Make the page fetch raise, and run the worker synchronously.

@@ -4,6 +4,11 @@ Every release section must list its subheadings in the fixed order
 Added > Changed > Fixed > Removed (any subset, but never shuffled), so the
 notes read the same way in every GitHub Release. The heading text may carry
 an emoji accent; only the trailing word is significant.
+
+An issue a bullet closes must be written as a full link ("[issue #11](url)")
+rather than a bare "(#11)": these notes are lifted verbatim into the Release
+body and read well outside the repo, where a bare number links to nothing
+and does not even say what it refers to.
 """
 
 from __future__ import annotations
@@ -51,3 +56,21 @@ def test_subheadings_follow_canonical_order():
             f"{heading!r} lists subheadings as {subs}; "
             f"they must follow Added > Changed > Fixed > Removed ({expected})"
         )
+
+
+def test_issue_references_are_labelled_links():
+    """No bare '#12' anywhere: an issue is named and linked, or not cited."""
+    bare = []
+    for lineno, raw in enumerate(CHANGELOG.read_text(encoding="utf-8").splitlines(), 1):
+        # Inline code spans quote the rule's own counter-example; they cite
+        # nothing, so they are not held to it.
+        line = re.sub(r"`[^`]*`", "", raw)
+        for match in re.finditer(r"#\d+", line):
+            start = match.start()
+            # A reference is fine when it reads "issue #N" AND that text is a
+            # markdown link ("[issue #N](url)"), which is how they are written.
+            named = line[:start].rstrip().endswith("issue")
+            linked = "](http" in line[match.end() : match.end() + 80]
+            if not (named and linked):
+                bare.append(f"line {lineno}: {line.strip()}")
+    assert not bare, "cite issues as [issue #N](https://github.com/.../issues/N):\n" + "\n".join(bare)

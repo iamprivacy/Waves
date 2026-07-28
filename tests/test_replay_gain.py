@@ -87,7 +87,7 @@ def test_migration_runs_once_and_respects_a_later_off():
     # After the one-time flip, a user who turns ReplayGain back off stays off:
     # the migration must not fire a second time.
     data = Settings()
-    _migrate_settings(data)  # first run marks it done
+    _migrate_settings(data)  # first run marks every step done
     data.metadata_replay_gain = False  # user opts out afterwards
     assert _migrate_settings(data) is False
     assert data.metadata_replay_gain is False
@@ -96,6 +96,7 @@ def test_migration_runs_once_and_respects_a_later_off():
 def test_migration_is_a_noop_once_marked():
     data = Settings()
     data.replay_gain_default_migrated = True
+    data.format_playlist_folder_migrated = True
     data.metadata_replay_gain = False
     assert _migrate_settings(data) is False
     assert data.metadata_replay_gain is False

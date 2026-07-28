@@ -31,6 +31,16 @@ def test_path_file_sanitize_keeps_legit_path(tmp_path):
     assert str(out.resolve()).startswith(str(base.resolve()))
 
 
+def test_path_file_sanitize_keeps_folder_path_depth(tmp_path):
+    # {folder_path} adds real directory levels ("Playlists/Country/Bluegrass/
+    # <playlist>/..."): the per-segment sanitizer must pass multi-segment
+    # paths through with the depth intact.
+    base = tmp_path / "Music"
+    out = p.path_file_sanitize(base / "Playlists" / "Country" / "Bluegrass" / "Road Songs" / "01. A - B.flac")
+    assert out.parts[-5:] == ("Playlists", "Country", "Bluegrass", "Road Songs", "01. A - B.flac")
+    assert str(out.resolve()).startswith(str(base.resolve()))
+
+
 def test_config_dir_is_waves_specific():
     # Waves must never share per-user state (token.json, settings.json) with an
     # installed Tidaler / tidal-dl-ng: a fresh install has to start signed out.

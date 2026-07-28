@@ -23,6 +23,7 @@ def _sweep_bridge(monkeypatch, calls):
     b = WavesBridge.__new__(WavesBridge)
     b._media_lists_cache = None
     b._media_lists_lock = Lock()
+    b._folder_tree = None
     b.tidal = MagicMock()
 
     def fake_sweep(session):
@@ -36,8 +37,8 @@ def _sweep_bridge(monkeypatch, calls):
 def test_media_lists_scroll_pages_reuse_the_sweep(monkeypatch):
     calls: list = []
     b = _sweep_bridge(monkeypatch, calls)
-    first = b._media_lists(refresh=True)  # tab open: fetches
-    again = b._media_lists(refresh=False)  # scroll page: reuses
+    first, _ = b._media_lists(refresh=True)  # tab open: fetches
+    again, _ = b._media_lists(refresh=False)  # scroll page: reuses
     assert first is again and len(calls) == 1
 
 
@@ -48,8 +49,8 @@ def test_media_lists_refresh_is_ttl_limited(monkeypatch):
     b._media_lists(refresh=True)  # e.g. an immediate re-sort: still cached
     assert len(calls) == 1
     # Age the cache past the TTL: the next first-page load re-sweeps.
-    ts, data = b._media_lists_cache
-    b._media_lists_cache = (ts - WavesBridge._MEDIA_LISTS_TTL - 1, data)
+    ts, data, tree = b._media_lists_cache
+    b._media_lists_cache = (ts - WavesBridge._MEDIA_LISTS_TTL - 1, data, tree)
     b._media_lists(refresh=True)
     assert len(calls) == 2
 
@@ -57,7 +58,7 @@ def test_media_lists_refresh_is_ttl_limited(monkeypatch):
 def test_media_lists_no_cache_fetches_even_without_refresh(monkeypatch):
     calls: list = []
     b = _sweep_bridge(monkeypatch, calls)
-    assert b._media_lists(refresh=False)["mixes"] == ["m1", "m2"]
+    assert b._media_lists(refresh=False)[0]["mixes"] == ["m1", "m2"]
     assert len(calls) == 1
 
 
