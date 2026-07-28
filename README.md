@@ -6,11 +6,11 @@
   <strong>A native desktop app for downloading music from your own TIDAL account: search‑first, art‑forward, and built for people who'd rather click than type.</strong>
 </p>
 
+<!-- The badges live on ONE source line on purpose: GitHub joins the split
+     lines into a row, but other renderers (the mirror frontends among them)
+     treat each source line as its own line and stack the badges vertically. -->
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
-  <a href="#install"><img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-informational" alt="Platforms"></a>
-  <a href="#install"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python"></a>
-  <a href="https://github.com/maya-doshi/tidaler"><img src="https://img.shields.io/badge/built%20on-Tidaler-2dd4bf" alt="Built on Tidaler"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a> <a href="#install"><img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-informational" alt="Platforms"></a> <a href="#install"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python"></a> <a href="https://github.com/maya-doshi/tidaler"><img src="https://img.shields.io/badge/built%20on-Tidaler-2dd4bf" alt="Built on Tidaler"></a>
 </p>
 
 <p align="center">
@@ -74,7 +74,7 @@ To be just as plain about what is new: it's mine. I wrote the interface, the in-
 Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engine described above:
 
 - **A from‑scratch native UI**: a calm, dark "console" theme (CRT phosphor‑green) drawn in PySide6 / Qt Quick. No web view, no Electron; one real desktop window.
-- **Browse, where Waves opens**: TIDAL's editorial front page (New Arrivals, TIDAL Rising, the full genre / mood / decade catalogue), rendered art‑first with live cover mosaics. Every page drills down for real, with hover **Preview / Download** controls and quality badges the whole way. And it stays current on its own: leave Waves running for days and Browse quietly follows what TIDAL is featuring instead of freezing at whatever loaded first.
+- **Browse, where Waves opens**: TIDAL's editorial front page (New Arrivals, TIDAL Rising, the full genre / mood / decade catalogue), rendered art‑first with live cover mosaics. Every page drills down for real, with hover **Preview / Download** controls and quality badges the whole way. And it stays current on its own: leave Waves running for days and Browse quietly follows what TIDAL is featuring instead of freezing at whatever loaded first. Your personalized home shelves ride along too ("Albums you'll enjoy", "Your forgotten favorites", your genre rows), each one downloadable like any other Browse row, and an "All Playlists" section drills from playlist folders (moods, genres, decades) into a grid of just that category's playlists, with a one‑click DOWNLOAD ALL for the whole category.
 - **Built‑in updates** (opt‑in): Waves can check for a newer version at launch and, when one is found, a small in‑app notice carries the whole update (download, verify, restart, all in one place); everything is also available from Settings. Updates are **cryptographically signed**, checks are off by default and never send any of your data (see [Privacy](#privacy)).
 - **Search‑first**: a single field searches artists, albums, tracks, videos, playlists, and mixes, or resolves a pasted `tidal.com` link and opens the release automatically.
 - **Art‑forward results**: cover art inline, results grouped by type, color‑coded quality badges (HI‑RES / LOSSLESS / HIGH), release‑date sorting and filtering, and clickable per‑artist credits. Each section opens as a quick overview (its first few results, artists in a sideways‑scrolling strip) with a SHOW ALL beneath it, and whichever sections you expand stay expanded on your next search.
@@ -87,8 +87,8 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - **A real library layout by default**: downloads land in `Artist/[Year] Album/Disc-Track. Artist - Title`, the structure Plex reads natively, instead of flat `Albums/` and `Tracks/` bins. Paths stay fully customizable in Settings, where each path field shows a live example of the exact folders and file name it produces as you type, typos in `{tokens}` are highlighted, and a built-in reference lists every available token with a description, an example value, and a one-click copy.
 - **Library‑friendly tagging**: a "clean album‑artist" mode (on by default) writes only the primary artist to the album‑artist tag, so Plex won't mis‑read or split multi‑artist albums. ReplayGain tags are written by default too, so players that support them level volume across your library without touching the audio; tracks TIDAL never measured are left untagged rather than stamped with a wrong level.
 - **Explicit, clean, or both**: when a release comes in both explicit and clean versions, keep whichever you prefer, or both side by side.
-- **Instant navigation**: pages and cover art you've already seen render instantly from a persistent local cache and quietly refresh in the background. Even a fresh launch paints right away. Tabs remember where you were, too: Search and My TIDAL reopen on the exact page you left, expanded albums, scroll position and all.
-- **My TIDAL**: your favorite albums, tracks, artists, videos, playlists, and mixes, with virtualized infinite scroll so large libraries stay smooth. It opens on a **Home** tab that previews your newest additions, up to 24 recent albums and 18 recent tracks; click any shelf heading to open the full list in that tab. Sort any category by recently added, name, release date, or artist, the same control as Search.
+- **Instant navigation**: pages and cover art you've already seen render instantly from a persistent local cache and quietly refresh in the background. Even a fresh launch paints right away. Tabs remember where you were, too: Search and My TIDAL reopen on the exact page you left, expanded albums, scroll position and all. A breadcrumb trail shows every step of how you got here as clickable pills; click any crumb to jump straight back to that spot, scroll position and expanded albums included. The mouse side buttons walk the same history, back and forward.
+- **My TIDAL**: your favorite albums, tracks, artists, videos, playlists, and mixes, with virtualized infinite scroll so large libraries stay smooth. It opens on a **Home** tab that previews your newest additions, up to 24 recent albums and 18 recent tracks; click any shelf heading to open the full list in that tab. Sort any category by recently added, name, release date, or artist, the same control as Search. Your TIDAL playlist folders appear under Playlists and drill in like a file manager; each folder offers "Download all" with a count badge that ticks down like an odometer as playlists finish, and on disk your playlists mirror the same folder tree (customizable via a `{folder_path}` token in the path template).
 - **Grouped download queue**: Completed / Downloading / Queued sections with live per‑track progress, plus per‑album and per‑artist roll‑ups. Every download button acknowledges the click on the spot with an animated QUEUED state, then flips to a live progress bar the moment its download starts.
 - **Remembers what you've downloaded**: track and video buttons show DOWNLOADED across sessions, and album, artist, playlist and mix downloads skip the ones you already have (marked HAVE in the queue), fetching only what's missing. Raise the audio quality setting later and lower‑quality copies show DOWNLOAD again, replacing the old file in place with the better one. This only covers downloads made from this version onward; broader library detection is planned for a future update.
 - **At home on a NAS or network drive**: downloading straight to an SMB share is a first‑class path. Finished tracks land in a few large writes instead of hundreds of tiny ones, a share that's merely busy is never mistaken for a dead one, brief hiccups retry on their own, and the interface stays responsive throughout. If the folder is genuinely unreachable, one clear dialog says so, and Try again resumes everything you queued, instead of a wall of silently failed tracks. On macOS, the access you grant to a network or external folder is remembered across launches, so the folder you picked stays valid instead of needing a re‑pick.
@@ -181,6 +181,13 @@ Waves is GUI‑first and does not ship a command‑line interface. If you want a
 Waves is the first piece of software I've ever released. I've spent a couple of decades in and out of tech, most of it on the other side of the fence, beta‑testing, filing bug reports, and helping developers polish their games and software. Building something and putting my own name on it is new to me, and so is everything that comes after a release: the maintaining, the issue‑tracking, the keeping‑the‑lights‑on side of running a project. This is a side project built in spare time, so I won't always be fast, and I'm certain I'll get some things wrong as I learn the developer's half of all this.
 
 None of that changes the welcome. If something breaks, behaves oddly, or just feels off, please open an issue, however small, and I'll genuinely read it and do my best to reply. Giving feedback is the thing I know how to do best, and I'm grateful to now be on the receiving end of it. Thank you for trying Waves.
+
+---
+
+## Star History
+
+<!-- star-history:start -->
+<!-- star-history:end -->
 
 ---
 

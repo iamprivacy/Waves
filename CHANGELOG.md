@@ -11,12 +11,123 @@ headings and their bullets carry a leading emoji accent (for example ✨ Added,
 🔧 Changed, 🐛 Fixed). Changes land under **Unreleased** as they are made;
 cutting a release renames that section to the new version.
 
+A bullet that closes a reported issue names it in full and links to it:
+`([issue #11](https://github.com/iamprivacy/Waves/issues/11))`, never a bare
+`(#11)`. These notes are read outside the repo (release emails, the website,
+package managers), where a bare number is neither a link nor obviously an
+issue. A test enforces it.
+
+## 🗂️ v0.1.12 (2026-07-28)
+
+### ✨ Added
+
+- 🖱️ The mouse "forward" side button now navigates forward, completing
+  [issue #8](https://github.com/iamprivacy/Waves/issues/8) alongside the back
+  button shipped in v0.1.11.
+- 📁 Your TIDAL playlist folders now appear in My Tidal > Playlists
+  ([issue #11](https://github.com/iamprivacy/Waves/issues/11)).
+  Folders drill in like a file manager with a breadcrumb strip, and each
+  folder row has a "Download all" button with a count badge that ticks down
+  like an odometer as each playlist finishes, ending on a checkmark. On disk,
+  playlists mirror your TIDAL folder tree (for example
+  Playlists/Country/Bluegrass/My Playlist/), even when downloaded one at a
+  time, via a new {folder_path} piece in the playlist path template. A
+  playlist that is in no folder lands exactly where it always did, and a
+  customized "Playlist path & name" setting is left untouched: add
+  {folder_path} wherever you want the mirroring. Files already on disk are
+  not moved, so a foldered playlist you download again lands in its new
+  nested spot beside the old flat copy; drop {folder_path} from the setting
+  to keep the previous layout.
+- 📄 Playlist rows in My Tidal now open the playlist page (the same art
+  header and track list playlists get in Browse), inside folders too.
+- 🗂️ Browse gains a folder-style "All Playlists" section: drill from playlist
+  folders (moods, genres, decades) into a grid of just that category's
+  playlists, no albums or tracks in the way. Hovering a folder offers
+  PREVIEW and DOWNLOAD ALL: the whole category queues in one click, with
+  the count badge ticking down as playlists finish. A confirm states how
+  many playlists are about to download ("Don't ask again" available). Both
+  landing styles get there: in the console style the section headlines are
+  now openable too, so the genre and decade folders are reachable without
+  switching to the art view.
+- ↩️ Every path, name template and separator in Settings now carries its own
+  default. A field you have changed offers "Restore default" beside its label
+  and goes back to the shipped value on its own, with nothing else reset; an
+  unchanged field just reads "Default", so you can see at a glance which
+  settings you have edited.
+- 🧿 Browse now carries the personalized shelves from TIDAL's home page:
+  "Essentials to explore", "Popular playlists on TIDAL", "Albums you'll
+  enjoy", "Suggested new albums for you", "Your forgotten favorites", your
+  genre rows and more, each one downloadable like any other Browse row.
+- 🍞 The "Back to X" bars on artist and Browse pages are now a breadcrumb
+  trail: every step of how you got there as clickable pills, with the page
+  you are on lit at the end. Click any crumb to jump straight back to that
+  spot (scroll position and expanded albums included). Long trails fold
+  their middle behind a "…" pill that expands in place and turns into "›‹"
+  to fold back down. The trail shows where you drilled in, not the tabs you
+  passed through: switching to Browse, Search or My Tidal starts it fresh
+  rather than piling up Search > My Tidal > Search. Back and Forward still
+  cross between tabs as they always did.
+
+### 🔧 Changed
+
+- ✨ The preview and download controls on covers no longer fade in on hover:
+  they rise from the bottom edge with a soft bounce, and drop back out of
+  sight when the pointer leaves. Settings > Advanced > "Hover controls slide
+  in" turns the movement off and brings the plain fade back.
+- 🧹 The two artist separator boxes now share one row instead of taking a
+  full-width box each for a single character.
+- 🔲 The download and preview buttons carry a slightly heavier outline, and so
+  does the divider between PREVIEW and DOWNLOAD, so they hold their edge over
+  busy artwork.
+- 💡 Hovering a download control now lights it up: the outline of the part
+  under the pointer (just that half, on the PREVIEW | DOWNLOAD pills) turns
+  bright and breathes slowly, and fades back out in place when you leave.
+- 🌊 The launch screen opens more gently: the WAVES wordmark is larger, the
+  version sits tucked under it instead of adrift below, and both fade up
+  together rather than appearing all at once. The hand-over to the app now
+  reads as two clean beats as well: the version empties out completely, and
+  the wordmark starts zooming only once it has, instead of the tail of one
+  running under the start of the other.
+- 🎞️ Rows that scroll sideways (the Browse and My Tidal shelves, the folder
+  tiles, the artist strip in search) now fade at their left and right edges,
+  the same soft edge the top and bottom of a page already had, so covers
+  slide out of frame instead of being cut off. The fade only appears on the
+  side you have actually scrolled past: a row that fits on screen keeps both
+  edges clean.
+
+### 🐛 Fixed
+
+- 👯 Browse no longer shows the same covers twice. TIDAL serves one set of
+  releases under several headlines ("New Albums", "New releases for you" and
+  "Suggested new albums for you" were the same albums three times), so a
+  shelf whose items all appear in a larger one is now dropped and only the
+  row carrying the most of them is shown. Shelves that merely share a few
+  entries are untouched.
+- 💬 Settings descriptions read properly again. Every comma in them was being
+  shown as a semicolon ("16 Bit, 44,1 kHz" appeared as "16 Bit; 44,1 kHz"),
+  and the artist separator fields advertised a default of "; " when they
+  actually ship with ", ".
+- 🧭 Opening an album or playlist you had visited earlier in the session now
+  remembers where you came from. Before, Back skipped that spot (a playlist
+  folder, a My Tidal shelf) and jumped to somewhere older, often Search.
+- 🎯 Clicking an artist or album name while a search (or a pasted TIDAL link)
+  was still resolving no longer yanks you to the search page when its results
+  finally arrive: late results are dropped, your click wins.
+- 🌊 The launch sequence stays fluid, and hands over to a finished page. When
+  Browse's landing refreshed behind the opening water (its editorial and For
+  You shelves change between sessions), the rebuild froze the animations for
+  a beat; and the wordmark lifted on its own schedule, so a landing still
+  assembling was watched dropping in shelf by shelf. The refresh now builds
+  in the background, and the launch screen holds until the page behind it is
+  complete.
+
 ## 🖱️ v0.1.11 (2026-07-21)
 
 ### ✨ Added
 
 - 🖱️ The mouse "back" side button now navigates back, same as the Back bar
-  and the macOS three-finger swipe (#8).
+  and the macOS three-finger swipe
+  ([issue #8](https://github.com/iamprivacy/Waves/issues/8)).
 
 ### 🐛 Fixed
 
@@ -55,7 +166,7 @@ cutting a release renames that section to the new version.
   as a success.
 - 🎚️ Changing the audio quality in Settings now applies to the very next
   download; previously new downloads kept the old quality until the app was
-  restarted (#9).
+  restarted ([issue #9](https://github.com/iamprivacy/Waves/issues/9)).
 - ↩️ Going Back from a playlist (or any long page) to Browse now returns you to
   the spot you left, instead of jumping to the top of the page.
 
