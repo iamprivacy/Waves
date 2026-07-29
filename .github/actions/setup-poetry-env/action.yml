@@ -29,7 +29,27 @@ runs:
     #        path: .venv
     #        key: venv-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles('poetry.lock') }}
 
+    # Retried, because a single dropped connection here costs a whole release.
+    # The PySide6 wheels are ~165MB each and PyPI does occasionally cut a
+    # transfer short ("IncompleteRead ... more expected"), which failed one leg
+    # of the v0.1.12 build 38 seconds in and left the release a draft: the
+    # signing job needs every matrix leg. Poetry has no download retry of its
+    # own, so wrap the install. A truncated wheel can land in poetry's cache, so
+    # clear it between attempts rather than retrying onto the same bad file.
     - name: Install dependencies
       #      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction --all-extras --with dev,docs
+      run: |
+        set -u
+        for attempt in 1 2 3; do
+          if poetry install --no-interaction --all-extras --with dev,docs; then
+            exit 0
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            echo "::error::poetry install failed after $attempt attempts"
+            exit 1
+          fi
+          echo "::warning::poetry install failed (attempt $attempt); clearing the cache and retrying"
+          poetry cache clear --all --no-interaction pypi || true
+          sleep $((attempt * 15))
+        done
       shell: bash
