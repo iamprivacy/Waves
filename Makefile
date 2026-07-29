@@ -53,6 +53,10 @@ docs-test: ## Test if documentation can be built without warnings or errors
 docs: ## Build and serve the documentation
 	@poetry run mkdocs serve
 
+.PHONY: star-history
+star-history: ## Copy the star-history chart from the public repo into this tree
+	@bash tools/sync_star_history.sh
+
 .PHONY: help
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
