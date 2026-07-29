@@ -17,6 +17,14 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.13 (2026-07-28)
+
+### 🐛 Fixed
+
+- 🌊 The opening WAVES animation is clean water again: the dark scroll-edge
+  fades of the page loading behind it no longer show through as bands across
+  the top and bottom of the launch screen.
+
 ## 🗂️ v0.1.12 (2026-07-28)
 
 ### ✨ Added
