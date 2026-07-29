@@ -9076,6 +9076,12 @@ ApplicationWindow {
     // One badge serves every page; it targets whichever scrollable is on
     // screen and stays hidden near the top of each.
     BackToTop {
+        id: scrollDressing
+        // Scroll dressing belongs to the interface, not to the launch screen:
+        // it lives outside the main column, so without this it painted its
+        // edge fades over the opening water at full strength (the landing is
+        // scrollable from the first frame, so the bottom fade was always on).
+        opacity: root.bootContentShown
         flick: root.artistOpen ? artistView
              : root.libraryOpen ? (root.libraryCategory === "home" ? homePane
                  : root.libraryCategory === "artists" ? libArtistsGrid
