@@ -11,8 +11,13 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
+      # assets/star-history/ is a byte-for-byte copy of files generated on the
+      # public repo (see tools/sync_star_history.sh). Reformatting it here would
+      # make every sync show a diff that is only ours, so it is left alone.
       - id: end-of-file-fixer
+        exclude: ^assets/star-history/
       - id: trailing-whitespace
+        exclude: ^assets/star-history/
 
   - repo: https://github.com/charliermarsh/ruff-pre-commit
     rev: "v0.1.12"
@@ -23,15 +28,16 @@ repos:
     rev: "v3.1.0"
     hooks:
       - id: prettier
-        # QML-dialect JS (".pragma library") is not parseable by prettier.
-        exclude: ^tidaler/waves_ui/qml/.*\.js$
+        # QML-dialect JS (".pragma library") is not parseable by prettier, and
+        # the star-history charts are generated elsewhere (see above).
+        exclude: ^(tidaler/waves_ui/qml/.*\.js|assets/star-history/.*)$
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: check-yaml
       - id: end-of-file-fixer
-        exclude: LICENSE
+        exclude: ^(LICENSE|assets/star-history/.*)$
 
   - repo: local
     hooks:
