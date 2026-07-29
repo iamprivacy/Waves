@@ -157,3 +157,19 @@ def test_a_public_tip_with_no_chart_yet_is_left_alone(sandbox: Path):
     readme = _git(sandbox, "show", f"{tree}:README.md")
     assert _START in readme and _END in readme
     assert readme == tmp_readme.strip()
+
+
+def test_a_stale_chart_in_the_private_tree_loses_to_the_public_one(sandbox: Path):
+    """The dev tree can hold its own copy of the chart (tools/sync_star_history.sh
+    mirrors it so the private README renders too), and that copy is stale the
+    moment the workflow next runs. The carry-over must overwrite it rather than
+    publish it, and must not choke on the path already being present: read-tree
+    --prefix refuses to bind over existing index entries."""
+    _write(sandbox / "assets" / "star-history" / "chart.svg", "<svg>stale</svg>\n")
+    _write(sandbox / "README.md", _readme(f"\n{_CHART}\n\n"))
+    _git(sandbox, "add", "-A")
+    _git(sandbox, "commit", "-m", "mirror the chart into the dev tree")
+
+    tree = _release(sandbox)
+    chart = _git(sandbox, "show", f"{tree}:assets/star-history/chart.svg")
+    assert chart == "<svg/>", f"the release published the dev tree's stale chart: {chart!r}"
