@@ -17,6 +17,254 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.14 (2026-08-03)
+
+### ✨ Added
+
+- ✨ Track previews are seekable: hover the progress ring around the album
+  art for a ghost marker and time readout, then click or drag to seek. The
+  ring is now a smooth arc instead of blocky cells.
+- ✨ The playback line along the bottom of the window is a seek bar: hover
+  for a time readout, click or drag to jump. Slightly taller, with a
+  glowing spark at the playhead.
+- ✨ Album covers tilt toward the cursor and lift while hovered, springing
+  back on leave. The tilt waits for the pointer to rest, so lists scrolling
+  under a still cursor stay calm. Round track thumbnails and the Browse
+  front page's big cards join in. Settings > Advanced turns it off for
+  anyone who would rather artwork stayed flat and still.
+- ✨ Hover video peek: rest on a video thumbnail and a floating preview
+  grows out of it, playing with sound but no controls, so you can tell what
+  a video is before opening it. Clicking it opens the full player without a
+  break (the preview simply becomes the player, then steps up to your usual
+  quality). Move away and it goes away.
+- ✨ The status bar's wordmark now ends with the version you are running, and
+  clicking it checks for an update on the spot: it reports back "up to date",
+  or raises the usual update notice when a newer build is waiting.
+
+### 🔧 Changed
+
+- 🔧 The full-width green PLAY bar across video thumbnails, which covered a
+  quarter of the picture, is now a small play mark in the corner over a
+  soft shadow.
+- 🔧 When the download folder is on a network drive that dropped off, Waves
+  now keeps checking for it and resumes the held downloads on its own the
+  moment the drive is back, instead of waiting for you to click Browse or
+  "Try again". On a Mac, a remounted volume is noticed immediately.
+- 🔧 A network folder that is mounted but slow to wake (macOS quietly drops
+  idle connections and reconnects on first touch) no longer triggers the
+  "isn't reachable" dialog: the download waits out the wake-up and starts by
+  itself. While Waves runs, it also keeps the connection warm so the folder
+  rarely goes to sleep in the first place.
+- 🔧 The Browse button next to path settings stays at full strength once a
+  path is set, so it always looks as clickable as it is.
+
+### 🐛 Fixed
+
+- 🐛 Waves no longer crashes at launch on Windows when another program
+  (an antivirus scan, a backup tool, or a second Waves instance) briefly
+  holds the settings file: the save retries for a moment and, at startup,
+  falls back to in-memory settings instead of failing to open.
+- 🐛 Finished downloads are flushed to stable storage before they get their
+  final name, so a power cut mid-move can no longer leave a truncated file
+  under a name Waves would trust. Zero-byte leftovers from an older crash now
+  read as "not downloaded" instead of being skipped forever.
+- 🐛 An update whose unpacked payload is missing the app executable now
+  restores the previous install instead of leaving the app uninstalled.
+- 🐛 The path preview for video templates now pads numeric tokens exactly the
+  way real video downloads do.
+- 🐛 Signing out now fully forgets the previous account: cached items can no
+  longer be fetched or downloaded through the old session, and the old
+  account's page snapshot can no longer be re-written to disk mid-sign-out.
+- 🐛 Several long-session memory and freshness gaps are closed: drilled
+  Browse pages and the ownership cache are now bounded, tile-art mosaics
+  refresh weekly even when the app never restarts, and cache eviction can no
+  longer race between loaders and drop a page repaint.
+- 🐛 Re-sorting a My Tidal category while it is still loading more rows no
+  longer splices the old order into the new list or skips a window of items.
+- 🐛 Opening Mixes first no longer makes Playlists briefly render (and save)
+  a folder-less list.
+- 🐛 The download-folder auto-heal is stricter and fairer: it only follows a
+  remounted volume that actually carries your library folder (never a
+  different drive that merely shares the name), a healed folder now reaches
+  the download already in progress, changing the folder mid-download no
+  longer skips the new folder's reachability check, and a share with odd
+  delete semantics no longer reads as dead.
+- 🐛 The download queue can no longer lose a just-added row when another
+  download finishes at the same moment, and an album finishing quickly no
+  longer skips recording which tracks belong to it.
+- 🐛 A failed preview no longer leaves an orphaned temp file behind, and
+  quitting mid-FFmpeg-install no longer orphans a partial archive.
+- 🐛 Quitting no longer risks "database is closed" errors from ownership
+  records still being written.
+- 🐛 Cancelling an app update now also works during the install phase, and a
+  failed update no longer leaves a full extracted app copy in the config
+  folder.
+- 🐛 Path templates: {album_date} and {isrc} without a value no longer write
+  literal braces into folder names, {album_artist} on a release with no
+  artist credit no longer fails the download, and de-duplicated filenames at
+  deep paths are no longer shredded to "\_01.flac".
+- 🐛 A hiccup loading Mixes no longer makes My Tidal report "0 playlists".
+- 🐛 RETRY works on every Browse page again: drilled playlist grids and
+  playlist/mix/album pages used to clear the error, show "loading" and never
+  load; the button now re-requests the right page.
+- 🐛 An expanded album no longer sits on "Loading tracks…" forever after a
+  search; the track list is re-fetched and a failure leaves the row
+  re-expandable instead of dead.
+- 🐛 Fast scrolling through long album lists can no longer carry one album's
+  selected tracks over to another row and download the wrong tracks.
+- 🐛 Clicking Install twice (in Settings and on the update toast) no longer
+  runs two updaters over the same staging folder, and cancelling an update
+  can no longer be undone by a stray second Install click.
+- 🐛 RETRY on a failed download row works even after searching for something
+  else in between; a row whose item cannot be re-fetched keeps its RETRY
+  instead of dying silently.
+- 🐛 On Linux, an update started from a build that was launched out of another
+  application's AppImage environment no longer overwrites that application's
+  file.
+- 🐛 The Settings page now refreshes when the app changes a setting on its own
+  ("Don't ask again", the player's video quality menu, the download folder
+  auto-heal), instead of showing the old value until a manual save.
+- 🐛 Picking a network share (\\nas\music) as the download folder now saves
+  the real share path; it used to be saved as a relative folder that landed
+  downloads next to the app's working directory.
+- 🐛 Drilled Browse pages with link tiles (e.g. Record Labels) keep their
+  cover mosaics on revisits and from the second launch onward.
+- 🐛 DOWNLOAD ALL on a Browse playlist category now waits for your playlist
+  folders to load first, so foldered playlists are not written a second time
+  outside their folder.
+- 🐛 Clicking an album's download button again while its edition scan is
+  still running no longer queues the album twice into two folders, and a
+  failed scan returns the button instead of leaving it stuck.
+- 🐛 Going Back to an artist page that fails to load (e.g. offline) no longer
+  stops the app from recording navigation history.
+- 🐛 Tracks with very long names now download reliably to network (NAS) and
+  external libraries: the temporary staging file no longer overflows the
+  filesystem's name-length limit.
+- 🐛 With "symlink to track directory" enabled, downloading a playlist whose
+  tracks are already in the track library no longer crashes the playlist job;
+  the playlist folder is created for the symlinks, and a failed symlink is
+  logged instead of failing the download.
+- 🐛 A brief network blip while sizing a track no longer fails the download:
+  the progress bar just runs without a percentage. Redirected download links
+  no longer show a stuck 0% bar.
+- 🐛 A track whose full path exceeds the operating system's limit (mostly a
+  Windows concern) now shortens its folder names to fit instead of silently
+  saving into the user's home folder, outside the library.
+- 🐛 "Reset application" now also erases previously exported diagnostic
+  bundles, matching what the confirmation dialog promises.
+- 🐛 Saving the page cache while the app is busy loading in the background can
+  no longer crash a loader and leave the busy indicator stuck on.
+- 🐛 Bulk downloads (a folder, a Browse category, a whole discography) started
+  without FFmpeg set up now ask about FFmpeg first and continue after "Continue
+  anyway", instead of freezing the button at "running" for the whole session.
+- 🐛 Downloading two discographies that share an album (or a guest track) now
+  completes both artist buttons; before, the second one could stay stuck at
+  "running" forever.
+- 🐛 A download button no longer dies for the session when an aged-out item is
+  re-fetched while no download folder is set, or when the download-folder
+  question is dismissed: the button returns to idle so it can be clicked again.
+- 🐛 An artist page whose fetch partly failed (for example a rate limit on the
+  albums list) is no longer saved or allowed to wipe the album grid on screen;
+  the last good page stays until a complete fetch succeeds.
+- 🐛 A failed album track-list fetch no longer erases what Waves had already
+  learned about that album's tracks (ownership badges kept working data).
+- 🐛 A failed playlist-folder scan no longer retries in a loop with the
+  download button spinning forever; it stops, says so, and your next click
+  retries.
+- 🐛 The favourites list used by library-scoped artist pages is no longer
+  silently truncated when TIDAL returns a short page, and a failed load is no
+  longer remembered as "no favourites" for ten minutes.
+- 🐛 A library tab whose very first load failed no longer saves an empty page
+  as the truth; reopening the tab retries instead of showing an empty library.
+- 🐛 Downloading a discography now refuses to run on a partial scan (some
+  release lists failed to load) instead of quietly downloading a truncated
+  discography and reporting success, or claiming "No albums to download".
+- 🐛 A "best of both" album merge no longer skips tracks you already own in a
+  different folder: every track lands in the merged album's own folder, so the
+  album is complete on disk when the download reports done.
+- 🐛 If one edition's track list cannot be fetched during a best-of-both scan
+  (a network hiccup, a region-locked edition), that edition is kept and the
+  merge is called off instead of silently dropping its exclusive tracks.
+- 🐛 A merged album now remembers it was downloaded: its download button stays
+  on DOWNLOADED after you reopen the album or restart the app, instead of
+  flipping back as if nothing had been fetched.
+- 🐛 The queue drawer shows a merged album at its real length, with every row
+  progressing, instead of doubled-up rows half stuck at "pending".
+- 🐛 Exporting a diagnostic report no longer switches your two diagnostics
+  settings back off. Turning on verbose diagnostics and "also hide titles and
+  searches", reproducing a problem, then clicking Export used to silently
+  disable both and produce a report containing the very details you had asked
+  to hide. Settings also now shows the true state of those switches when you
+  reopen the page.
+- 🐛 Previewing or downloading an artist from a card that came out of the
+  search cache no longer freezes the window while it fetches.
+- 🐛 A stalled connection to TIDAL while Browse is loading no longer blocks
+  search, artist pages and downloads along with it.
+- 🐛 An artist whose name is only punctuation (`?`, `*`, `<>`) no longer sends
+  the download outside your download folder. On Windows those tracks were
+  written to the root of the drive and still reported as done; on macOS and
+  Linux the download failed with an unexplained error.
+- 🐛 Dialogs now dim the window behind them. Every modal (download folder,
+  bulk-download confirm, settings reset, factory reset, folder unreachable,
+  FFmpeg, terms) and the sign-in panel were drawing their backdrop at 2%
+  opacity, so the interface behind stayed fully bright. The video overlay, the
+  play/pause glyph disc and the "buffering" text outline had the same fault.
+- 🐛 Answering the download-folder question with "keep it", or ticking "Don't
+  ask again" on the bulk-download confirm, no longer silently switches off FLAC
+  extraction and video conversion on disk (the loss only showed up on the next
+  launch), and no longer writes a path containing your username into
+  `settings.json`.
+- 🐛 `crash.log` is now scrubbed the same way every other log is. Crashes could
+  previously write your username, home folder path and the name of the track
+  being handled into that file, which the bug-report template asks you to paste
+  into a public issue.
+- 🐛 "Also hide titles and searches" now actually hides them. The switch had
+  nothing to act on, so an exported report taken with it turned on still
+  contained your search terms and media names.
+- 🐛 An album or playlist containing one track that fails to download no longer
+  loops forever, re-downloading and rewriting every other track in it on every
+  pass. The download now finishes and the queue row completes, instead of
+  staying stuck on "running" until cancelled.
+- 🐛 Downloading from a Mac to a WebDAV network drive no longer litters the
+  server with hidden 4 KB `._` companion files next to every track, cover and
+  playlist (macOS metadata files that other systems show as ghost files).
+  Generated m3u playlists also no longer pick up any existing `._` files as
+  tracks.
+- 🐛 Album rows in search results now show the artist name, clickable in green
+  like everywhere else, both on the collapsed row and in the expanded album
+  panel.
+- 🐛 Playlists longer than 200 tracks now show every track: the track list
+  stopped after two pages of the paged playlist endpoint, truncating long
+  playlists even though the header count was right
+  ([issue #12](https://github.com/iamprivacy/Waves/issues/12)).
+- 🐛 Very long playlists scroll smoothly again. Waves now builds only the rows
+  around what you are looking at and fills the rest in as you scroll, instead
+  of building all of them at once, so a several-hundred-track playlist no
+  longer stays sluggish the whole time you are on it. Download buttons also
+  stopped building their progress bar while nothing is downloading. Together
+  these cut the memory a browsing session holds by roughly eight times.
+- 🐛 Browse and My Tidal keep their pages alive behind the scenes: going Back
+  or Forward between the Browse front page and an open playlist or album is
+  instant and lands exactly where you left off, with nothing visibly
+  assembling, scrolling or reloading, and each My Tidal category (Albums,
+  Tracks, Artists, Playlists, Mixes, Videos) holds its rows, scroll position
+  and expanded albums for as long as the app runs instead of reloading every
+  time you switch. Leaving for another tab and returning is just as seamless,
+  and fresh favourites are still picked up quietly in the background without
+  moving the page under you.
+- 🐛 A page reached by returning to its section through the nav tabs no longer
+  leaves you without breadcrumbs: the trail now always begins with the
+  section's home pill (Browse, Search, or My Tidal), so there is always a
+  visible way back up, not just the Back gesture.
+- 🐛 Breadcrumbs no longer wipe in whenever a page opens: crumbs now appear
+  in place, with only a barely-there fade when one is removed.
+- 🐛 The launch animation hands over cleanly again: the version readout always
+  finishes its drain before the wordmark zooms away and the interface fades
+  up, instead of the two overlapping on a busy start.
+- 🐛 The Settings page holds your place: changing a setting, or leaving for
+  another tab and coming back, no longer collapses the sections you had opened
+  or throws you back to the top of the page.
+
 ## 🗂️ v0.1.13 (2026-07-28)
 
 ### 🐛 Fixed
