@@ -332,8 +332,29 @@ def _running_appimage() -> str:
     The AppImage runtime mounts the payload on a read-only squashfs and sets
     ``$APPIMAGE`` to the actual file; the running executable's own path points
     into the mount and must never be an update target.
+
+    The runtime exports both ``$APPIMAGE`` and ``$APPDIR`` to every descendant
+    process, so a non-AppImage Waves launched from an AppImage-parented shell
+    inherits them. Trusting the variable alone would make the updater
+    os.replace the Waves payload over that unrelated application's .AppImage
+    file. Only claim the AppImage path when this process actually runs out of
+    the advertised mount.
     """
-    return os.environ.get("APPIMAGE", "")
+    appimage = os.environ.get("APPIMAGE", "")
+    appdir = os.environ.get("APPDIR", "")
+    if not appimage or not appdir:
+        return ""
+    try:
+        # Both the literal and the symlink-resolved executable path count as
+        # inside the mount; runtimes differ in which one they expose.
+        exe = Path(sys.executable)
+        mount = Path(appdir)
+        inside = exe.absolute().is_relative_to(mount.absolute()) or exe.resolve().is_relative_to(mount.resolve())
+        if not inside:
+            return ""
+    except OSError:
+        return ""
+    return appimage
 
 
 def _select_asset(
@@ -565,6 +586,7 @@ class AppUpdater:
         suffix = os.path.basename((release.asset or "dl").replace("\\", "/")) or "dl"
         with tempfile.NamedTemporaryFile(dir=self.staging_dir, suffix="-" + suffix, delete=False) as tmp:
             payload = Path(tmp.name)
+        applied_clean = False
         try:
             self._download(sess, release.url, payload, progress_cb, abort)
             _check_abort()
@@ -613,9 +635,17 @@ class AppUpdater:
 
             _check_abort()
             _log("installing")
-            applied_to = self._apply(payload, release, _log)
+            applied_to = self._apply(payload, release, _log, abort=abort)
+            applied_clean = True
         finally:
             payload.unlink(missing_ok=True)
+            # A failed (or cancelled) apply can leave a full extracted app
+            # copy under staged/; without this it sits in the config dir until
+            # the next update attempt happens to overwrite it. Only our own
+            # staging tree is touched, and only on failure: on success the
+            # platform move has already consumed it. _rmtree never raises.
+            if not applied_clean:
+                _rmtree(self.staging_dir / "staged")
 
         self._write_manifest(release)
         _log(f"installed {release.version}")
@@ -772,18 +802,28 @@ class AppUpdater:
     # artifacts. Each extracts the payload (zip or raw) and swaps it next to the
     # running executable; Windows defers the swap to a helper because a running
     # .exe can't overwrite itself.
-    def _apply(self, payload: Path, release: Release, log) -> Path:
+    def _apply(self, payload: Path, release: Release, log, abort: Event | None = None) -> Path:
+        # The last chance to honour Cancel: extraction is the slow half of the
+        # apply, so check right after it, before the platform swap touches the
+        # install (aborting MID-swap would be worse than finishing it, so the
+        # swap itself stays uninterruptible, like _managed_upgrade's runner).
+        def _check_abort() -> None:
+            if abort is not None and abort.is_set():
+                raise UpdateCancelled()
+
         # Running from an AppImage: the executable path is inside a read-only
         # squashfs mount; the real install is the single .AppImage file, so
         # swap that (asset selection already guaranteed an .AppImage payload).
         appimage = _running_appimage()
         if appimage:
             staged = self._extract_payload(payload, release.asset, log)
+            _check_abort()
             if not staged.is_file():
                 raise UpdaterError("Refusing to install: expected a single-file AppImage payload.")
             return self._apply_unix(staged, Path(appimage), log)
         target = _current_exe()
         staged = self._extract_payload(payload, release.asset, log)
+        _check_abort()
         if self.os_key == "macos":
             return self._apply_macos(staged, target, log)
         # Nuitka --standalone ships a multi-file directory (the .dist tree). When the
@@ -1011,6 +1051,14 @@ class AppUpdater:
                 os.replace(backup, install_root)
             _rmtree(staged_same_dev)
             raise
+        # 3. Confirm the swapped-in tree actually contains the executable before
+        #    the backup is discarded; a payload that unpacked without it must
+        #    never leave the app uninstalled. Roll the old install back instead.
+        if not (install_root / target.name).is_file():
+            _rmtree(install_root)
+            if backed_up and backup.exists():
+                os.replace(backup, install_root)
+            raise UpdaterError("Updated install tree is missing the app executable; previous install restored.")
         _rmtree(backup)
         return target
 
