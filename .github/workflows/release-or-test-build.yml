@@ -461,6 +461,22 @@ jobs:
             /^## / { on = 0; for (i = 2; i <= NF; i++) if ($i == tag) on = 1; next }
             on && (started || NF) { started = 1; print }
           ' CHANGELOG.md > RELEASE_NOTES.md
+          # Every release body opens with the star-and-donate banner (kept in
+          # step with the README's), so it cannot be forgotten again: it was
+          # pasted in by hand for a while and quietly stopped after v0.1.5.
+          if [ -s RELEASE_NOTES.md ]; then
+            cat > NOTES_HEADER.md <<'BANNER'
+          <p align="center">
+            <strong>🌊 If you enjoy Waves, a star on this repo goes a long way, and if you'd like to help me afford to keep developing it, consider donating.</strong>
+          </p>
+
+          <p align="center">
+            <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+          </p>
+
+          BANNER
+            cat NOTES_HEADER.md RELEASE_NOTES.md > RELEASE_NOTES.tmp && mv RELEASE_NOTES.tmp RELEASE_NOTES.md
+          fi
           if [ -s RELEASE_NOTES.md ]; then
             echo "----- RELEASE_NOTES.md -----"; cat RELEASE_NOTES.md
           else
