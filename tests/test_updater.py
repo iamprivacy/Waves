@@ -11,6 +11,8 @@ import errno
 import hashlib
 import io
 import os
+import pathlib
+import sys
 import zipfile
 
 import pytest
@@ -411,7 +413,7 @@ def _prep(monkeypatch, tmp_path, *, payload, manifest, signature, pubkey, asset=
     monkeypatch.setattr(AppUpdater, "_fetch_signature", lambda self, sess, url: signature, raising=True)
     applied = {}
     monkeypatch.setattr(
-        AppUpdater, "_apply", lambda self, p, rel, log: applied.setdefault("path", p) or p, raising=True
+        AppUpdater, "_apply", lambda self, p, rel, log, abort=None: applied.setdefault("path", p) or p, raising=True
     )
     return up, applied
 
@@ -867,12 +869,12 @@ def _assets(*names):
 def test_select_asset_zip_install_never_gets_an_appimage():
     # ".AppImage" sorts before ".zip" alphabetically; without hard partitioning
     # every zip user would silently be switched to an AppImage payload.
-    name, url, _ = u._select_asset(_assets("waves_linux-x64.AppImage", "waves_linux-x64.zip"), "linux", "amd64")
+    name, _url, _ = u._select_asset(_assets("waves_linux-x64.AppImage", "waves_linux-x64.zip"), "linux", "amd64")
     assert name == "waves_linux-x64.zip"
 
 
 def test_select_asset_appimage_install_gets_only_appimage():
-    name, url, sha = u._select_asset(
+    name, _url, sha = u._select_asset(
         _assets("waves_linux-x64.AppImage", "waves_linux-x64.AppImage.sha256", "waves_linux-x64.zip"),
         "linux",
         "amd64",
@@ -893,6 +895,9 @@ def test_apply_targets_the_appimage_file(monkeypatch, tmp_path):
     appimage_path = tmp_path / "Waves.AppImage"
     appimage_path.write_bytes(b"OLD")
     monkeypatch.setenv("APPIMAGE", str(appimage_path))
+    # The AppImage claim is only honoured when this process runs out of the
+    # advertised mount (see _running_appimage), so point APPDIR at ourselves.
+    monkeypatch.setenv("APPDIR", str(pathlib.Path(sys.executable).parent))
     up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
     up.os_key = "linux"
     payload = tmp_path / "dl.bin"

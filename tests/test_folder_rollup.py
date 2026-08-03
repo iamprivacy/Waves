@@ -139,10 +139,14 @@ def test_playlist_template_root_and_cold_session_fall_back_clean():
 class _DownloadFolderStub:
     downloadFolder = WavesBridge.downloadFolder
     _playlist_template = WavesBridge._playlist_template
+    _ffmpeg_gate_holds = WavesBridge._ffmpeg_gate_holds
 
-    def __init__(self, tree, gate="ok"):
+    def __init__(self, tree, gate="ok", ffmpeg="system"):
         self._tree = tree
         self.gate = gate
+        self.ffmpeg = ffmpeg
+        self._ffmpeg_gate_bypassed = False
+        self.ffmpegMissingBlocked = _Signal()
         self._folder_groups = {}
         self._folder_lock = Lock()
         self._objs = {"playlist": {}}
@@ -165,6 +169,9 @@ class _DownloadFolderStub:
 
     def _download_gate(self):
         return self.gate
+
+    def _ffmpeg_source_label(self):
+        return self.ffmpeg
 
     _stash_pending_download = WavesBridge._stash_pending_download
 
@@ -285,6 +292,25 @@ def test_a_nudged_download_folder_stashes_the_whole_rollup():
 
     # Replaying it once the folder is resolved queues the real thing.
     stub.gate = "ok"
+    stub._pending_downloads[0][1]()
+    assert sorted(mid for mid, _t, _tpl, _c in stub.downloads) == ["p1", "p2"]
+    assert "f1" in stub._folder_groups
+
+
+def test_a_missing_ffmpeg_stashes_the_whole_rollup_before_any_state():
+    """The FFmpeg gate would reject every member inside _download, so no queue
+    row would ever tick the group down: the pre-gate must hold the WHOLE
+    rollup before any state (button, badge, group) is published."""
+    stub = _DownloadFolderStub(_folder_tree(), ffmpeg="none")
+    stub.downloadFolder("f1")
+    assert stub._folder_groups == {}
+    assert stub.downloads == []
+    assert stub.downloadState.emits == [] and stub.folderRemaining.emits == []
+    assert stub.ffmpegMissingBlocked.emits == [()]
+    assert [mid for mid, _fn in stub._pending_downloads] == ["f1"]
+
+    # "Continue anyway" replays the stash and the rollup registers normally.
+    stub.ffmpeg = "system"
     stub._pending_downloads[0][1]()
     assert sorted(mid for mid, _t, _tpl, _c in stub.downloads) == ["p1", "p2"]
     assert "f1" in stub._folder_groups

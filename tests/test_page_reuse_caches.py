@@ -81,6 +81,7 @@ def test_library_page_playlists_pages_locally_from_one_sweep(monkeypatch):
 def test_remember_album_tracks_evicts_oldest_beyond_cap():
     b = WavesBridge.__new__(WavesBridge)
     b._album_tracks_cache = {}
+    b._evict_lock = Lock()
     cap = WavesBridge._ALBUM_TRACKS_CACHE_MAX
     for i in range(cap + 5):
         b._remember_album_tracks(str(i), [{"id": i}])

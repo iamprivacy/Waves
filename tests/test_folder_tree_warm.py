@@ -159,6 +159,26 @@ def test_a_download_before_the_sweep_waits_for_the_folder_path():
     assert templates == ["Playlists/Country/{playlist_name}"], "the playlist's real folder, not the root"
 
 
+def test_a_failed_sweep_does_not_loop_and_clears_the_button():
+    """A sweep that fails leaves the tree None; replaying the parked callbacks
+    into that would just re-warm, forever (each re-tests the same None). The
+    callbacks are dropped instead, the button a parked download lit is cleared,
+    and the user's next click is the retry."""
+    stub = _WarmStub(None)  # the sweep "succeeds" but produces no tree
+    stub.downloadState = _Emit()
+    stub.statuses: list = []
+    stub._set_status = stub.statuses.append
+
+    replays: list = []
+    started = stub._warm_folder_tree(lambda: replays.append(1), "p1")
+
+    assert started is True and stub.sweeps == 1, "one sweep, no re-warm loop"
+    assert replays == [], "the callback must not replay into a missing tree"
+    assert stub._tree_warm_waiting == []
+    assert stub.downloadState.calls == [("p1", "")], "the lit download button returns to idle"
+    assert stub.statuses == ["Could not load your playlist folders, try again"]
+
+
 def test_a_template_without_the_placeholder_never_waits():
     """Most users never touch the template: they must not pay a sweep for a
     value their path does not use."""

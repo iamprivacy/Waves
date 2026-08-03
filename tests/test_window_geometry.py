@@ -21,8 +21,20 @@ from __future__ import annotations
 import json
 import types
 
+import pytest
+
 import tidaler.waves_ui.backend as backend
 from tidaler.waves_ui.backend import WavesBridge, _fit_frame
+
+
+# The suite itself runs offscreen, so the headless-save guard would turn every
+# round-trip test below into a silent no-op depending on whether some earlier
+# test happened to build a QGuiApplication in this process. Pin it: these tests
+# simulate a real desktop unless they say otherwise.
+@pytest.fixture(autouse=True)
+def _desktop_platform(monkeypatch):
+    monkeypatch.setattr(backend, "_headless_platform", lambda: False)
+
 
 # A single 1080p screen at the origin, docks/taskbar already excluded.
 ONE_SCREEN = [(0, 0, 1920, 1080)]
@@ -182,6 +194,28 @@ def test_zero_size_does_not_clobber_a_good_save(tmp_path):
         "y": 60,
         "w": 1100,
         "h": 850,
+        "maximized": False,
+    }
+
+
+def test_headless_platform_never_saves_geometry(tmp_path, monkeypatch):
+    """An offscreen/minimal QPA run (tests, benchmark harnesses) parks its
+    window at 0,0; persisting that would poison the frame the user's next real
+    launch restores to. Under a headless platform, saves must be no-ops and a
+    previously saved desktop frame must survive untouched."""
+    _PrefsStub(tmp_path).windowSaveGeometry(120, 140, 1000, 800, False)  # real desktop save
+
+    monkeypatch.setattr(backend, "_headless_platform", lambda: True)
+    headless = _PrefsStub(tmp_path)
+    headless.windowSaveGeometry(0, 0, 1100, 720, False)  # must be a no-op
+    assert headless.save_calls == 0
+
+    monkeypatch.setattr(backend, "_headless_platform", lambda: False)
+    assert _PrefsStub(tmp_path).windowRestoreGeometry() == {
+        "x": 120,
+        "y": 140,
+        "w": 1000,
+        "h": 800,
         "maximized": False,
     }
 

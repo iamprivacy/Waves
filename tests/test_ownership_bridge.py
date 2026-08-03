@@ -61,6 +61,7 @@ class _BridgeStub:
         self._own_cache: dict = {}
         self._own_pending: set = set()
         self._own_lock = Lock()
+        self._OWN_CACHE_MAX = WavesBridge._OWN_CACHE_MAX
         self._own_pool = _SyncPool()
         self._OWN_TTL = WavesBridge._OWN_TTL
         self._OWN_TTL_BUSY = WavesBridge._OWN_TTL_BUSY
@@ -72,6 +73,7 @@ class _BridgeStub:
         for name in (
             "_track_lifecycle",
             "_record_ownership",
+            "_evict_own_cache_locked",
             "_note_download_base_ok",
             "ownershipOf",
             "_own_refresh",

@@ -1,38 +1,32 @@
-"""Regression: Back to Browse restores your scroll position, never the top.
+"""Regression: Back to Browse lands on your scroll position, never the top.
 
 THE BUG WE ARE FENCING OFF
 --------------------------
 Going Back from a drilled page (a playlist, an album, any long listing) to the
 Browse landing jumped the page to the top instead of the spot the user left.
 
-The browse scroll restore is armed on Back (``browsePane.pendingRestoreY``) and
-re-applied during layout. It disarmed itself once ``maxY >= pendingRestoreY``
-("we reached the target"), but ``browsePane._pageKey`` is notified BEFORE the
-section Repeater's model swaps, so on the page-key change ``contentHeight`` was
-still the OUTGOING page's. A playlist taller than the saved position cleared
-that check against a height the landing does not have yet, disarming the
-restore. The landing's shelves then rebuild through asynchronous Loaders:
-``contentHeight`` collapses (clamping ``contentY`` to the top) and the genuine
-layout pass that should have re-applied the restore finds it already spent.
-
 HOW THIS STAYS FIXED
 --------------------
-``applyRestore`` takes a ``mayDisarm`` flag: the page-key pass restores but may
-NOT spend the restore; only a real layout pass (``onContentHeightChanged``) may.
-The artist pane carries an identical copy of the mechanism and the same fix; it
-is exercised through the same navigation code, so this browse-level guard
-covers the shared logic.
+Browse renders through two always-alive panes (``browseLanding`` and
+``browseDrill``, both ``BrowseScroll``): navigation only flips which pane is
+visible, so the landing's ``contentY`` is simply still where the user left it.
+Nothing is rebuilt on Back and nothing needs restoring; this test fails if
+anyone reintroduces a teardown on the Back path (a model swap, a pane reset)
+that loses the position. The hold-in-place machinery that remains in
+``BrowseScroll`` covers CONTENT swaps (revalidate, endless-scroll growth); the
+artist pane carries its own copy of that mechanism.
 
 HOW IT IS RUN
 -------------
 The scenario boots the REAL ``Main.qml`` and drives ``openBrowseItem`` ->
-``navBack`` with a tall playlist over the async landing rebuild, asserting the
-landing returns to the saved offset. It lands at the top (exit 1) on the pre-fix
-tree and on the saved spot (exit 0) after. It runs in a SUBPROCESS: constructing
-the bridge installs a process-global Qt message handler / diagnostics logging
-that would otherwise leak into unrelated tests in the same interpreter (the
-repo's other QML checks, e.g. scratchpad/gate_qml.py, run standalone for the
-same reason). Promotion of ``scratchpad/browse_back_scroll_check.py``.
+``navBack`` with a playlist taller than the saved offset, asserting the
+landing shows again at the saved spot. It lands at the top (exit 1) on a
+regressed tree and on the saved spot (exit 0) otherwise. It runs in a
+SUBPROCESS: constructing the bridge installs a process-global Qt message
+handler / diagnostics logging that would otherwise leak into unrelated tests
+in the same interpreter (the repo's other QML checks, e.g.
+scratchpad/gate_qml.py, run standalone for the same reason). Promotion of
+``scratchpad/browse_back_scroll_check.py``.
 """
 
 from __future__ import annotations
@@ -173,9 +167,9 @@ def _run_scenario() -> int:
     root.setProperty("height", _WIN_H)
 
     def q(expr: str):
-        # Evaluate in Main.qml's own scope so its ids (browsePane, the nav
-        # functions) resolve. PySide6 returns evaluate()'s valueIsUndefined
-        # out-param as a tuple.
+        # Evaluate in Main.qml's own scope so its ids (the browse panes, the
+        # nav functions) resolve. PySide6 returns evaluate()'s
+        # valueIsUndefined out-param as a tuple.
         ctx = QQmlEngine.contextForObject(root)
         e = QQmlExpression(ctx, root, expr)
         r = e.evaluate()
@@ -214,22 +208,22 @@ def _run_scenario() -> int:
     if not pump(
         lambda: q("browsePageKey") == ""
         and not q("browseBuilding")
-        and q("browsePane.contentHeight") > q("browsePane.height") + 200
+        and q("browseLanding.contentHeight") > q("browseLanding.height") + 200
     ):
         print("Browse landing never became scrollable", file=sys.stderr)
         return _EXIT_PRECONDITION
     settle()
 
-    landing_ch = q("browsePane.contentHeight")
-    landing_max = max(0.0, landing_ch - q("browsePane.height"))
+    landing_ch = q("browseLanding.contentHeight")
+    landing_max = max(0.0, landing_ch - q("browseLanding.height"))
     if landing_max <= 100:
         print("no scrollable landing in this environment", file=sys.stderr)
         return _EXIT_PRECONDITION
 
     # 2. Scroll partway down and remember the spot.
     saved = round(landing_max * 0.6)
-    q(f"browsePane.contentY = {saved}")
-    saved = q("browsePane.contentY")
+    q(f"browseLanding.contentY = {saved}")
+    saved = q("browseLanding.contentY")
     if saved <= 10:
         print("could not establish a non-top scroll offset", file=sys.stderr)
         return _EXIT_PRECONDITION
@@ -240,21 +234,21 @@ def _run_scenario() -> int:
     bridge.browsePageLoaded.emit(_playlist())
     if not pump(
         lambda: q("browsePageKey") == "item:playlist:p1"
-        and (q("browsePane.contentHeight") - q("browsePane.height")) > saved
+        and (q("browseDrill.contentHeight") - q("browseDrill.height")) > saved
     ):
         print("playlist page never grew taller than the saved position", file=sys.stderr)
         return _EXIT_PRECONDITION
 
-    # 4. Back to Browse. The landing rebuilds through async Loaders, so wait for
-    #    contentHeight to return to the landing's height (browseBuilding is not
-    #    re-set on Back, so height, not the flag, is the settle signal).
+    # 4. Back to Browse. The landing pane never went away, so its height must
+    #    already be the landing's and its position must be the saved spot; the
+    #    pump only absorbs the event-loop turns the nav flip itself needs.
     q("navBack()")
-    if not pump(lambda: q("browsePageKey") == "" and abs(q("browsePane.contentHeight") - landing_ch) <= 1):
-        print("Browse landing never rebuilt to its original height after Back", file=sys.stderr)
+    if not pump(lambda: q("browsePageKey") == "" and abs(q("browseLanding.contentHeight") - landing_ch) <= 1):
+        print("Browse landing is not at its original height after Back", file=sys.stderr)
         return _EXIT_PRECONDITION
     settle()
 
-    final = q("browsePane.contentY")
+    final = q("browseLanding.contentY")
     restored = abs(final - saved) <= 2
     print(f"savedY={saved:.0f} finalY={final:.0f} restored={restored}", flush=True)
     return _EXIT_RESTORED if restored else _EXIT_REGRESSED

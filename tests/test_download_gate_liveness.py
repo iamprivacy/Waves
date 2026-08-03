@@ -7,7 +7,9 @@ ids that session never started). These tests pin the new behavior:
 
 * a recent real write to the base skips the probe entirely,
 * a probe timeout while downloads are running reads as busy, not dead,
-* a probe timeout with nothing running still raises the dialog,
+* a probe timeout with nothing running holds the download quietly (a cold
+  share warming up) and hands off to the recovery watch instead of raising
+  the dialog immediately,
 * held downloads accumulate per item and ALL replay on "Try again",
 * destination-folder creation retries transient errors instead of failing
   the whole album on one spurious EACCES.
@@ -31,6 +33,7 @@ class GateHost:
     """Just enough bridge surface for the gate methods to run on."""
 
     _BASE_OK_TTL_SEC = WavesBridge._BASE_OK_TTL_SEC
+    _WARMUP_DIALOG_DELAY_SEC = WavesBridge._WARMUP_DIALOG_DELAY_SEC
     _gate_reachability = WavesBridge._gate_reachability
     _note_download_base_ok = WavesBridge._note_download_base_ok
     _downloads_running = WavesBridge._downloads_running
@@ -38,6 +41,11 @@ class GateHost:
     _run_pending_downloads = WavesBridge._run_pending_downloads
     _probe_download_base = WavesBridge._probe_download_base
     _probe_folder_verdict = staticmethod(WavesBridge._probe_folder_verdict)
+    # Saves go through the guarded helper, which undoes the transient ffmpeg
+    # injections before writing (see tests/test_settings_save_guard.py).
+    _save_settings = WavesBridge._save_settings
+    _restore_ffmpeg_flags = WavesBridge._restore_ffmpeg_flags
+    _restore_ffmpeg_path = WavesBridge._restore_ffmpeg_path
 
     def __init__(self, base: str = "/Volumes/Share/Music") -> None:
         self.saved = 0
@@ -45,7 +53,9 @@ class GateHost:
         def save() -> None:
             self.saved += 1
 
-        self.settings = SimpleNamespace(data=SimpleNamespace(download_base_path=base), save=save)
+        self.settings = SimpleNamespace(data=SimpleNamespace(download_base_path=base, path_binary_ffmpeg=""), save=save)
+        self._ffmpeg_flag_prefs: dict = {}
+        self._ffmpeg_user_path = ""
         self._base_ok = ("", 0.0)
         self._pending_downloads = []
         self._pending_lock = Lock()
@@ -53,6 +63,13 @@ class GateHost:
         self.statuses: list[str] = []
         self.unreachable_emits: list[str] = []
         self.downloadFolderUnreachable = SimpleNamespace(emit=self.unreachable_emits.append)
+        self.watch_requests = 0
+
+        def watch_wanted() -> None:
+            self.watch_requests += 1
+
+        self._recoveryWatchWanted = SimpleNamespace(emit=watch_wanted)
+        self.settingsPersistedExternally = SimpleNamespace(emit=lambda *a: None)
 
     def _set_status(self, text: str) -> None:
         self.statuses.append(text)
@@ -72,7 +89,7 @@ def _probe_stub(host: GateHost, verdict: str, live: str | None = None, calls: li
 
 def test_recent_base_write_skips_the_probe():
     host = GateHost()
-    host._note_download_base_ok()
+    host._note_download_base_ok(host.settings.data.download_base_path)
     calls: list = []
     host._probe_download_base = _probe_stub(host, "dead", calls=calls)
     assert host._gate_reachability(lambda: None, "m1") is True
@@ -117,13 +134,20 @@ def test_probe_timeout_with_running_downloads_proceeds():
     assert host.unreachable_emits == []
 
 
-def test_probe_timeout_with_idle_queue_raises_the_dialog():
+def test_probe_timeout_with_idle_queue_waits_out_the_warmup_quietly():
+    """A mounted-but-cold SMB share hangs its first access while the session
+    reconnects. That used to raise the unreachable dialog instantly; now the
+    download is held with NO dialog and the recovery watch takes over (the
+    dialog comes only if the warm-up deadline passes, see the recovery tests)."""
     host = GateHost()
     host._queue = [{"qid": 1, "status": "done"}]
     host._probe_download_base = _probe_stub(host, "timeout")
     assert host._gate_reachability(lambda: None, "m1") is False
-    assert host.unreachable_emits == [host.settings.data.download_base_path]
+    assert host.unreachable_emits == []
+    assert host.watch_requests == 1
     assert len(host._pending_downloads) == 1
+    assert host._recovery_dialog_shown is False
+    assert host._recovery_dialog_deadline > time.monotonic()
 
 
 def test_probe_dead_raises_the_dialog_even_while_downloads_run():

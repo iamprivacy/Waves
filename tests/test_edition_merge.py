@@ -15,7 +15,9 @@ from tidaler.waves_ui.backend import (
     _as_member_of,
     _build_merge_plan,
     _MergeRec,
+    _PlanEntry,
     _track_isrc,
+    _TrackedDownload,
 )
 
 
@@ -125,8 +127,12 @@ def test_merge_pulls_shared_from_higher_quality_keeps_exclusives():
     identity, plan = _build_merge_plan([standard, deluxe], _recs_of, _rank_of)
 
     assert identity is deluxe  # complete edition supplies the identity/structure
-    assert [src.id for src, _n, _v in plan] == ["s-a", "s-b", "d-c"]
-    assert [n for _s, n, _v in plan] == [1, 2, 3]  # deluxe's numbering preserved
+    assert [entry.src.id for entry in plan] == ["s-a", "s-b", "d-c"]
+    assert [entry.track_num for entry in plan] == [1, 2, 3]  # deluxe's numbering preserved
+    # Every slot carries the IDENTITY edition's track id: that is the id the
+    # download is recorded and browsed under, even when the audio comes from
+    # another edition.
+    assert [entry.identity_id for entry in plan] == ["d-a", "d-b", "d-c"]
 
 
 def test_merge_three_editions_picks_best_source_per_track():
@@ -140,7 +146,8 @@ def test_merge_three_editions_picks_best_source_per_track():
     identity, plan = _build_merge_plan([standard, expanded, deluxe], _recs_of, _rank_of)
     assert identity is deluxe
     # A,B from standard (4); C from expanded (3) not deluxe (2); D only on deluxe.
-    assert [src.id for src, _n, _v in plan] == ["s-a", "s-b", "e-c", "d-d"]
+    assert [entry.src.id for entry in plan] == ["s-a", "s-b", "e-c", "d-d"]
+    assert [entry.identity_id for entry in plan] == ["d-a", "d-b", "d-c", "d-d"]
 
 
 def test_no_upgrade_returns_none():
@@ -176,6 +183,25 @@ def test_no_merge_when_template_not_a_superset():
     assert _build_merge_plan([standard, deluxe], _recs_of, _rank_of)[1] is not None
 
 
+def test_no_merge_when_an_editions_tracks_are_unknown():
+    # SAFETY: recs_of yields [] both when the track fetch FAILED and for a
+    # region-locked edition. Empty means unknown content, not no content: the
+    # superset guard would read 0 aligned < 0 recs and pass vacuously, and the
+    # tour edition's exclusive track would silently vanish from the download.
+    # The planner must refuse so the caller keeps the editions intact.
+    standard = _Album("std", [_Track("s-a", "A", 200), _Track("s-b", "B", 200)], rank=4)
+    deluxe = _Album(
+        "dlx",
+        [_Track("d-a", "A", 200), _Track("d-b", "B", 200), _Track("d-c", "C", 200)],
+        rank=2,
+    )
+    tour = _Album("tour", [], rank=3)  # fetch failed or region-locked: no recs
+
+    assert _build_merge_plan([standard, deluxe, tour], _recs_of, _rank_of) == (None, None)
+    # Sanity: without the unknown edition the same group DOES merge.
+    assert _build_merge_plan([standard, deluxe], _recs_of, _rank_of)[1] is not None
+
+
 # ---- _as_member_of: re-tag a COPY, never the cached original ----------------
 def test_as_member_of_overrides_on_a_copy():
     original_album = object()
@@ -183,10 +209,11 @@ def test_as_member_of_overrides_on_a_copy():
     track = _Track("t-1", "Song", 200, track_num=5, volume_num=1)
     track.album = original_album
 
-    member = _as_member_of(track, identity_album, 12, 2)
+    member = _as_member_of(track, identity_album, 12, 2, "identity-9")
 
     assert member is not track
     assert member.id == "t-1"  # same recording -> same stream
+    assert member.waves_identity_id == "identity-9"  # but recorded under the identity slot
     assert member.album is identity_album
     assert member.track_num == 12
     assert member.volume_num == 2
@@ -235,9 +262,9 @@ def test_download_merge_plan_calls_item_per_track():
 
     identity = object()
     plan = [
-        (_Track("s-a", "A", 200), 1, 1),
-        (_Track("s-b", "B", 210), 2, 1),
-        (_Track("d-c", "C", 180), 3, 1),
+        _PlanEntry(_Track("s-a", "A", 200), 1, 1, "d-a"),
+        _PlanEntry(_Track("s-b", "B", 210), 2, 1, "d-b"),
+        _PlanEntry(_Track("d-c", "C", 180), 3, 1, "d-c"),
     ]
     dl = _RecordingDownload()
     signals = _FakeSignals()
@@ -253,8 +280,10 @@ def test_download_merge_plan_calls_item_per_track():
         assert call["keep_album"] is True  # so item() won't re-fetch and clobber the identity
         assert call["event_stop"] is job_abort
     assert sorted(c["list_position"] for c in dl.calls) == [1, 2, 3]
-    # Each source recording is preserved (the stream still comes from its edition).
+    # Each source recording is preserved (the stream still comes from its edition)
+    # while every member carries its identity slot for record-keeping.
     assert {c["media"].id for c in dl.calls} == {"s-a", "s-b", "d-c"}
+    assert {c["media"].waves_identity_id for c in dl.calls} == {"d-a", "d-b", "d-c"}
     # List progress reaches 100% once every track is done.
     assert signals.list_item.values and signals.list_item.values[-1] == pytest.approx(100.0)
 
@@ -263,7 +292,7 @@ def test_download_merge_plan_raises_when_a_track_fails():
     # A partially-failed merge must NOT be reported as a clean success.
     bridge = WavesBridge.__new__(WavesBridge)
     bridge.settings = _FakeSettings()
-    plan = [(_Track("a", "A", 100), 1, 1), (_Track("b", "B", 100), 2, 1)]
+    plan = [_PlanEntry(_Track("a", "A", 100), 1, 1, "a"), _PlanEntry(_Track("b", "B", 100), 2, 1, "b")]
 
     class _PartialDownload:
         def item(self, **kw):
@@ -271,6 +300,84 @@ def test_download_merge_plan_raises_when_a_track_fails():
 
     with pytest.raises(RuntimeError):
         bridge._download_merge_plan(_PartialDownload(), _FakeSignals(), threading.Event(), object(), "tmpl", plan)
+
+
+# ---- queue drawer registry: rows keyed by identity ids ----------------------
+def test_seed_merge_registry_keys_rows_by_identity_id():
+    # loadQueueTracks fetches the IDENTITY album's track list and joins it to
+    # this registry by id; source-id keys would miss, freezing rows at pending
+    # and appending ghost rows (a 3-track album rendered as 5 rows).
+    from tidaler.waves_ui.backend import _seed_merge_registry
+
+    plan = [
+        _PlanEntry(_Track("s-a", "A", 200), 1, 1, "d-a"),
+        _PlanEntry(_Track("d-c", "C", 180), 2, 1, "d-c"),
+    ]
+    reg = _seed_merge_registry(plan)
+    assert sorted(reg) == ["d-a", "d-c"]
+    assert all(reg[k]["id"] == k and reg[k]["status"] == "pending" for k in reg)
+    assert _seed_merge_registry(None) == {}
+
+
+# ---- ownership gate: merge members skip only at THIS job's destination -------
+class _GateSettingsData:
+    album_track_num_pad_min = 0
+    filename_delimiter_artist = ", "
+    filename_delimiter_album_artist = ", "
+    use_primary_album_artist = False
+
+
+class _GateSettings:
+    data = _GateSettingsData()
+
+
+def _gate_dl(records: dict, tmp_path) -> _TrackedDownload:
+    dl = _TrackedDownload.__new__(_TrackedDownload)  # no engine init: gate-only
+    dl._ownership_of = lambda mid: records.get(mid)
+    dl._target_rank = 2
+    dl.settings = _GateSettings()
+    dl.path_base = str(tmp_path)
+    return dl
+
+
+def test_merge_member_owned_elsewhere_is_not_skipped(tmp_path):
+    # The identity track is owned, but in ANOTHER folder (the standard
+    # edition's, or a playlist's). Skipping would leave a hole in the merged
+    # album while the job still reports done, so the gate must not fire.
+    member = _as_member_of(_Track("src-1", "Song", 200), object(), 1, 1, "id-1")
+    records = {"id-1": {"path": str(tmp_path / "Standard" / "01 Song.flac"), "quality_rank": 4}}
+    dl = _gate_dl(records, tmp_path)
+
+    assert dl._ownership_verdict(member, "Merged/file") is None
+
+
+def test_merge_member_owned_at_the_destination_is_skipped(tmp_path):
+    member = _as_member_of(_Track("src-1", "Song", 200), object(), 1, 1, "id-1")
+    records = {"id-1": {"path": str(tmp_path / "Merged" / "01 Song.flac"), "quality_rank": 4}}
+    dl = _gate_dl(records, tmp_path)
+
+    assert dl._ownership_verdict(member, "Merged/file") == "skip"
+
+
+def test_merge_member_is_looked_up_by_identity_id_not_source_id(tmp_path):
+    # The download gets RECORDED under the identity id, so a record under the
+    # source edition's id (a leftover from the pre-fix era, or that edition's
+    # own download) must not satisfy the gate.
+    member = _as_member_of(_Track("src-1", "Song", 200), object(), 1, 1, "id-1")
+    records = {"src-1": {"path": str(tmp_path / "Merged" / "01 Song.flac"), "quality_rank": 4}}
+    dl = _gate_dl(records, tmp_path)
+
+    assert dl._ownership_verdict(member, "Merged/file") is None
+
+
+def test_plain_item_gate_is_unchanged_by_the_destination_rule(tmp_path):
+    # A non-merge item keeps the deliberate cross-folder dedupe (a playlist
+    # track owned via an album download stays skipped, no duplicate file).
+    track = _Track("t-1", "Song", 200)
+    records = {"t-1": {"path": str(tmp_path / "SomeAlbum" / "01 Song.flac"), "quality_rank": 4}}
+    dl = _gate_dl(records, tmp_path)
+
+    assert dl._ownership_verdict(track, "Playlists/file") == "skip"
 
 
 # ---- _album_key keeps same-titled editions with different track counts apart -

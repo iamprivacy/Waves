@@ -49,6 +49,8 @@ class _Stub:
         self._merge_plans: dict = {}
         self._pending_downloads: list = []
         self._pending_lock = Lock()
+        self._queue_lock = Lock()
+        self._objs: dict = {"album": {}, "track": {}, "playlist": {}, "mix": {}, "video": {}}
         self._queue_emit_suspended = False
         self._paused = False
         self._event_run = Event()

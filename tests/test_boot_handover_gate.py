@@ -110,6 +110,7 @@ def _run_scenario() -> int:
     q("bootSeq.stop()")
     q("bootHandover.stop()")
     q("bootBlk.stop()")
+    q("bootZoom.stop()")
     q("handoverCap.stop()")
     q("handoverCap.expired = false")
     q("bootVer.shown = 1")
@@ -142,13 +143,22 @@ def _run_scenario() -> int:
     # under an interface that is fading in. The payload waits instead, and is
     # applied on the other side as an ordinary in-place refresh.
     q("bootHandover.stop()")
+    q("bootBlk.stop()")
+    q("bootZoom.stop()")
     q("bootOverlay.done = false")
     q("browseSections = [{rowKind: 'albums', title: 'Already here', items: []}]")
     q("_browseParked = null")
     q("browseBuilding = false")
+    q("bootVer.shown = 1")
+    q("bootVer.text = 'v0.0.0'")  # give the drain a readout to walk
     q("bootHandover.start()")
-    settle(200)  # mid-reveal: zooming out, interface fading up
-    mid_reveal = bool(q("bootHandover.running")) and not bool(q("bootOverlay.done"))
+    settle(200)  # mid-reveal: the version drain is walking its cells
+    # The visible handover is now the drain (bootBlk) plus the zoom it starts
+    # from its own last tick (bootZoom); bootHandover itself only lights the
+    # drain, so "mid-reveal" is any of the three still running.
+    mid_reveal = bool(q("bootHandover.running || bootBlk.running || bootZoom.running")) and not bool(
+        q("bootOverlay.done")
+    )
     q(
         "waves.browseLoaded({sections: [{rowKind: 'albums', title: 'Refreshed', items: []}], genres: [], moods: [], decades: []})"
     )
