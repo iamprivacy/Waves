@@ -226,7 +226,27 @@ def format_path_media(
             )
             result = result.replace(template_str, value)
 
-    return result
+    return _drop_empty_segments(result)
+
+
+def _drop_empty_segments(path_relative: str) -> str:
+    """Collapse empty components out of a formatted relative media path.
+
+    A token whose value sanitizes to ``""`` is substituted blind, and both
+    default templates open with ``{artist_name}``. An artist name that empties
+    out under pathvalidate (``?``, ``*``, ``<>``, ``|``, ``"``, or a name of
+    only dots) therefore made the relative path start with a separator, and
+    ``Path(path_base) / file_name_relative`` DISCARDS the base when the
+    right-hand operand is absolute. On Windows ``PureWindowsPath`` keeps the
+    drive, so the track landed outside the download folder (at ``C:\\<album>``)
+    and the queue still reported done; on POSIX the write failed at the volume
+    root with an unexplained errno 30. ``_no_traversal`` covers ``..`` escaping
+    the base and does not address this shape.
+
+    Dropping empty components keeps the path relative and inside the base, and
+    also tidies the doubled separator an emptied mid-template token leaves.
+    """
+    return "/".join(part for part in re.split(r"[\\/]+", path_relative) if part)
 
 
 def format_str_media(
@@ -453,7 +473,10 @@ def _format_ids(
             return str(media.album.id)
     # Handle ISRC
     elif name == "isrc" and isinstance(media, Track):
-        return media.isrc
+        # "" (my token, no value) rather than None ("not my token"): None
+        # leaves a literal {isrc} in the folder name, "" is substituted and
+        # the empty segment is collapsed away.
+        return media.isrc or ""
     elif name == "album_artist_id" and isinstance(media, Album):
         return str(media.artist.id)
     elif name == "track_artist_id" and isinstance(media, Track):
@@ -517,10 +540,14 @@ def _format_dates(
         elif isinstance(media, Track):
             return str(media.album.year)
     elif name == "album_date":
+        # "" (my token, no value) rather than None ("not my token"): None
+        # leaves a literal {album_date} in the folder name (back-catalogue
+        # albums often have a year but no full date), "" is substituted and
+        # the empty segment is collapsed away.
         if isinstance(media, Album):
-            return media.release_date.strftime("%Y-%m-%d") if media.release_date else None
+            return media.release_date.strftime("%Y-%m-%d") if media.release_date else ""
         elif isinstance(media, Track):
-            return media.album.release_date.strftime("%Y-%m-%d") if media.album.release_date else None
+            return media.album.release_date.strftime("%Y-%m-%d") if media.album.release_date else ""
 
     return None
 
@@ -652,6 +679,39 @@ def _no_traversal(part: str) -> str:
     return "_" if part in (".", "..") else part
 
 
+def _shorten_to_valid_length(path: pathlib.Path, sanitize) -> pathlib.Path:
+    """Shrink a too-long directory path until the platform accepts it.
+
+    Deterministic (the same input always shortens the same way, so every track
+    of an album still lands in one folder): halve the deepest component's name
+    repeatedly, and once it is down to a single character drop it and move one
+    level up. The shallow components (the user's download base) go last, so
+    the result stays inside the library for any realistic base path.
+
+    Args:
+        path (pathlib.Path): The over-long directory path.
+        sanitize: Callable that returns the path if valid and raises
+            ``ValidationError`` (PV1101) when it is still too long.
+
+    Returns:
+        pathlib.Path: The shortened, valid path.
+    """
+    parts = list(path.parts)
+    while len(parts) > 1:
+        candidate = pathlib.Path(*parts)
+        try:
+            return sanitize(candidate)
+        except ValidationError as e:
+            if not str(e).startswith("[PV1101]"):
+                raise
+        name = parts[-1]
+        if len(name) > 1:
+            parts[-1] = name[: max(1, len(name) // 2)]
+        else:
+            parts.pop()
+    return sanitize(pathlib.Path(*parts))
+
+
 def path_file_sanitize(path_file: pathlib.Path, adapt: bool = False, uniquify: bool = False) -> pathlib.Path:
     """Sanitize a file path to ensure it is valid and optionally make it unique.
 
@@ -687,13 +747,19 @@ def path_file_sanitize(path_file: pathlib.Path, adapt: bool = False, uniquify: b
         ]
     )
 
+    def _sanitize(p: pathlib.Path) -> pathlib.Path:
+        return sanitize_filepath(p, replacement_text="_", validate_after_sanitize=True, platform="auto")
+
     try:
-        sanitized_path = sanitize_filepath(
-            sanitized_path, replacement_text="_", validate_after_sanitize=True, platform="auto"
-        )
+        sanitized_path = _sanitize(sanitized_path)
     except ValidationError as e:
         if adapt and str(e).startswith("[PV1101]"):
-            sanitized_path = pathlib.Path.home()
+            # The whole path exceeds the platform length cap (realistically
+            # only Windows' 260). The old fallback substituted Path.home(),
+            # silently relocating the track OUTSIDE the download base into the
+            # user's home folder. Shorten the deepest components instead so
+            # the file stays under the library base.
+            sanitized_path = _shorten_to_valid_length(sanitized_path, _sanitize)
         else:
             raise
 
@@ -715,12 +781,15 @@ def path_file_uniquify(path_file: pathlib.Path) -> pathlib.Path:
 
     if unique_suffix:
         file_suffix = unique_suffix + path_file.suffix
-        # For most OS filename has a character limit of 255.
-        path_file = (
-            path_file.parent / (str(path_file.stem)[: -len(file_suffix)] + file_suffix)
-            if len(str(path_file.parent / (path_file.stem + unique_suffix))) > FILENAME_LENGTH_MAX
-            else path_file.parent / (path_file.stem + unique_suffix)
-        )
+        # Only the FILENAME is bounded by the 255-character limit. The old
+        # check measured the WHOLE path against it, so a short name at a deep
+        # path took the truncation branch, and that branch chopped a fixed
+        # slice off the stem's end (an 8-character stem was annihilated to
+        # "_01.flac"). Measure the name alone and keep as much stem as fits.
+        stem = str(path_file.stem)
+        if len(stem) + len(file_suffix) > FILENAME_LENGTH_MAX:
+            stem = stem[: max(1, FILENAME_LENGTH_MAX - len(file_suffix))]
+        path_file = path_file.parent / (stem + file_suffix)
 
     return path_file
 
@@ -748,6 +817,75 @@ def file_unique_suffix(path_file: pathlib.Path, separator: str = "_") -> str:
     return unique_suffix
 
 
+def strip_apple_double(path_file: pathlib.Path) -> None:
+    """Best-effort removal of macOS AppleDouble litter for one file.
+
+    On network mounts that cannot store extended attributes in-band (WebDAV is
+    the classic case), macOS materialises every xattr it wants to attach (for
+    example com.apple.provenance on newly created files) as a hidden 4 KB
+    sibling named ``._<name>``. Users browsing the share from another OS see
+    these as ghost files next to every track and cover. Removing the xattrs
+    from the file makes macOS's own WebDAV client retire the server-side
+    companion. Deliberately prevention-only: this function never deletes or
+    unlinks any file itself, it only edits attribute metadata on the one file
+    Waves just wrote.
+
+    macOS only, and every step is best-effort: metadata cleanup must never
+    fail a download that already landed.
+
+    Args:
+        path_file (pathlib.Path): The final destination file to clean up.
+    """
+    if sys.platform != "darwin":
+        return
+
+    for name_xattr in _xattr_names(path_file):
+        _xattr_remove(path_file, name_xattr)
+
+
+def _xattr_names(path_file: pathlib.Path) -> list[str]:
+    """List extended attribute names of a file via libc (macOS).
+
+    Python's os.listxattr exists only on Linux, so macOS goes through ctypes.
+    Best-effort: any failure returns an empty list.
+
+    Args:
+        path_file (pathlib.Path): The file to inspect.
+
+    Returns:
+        list[str]: Extended attribute names, empty on any failure.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        path_bytes: bytes = os.fsencode(str(path_file))
+        size: int = libc.listxattr(path_bytes, None, 0, 0)
+        if size <= 0:
+            return []
+        buffer = ctypes.create_string_buffer(size)
+        size = libc.listxattr(path_bytes, buffer, size, 0)
+        if size <= 0:
+            return []
+        return [name.decode("utf-8", errors="replace") for name in buffer.raw[:size].split(b"\x00") if name]
+    except Exception:
+        return []
+
+
+def _xattr_remove(path_file: pathlib.Path, name_xattr: str) -> None:
+    """Remove one extended attribute via libc (macOS), best-effort.
+
+    Args:
+        path_file (pathlib.Path): The file to modify.
+        name_xattr (str): The attribute name to remove.
+    """
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.removexattr(os.fsencode(str(path_file)), name_xattr.encode("utf-8"), 0)
+
+
 def check_file_exists(path_file: pathlib.Path, extension_ignore: bool = False) -> bool:
     """Check if a file exists.
 
@@ -767,7 +905,16 @@ def check_file_exists(path_file: pathlib.Path, extension_ignore: bool = False) -
     else:
         path_files: list[str] = [str(path_file)]
 
-    return any(os.path.isfile(_file) for _file in path_files)
+    def _nonempty(candidate: str) -> bool:
+        # A zero-byte file under a final name is a truncation artifact (a
+        # crash between create and write), never a finished download; treating
+        # it as existing would trust it forever and skip the re-download.
+        try:
+            return os.path.isfile(candidate) and os.path.getsize(candidate) > 0
+        except OSError:
+            return False
+
+    return any(_nonempty(_file) for _file in path_files)
 
 
 def resource_path(relative_path: str) -> str:

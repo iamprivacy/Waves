@@ -1,7 +1,9 @@
 import contextlib
 import json
+import logging
 import os
 import shutil
+import time
 from collections.abc import Callable
 from json import JSONDecodeError
 from pathlib import Path
@@ -19,6 +21,34 @@ from tidaler.helper.decorator import SingletonMeta
 from tidaler.helper.path import path_config_base, path_file_settings, path_file_token
 from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.cfg import Token as ModelToken
+
+logger = logging.getLogger("waves.config")
+
+# Windows answers os.replace with a sharing violation (WinError 32) while ANY
+# other process holds the target open: an antivirus scanning the file, a backup
+# tool syncing Roaming, or a second app instance. Those locks are usually gone
+# within a moment, so the swap is retried briefly before the error is real.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_RETRY_DELAY_SEC = 0.2
+
+
+def _replace_with_retry(tmp_path: str, file_path: str) -> None:
+    """os.replace with a short bounded retry for transient Windows file locks.
+
+    On final failure the temp file is removed (it is this process's own
+    throwaway sibling) and the error propagates to the caller.
+    """
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp_path, file_path)
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SEC)
+        else:
+            return
 
 
 class BaseConfig:
@@ -48,7 +78,7 @@ class BaseConfig:
             json.dump(obj_json_config, f, indent=4)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, self.file_path)
+        _replace_with_retry(tmp_path, self.file_path)
 
     def set_option(self, key: str, value: Any) -> None:
         value_old: Any = getattr(self.data, key)
@@ -88,7 +118,18 @@ class BaseConfig:
             self.data = self.cls_model()
 
         # Call save in case of we need to update the saved config, due to changes in code.
-        self.save(settings_json)
+        # This write-back is an optional upgrade persist: if another process
+        # still holds the file after the retries (a second instance, an
+        # overzealous antivirus), the app must start on the in-memory settings
+        # instead of dying with an uncaught PermissionError at launch. The
+        # next successful save persists the same upgrades.
+        try:
+            self.save(settings_json)
+        except OSError as e:
+            logger.warning(
+                "Config write-back blocked by another process; continuing with in-memory settings (%s)",
+                type(e).__name__,
+            )
 
         return result
 
@@ -132,7 +173,16 @@ class Settings(BaseConfig, metaclass=SingletonMeta):
         self.file_path = path_file_settings()
         self.read(self.file_path)
         if _migrate_settings(self.data):
-            self.save()
+            # Same degrade as read()'s write-back: a still-locked file must not
+            # abort startup; the migrations live in memory and persist on the
+            # next successful save (their markers keep them one-time).
+            try:
+                self.save()
+            except OSError as e:
+                logger.warning(
+                    "Settings migration persist blocked by another process; continuing in memory (%s)",
+                    type(e).__name__,
+                )
 
 
 class Tidal(BaseConfig, metaclass=SingletonMeta):

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
@@ -8,6 +9,8 @@ from tidalapi.user import LoggedInUser
 
 from tidaler.constants import FAVORITES, MediaType
 from tidaler.helper.exceptions import MediaUnknown
+
+logger = logging.getLogger(__name__)
 
 
 def name_builder_artist(media: Track | Video | Album, delimiter: str = ", ") -> str:
@@ -55,7 +58,9 @@ def name_builder_album_artist(media: Track | Album, first_only: bool = False, de
     album_artists = get_album_artists(media)
 
     if first_only:
-        return album_artists[0]
+        # An album with no main-artist credit (various-artists edge cases)
+        # must not fail the whole download with an IndexError.
+        return album_artists[0] if album_artists else ""
 
     return delimiter.join(album_artists)
 
@@ -238,8 +243,17 @@ def user_media_lists(session: Session) -> dict[str, list]:
     # Combine folders and playlists
     all_playlists = folders + playlists
 
-    # Get mixes
-    user_mixes = session.mixes().categories[0].items
+    # Get mixes. Degrade to "no mixes" on any failure: this is the LAST
+    # statement, so an unguarded raise here throws away all the playlist and
+    # folder paging above, nothing gets cached, every retry repeats the whole
+    # sweep, and the user reads "0 playlists" instead of an error.
+    user_mixes: list = []
+    try:
+        categories = session.mixes().categories or []
+        if categories:
+            user_mixes = categories[0].items
+    except Exception:
+        logger.exception("Could not load the user's mixes; keeping the playlists")
 
     return {"playlists": all_playlists, "mixes": user_mixes}
 

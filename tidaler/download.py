@@ -47,6 +47,7 @@ from tidaler.constants import (
     CHUNK_SIZE,
     COVER_NAME,
     EXTENSION_LYRICS,
+    FILENAME_LENGTH_MAX,
     METADATA_EXPLICIT,
     METADATA_LOOKUP_UPC,
     PLAYLIST_EXTENSION,
@@ -66,6 +67,7 @@ from tidaler.helper.path import (
     check_file_exists,
     format_path_media,
     path_file_sanitize,
+    strip_apple_double,
     url_to_filename,
 )
 from tidaler.helper.tidal import (
@@ -78,7 +80,12 @@ from tidaler.helper.tidal import (
 from tidaler.metadata import Metadata, MetadataUnreadable
 from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from tidaler.model.gui_data import ProgressBars
+from tidaler.waves_ui.diagnostics import content as log_content
 from tidaler.waves_ui.manifest import overgenerated_tail_urls
+
+# Characters _stage_and_swap adds around the destination name: a leading dot,
+# a dot-separated uuid4 (36) and the ".tmp" suffix.
+_STAGING_NAME_OVERHEAD: int = len(f"..{uuid4()}.tmp")
 
 
 # TODO: Set appropriate client string and use it for video download.
@@ -355,15 +362,26 @@ class Download:
             progress_total: int = urls_count
             block_size: int | None = None
         elif urls_count == 1:
+            block_size = 1048576
             r = None
             try:
-                # Get file size and compute progress steps
-                r = requests.head(urls[0], timeout=REQUESTS_TIMEOUT_SEC)
+                # Get file size and compute progress steps. Ride the shared
+                # pooled session (Retry(total=5), preloaded SSLContext), never
+                # a bare requests call, and follow redirects so a 3xx does not
+                # read as a content-length of 0.
+                r = self._shared_http().head(urls[0], timeout=REQUESTS_TIMEOUT_SEC, allow_redirects=True)
                 r.raise_for_status()
 
                 total_size_in_bytes: int = int(r.headers.get("content-length", 0))
-                block_size = 1048576
                 progress_total = total_size_in_bytes / block_size
+            except Exception as error:
+                # The probe only sizes the progress bar; a blip here must not
+                # fail the track. Fall back to an indeterminate total.
+                # fn_logger may be a plain wrapper without .exception, so this
+                # stays .error (bound first, which also sidesteps TRY400).
+                log_error = self.fn_logger.error
+                log_error(f"Could not size the download, progress will be indeterminate: {error}")
+                progress_total = None
             finally:
                 if r:
                     r.close()
@@ -522,7 +540,9 @@ class Download:
             result_merge = self._segments_merge(path_file, dl_segment_results, n_tail_spurious)
 
             if not result_merge:
-                self.fn_logger.error(f"Something went wrong while writing to {media.name}. File is corrupt!")
+                self.fn_logger.error(
+                    f"Something went wrong while writing to {log_content(media.name)}. File is corrupt!"
+                )
             elif isinstance(media, Track) and stream_manifest.is_encrypted:
                 key, nonce = decrypt_security_token(stream_manifest.encryption_key)
                 tmp_path_file_decrypted = path_file.with_suffix(".decrypted")
@@ -1313,7 +1333,7 @@ class Download:
             # Handle metadata, lyrics, and cover
             self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
 
-            self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
+            self.fn_logger.info(f"Downloaded item '{log_content(name_builder_item(media))}'.")
 
             # Move final file to the configured destination directory.
             return self._move_file(tmp_path_file, path_media_dst, overwrite=overwrite), path_media_dst
@@ -1462,10 +1482,22 @@ class Download:
                 self.fn_logger.debug(f"Symlink: {path_media_src} -> {path_media_dst}")
                 path_media_dst_relative: pathlib.Path = path_media_dst.relative_to(path_media_src.parent, walk_up=True)
 
-                if self._unlink_with_retry(path_media_src):
-                    path_media_src.symlink_to(path_media_dst_relative)
-                else:
-                    self.fn_logger.error(f"Unable to replace source with symlink: {path_media_src}")
+                # The playlist directory may not exist yet: when the track was
+                # found already in the track dir the download (and with it the
+                # only ensure of this parent) was skipped entirely, so the
+                # symlink would raise FileNotFoundError and fail the whole
+                # playlist job. Ensure it, and never let a failed symlink (a
+                # convenience pointer, the audio is safe in the track dir)
+                # crash the run.
+                try:
+                    self._ensure_directory(path_media_src.parent)
+                    if self._unlink_with_retry(path_media_src):
+                        path_media_src.symlink_to(path_media_dst_relative)
+                    else:
+                        self.fn_logger.error(f"Unable to replace source with symlink: {path_media_src}")
+                except OSError as error:
+                    # fn_logger may be a plain callable wrapper without .exception
+                    self.fn_logger.error(f"Unable to create playlist symlink {path_media_src}: {error}")  # noqa: TRY400
 
         return path_media_dst
 
@@ -1622,6 +1654,12 @@ class Download:
         """
         with path_source.open("rb") as file_source, path_destination.open("wb") as file_destination:
             shutil.copyfileobj(file_source, file_destination, length=self._COPY_BUFFER_BYTES)
+            # Flush to stable storage before the caller renames this over the
+            # final name: the swap's crash-safety promise (a power cut leaves
+            # at most the throwaway temp, never a truncated file under the
+            # real name) holds only if the bytes are durable before rename.
+            file_destination.flush()
+            os.fsync(file_destination.fileno())
 
     def _move_file(
         self,
@@ -1680,7 +1718,14 @@ class Download:
 
             return self._stage_and_swap(path_file_source, path_destination, skip_if_exists)
 
-        return self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
+        moved: bool = self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
+
+        # The file is in place; drop the xattrs macOS attached on creation so
+        # WebDAV-backed destinations do not keep a ._ AppleDouble ghost per file.
+        if moved:
+            strip_apple_double(path_destination)
+
+        return moved
 
     def _stage_and_swap(
         self,
@@ -1707,7 +1752,13 @@ class Download:
         Returns:
             bool: True if the destination file is in place.
         """
-        path_destination_tmp: pathlib.Path = path_destination.with_name(f".{path_destination.name}.{uuid4()}.tmp")
+        # The staging decoration (dot prefix, uuid, .tmp) adds 42 characters to
+        # a destination name that is itself allowed to reach the filesystem's
+        # 255 cap, so a long track name would make every stage attempt raise
+        # ENAMETOOLONG deterministically (all retries fail the same way).
+        # Truncate the readable part; the uuid alone carries the uniqueness.
+        base_name: str = path_destination.name[: FILENAME_LENGTH_MAX - _STAGING_NAME_OVERHEAD]
+        path_destination_tmp: pathlib.Path = path_destination.with_name(f".{base_name}.{uuid4()}.tmp")
         try:
             self._copy_file_contents(path_file_source, path_destination_tmp)
             path_destination_tmp.replace(path_destination)
@@ -1915,7 +1966,7 @@ class Download:
                     lyrics = lyrics_synced
             except Exception:
                 lyrics = ""
-                self.fn_logger.debug(f"Could not retrieve lyrics for `{name_builder_item(track)}`.")
+                self.fn_logger.debug(f"Could not retrieve lyrics for `{log_content(name_builder_item(track))}`.")
 
         if lyrics and self.settings.data.lyrics_file:
             path_lyrics = self.lyrics_to_file(path_media.parent, lyrics)
@@ -2058,7 +2109,7 @@ class Download:
         if self.settings.data.playlist_create:
             self.playlist_populate(set(result_dirs), list_media_name, is_album, sort_by_track_num)
 
-        self.fn_logger.info(f"Finished list '{list_media_name}'.")
+        self.fn_logger.info(f"Finished list '{log_content(list_media_name)}'.")
 
     def _setup_collection_download_context(
         self,
@@ -2146,8 +2197,12 @@ class Download:
 
             return result_dirs
 
-        # Iterate through list items
-        while not progress.finished:
+        # Iterate through list items. Gate on THIS collection's own task, never on
+        # `progress.finished`: that is `all(task.finished)` over every task on the
+        # bar, including the per-track ones, and a track task only completes on
+        # success. A single failed track therefore left the whole item list being
+        # re-submitted forever, re-downloading every sibling on each pass.
+        while not progress.tasks[progress_task].finished:
             with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
                 # Dispatch all download tasks to worker threads
                 download_futures: list[futures.Future] = [
@@ -2247,7 +2302,11 @@ class Download:
             path_tracks: list[pathlib.Path] = []
 
             for extension_audio in AudioExtensionsValid:
-                path_tracks = path_tracks + list(dir_scoped.glob(f"*{extension_audio!s}"))
+                # pathlib's glob matches hidden files, so filter dotfiles: macOS
+                # AppleDouble ghosts (._Track.flac) must never become playlist entries.
+                path_tracks = path_tracks + [
+                    p for p in dir_scoped.glob(f"*{extension_audio!s}") if not p.name.startswith(".")
+                ]
 
             # Sort alphabetically, e.g. if items are prefixed with numbers
             if sort_alphabetically:
@@ -2271,6 +2330,10 @@ class Download:
                     # line ending. Using os.linesep here would double-translate on Windows
                     # ('\r\n' -> '\r\r\n') and corrupt the entries.
                     f.write(str(media_file_target) + "\n")
+
+            # Written directly at the destination, so it needs the same
+            # AppleDouble cleanup the moved files get.
+            strip_apple_double(path_playlist)
 
             result.append(path_playlist)
 
