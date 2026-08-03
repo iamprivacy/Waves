@@ -29,6 +29,15 @@ from threading import Lock
 # default to 16 / 44100), so the tier string is the only trustworthy signal.
 QUALITY_RANK = {"LOW": 0, "HIGH": 1, "LOSSLESS": 2, "HI_RES_LOSSLESS": 3}
 
+
+def _nonempty_file(path: str) -> bool:
+    """A recorded path counts as surviving only if it holds actual bytes."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
 # Columns beyond the primary key, with the type used to ADD them to an older DB.
 # CREATE TABLE below carries the full schema; this list only drives the
 # forward-compatible ALTER guard, so every entry must be nullable or defaulted
@@ -245,9 +254,11 @@ class OwnershipStore:
                     (str(track_id), str(user_id)),
                 ).fetchall()
         # Existence check is intentionally OUTSIDE the lock: it can stat the disk,
-        # and a read must never hold up a worker-thread write behind it.
+        # and a read must never hold up a worker-thread write behind it. A
+        # zero-byte survivor is a truncation artifact, not a copy: skip it (not
+        # removed, like a deleted path) so the track reads as wanted again.
         for path, tier, rank, mode, depth, rate, codecs, recorded_at in rows:
-            if path and os.path.exists(path):
+            if path and _nonempty_file(path):
                 return {
                     "owned": True,
                     "path": path,
