@@ -112,10 +112,49 @@ Item {
             // (e.g. "downloads"), so the folder gate can deep-link a regular
             // section the same way the update notice targets its card.
             if (it && (it.modelData.card === cardId || it.modelData.id === cardId)) {
+                // An explicit destination outranks the remembered spot, which
+                // would otherwise be re-applied on the same open and fight it.
+                page.pendingY = -1
                 settingsFlick.contentY = Math.max(0, Math.min(it.y, settingsFlick.contentHeight - settingsFlick.height))
                 return
             }
         }
+    }
+
+    // ---- Holding your place across tabs ---------------------------------
+    // The page stays mounted while another tab shows, but hiding it collapses
+    // its Flickable to zero height and StopAtBounds then clamps contentY to
+    // the top. Staying mounted is therefore not enough to keep the spot: the
+    // position has to be recorded, and the clamp itself must not be recorded
+    // (it lands while the height is 0, which is exactly how it is told apart
+    // from a real scroll). Restored on the way back in, in the same layout
+    // pass the height returns, so the page paints where it was rather than
+    // scrolling there (see the app-wide no-visible-scroll rule).
+    property real keptY: 0
+    property real pendingY: -1
+    // Which sections the user opened or shut by hand. Kept on the page, not
+    // on the cards: `groups` is reassigned on every schema refresh (saving a
+    // setting triggers one), and that destroys and rebuilds every delegate,
+    // taking their open state with it. Only a real click writes here, so the
+    // auto-open rules below still decide anything the user never touched.
+    property var openSections: ({})
+    function sectionOpen(id, dflt) {
+        var v = openSections[id]
+        return v === undefined ? dflt : v
+    }
+    function setSectionOpen(id, on) {
+        var m = Object.assign({}, openSections)
+        m[id] = on
+        openSections = m
+    }
+    // Where the page is scrolled to, for anything outside that needs to read
+    // or set it (and for the bench that pins this behaviour).
+    property alias scrollY: settingsFlick.contentY
+    property alias scrollViewport: settingsFlick
+    function _restoreScroll() {
+        if (pendingY < 0 || settingsFlick.height <= 0) return
+        settingsFlick.contentY = Math.max(0, Math.min(pendingY, settingsFlick.contentHeight - settingsFlick.height))
+        pendingY = -1
     }
 
     function val(f) { return editMap[f.key] !== undefined ? editMap[f.key] : f.value }
@@ -163,6 +202,12 @@ Item {
         // /C:/…, drop the leading slash before the drive letter so the result is a
         // valid path (Linux file:///home/… already yields /home/… and is untouched).
         if (/^\/[A-Za-z]:/.test(s)) s = s.substring(1)
+        // A network share puts its host in the URL authority: \\nas\music (or
+        // //nas/music) becomes file://nas/music, which the strip above turns
+        // into the RELATIVE "nas/music"; saved like that, downloads land in a
+        // nas/music folder beside the working directory. Restore the UNC form.
+        else if (s === "localhost" || s.indexOf("localhost/") === 0) s = s.substring(9) || "/"
+        else if (s.length > 0 && s[0] !== "/") s = "//" + s
         return s
     }
     // Inverse of urlToPath for a path's parent directory: file URL for the
@@ -171,7 +216,11 @@ Item {
     function pathUrl(p) {
         var s = String(p || "").trim()
         if (s === "") return ""
-        // Windows drive-letter paths need the extra slash (file:///C:/…).
+        // Windows drive-letter paths need the extra slash (file:///C:/…); a
+        // UNC path (//nas/music or \\nas\music) keeps its host in the
+        // authority (file://nas/…).
+        if (/^\\\\/.test(s)) s = "//" + s.substring(2).replace(/\\/g, "/")
+        if (/^\/\//.test(s)) return "file:" + s
         return (/^[A-Za-z]:/.test(s) ? "file:///" : "file://") + s
     }
     function dirUrlOf(p) {
@@ -205,6 +254,10 @@ Item {
 
     onActiveChanged: {
         if (active) {
+            // Arm before anything else: a schema refresh below can re-measure
+            // the column, and the restore rides the layout pass that follows.
+            pendingY = keptY
+            _restoreScroll()
             editMap = ({})
             dirty = false
             if (needsRefresh) refreshSchema()
@@ -220,6 +273,15 @@ Item {
     // the shared FfmpegManager, `page.ff`.)
     Connections {
         target: waves
+        function onSettingsPersistedExternally() {
+            // The backend persisted schema-backed settings without the Save
+            // button ("Don't ask again", the player's quality menu, the
+            // folder auto-heal): rebuild now if the page is idle, otherwise
+            // on its next open, so it never shows values the app already
+            // changed underneath it. Unsaved edits are never clobbered.
+            if (page.active && !page.dirty) page.refreshSchema()
+            else page.needsRefresh = true
+        }
         function onAppUpdateStateChanged(state, msg) {
             page.auState = state; page.auMsg = msg
             if (state === "done" || state === "failed" || state === "cancelled") page.auPct = 0
@@ -589,6 +651,13 @@ Item {
             contentHeight: col.height + 28
             ScrollBar.vertical: ScrollBar {}
             boundsBehavior: Flickable.StopAtBounds
+            // Only a real scroll is worth remembering: while the page is
+            // hidden the height is 0 and every write here is the clamp.
+            onContentYChanged: if (height > 0 && page.active) page.keptY = contentY
+            // The height returning is the page coming back on screen; put the
+            // spot back in that same pass, before it paints.
+            onHeightChanged: page._restoreScroll()
+            onContentHeightChanged: page._restoreScroll()
 
             Column {
                 id: col
@@ -1227,10 +1296,17 @@ Item {
                                         anchors.fill: parent; enabled: !page.diagBusy
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: {
-                                            // Push the two prefs as they stand in the UI so the
-                                            // export honours an unsaved checkbox change.
-                                            waves.setWavesPref("verbose_diagnostics", dgCard.vbOn)
-                                            waves.setWavesPref("diagnostics_redact_content", dgCard.rdOn)
+                                            // Do NOT re-push the two prefs here. Both toggles below
+                                            // apply live via setWavesPref, so the backend already
+                                            // holds the truth and there is no unsaved change to
+                                            // honour. Pushing vbOn/rdOn instead sent whatever the
+                                            // card was rendering, and after a close-and-reopen that
+                                            // is the STALE baked-in schema value (onActiveChanged
+                                            // clears editMap but only rebuilds `groups` when
+                                            // needsRefresh is set). Exporting therefore switched
+                                            // both prefs back off, stopped the freeze watchdog, and
+                                            // produced a bundle containing exactly the searches and
+                                            // titles the user had asked to hide.
                                             page.diagFailed = false
                                             page.diagBusy = true
                                             waves.exportDiagnostics()
@@ -1280,6 +1356,10 @@ Item {
                                             // Applies live: the watchdog and detail level flip now,
                                             // not on Save, so "turn on, reproduce, export" just works.
                                             waves.setWavesPref("verbose_diagnostics", v)
+                                            // Applied without a Save, so the baked schema `groups`
+                                            // is now stale; force a rebuild on the next reopen or
+                                            // the card renders the pre-change value.
+                                            page.needsRefresh = true
                                         }
                                     }
                                 }
@@ -1304,6 +1384,7 @@ Item {
                                             var v = !dgCard.rdOn
                                             page.setv("diagnostics_redact_content", v)
                                             waves.setWavesPref("diagnostics_redact_content", v)
+                                            page.needsRefresh = true
                                         }
                                     }
                                 }
@@ -1341,9 +1422,10 @@ Item {
                     // collapsed. The Processing trigger latches on `ffEverMissing`
                     // (not the live state) so a successful install, which flips
                     // the state missing → managed, doesn't snap the card shut.
-                    property bool open: modelData.open === true
+                    property bool open: page.sectionOpen(card.modelData.id,
+                           modelData.open === true
                         || (modelData.card === "ffmpeg" && page.ffEverMissing)
-                        || (modelData.card === "updates" && page.auUpdate)
+                        || (modelData.card === "updates" && page.auUpdate))
 
                     // Card header, icon + title + count chip + rotating chevron.
                     // The whole row is the click target.
@@ -1412,7 +1494,13 @@ Item {
                         MouseArea {
                             id: hdHover
                             anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            onClicked: card.open = !card.open
+                            // Record on the page as well: the click breaks the
+                            // binding above, and the next schema refresh would
+                            // otherwise rebuild this card back to its default.
+                            onClicked: {
+                                card.open = !card.open
+                                page.setSectionOpen(card.modelData.id, card.open)
+                            }
                         }
                     }
 
@@ -1592,17 +1680,19 @@ Item {
                                                         enabled: strDefaultLink.changed
                                                         hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                                         // Set the edit map, then RE-BIND the box rather than
-                                                        // writing its text. Typing into a TextField breaks
-                                                        // its text binding, so setv alone would not reach a
-                                                        // field already edited; but a plain imperative write
-                                                        // destroys the binding for good, and delegates are
-                                                        // kept alive across close/reopen (refreshSchema only
+                                                        // writing its text. (Typing alone does NOT break a
+                                                        // TextField's text binding on this Qt, verified with
+                                                        // real key events; only an imperative JS write to
+                                                        // `text` destroys it, permanently.) setv alone would
+                                                        // not repaint a field the user had edited (val()
+                                                        // reads the edit map only on re-evaluation), and a
+                                                        // plain write would kill the binding while delegates
+                                                        // stay alive across close/reopen (refreshSchema only
                                                         // runs after a save), so Restore default followed by
-                                                        // Cancel left the box showing the default for the
-                                                        // rest of the session while the config, and every
-                                                        // download, still used the custom value. Qt.binding
-                                                        // does both jobs: it shows the default now and
-                                                        // repairs a binding the user's typing had broken.
+                                                        // Cancel could leave the box showing the default
+                                                        // while the config still used the custom value.
+                                                        // Qt.binding shows the default now and keeps the
+                                                        // display live afterwards.
                                                         onClicked: {
                                                             page.setv(modelData.key, modelData.default_value)
                                                             strField.text = Qt.binding(function() { return page.val(modelData) })
@@ -1623,17 +1713,15 @@ Item {
                                                     id: browseBtn
                                                     visible: modelData.browse !== ""
                                                     // SAVE CHANGES button vocabulary: accent-container fill,
-                                                    // accentDim border, uppercase accent label; full strength
-                                                    // while the field still needs a value (Browse IS the action
-                                                    // to take), faded once one is set. String(): this binding
-                                                    // also evaluates in the hidden non-str branches of the
-                                                    // delegate, where val() is a number or bool.
-                                                    readonly property bool needsValue: String(page.val(modelData) ?? "").trim() === ""
+                                                    // accentDim border, uppercase accent label. Always full
+                                                    // strength: an earlier fade-once-set read as disabled,
+                                                    // and re-picking the folder is a legitimate action at any
+                                                    // time (it is also how macOS re-grants network-volume
+                                                    // access), so the button must always look clickable.
                                                     width: browseTxt.width + page.btnPadH * 2; height: browseTxt.height + page.btnPadV * 2; radius: page.btnRad
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     color: page.accentCont
                                                     border.color: page.accentDim; border.width: 1
-                                                    opacity: needsValue ? 1 : 0.4
                                                     Text { id: browseTxt; anchors.centerIn: parent; text: "BROWSE"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
                                                     MouseArea {
                                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor

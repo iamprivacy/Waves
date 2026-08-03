@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import QtQuick.Effects
+import QtQuick.Shapes
 import QtCore
 import QtMultimedia
 
@@ -23,6 +24,24 @@ ApplicationWindow {
     minimumHeight: 560
     title: "Waves"
     color: bg
+
+    // ---- Album-art hover tilt knobs (iteration; final home = settings) --
+    // Variant: none | tilt | tilt_gloss | tilt_shadow. Tilt is BGT's value.
+    // Lift is BGT's 1.04 swell cut by a fifth (0.04 -> 0.032): the cover read
+    // as jumping toward you too eagerly at BGT's number.
+    // Settings > Advanced > "Cover art tilts on hover". "none" is the same
+    // switch the variants already had, so one binding turns the effect off
+    // everywhere it reaches (Art, the track discs, the Browse hero cards).
+    property bool artHoverTilt: waves.wavesPref("art_hover_tilt") !== false
+    Connections {
+        target: waves
+        function onArtHoverTiltChanged() {
+            root.artHoverTilt = waves.wavesPref("art_hover_tilt") !== false
+        }
+    }
+    property string artFxVariant: root.artHoverTilt ? "tilt" : "none"
+    property real artFxTilt: 8
+    property real artFxLift: 1.032
 
     // ---- Console palette (phosphor-green CRT, dark only) ----------------
     // Legacy names kept (values repointed) so every existing binding recolours
@@ -439,10 +458,18 @@ ApplicationWindow {
         }
         }
     }
-    // My Tidal infinite scroll: whether more pages exist, and whether one is in
-    // flight (to avoid firing duplicate page requests while scrolling).
-    property bool libHasMore: false
+    // My Tidal infinite scroll: whether more pages exist PER CATEGORY (the
+    // category panes are keep-alive now, so each keeps its own pagination
+    // truth while hidden), and whether a page is in flight for the active one
+    // (to avoid firing duplicate page requests while scrolling). The map is
+    // read only from functions, never bindings, so plain mutation is fine.
+    property var libCatHasMore: ({})
     property bool libLoadingMore: false
+    // Armed when a quiet revalidate of the active category is issued: if it
+    // does land (rows actually changed), the refill pins the user's scroll
+    // spot instead of snapping to the top. Sort changes and fresh loads
+    // disarm it: those genuinely restart the list from the top.
+    property bool libPinRefill: false
     // My Tidal per-category sort, {cat: {key, asc}}. Kept in step with the
     // backend's own per-category sort (both mutate only via libApplySort).
     property var libSort: ({})
@@ -626,6 +653,11 @@ ApplicationWindow {
         // rendered as async shelves alongside the content sections.
         root._browseBuildStart(root._browseAsyncBuild && !p.error ? secs.length + 4 : 0)
         root.browseArtistsSideMap(secs)
+        // Refresh of a landing already built: hold the spot across the
+        // shelf rebuild (see holdScroll). The landing pane is alive even
+        // behind a drilled page, and the clamp does not care that it is
+        // hidden, so the hold arms regardless of which pane is showing.
+        if (root.browseSections.length > 0) browseLanding.holdScroll()
         root.browseSections = secs
         root.browseChips = { genres: p.genres || [], moods: p.moods || [], decades: p.decades || [] }
         // An open (or stacked) local: row page snapshotted a row this payload
@@ -1016,10 +1048,20 @@ ApplicationWindow {
     property bool videoError: false
     property real videoPendingSeek: -1   // restore position across a quality switch
     property bool videoSwitching: false  // quality switch in flight, old stream keeps playing
+    // The overlay can be driven by EITHER player: its own (a cold open from a
+    // row) or the hover peek's, adopted mid-playback when the card is clicked
+    // (see promoteVideo). Every control and readout in the overlay reads
+    // vPlayer so it never has to care which pipeline is sounding.
+    property bool videoFromPeek: false   // the overlay is showing the adopted peek pipeline
+    property bool videoUpgrading: false  // real-quality stream loading behind that picture
+    property bool videoOnB: false        // which of the two stacked sinks is on stage
+    readonly property MediaPlayer vPlayer: videoFromPeek ? peekPlayer : videoPlayer
     function openVideo(id, title, artist) {
         if (!id) return
+        peekClose()     // the hover peek yields to the real player
         stopPreview()   // one thing plays at a time
         videoPlayer.stop(); videoPlayer.source = ""
+        _videoStageReset()
         videoNow = { id: "" + id, title: title || "", artist: artist || "" }
         videoLoading = true; videoError = false; videoSwitching = false
         _videoSwapDone()
@@ -1027,10 +1069,22 @@ ApplicationWindow {
     }
     function closeVideo() {
         videoPlayer.stop(); videoPlayer.source = ""
+        videoUpgradeRetry.stop(); videoUpgrading = false
+        if (videoFromPeek) { peekPlayer.stop(); peekPlayer.source = ""; peekReady = false }
+        videoFromPeek = false
+        _videoStageReset()
         videoNow = null; videoLoading = false; videoError = false
         videoSwitching = false
         _videoSwapDone()
         vqMenu.visible = false
+    }
+    // Cold-open sink arrangement: the overlay's own player paints stage A,
+    // the peek player owns the card's surface again.
+    function _videoStageReset() {
+        peekPlayer.videoOutput = peekSurface
+        videoPlayer.videoOutput = vsA
+        videoOnB = false
+        videoOut.muted = false   // an abandoned upgrade must never leave it silent
     }
     // Switch the running video to a newly chosen resolution as seamlessly as
     // Qt allows: the current stream KEEPS PLAYING while the new variant URL
@@ -1039,11 +1093,131 @@ ApplicationWindow {
     // The choice persists app-wide (setVideoQuality writes the same setting
     // the Settings page does).
     function changeVideoQuality(h) {
-        if (!videoNow || videoSwitching) return
+        // A promotion upgrade is already a resolve in flight on this video;
+        // a second one would race it (the menu is hidden while it runs).
+        if (!videoNow || videoSwitching || videoUpgrading || videoFromPeek) return
         waves.setVideoQuality(h)
         videoSwitching = true
         waves.playVideo(videoNow.id)
     }
+
+    // --- Peek to full player, without a gap ------------------------------
+    // The peek's pipeline is ALREADY decoding this video, so the click never
+    // opens a second stream and never restarts: the running player simply
+    // hands its picture to the overlay's stage and keeps sounding. A frame
+    // grabbed from the card covers the one-frame sink move. Behind that live
+    // picture, the real-quality stream loads into the second (invisible)
+    // stage and takes over once both are at the same moment, so the step up
+    // in resolution costs nothing visible either (see _videoCut).
+    function promoteVideo() {
+        var p = peekNow
+        if (!p || videoNow) return
+        peekLinger.stop()
+        // The grab lands on the next render (~a frame), while the card is
+        // still showing the video, so the handover has something to hide
+        // behind. If the platform refuses the grab, go without it.
+        if (!peekSurface.grabToImage(function(result){ root._videoAdopt(p, result) }))
+            _videoAdopt(p, null)
+    }
+    function _videoAdopt(p, grab) {
+        if (!peekNow || peekNow.id !== p.id) return   // closed or retargeted mid-grab
+        stopPreview()
+        if (grab) {
+            _videoGrab = grab
+            videoFreeze.source = grab.url
+            videoFreeze.visible = true
+            videoFreezeLift.restart()
+        }
+        videoNow = { id: p.id, title: p.title, artist: p.artist }
+        videoLoading = false; videoError = false; videoSwitching = false
+        videoPendingSeek = -1; _videoSeekTarget = -1; videoSeekRetry.stop()
+        videoFromPeek = true; videoUpgrading = true
+        // Sinks trade places: the live peek takes the stage, the overlay's
+        // own player parks on the invisible one to warm the upgrade there.
+        videoOnB = false
+        videoPlayer.videoOutput = vsB
+        peekPlayer.videoOutput = vsA
+        peekNow = null   // the card goes away, its player does not
+        waves.playVideo(p.id)
+    }
+    // Both pipelines are at the same moment: swap which one is on stage and
+    // which one is audible, in a single frame, then retire the peek.
+    function _videoCut() {
+        videoUpgradeRetry.stop()
+        videoUpgrading = false
+        _videoUpPhase = 0
+        if (!videoFromPeek) return
+        var wasPaused = peekPlayer.playbackState !== MediaPlayer.PlayingState
+        // The upgrade is parked on the very frame the peek is showing, so the
+        // stage flip reveals a picture that is already correct. Retire the
+        // glance stream first so the two never sound at once.
+        videoOnB = true
+        peekPlayer.stop(); peekPlayer.source = ""
+        peekPlayer.videoOutput = peekSurface
+        videoOut.muted = false
+        if (!wasPaused) videoPlayer.play()
+        videoFromPeek = false
+        peekReady = false
+    }
+    // The upgrade could not happen (no stream, or it failed): stay on the
+    // peek's pipeline, which is playing perfectly well, just at glance
+    // resolution. Nothing user-visible happens here.
+    function _videoUpgradeGiveUp() {
+        videoUpgradeRetry.stop()
+        videoUpgrading = false
+        _videoUpPhase = 0
+        videoPlayer.stop(); videoPlayer.source = ""
+        videoOut.muted = false
+    }
+    // The peek's own pipeline died while it was driving the overlay. Take
+    // the upgrade if it is ready, else surface the failure like a cold open.
+    function _videoPromotionLost() {
+        if (videoUpgrading && (videoPlayer.mediaStatus === MediaPlayer.LoadedMedia
+                || videoPlayer.mediaStatus === MediaPlayer.BufferedMedia)) {
+            _videoCut()
+            return
+        }
+        videoUpgradeRetry.stop(); videoUpgrading = false
+        videoFromPeek = false; peekReady = false
+        _videoStageReset()
+        videoLoading = false
+        videoError = true
+    }
+
+    // --- Hover video peek (floating card, sound but no controls) ---------
+    // peekNow: {id, title, artist, art} while the card is up, else null. A
+    // short dwell on a video thumbnail grows the card out of the thumb's
+    // rect; the backend resolves a low variant (waves.peekVideo) and it
+    // plays with sound until the pointer leaves. A click opens the full
+    // player. This is a glance surface: no scrubber, no buttons, no chrome.
+    property var peekNow: null
+    property bool peekReady: false       // first frames are on the surface
+    property bool peekThumbHover: false  // pointer is over the source thumb
+    function peekOpen(anchor, id, title, artist, art) {
+        if (!id || videoNow) return
+        if (peekNow && peekNow.id === ("" + id)) return
+        peekPlayer.stop(); peekPlayer.source = ""
+        peekReady = false
+        var p = anchor.mapToItem(peekCard.parent, 0, 0)
+        peekNow = { id: "" + id, title: title || "", artist: artist || "", art: art || "" }
+        peekCard.growFrom(p.x, p.y, anchor.width, anchor.height)
+        peekLinger.stop()
+        waves.peekVideo("" + id)
+    }
+    function peekClose() {
+        peekLinger.stop()
+        peekPlayer.stop(); peekPlayer.source = ""
+        peekNow = null; peekReady = false
+    }
+    // The card lives while the pointer is over the thumb OR the card; when
+    // both are gone a short grace covers the travel between them (and the
+    // moment the growing card slides under the cursor).
+    function peekHoverCheck() {
+        if (!peekNow) return
+        if (peekThumbHover || peekCardHover.hovered) { peekLinger.stop(); return }
+        peekLinger.restart()
+    }
+    Timer { id: peekLinger; interval: 260; onTriggered: root.peekClose() }
 
     // --- In-app preview control (single shared player, see previewPlayer) ---
     function pvActive(kind, id) {
@@ -1072,6 +1246,7 @@ ApplicationWindow {
     // preview spans, and seeks across, the full song.
     function startPreview(kind, id, stopMs) {
         if (!id) return
+        peekClose()   // a deliberate track preview outranks a hover glance
         previewStopMs = (stopMs === undefined ? 0 : stopMs)
         previewError = ""; previewErrorTimer.stop()
         // Never inherit a pending seek-mute from the previous preview.
@@ -1219,7 +1394,7 @@ ApplicationWindow {
                                  bio: bioExpanded, tops: topTracksExpanded }
         if (browseOpen) return { v: "browse", key: browsePageKey, page: browsePage,
                                  stack: browseStack.slice(), hi: browseHighlightId,
-                                 scrollY: browsePane.contentY,
+                                 scrollY: browsePageKey === "" ? browseLanding.contentY : browseDrill.contentY,
                                  label: browsePageKey === "" ? "Browse"
                                        : browsePage ? (browsePage.title || "Browse")
                                        : (browseTitleHint !== "" ? browseTitleHint : "Browse") }
@@ -1309,18 +1484,38 @@ ApplicationWindow {
             browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
             browseStack = s.stack || []
             browseHighlightId = s.hi || ""
-            // Arm the scroll restore BEFORE changing the page key: it's tagged
-            // with the destination key so on_PageKeyChanged applies it (rather
-            // than jumping to the top) once that page is showing, Back lands you
-            // exactly where you left off.
-            browsePane.pendingRestoreKey = s.key || ""
-            browsePane.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
-            browsePageKey = s.key || ""
-            browsePage = s.page || null
-            // A page snapshotted mid-load has no payload; its label is the
-            // best (and only) name for it until the user reloads it somehow.
-            browseTitleHint = (s.key && !s.page) ? (s.label || "") : ""
-            browsePageLoading = false; browsePageError = false
+            var bkey = s.key || ""
+            if (bkey === "") {
+                // The landing pane is alive and still positioned; showing it
+                // is the whole restore. Its own contentY is the truth (a
+                // revalidate may have reshaped the page since the snapshot),
+                // so the recorded scrollY is deliberately not re-applied.
+                // browsePage deliberately stays set: the drill pane stays
+                // alive behind the landing, so Forward (or reopening the
+                // same page) costs nothing and Back pays no teardown.
+                browsePageKey = ""
+                browseTitleHint = ""
+                browsePageLoading = false; browsePageError = false
+            } else if (bkey === browsePageKey && browsePage) {
+                // The drilled page snapshotted is the one still loaded in
+                // the drill pane (a round trip through another section):
+                // alive, positioned, possibly fresher than the snapshot.
+                // Reassigning browsePage here would rebuild it for nothing.
+            } else {
+                // A different drilled page: this is a real rebuild, so arm
+                // the scroll restore BEFORE changing the page key. It's
+                // tagged with the destination key so the pane applies it
+                // (rather than jumping to the top) once that page is
+                // showing, pre-paint, and Back lands where you left off.
+                browseDrill.pendingRestoreKey = bkey
+                browseDrill.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
+                browsePageKey = bkey
+                browsePage = s.page || null
+                // A page snapshotted mid-load has no payload; its label is
+                // the best (and only) name for it until the user reloads it.
+                browseTitleHint = !s.page ? (s.label || "") : ""
+                browsePageLoading = false; browsePageError = false
+            }
             if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false; waves.loadBrowse()
             } else if (waves.loggedIn) {
@@ -1379,8 +1574,51 @@ ApplicationWindow {
         while (k > 0 && (navHistory[k - 1].o || "") === navOrigin) k--
         return k
     }
+    // SYNTHETIC SECTION-ROOT CRUMB. A drilled page can be the whole trail:
+    // returning to a section via its nav tab lands on the page it was left on
+    // (keep-alive), but the tab switch also started a fresh section-scoped
+    // trail, so the crumb row held a single, unclickable pill and the only
+    // way up was the tab button or the Back gesture (reported from
+    // livetesting: "stuck in a playlist with no breadcrumbs"). Whenever the
+    // trail of a drilled page does not begin at a section root, a synthetic
+    // root pill ("Browse", "Search", "My Tidal") leads it, and clicking it
+    // climbs out of the drill within the section (the keep-alive panes make
+    // that a pure flip). It is display-only: history is untouched until it
+    // is clicked, which records the drilled page like any navigation.
+    readonly property bool crumbSynth: {
+        var drilled = artistOpen || (browseOpen && !settingsOpen && !libraryOpen && browsePageKey !== "")
+        if (!drilled || settingsOpen) return false
+        if (crumbBase >= navHistory.length) return true
+        return !navIsRoot(navHistory[crumbBase])
+    }
+    readonly property string crumbSynthLabel:
+        navOrigin === "library" ? "My Tidal" : navOrigin === "browse" ? "Browse" : "Search"
+    function crumbSynthGo() {
+        navPush()
+        markNav("crumb root")
+        if (navOrigin === "browse") {
+            // Up to the Browse landing: the drilled page idles behind it
+            // (keep-alive), its lineage is done (same as the tab's home
+            // strike), but the landing keeps its own scroll.
+            browseStack = []
+            browseHighlightId = ""
+            browseTitleHint = ""
+            browsePageLoading = false; browsePageError = false
+            browsePageKey = ""
+            artistOpen = false; settingsOpen = false; libraryOpen = false
+            browseOpen = true
+        } else if (navOrigin === "library") {
+            artistOpen = false; settingsOpen = false; browseOpen = false
+            libraryOpen = true
+        } else {
+            // Search: uncover the results pane exactly as it stands.
+            artistOpen = false; settingsOpen = false; libraryOpen = false
+            browseOpen = false
+        }
+    }
     readonly property var crumbLabels: {
         var out = []
+        if (crumbSynth) out.push(crumbSynthLabel)
         for (var i = crumbBase; i < navHistory.length; i++) out.push(navHistory[i].label || "")
         if (currentNavLabel !== "") out.push(currentNavLabel)   // "" = name not known yet
         return out
@@ -1456,12 +1694,9 @@ ApplicationWindow {
         if (alreadyActive) { navPush(); markNav("library home"); loadLib("home"); return }
         navPush(); markNav("library"); navOrigin = "library"
         libraryOpen = true; settingsOpen = false; artistOpen = false
-        // RETURN to the category the user left, not always Home. A category
-        // whose rows are already on screen keeps them (and its scroll)
-        // untouched: the backend revalidates quietly, throttled, and repaints
-        // only when the favourites actually changed.
-        var m = libraryCategory === "home" ? null : libModelFor(libraryCategory)
-        if (m && m.count > 0) { waves.loadLibrary(libraryCategory, true); return }
+        // RETURN to the category the user left, not always Home. loadLib is
+        // keep-alive: a category whose rows are already on screen keeps them
+        // (and its scroll) untouched and only revalidates quietly.
         loadLib(libraryCategory)
     }
 
@@ -1534,8 +1769,6 @@ ApplicationWindow {
     function loadLib(cat) {
         libraryCategory = cat
         libLoadingMore = false
-        libHasMore = false
-        expandedAlbums = ({})
         // "Home" is a self-contained, Browse-shaped landing kept on screen:
         // re-opening My Tidal shows the shelves it already has, instantly. The
         // backend serves the first load from its disk snapshot and every visit
@@ -1548,11 +1781,20 @@ ApplicationWindow {
             waves.loadHome(root.homeSections.length > 0)
             return
         }
-        // Every other category is a paginated favourites list. Clear the old
-        // category's rows immediately so they don't linger under the loading
-        // state; a cached category refills in the same tick, so there's no flash.
-        libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
-        libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
+        // Every category pane is keep-alive: switching only changes which one
+        // is visible, and each keeps its rows, expansion and scroll for its
+        // whole life. A category that already has rows shows them as-is and
+        // revalidates quietly (the backend repaints only on change, and the
+        // refill pins the scroll spot); only a still-empty category does a
+        // visible first load.
+        var m = libModelFor(cat)
+        if (m && m.count > 0) {
+            libPinRefill = true
+            waves.loadLibrary(cat, true)
+            return
+        }
+        libPinRefill = false
+        libCatHasMore[cat] = false
         waves.loadLibrary(cat)
     }
     // Deep-link to the download-folder setting (from the folder gate/nudge), the
@@ -1594,21 +1836,21 @@ ApplicationWindow {
         navPush()
         markNav("browse")
         // The tab button always lands on the main Browse page: drop any open
-        // sub-page (genre / playlist / album) and its stack.
+        // sub-page (genre / playlist / album) and its stack. The landing
+        // pane is alive; this only flips it visible.
         browseStack = []
         browsePageKey = ""
-        browsePage = null
         browseTitleHint = ""   // the landing is "Browse", never the page we left
         browsePageLoading = false
         browsePageError = false
         browseHighlightId = ""
         browseOpen = true
         settingsOpen = false; artistOpen = false; libraryOpen = false
-        // The tab button is an explicit "take me to the top of Browse": cancel
-        // any armed Back-restore and reset the scroll (on_PageKeyChanged only
-        // fires when the key actually changes, which it won't if already home).
-        browsePane.pendingRestoreY = -1
-        browsePane.contentY = 0
+        // The tab button is an explicit "take me to the top of Browse":
+        // cancel any armed hold and reset the landing's scroll directly
+        // (the pane is alive, so a plain set is exact).
+        browseLanding.pendingRestoreY = -1
+        browseLanding.contentY = 0
         if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
             waves.loadBrowse()
@@ -1618,7 +1860,11 @@ ApplicationWindow {
     }
     function openBrowseLink(path, title) {
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = ""
         browsePageKey = path
         browsePage = null
@@ -1626,6 +1872,25 @@ ApplicationWindow {
         browsePageError = false
         browsePageLoading = true
         waves.openBrowsePage(path, title)
+    }
+    // Re-issue the current drilled page's fetch after an error. The key alone
+    // says which backend entry built the page: openBrowsePage only answers
+    // pages/… paths, so routing a pl:… (filtered playlists grid) or item:…
+    // (playlist/mix/album page) key through it makes no request at all and
+    // the loading hint never clears. No navPush: a retry is not a navigation.
+    function retryBrowsePage() {
+        var key = "" + browsePageKey
+        browsePageError = false
+        browsePageLoading = true
+        if (key.indexOf("pl:") === 0) {
+            waves.openBrowsePlaylists(key.substring(3), browseTitleHint)
+        } else if (key.indexOf("item:") === 0) {
+            var rest = key.substring(5)
+            var cut = rest.indexOf(":")
+            waves.openBrowseItem(rest.substring(0, cut), rest.substring(cut + 1))
+        } else {
+            waves.openBrowsePage(key, browseTitleHint)
+        }
     }
     // Some rows (Custom mixes, Radio stations, New releases…) have no TIDAL
     // "show more" path. Their headline still opens a full listing: a local
@@ -1636,7 +1901,11 @@ ApplicationWindow {
         var key = "local:" + (sec.title || "More")
         if (browsePageKey === key) return   // already there
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = ""
         browsePageKey = key
         browsePageError = false
@@ -1708,7 +1977,11 @@ ApplicationWindow {
         var key = "pl:" + path
         if (browsePageKey === key) return
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = ""
         browsePageKey = key
         browsePage = null
@@ -1721,7 +1994,11 @@ ApplicationWindow {
         var key = "cloud:All Playlists"
         if (browsePageKey === key) return
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = ""
         browsePageKey = key
         browsePageError = false
@@ -1735,7 +2012,11 @@ ApplicationWindow {
         var key = "cloud:" + title
         if (browsePageKey === key) return
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = ""
         browsePageKey = key
         browsePageError = false
@@ -1783,11 +2064,13 @@ ApplicationWindow {
         }
         _browseAsyncBuild = false   // growth re-lays the landing in place, never streamed
         var s = grown(browseSections)
+        var ps = (browsePage && browsePage.sections) ? grown(browsePage.sections) : null
+        // Growth rebuilds a column in place; hold the user's spot across it,
+        // on whichever pane actually re-lays.
+        if (s) browseLanding.holdScroll()
+        if (ps) browseDrill.holdScroll()
         if (s) browseSections = s
-        if (browsePage && browsePage.sections) {
-            var ps = grown(browsePage.sections)
-            if (ps) browsePage = Object.assign({}, browsePage, { sections: ps })
-        }
+        if (ps) browsePage = Object.assign({}, browsePage, { sections: ps })
     }
     // Open one playlist / mix / album as its own page inside Browse (art
     // header + track list). Drilling from an editorial page pushes it onto
@@ -1807,7 +2090,11 @@ ApplicationWindow {
             return
         }
         navPush()
-        if (browsePage) browseStack = browseStack.concat([browsePage])
+        // browsePage stays set while the landing shows (the drill pane
+        // is kept alive for an instant return), so "there is a page" is
+        // browsePageKey, not browsePage: pushing the stale object here
+        // would make Back detour through a page the user already left.
+        if (browsePageKey !== "" && browsePage) browseStack = browseStack.concat([browsePage])
         browseHighlightId = highlight || ""
         browseHighlightPending = false   // the highlighted row re-arms this on layout
         browsePageKey = "item:" + kind + ":" + id
@@ -1829,8 +2116,9 @@ ApplicationWindow {
             browsePage = prev
             browsePageKey = prev.key
         } else {
+            // Home: flip the landing visible. browsePage stays set so the
+            // page just left survives behind it (see _navRestore).
             browsePageKey = ""
-            browsePage = null
         }
     }
     // A track title anywhere (search, library, artist, browse) leads to its
@@ -1977,10 +2265,77 @@ ApplicationWindow {
                 videoPlayer.position = Math.min(root.videoPendingSeek, videoPlayer.duration - 500)
         }
     }
+    // Lifts the frame grabbed from the peek card once the adopted pipeline is
+    // painting the overlay's stage (the sink move takes a frame or two).
+    Timer {
+        id: videoFreezeLift
+        interval: 260
+        onTriggered: { videoFreeze.visible = false; root._videoGrab = null }
+    }
+    // Promotion upgrade, park and meet.
+    //
+    // Cutting on POSITION alone is not enough, and livetesting showed exactly
+    // why: position reports a seek target the instant it is set, while the
+    // sink still holds whatever frame it had before (for a stream that just
+    // started, frame one). The swap then flashed the first frame for a beat
+    // before the seeked picture arrived. So the upgrade does not chase: it
+    // parks PAUSED a couple of seconds AHEAD of the live clock, which makes
+    // the backend decode and present that exact frame into the off-stage
+    // sink, and the cut waits until the peek's own clock reaches the parked
+    // frame. Both sides are then showing the same moment, and the swap is a
+    // true continuation with nothing stale to reveal.
+    property int _videoUpTries: 0
+    property int _videoUpAims: 0
+    property int _videoUpPhase: 0     // 0 opening, 1 seeking to the park, 2 parked and waiting
+    property real _videoUpTarget: -1
+    function _videoUpAimAt(t) {
+        if (++_videoUpAims > 6) { _videoUpgradeGiveUp(); return }
+        // Not enough runway left to stage a handover before the video ends.
+        if (videoPlayer.duration > 0 && t > videoPlayer.duration - 800) { _videoUpgradeGiveUp(); return }
+        _videoUpTarget = Math.max(0, t)
+        _videoUpPhase = 1
+        videoPlayer.pause()
+        videoPlayer.position = _videoUpTarget
+    }
+    Timer {
+        id: videoUpgradeRetry
+        interval: 60; repeat: true
+        onTriggered: {
+            if (!root.videoUpgrading || !root.videoFromPeek || !root.videoNow) { root._videoUpgradeGiveUp(); return }
+            if (++root._videoUpTries > 250) { root._videoUpgradeGiveUp(); return }   // ~15s, stay on the glance stream
+            if (videoPlayer.mediaStatus !== MediaPlayer.LoadedMedia
+                    && videoPlayer.mediaStatus !== MediaPlayer.BufferedMedia) return
+            var live = peekPlayer.position
+            var playing = peekPlayer.playbackState === MediaPlayer.PlayingState
+            if (root._videoUpPhase === 0) {
+                // First moment the new stream is usable: park it ahead of the
+                // live clock (or right on it, when the peek is paused).
+                root._videoUpAimAt(playing ? live + 2000 : live)
+                return
+            }
+            if (root._videoUpPhase === 1) {
+                // Parked once the seek has actually landed, which is also when
+                // the sink is holding the frame we are going to reveal.
+                if (Math.abs(videoPlayer.position - root._videoUpTarget) <= 250) { root._videoUpPhase = 2; return }
+                // The live clock overtook the park before the seek landed
+                // (slow seek, or the user jumped forward): aim further ahead.
+                if (playing && live > root._videoUpTarget - 250)
+                    root._videoUpAimAt(live + 2000 * (root._videoUpAims + 1))
+                return
+            }
+            // Parked and holding: meet the live clock at that exact frame.
+            if (!playing) {
+                if (Math.abs(videoPlayer.position - live) <= 250) { root._videoCut(); return }
+                root._videoUpAimAt(live)   // paused somewhere else, re-park on the spot
+                return
+            }
+            if (live >= root._videoUpTarget - 40) root._videoCut()
+        }
+    }
     MediaPlayer {
         id: videoPlayer
-        videoOutput: videoSurface
-        audioOutput: AudioOutput {}
+        videoOutput: vsA
+        audioOutput: AudioOutput { id: videoOut }
         onPositionChanged: {
             // Lift the freeze-frame only once playback has actually reached the
             // restored spot, the blank/black gap stays hidden the whole time.
@@ -1994,19 +2349,108 @@ ApplicationWindow {
         onErrorOccurred: function(err, errStr) {
             waves.uiLog("video", "player error " + err + ": " + errStr, -1)
             root._videoSwapDone()
+            // A failed UPGRADE is invisible: the peek's pipeline is on stage
+            // and playing, so the video just stays at glance resolution.
+            if (root.videoUpgrading) { root._videoUpgradeGiveUp(); return }
             if (root.videoNow) { root.videoError = true; root.videoLoading = false }
         }
     }
+    // ==== Hover video peek card =========================================
+    // Grows out of the hovered thumbnail's mapped rect into a 16:9 card
+    // centered on it (clamped inside the window). The thumbnail's own art
+    // holds the surface until frames arrive so the growth never reveals a
+    // black panel; sound eases in rather than blasting. Sits under the full
+    // player overlay (z 999) so opening the real player covers it.
+    MediaPlayer {
+        id: peekPlayer
+        videoOutput: peekSurface
+        audioOutput: AudioOutput {
+            volume: root.peekReady ? 1 : 0
+            Behavior on volume { NumberAnimation { duration: 420 } }
+        }
+        onPlaybackStateChanged: {
+            if (playbackState === MediaPlayer.PlayingState) {
+                root.peekReady = true
+                // One thing sounds at a time (same rule as the full player),
+                // but a hover glance only pauses a running track preview, it
+                // never tears the preview down.
+                if (previewPlayer.playbackState === MediaPlayer.PlayingState) previewPlayer.pause()
+            }
+        }
+        onMediaStatusChanged: {
+            if (mediaStatus !== MediaPlayer.EndOfMedia) return
+            // Once promoted this player IS the overlay, so its end is the
+            // video's end, not a hover ending.
+            if (root.videoFromPeek) root.closeVideo(); else root.peekClose()
+        }
+        onErrorOccurred: function(err, errStr) {
+            // A failed glance just goes away, no error chrome on a hover.
+            waves.uiLog("video", "peek player error " + err + ": " + errStr, -1)
+            if (root.videoFromPeek) root._videoPromotionLost(); else root.peekClose()
+        }
+    }
+    Rectangle {
+        id: peekCard
+        z: 990
+        visible: root.peekNow !== null
+        color: "#0b0d10"; radius: 8
+        border.color: root.border1; border.width: 1
+        clip: true
+        function growFrom(ax, ay, aw, ah) {
+            peekGrow.stop()
+            x = ax; y = ay; width = aw; height = ah
+            var tw = Math.min(360, root.width - 24)
+            var th = Math.round(tw * 9 / 16)
+            gx.to = Math.max(12, Math.min(ax + aw / 2 - tw / 2, root.width - tw - 12))
+            gy.to = Math.max(12, Math.min(ay + ah / 2 - th / 2, root.height - th - 12))
+            gw.to = tw; gh.to = th
+            peekGrow.start()
+        }
+        ParallelAnimation {
+            id: peekGrow
+            NumberAnimation { id: gx; target: peekCard; property: "x"; duration: 240; easing.type: Easing.OutCubic }
+            NumberAnimation { id: gy; target: peekCard; property: "y"; duration: 240; easing.type: Easing.OutCubic }
+            NumberAnimation { id: gw; target: peekCard; property: "width"; duration: 240; easing.type: Easing.OutCubic }
+            NumberAnimation { id: gh; target: peekCard; property: "height"; duration: 240; easing.type: Easing.OutCubic }
+        }
+        VideoOutput {
+            id: peekSurface
+            anchors.fill: parent; anchors.margins: 1
+            fillMode: VideoOutput.PreserveAspectCrop
+            opacity: root.peekReady ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 180 } }
+        }
+        Art {
+            anchors.fill: parent; anchors.margins: 1; radius: 7
+            url: root.peekNow ? root.peekNow.art : ""
+            visible: !root.peekReady
+        }
+        HoverHandler { id: peekCardHover; onHoveredChanged: root.peekHoverCheck() }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                // Playing: hand the live pipeline over, no gap, no restart.
+                // Still resolving: nothing to adopt, so open cold.
+                if (root.peekReady) { root.promoteVideo(); return }
+                var p = root.peekNow
+                root.peekClose()
+                if (p) root.openVideo(p.id, p.title, p.artist)
+            }
+            onWheel: function(w){ w.accepted = true }
+        }
+    }
+    Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null; onActivated: root.peekClose() }
     Shortcut { sequence: "Esc"; enabled: root.videoNow !== null; onActivated: root.closeVideo() }
     Shortcut {
         sequence: "Space"; enabled: root.videoNow !== null && !root.videoLoading && !root.videoError
-        onActivated: videoPlayer.playbackState === MediaPlayer.PlayingState ? videoPlayer.pause() : videoPlayer.play()
+        onActivated: root.vPlayer.playbackState === MediaPlayer.PlayingState ? root.vPlayer.pause() : root.vPlayer.play()
     }
     Rectangle {
         anchors.fill: parent
         z: 999
         visible: root.videoNow !== null
-        color: "#000000e0"
+        color: "#e0000000"
         // Click outside the card closes; swallow wheel so pages don't scroll.
         MouseArea { anchors.fill: parent; onClicked: root.closeVideo(); onWheel: function(w){ w.accepted = true } }
         Rectangle {
@@ -2017,29 +2461,37 @@ ApplicationWindow {
             color: "#0b0d10"; radius: 10; border.color: root.border1; border.width: 1
             clip: true
             MouseArea { anchors.fill: parent }   // swallow clicks inside the card
-            VideoOutput {
-                id: videoSurface
+            // Two stacked sinks, one on stage. A single player uses A and B
+            // never renders; a promoted peek plays A while the upgrade warms
+            // up on B, and the cut is one opacity flip (see _videoCut). Both
+            // always exist as real sinks so the warming stream has somewhere
+            // to decode into, it just is not painted.
+            Item {
+                id: videoStage
                 anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
                 anchors.margins: 1
                 height: parent.height - 46
+                VideoOutput { id: vsA; anchors.fill: parent; opacity: root.videoOnB ? 0 : 1 }
+                VideoOutput { id: vsB; anchors.fill: parent; opacity: root.videoOnB ? 1 : 0 }
             }
-            // Last frame of the outgoing stream, held over the surface during a
-            // quality switch so the source swap never shows a blank panel.
+            // Held over the stage whenever a swap could show a blank panel: a
+            // quality switch (last frame of the outgoing stream) or the peek
+            // handover (last frame of the card).
             Image {
                 id: videoFreeze
                 visible: false
-                anchors.fill: videoSurface
+                anchors.fill: videoStage
                 fillMode: Image.PreserveAspectFit
                 cache: false
             }
             // Click anywhere on the picture to toggle play/pause.
             MouseArea {
-                anchors.fill: videoSurface
-                onClicked: videoPlayer.playbackState === MediaPlayer.PlayingState ? videoPlayer.pause() : videoPlayer.play()
+                anchors.fill: videoStage
+                onClicked: root.vPlayer.playbackState === MediaPlayer.PlayingState ? root.vPlayer.pause() : root.vPlayer.play()
             }
             // GET / ERR states, in the terminal voice of the Art placeholders.
             Text {
-                anchors.centerIn: videoSurface
+                anchors.centerIn: videoStage
                 visible: root.videoLoading || root.videoError
                 textFormat: Text.PlainText
                 text: root.videoError ? "ERR  stream unavailable" : "GET  video stream…"
@@ -2054,28 +2506,28 @@ ApplicationWindow {
                     anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 10; spacing: 12
                     Text {
                         textFormat: Text.PlainText
-                        text: videoPlayer.playbackState === MediaPlayer.PlayingState ? "[||]" : "[>]"
+                        text: root.vPlayer.playbackState === MediaPlayer.PlayingState ? "[||]" : "[>]"
                         color: root.accent; font.family: root.mono; font.pixelSize: 14
                         MouseArea {
                             anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor
                             enabled: !root.videoLoading && !root.videoError
-                            onClicked: videoPlayer.playbackState === MediaPlayer.PlayingState ? videoPlayer.pause() : videoPlayer.play()
+                            onClicked: root.vPlayer.playbackState === MediaPlayer.PlayingState ? root.vPlayer.pause() : root.vPlayer.play()
                         }
                     }
                     // Seek bar: click or drag anywhere on the track.
                     Rectangle {
                         Layout.fillWidth: true; height: 5; radius: 2; color: root.surface3
                         Rectangle {
-                            width: videoPlayer.duration > 0 ? parent.width * videoPlayer.position / videoPlayer.duration : 0
+                            width: root.vPlayer.duration > 0 ? parent.width * root.vPlayer.position / root.vPlayer.duration : 0
                             height: parent.height; radius: 2; color: root.accent
                         }
                         MouseArea {
                             anchors.fill: parent; anchors.margins: -8
-                            enabled: videoPlayer.seekable
+                            enabled: root.vPlayer.seekable
                             function seekTo(x) {
                                 var w = width - 16
-                                if (w > 0 && videoPlayer.duration > 0)
-                                    videoPlayer.position = Math.max(0, Math.min(1, (x - 8) / w)) * videoPlayer.duration
+                                if (w > 0 && root.vPlayer.duration > 0)
+                                    root.vPlayer.position = Math.max(0, Math.min(1, (x - 8) / w)) * root.vPlayer.duration
                             }
                             onPressed: function(m){ seekTo(m.x) }
                             onPositionChanged: function(m){ if (pressed) seekTo(m.x) }
@@ -2083,7 +2535,7 @@ ApplicationWindow {
                     }
                     Text {
                         textFormat: Text.PlainText
-                        text: root.fmtMs(videoPlayer.position) + " / " + root.fmtMs(videoPlayer.duration)
+                        text: root.fmtMs(root.vPlayer.position) + " / " + root.fmtMs(root.vPlayer.duration)
                         color: root.textLo; font.family: root.mono; font.pixelSize: 11
                     }
                     // Title -> the video's album page (when TIDAL links one).
@@ -2120,7 +2572,10 @@ ApplicationWindow {
                     Text {
                         id: vqLabel
                         textFormat: Text.PlainText
-                        visible: root.videoNow !== null
+                        // Hidden while a promotion upgrade is in flight: the
+                        // resolution is about to change on its own, and a
+                        // manual pick would race that resolve.
+                        visible: root.videoNow !== null && !root.videoUpgrading && !root.videoFromPeek
                         text: root.videoSwitching ? "…"
                             : root.videoNow && root.videoNow.res ? root.videoNow.res + "p" : "AUTO"
                         color: root.accent; font.family: root.mono; font.pixelSize: 11
@@ -2288,6 +2743,77 @@ ApplicationWindow {
         border.color: border1
         border.width: 1
         clip: true
+        // Album-art hover tilt (from BGT's CoverArt.qml): opt-in per call
+        // site. The whole cover (art, border, anything anchored on it)
+        // tilts toward the cursor and lifts slightly, springing back on
+        // exit. Pure render-thread transforms: Image geometry, decode size
+        // and clip untouched, so hoverFx: false sites are pixel-identical
+        // and cost nothing.
+        property bool hoverFx: false
+        readonly property string fxVariant: root.artFxVariant
+        property real fxRx: 0
+        property real fxRy: 0
+        property real fxLift: 1.0
+        property real fxGlossX: width / 2
+        property real fxGlossY: height / 2
+        readonly property bool fxOn: hoverFx && fxVariant !== "none"
+        // The effect waits for the pointer to REST on the cover. A scrolling
+        // list slides its rows under a stationary cursor, and every row that
+        // passed under it used to arm the tilt on the way through: dozens of
+        // 280 ms lift and tilt springs at once (and, on tilt_shadow, a layer
+        // FBO per row), for covers nobody pointed at. That was half of the
+        // playlist scroll jank reported from livetesting. 90 ms of unbroken
+        // hover is below notice when you mean it, and far longer than a row
+        // spends under the cursor mid-scroll. Disarms the instant the pointer
+        // leaves, so springing back is never delayed.
+        property bool fxArmed: false
+        readonly property bool fxHovering: fxOn && fxArmed && fxHover.hovered
+        function _fxAim(p) {
+            var cx = width / 2, cy = height / 2
+            fxRy =  ((p.x - cx) / cx) * root.artFxTilt
+            fxRx = -((p.y - cy) / cy) * root.artFxTilt
+            fxGlossX = p.x
+            fxGlossY = p.y
+        }
+        Timer {
+            id: fxArm; interval: 90
+            // Take the lift AND the current aim on arming: a cursor that
+            // lands and holds still must tilt without needing a nudge.
+            onTriggered: {
+                if (!fxHover.hovered) return
+                artRoot.fxArmed = true
+                artRoot.fxLift = root.artFxLift
+                artRoot._fxAim(fxHover.point.position)
+            }
+        }
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        // Turning the effect off in Settings while a cover is mid-tilt must
+        // lay it flat, not freeze it there (the same guard the track discs
+        // carry for a preview starting under an armed tilt).
+        onFxOnChanged: if (!fxOn) { fxArm.stop(); fxArmed = false; fxRx = 0; fxRy = 0; fxLift = 1.0 }
+        transform: [
+            Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(1, 0, 0); angle: artRoot.fxRx },
+            Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(0, 1, 0); angle: artRoot.fxRy },
+            Scale    { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; xScale: artRoot.fxLift; yScale: artRoot.fxLift }
+        ]
+        // HoverHandler, not a MouseArea: call sites' own MouseAreas (open
+        // the page, hover controls) keep every click and hover.
+        HoverHandler {
+            id: fxHover
+            enabled: artRoot.fxOn
+            onHoveredChanged: {
+                if (hovered) fxArm.restart()
+                else {
+                    fxArm.stop(); artRoot.fxArmed = false
+                    artRoot.fxRx = 0; artRoot.fxRy = 0; artRoot.fxLift = 1.0
+                }
+            }
+            // fxArmed implies hovered (leaving clears it), so this is the
+            // whole guard: an unarmed pass-through moves nothing.
+            onPointChanged: if (artRoot.fxArmed) artRoot._fxAim(point.position)
+        }
         Image {
             id: artImg
             anchors.fill: parent
@@ -2395,6 +2921,49 @@ ApplicationWindow {
                     color: root.textDim
                 }
             }
+        }
+        // Gloss variant (from BGT): a cursor-following radial highlight.
+        // Behind a Loader: the Shape + gradient exist only for tilt_gloss
+        // instances, every other Art (there are hundreds in list delegates)
+        // creates nothing here.
+        Loader {
+            anchors.fill: parent
+            z: 10   // above any call-site children riding the art
+            active: artRoot.hoverFx && artRoot.fxVariant === "tilt_gloss"
+            sourceComponent: Item {
+                clip: true
+                opacity: artRoot.fxHovering ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 140 } }
+                Shape {
+                    anchors.fill: parent
+                    antialiasing: true
+                    ShapePath {
+                        strokeColor: "transparent"
+                        fillGradient: RadialGradient {
+                            centerX: artRoot.fxGlossX; centerY: artRoot.fxGlossY
+                            centerRadius: Math.max(artRoot.width, artRoot.height) * 0.55
+                            focalX: artRoot.fxGlossX; focalY: artRoot.fxGlossY
+                            GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, 0.42) }
+                            GradientStop { position: 0.45; color: Qt.rgba(1, 1, 1, 0.0) }
+                        }
+                        startX: 0; startY: 0
+                        PathLine { x: artRoot.width; y: 0 }
+                        PathLine { x: artRoot.width; y: artRoot.height }
+                        PathLine { x: 0;             y: artRoot.height }
+                        PathLine { x: 0;             y: 0 }
+                    }
+                }
+            }
+        }
+        // Offset depth shadow (BGT tilt_shadow: sx=-px*14, sy=-py*14+6),
+        // hover-only so idle covers never pay the layer.
+        layer.enabled: artRoot.hoverFx && artRoot.fxVariant === "tilt_shadow" && artRoot.fxHovering
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: "#80000000"
+            shadowBlur: 0.9
+            shadowHorizontalOffset: -(artRoot.fxRy / root.artFxTilt) * 14
+            shadowVerticalOffset:    (artRoot.fxRx / root.artFxTilt) * 14 + 6
         }
     }
 
@@ -2586,7 +3155,9 @@ ApplicationWindow {
         property int baseTick: 0
         Component.onCompleted: baseTick = root.marchTick
         onVisibleChanged: if (visible) baseTick = root.marchTick
-        readonly property int step: Math.floor(((root.marchTick - baseTick + 100000) % 100000) / 7) % 4
+        // Gated on visible so an idle button doesn't re-evaluate this on every
+        // 50ms tick: hidden, the binding's only dependency is `visible` itself.
+        readonly property int step: visible ? Math.floor(((root.marchTick - baseTick + 100000) % 100000) / 7) % 4 : 0
         readonly property int walk: step === 3 ? 1 : step   // 0,1,2,1 bounce
         spacing: 2.5
         Repeater {
@@ -2738,9 +3309,12 @@ ApplicationWindow {
     }
 
     // Track preview: the album art IS the play button. Idle it's just artwork;
-    // hover reveals a ▶ over a dark scrim; while previewing, a ring of LED blocks
-    // hugging the art fills clockwise with playback position (⏸ over the scrim).
-    // Only the active track shows its ring, one shared player.
+    // hover reveals a ▶ over a dark scrim; while previewing, a smooth arc
+    // hugging the art fills clockwise with playback position (⏸ over the scrim)
+    // and doubles as the seek surface: hovering the band around the art shows
+    // a ghost marker + time readout, click or drag seeks (seek-lab ghost
+    // cursor + segment-lab solid arc). Only the active track shows its ring,
+    // one shared player.
     component PreviewArt: Item {
         id: pa
         property string url: ""
@@ -2753,6 +3327,13 @@ ApplicationWindow {
         // Show the play/pause glyph on hover, or while connecting/errored. Plain
         // playback shows through the ring alone, keeping the cover unobscured.
         readonly property bool showGlyph: pa.hovered || pa.st === "loading" || pa.st === "error"
+        // Seek aim state: aimFrac is the track fraction under the mouse angle,
+        // 12 o'clock = 0, clockwise (the arc's fill direction).
+        property real aimFrac: 0
+        function angFrac(mx, my) {
+            var a = Math.atan2(my - height / 2, mx - width / 2)
+            return ((a + Math.PI / 2) / (2 * Math.PI) + 1) % 1
+        }
         implicitWidth: 48; implicitHeight: 48
         // Same lazy-fetch latch as Art: rows hidden behind the search page's
         // first-5 cap must not spend a connection on a disc nobody can see.
@@ -2760,6 +3341,54 @@ ApplicationWindow {
         property bool everShown: false
         Component.onCompleted: if (visible) everShown = true
         onVisibleChanged: if (visible) everShown = true
+
+        // The same rest-armed hover tilt as Art (identical knobs, timings and
+        // rest-before-tilt arming), so the track discs no longer sit flat in
+        // lists whose every other cover tilts (reported from livetesting on
+        // a mix page). Held OFF while this disc's preview is active: the
+        // seek ring aims by pointer angle and needs a stable target.
+        property real fxRx: 0
+        property real fxRy: 0
+        property real fxLift: 1.0
+        readonly property bool fxOn: root.artFxVariant !== "none" && !pa.active
+        property bool fxArmed: false
+        function _fxAim(p) {
+            var cx = width / 2, cy = height / 2
+            fxRy =  ((p.x - cx) / cx) * root.artFxTilt
+            fxRx = -((p.y - cy) / cy) * root.artFxTilt
+        }
+        Timer {
+            id: paFxArm; interval: 90
+            onTriggered: {
+                if (!paFxHover.hovered) return
+                pa.fxArmed = true
+                pa.fxLift = root.artFxLift
+                pa._fxAim(paFxHover.point.position)
+            }
+        }
+        // A preview starting under an armed tilt (click) must not leave the
+        // disc frozen mid-tilt while the ring takes over.
+        onFxOnChanged: if (!fxOn) { paFxArm.stop(); fxArmed = false; fxRx = 0; fxRy = 0; fxLift = 1.0 }
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        transform: [
+            Rotation { origin.x: pa.width / 2; origin.y: pa.height / 2; axis: Qt.vector3d(1, 0, 0); angle: pa.fxRx },
+            Rotation { origin.x: pa.width / 2; origin.y: pa.height / 2; axis: Qt.vector3d(0, 1, 0); angle: pa.fxRy },
+            Scale    { origin.x: pa.width / 2; origin.y: pa.height / 2; xScale: pa.fxLift; yScale: pa.fxLift }
+        ]
+        HoverHandler {
+            id: paFxHover
+            enabled: pa.fxOn
+            onHoveredChanged: {
+                if (hovered) paFxArm.restart()
+                else {
+                    paFxArm.stop(); pa.fxArmed = false
+                    pa.fxRx = 0; pa.fxRy = 0; pa.fxLift = 1.0
+                }
+            }
+            onPointChanged: if (pa.fxArmed) pa._fxAim(point.position)
+        }
 
         // Circular cover. A Rectangle's clip ignores its radius (Qt draws children
         // to the square bounds), so the square crop is clipped to a real circle
@@ -2829,33 +3458,61 @@ ApplicationWindow {
                 Rectangle { anchors.fill: parent; radius: width / 2; color: "#ffffff" }
             }
         }
-        // Playback ring: the same sharp LED cells as every DotMatrix bar, bent
-        // around the art. Cells fill clockwise from 12 o'clock with playback and
-        // the next cell breathes on the shared 20 Hz clock, matching the row
-        // scrubber and download bars. Geometry keeps every rotated corner within
-        // 22 of centre (outer edge 21.8, corners ~21.9), so the ring can never
-        // poke past the 44px thumb box and get clipped by neighbours.
+        // Playback ring: one continuous round-cap arc over a dim track
+        // (segment-lab round 2 winner, "solid arc"), drawn with the same
+        // CurveRenderer as the Ico glyphs so the curve is genuinely smooth,
+        // no rotated-rectangle corners. Fills clockwise from 12 o'clock.
+        // Outer edge 19.5 + 1.6 stays within 22 of centre, so the ring can
+        // never poke past the 44px thumb box and get clipped by neighbours.
         Item {
             id: ledRing
             visible: pa.active
             anchors.fill: parent
-            readonly property int cells: 24
-            readonly property real ringR: 19.8
-            readonly property int lit: Math.round(Math.max(0, Math.min(1, pa.frac)) * cells)
-            Repeater {
-                model: ledRing.visible ? ledRing.cells : 0
-                delegate: Rectangle {
-                    required property int index
-                    readonly property bool litCell: index < ledRing.lit
-                    readonly property bool pulsing: index === ledRing.lit && ledRing.lit < ledRing.cells
-                    readonly property real ang: -Math.PI / 2 + index / ledRing.cells * 2 * Math.PI
-                    x: ledRing.width / 2 + ledRing.ringR * Math.cos(ang) - width / 2
-                    y: ledRing.height / 2 + ledRing.ringR * Math.sin(ang) - height / 2
-                    width: 3; height: 4; radius: 0   // sharp LED cells, long side radial
-                    rotation: index / ledRing.cells * 360
-                    color: root.accent
-                    opacity: pulsing ? root.ledPulse : (litCell ? 1.0 : 0.16)
+            readonly property real ringR: 19.5
+            readonly property bool aiming: paZone.ringHover || paZone.scrubbing
+            Shape {
+                anchors.fill: parent
+                antialiasing: true
+                preferredRendererType: Shape.CurveRenderer
+                // dim track (full circle)
+                ShapePath {
+                    strokeColor: "#293dff6e"
+                    strokeWidth: 3.2; fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    PathAngleArc {
+                        centerX: ledRing.width / 2; centerY: ledRing.height / 2
+                        radiusX: ledRing.ringR; radiusY: ledRing.ringR
+                        startAngle: -90; sweepAngle: 360
+                    }
                 }
+                // lit arc
+                ShapePath {
+                    strokeColor: root.accent
+                    strokeWidth: 3.2; fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    PathAngleArc {
+                        centerX: ledRing.width / 2; centerY: ledRing.height / 2
+                        radiusX: ledRing.ringR; radiusY: ledRing.ringR
+                        startAngle: -90
+                        sweepAngle: 360 * Math.max(0, Math.min(1, pa.frac))
+                    }
+                }
+            }
+            // Ghost cursor (seek lab): a marker dot at the aim angle, bright
+            // phosphor over the unplayed side, a dark notch punched into the
+            // arc over the played side, so it stands out on both sides of
+            // the playhead.
+            Rectangle {
+                visible: ledRing.aiming
+                readonly property real ang: -Math.PI / 2 + pa.aimFrac * 2 * Math.PI
+                readonly property bool played: pa.aimFrac <= pa.frac
+                antialiasing: true
+                x: ledRing.width / 2 + ledRing.ringR * Math.cos(ang) - width / 2
+                y: ledRing.height / 2 + ledRing.ringR * Math.sin(ang) - height / 2
+                width: 6; height: 6; radius: 3
+                color: played ? root.bg : root.accentSoft
+                border.width: played ? 1 : 0
+                border.color: root.accentDim
             }
         }
         // Only a whisper of a scrim, and only when the glyph is up.
@@ -2871,7 +3528,7 @@ ApplicationWindow {
             // the same legibility over art the Text.Outline used to.
             Rectangle {
                 anchors.centerIn: parent; width: 26; height: 26; radius: 13
-                color: "#00000055"; visible: pa.st !== "loading"
+                color: "#55000000"; visible: pa.st !== "loading"
             }
             Ico {
                 anchors.centerIn: parent
@@ -2886,7 +3543,7 @@ ApplicationWindow {
                 text: "buffering"
                 color: root.accent; font.family: root.mono
                 font.pixelSize: 8; font.bold: true
-                style: Text.Outline; styleColor: "#000000cc"
+                style: Text.Outline; styleColor: "#cc000000"
                 property real breathe: 1
                 opacity: breathe
                 SequentialAnimation on breathe {
@@ -2896,11 +3553,76 @@ ApplicationWindow {
                 }
             }
         }
+        // The would-seek time, floating above the art while aiming at the ring.
+        Rectangle {
+            visible: ledRing.aiming
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: -18
+            width: paAimTxt.implicitWidth + 12; height: 16; radius: 4
+            color: root.surfaceHi; border.color: root.border1
+            Text {
+                id: paAimTxt
+                anchors.centerIn: parent; textFormat: Text.PlainText
+                text: root.fmtMs(pa.aimFrac * root.previewDuration)
+                color: root.accentContTx; font.family: root.mono; font.pixelSize: 9
+            }
+        }
+        // Pointer zone (seek-lab ghost cursor). Idle, the whole box starts the
+        // preview exactly as the old full-box MouseArea did. While this track
+        // is active, the disc toggles play/pause and the band around it is the
+        // seek surface: hover aims the ghost marker, press/drag scrubs the
+        // fill locally, the single real seek fires on release (same discipline
+        // as the PreviewBar scrubber, no mid-gesture flush pop).
         MouseArea {
-            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-            onEntered: pa.hovered = true
-            onExited: pa.hovered = false
-            onClicked: root.togglePreview(pa.kind, pa.pid, 0)
+            id: paZone
+            anchors.fill: parent
+            anchors.margins: -6
+            hoverEnabled: true
+            preventStealing: true
+            property bool scrubbing: false
+            property bool ringHover: false
+            readonly property real discR: 17
+            readonly property real bandR: 28
+            readonly property real idleR: 24
+            function dist(mx, my) {
+                var dx = mx - width / 2; var dy = my - height / 2
+                return Math.sqrt(dx * dx + dy * dy)
+            }
+            cursorShape: (ringHover || dist(mouseX, mouseY) <= (pa.active ? discR : idleR))
+                         ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onPositionChanged: function(m) {
+                var d = dist(m.x, m.y)
+                pa.hovered = pa.active ? d <= discR : d <= idleR
+                ringHover = pa.active && d > discR && d <= bandR
+                if (ringHover || scrubbing) {
+                    pa.aimFrac = pa.angFrac(m.x + x, m.y + y)
+                    if (scrubbing) root.scrubPreviewVisual(pa.aimFrac)
+                }
+            }
+            onEntered: pa.hovered = !pa.active
+            onExited: { pa.hovered = false; ringHover = false }
+            onPressed: function(m) {
+                var d = dist(m.x, m.y)
+                if (pa.active && d > discR && d <= bandR) {
+                    scrubbing = true; root.previewScrubbing = true
+                    pa.aimFrac = pa.angFrac(m.x + x, m.y + y)
+                    root.scrubPreviewVisual(pa.aimFrac)
+                    m.accepted = true
+                } else if (d <= (pa.active ? discR : idleR)) {
+                    m.accepted = true
+                } else {
+                    m.accepted = false
+                }
+            }
+            onReleased: function(m) {
+                if (scrubbing) {
+                    scrubbing = false; root.previewScrubbing = false
+                    root.seekPreview(pa.aimFrac)
+                } else if (dist(m.x, m.y) <= (pa.active ? discR : idleR)) {
+                    root.togglePreview(pa.kind, pa.pid, 0)
+                }
+            }
+            onCanceled: { scrubbing = false; root.previewScrubbing = false }
         }
     }
 
@@ -3304,25 +4026,33 @@ ApplicationWindow {
         scale: 1
         Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
 
-        // RUNNING, dot matrix fills the full button width; % pinned to the right
-        Item {
-            visible: db.st === "running"
+        // RUNNING, dot matrix fills the full button width; % pinned to the right.
+        // Behind a Loader rather than plain `visible: false`: an invisible
+        // subtree is still BUILT, and this one is a 92-dot matrix. A row that
+        // is not downloading has no progress to draw, but every row of a
+        // 500-track playlist was paying for the matrix anyway: 92 of the 232
+        // items a TrackRow creates, measured. The Loader has a size, so the
+        // loaded Item is sized to it (no anchors needed inside).
+        Loader {
+            active: db.st === "running"
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-            Text {
-                textFormat: Text.PlainText
-                // pct is -1 until the first progress event (mirrors DownIcon's "…")
-                id: dbPct; text: db.pct >= 0 ? Math.round(db.pct) + "%" : "…"
-                color: root.accent; font.family: root.mono; font.pixelSize: 11; font.bold: true
-                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-            }
-            DotMatrix {
-                anchors.left: parent.left; anchors.right: dbPct.left; anchors.rightMargin: 8
-                anchors.verticalCenter: parent.verticalCenter
-                rows: 4; dot: 3; gap: 2; pct: Math.max(0, db.pct)
-                // Only visible while st === "running", so 100% here means the
-                // final steps are still in flight: twinkle in step with the
-                // queue row for the same item.
-                finishing: db.pct >= 99.9
+            sourceComponent: Item {
+                Text {
+                    textFormat: Text.PlainText
+                    // pct is -1 until the first progress event (mirrors DownIcon's "…")
+                    id: dbPct; text: db.pct >= 0 ? Math.round(db.pct) + "%" : "…"
+                    color: root.accent; font.family: root.mono; font.pixelSize: 11; font.bold: true
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                }
+                DotMatrix {
+                    anchors.left: parent.left; anchors.right: dbPct.left; anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    rows: 4; dot: 3; gap: 2; pct: Math.max(0, db.pct)
+                    // Only loaded while st === "running", so 100% here means the
+                    // final steps are still in flight: twinkle in step with the
+                    // queue row for the same item.
+                    finishing: db.pct >= 99.9
+                }
             }
         }
         // IDLE / QUEUED / DONE / FAILED, centered glyph + label
@@ -3339,8 +4069,22 @@ ApplicationWindow {
                 color: root.accent
                 size: 14; bold: db.st === "done" ? 0 : 10; anchors.verticalCenter: parent.verticalCenter
             }
-            QueueStack { visible: db.st === "queued"; anchors.verticalCenter: parent.verticalCenter }
-            RetryMark { visible: db.st === "failed"; color: root.red; box: 16; anchors.verticalCenter: parent.verticalCenter }
+            // Both draw through a Canvas, and both belong to a state a row is
+            // almost never in. Same reason as the dot matrix above: gate them
+            // on `active`, not `visible`, so an idle row builds neither.
+            // `visible: active` matters: a Row skips invisible children but
+            // still spaces around a zero-width one, so an inactive Loader left
+            // visible would pad the idle button by two gaps.
+            Loader {
+                active: db.st === "queued"; visible: active
+                anchors.verticalCenter: parent.verticalCenter
+                sourceComponent: QueueStack {}
+            }
+            Loader {
+                active: db.st === "failed"; visible: active
+                anchors.verticalCenter: parent.verticalCenter
+                sourceComponent: RetryMark { color: root.red; box: 16 }
+            }
             Text {
                 textFormat: Text.PlainText  // db.label carries a remote artist name
                 text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.st === "queued" ? db.queuedLabel : db.label.toUpperCase()
@@ -3486,7 +4230,7 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent; anchors.margins: 10; spacing: 13
             FolderTile { visible: plRow.isFolder }
-            Art { visible: !plRow.isFolder; width: 44; height: 44; url: plRow.isFolder ? "" : model.art }
+            Art { visible: !plRow.isFolder; width: 44; height: 44; hoverFx: true; url: plRow.isFolder ? "" : model.art }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 2
                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -4230,52 +4974,86 @@ ApplicationWindow {
     // of the art with an ink triangle and PLAY label, like a terminal status
     // bar. `lit` brightens and thickens it while the row/thumb is hovered.
     // Fills its parent (the thumb): the strip anchors itself to the bottom.
+    // Play affordance on video artwork: the least ink that still reads. A
+    // shadow rises out of the bottom edge so the mark stays legible over any
+    // frame, and the mark is a small triangle in the corner. This replaces a
+    // full-width green strip with "PLAY" set into it, which ate a quarter of
+    // an 88x50 thumb; the picture is the point, the more so now that resting
+    // on one plays it. `radius` follows the art the badge sits on (6 on the
+    // rounded browse thumbs, 0 on the square track-row ones).
     component PlayBadge: Item {
+        id: pb
         property bool lit: false
+        property real radius: 6
         anchors.fill: parent
         Rectangle {
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-            height: lit ? 16 : 13
-            radius: 6   // follow the art's rounded bottom corners
-            color: lit ? root.accentSoft : root.accent
-            Behavior on height { NumberAnimation { duration: 90 } }
-            // Square off the strip's top edge (radius rounds all four corners).
+            height: Math.round(parent.height * 0.42)
+            radius: pb.radius
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#0006090c" }
+                GradientStop { position: 1.0; color: pb.lit ? "#dd06090c" : "#cc06090c" }
+            }
+            // Square off the scrim's top edge (radius rounds all four corners).
             Rectangle {
                 anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                 height: parent.radius
-                color: parent.color
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#0006090c" }
+                    GradientStop { position: 1.0; color: "#3306090c" }
+                }
             }
-            Row {
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.left: parent.left; anchors.leftMargin: 6
-                spacing: 5
-                Canvas {
-                    width: 7; height: 8
-                    anchors.verticalCenter: parent.verticalCenter
-                    onPaint: {
-                        var c = getContext("2d")
-                        c.reset()
-                        c.fillStyle = "" + root.accentText
-                        c.beginPath(); c.moveTo(0, 0); c.lineTo(0, height); c.lineTo(width, height / 2)
-                        c.closePath(); c.fill()
-                    }
-                }
-                Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "PLAY"; color: root.accentText
-                    font.family: root.mono; font.pixelSize: 8
-                    font.bold: true; font.letterSpacing: 2
-                }
+        }
+        Canvas {
+            anchors.left: parent.left; anchors.bottom: parent.bottom
+            anchors.leftMargin: 6; anchors.bottomMargin: 6
+            width: pb.lit ? 9 : 8; height: pb.lit ? 10 : 9
+            readonly property color ink: pb.lit ? root.accentSoft : root.accent
+            // Repaint on every input to the paint, none of which Canvas
+            // watches by itself.
+            onInkChanged: requestPaint()
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
+            onPaint: {
+                var c = getContext("2d")
+                c.reset()
+                c.fillStyle = "" + ink
+                c.beginPath(); c.moveTo(0, 0); c.lineTo(0, height); c.lineTo(width, height / 2)
+                c.closePath(); c.fill()
             }
         }
     }
     component VideoThumb: Item {
+        id: vt
         property string url: ""
         property bool lit: false
+        // Hover peek wiring: with a videoId set, the thumb swells right away
+        // for instant feedback and a short dwell grows the floating peek
+        // card out of its rect (root.peekOpen). Thumbs without an id (none
+        // today) stay inert.
+        property string videoId: ""
+        property string vTitle: ""
+        property string vArtist: ""
+        readonly property bool peekable: videoId !== ""
         width: 88; height: 50
-        Art { anchors.fill: parent; radius: 6; url: parent.url }
-        PlayBadge { lit: parent.lit }
+        scale: peekable && vtHover.hovered ? 1.08 : 1
+        Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        z: vtHover.hovered ? 4 : 0
+        Art { anchors.fill: parent; radius: 6; url: vt.url }
+        PlayBadge { lit: vt.lit || vtHover.hovered }
+        HoverHandler {
+            id: vtHover
+            enabled: vt.peekable
+            onHoveredChanged: {
+                if (hovered) { root.peekThumbHover = true; vtDwell.restart() }
+                else { vtDwell.stop(); root.peekThumbHover = false; root.peekHoverCheck() }
+            }
+        }
+        Timer {
+            id: vtDwell
+            interval: 450
+            onTriggered: if (vtHover.hovered) root.peekOpen(vt, vt.videoId, vt.vTitle, vt.vArtist, vt.url)
+        }
     }
 
     // Old-school LED dot-matrix progress. Dots sit in a fixed grid and brighten
@@ -4388,12 +5166,26 @@ ApplicationWindow {
         // ListView delegate recycling in the virtualised My Tidal lists.
         readonly property bool expanded: root.expandedAlbums[albumId] === true
         property var sel: ({})
+        // sel holds raw track ids, so a recycled delegate rebinding to a new
+        // album (LibList sets reuseItems) would download the PREVIOUS album's
+        // selection; expanded/trackList live in global maps for that reason,
+        // the per-delegate selection resets instead.
+        onAlbumIdChanged: sel = ({})
         readonly property var trackList: root.trackCache[albumId] || []
         // Tier split once the tracks are known (expand fetches them), flips
         // the quality badge to MIXED when the album spans tiers.
         readonly property var qualMix: root.qualMixList(trackList)
         readonly property int selCount: Object.keys(sel).length
         readonly property bool allSelected: trackList.length > 0 && selCount === trackList.length
+        // The artists this block should link: the side-map array when the
+        // payload carried one, else a single entry from artistName/artistId
+        // (same fallback as cardLeadArtists, so search albums always show a
+        // clickable artist like the track rows do).
+        readonly property var leadArtists: {
+            var a = root.artistsById[albumId] || []
+            if (a.length > 0) return a
+            return artistName !== "" ? [{ id: artistId, name: artistName }] : []
+        }
         spacing: 6
 
         function toggle() {
@@ -4427,7 +5219,7 @@ ApplicationWindow {
                     Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
                     Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
-                Art { width: 46; height: 46; url: art }
+                Art { width: 46; height: 46; hoverFx: true; url: art }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
                     Text {
@@ -4447,7 +5239,7 @@ ApplicationWindow {
                     }
                     ArtistLinks {
                         Layout.fillWidth: true
-                        artists: root.artistsById[albumId] || []
+                        artists: ab.leadArtists
                         suffix: (releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " trks" : "")
                     }
                 }
@@ -4480,7 +5272,7 @@ ApplicationWindow {
                 x: 16; y: 12; width: parent.width - 32; spacing: 12
                 Row {
                     width: parent.width; spacing: 16
-                    Art { width: 116; height: 116; url: art }
+                    Art { width: 116; height: 116; hoverFx: true; url: art }
                     Column {
                         width: parent.width - 132 - abPanelMeta.width - 16; spacing: 6
                         Text { text: "ALBUM"; color: root.textDim; font.pixelSize: 11 }
@@ -4498,7 +5290,12 @@ ApplicationWindow {
                                 onClicked: root.openAlbumPage(albumId, "", title)
                             }
                         }
-                        Text { textFormat: Text.PlainText; text: artistName + (releaseDate !== "" ? "  ·  " + releaseDate : (year !== "" ? "  ·  " + year : "")) + (trackCount > 0 ? "  ·  " + trackCount + " tracks" : ""); color: root.textLo; font.pixelSize: 14 }
+                        ArtistLinks {
+                            width: parent.width
+                            px: 14
+                            artists: ab.leadArtists
+                            suffix: (releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
+                        }
                         Row {
                             spacing: 10; topPadding: 6
                             // With the merge preference on the backend runs the
@@ -4691,7 +5488,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 44; Layout.alignment: Qt.AlignVCenter
                     PreviewArt { visible: trow.kind !== "video"; anchors.fill: parent; kind: "track"; pid: tId; url: art }
                     Art { visible: trow.kind === "video"; anchors.fill: parent; url: art }
-                    PlayBadge { visible: trow.kind === "video"; lit: thumbMa.containsMouse }
+                    PlayBadge { visible: trow.kind === "video"; lit: thumbMa.containsMouse; radius: 0 }
                     MouseArea {
                         id: thumbMa
                         anchors.fill: parent
@@ -4850,7 +5647,7 @@ ApplicationWindow {
             anchors.fill: parent; anchors.margins: 8; spacing: 8
             Item {
                 width: parent.width; height: parent.width
-                Art { anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width; url: aArt }
+                Art { anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width; hoverFx: true; url: aArt }
             }
             Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
             PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: aPop }
@@ -4888,7 +5685,7 @@ ApplicationWindow {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
             anchors.margins: 8; spacing: 5
             Art {
-                width: parent.width; height: parent.width; url: bc.card.art || ""
+                width: parent.width; height: parent.width; hoverFx: true; url: bc.card.art || ""
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: bc.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -5141,7 +5938,9 @@ ApplicationWindow {
             if (cutAny) nctReap.restart()
         }
         Timer {
-            id: nctReap; interval: 340
+            // Just past the 90ms removal fade: dying pills leave as soon as
+            // they are invisible, so the row closes up right behind the fade.
+            id: nctReap; interval: 110
             onTriggered: {
                 for (var i = nctModel.count - 1; i >= 0; i--)
                     if (nctModel.get(i).dying) nctModel.remove(i)
@@ -5171,11 +5970,14 @@ ApplicationWindow {
                     clip: true
                     Row {
                         id: ncRow; spacing: 0; height: parent.height
+                        // No entrance/width animation anywhere in the trail:
+                        // pills growing in per navigation read as a wipe
+                        // (reported from livetesting). Crumbs appear in place;
+                        // the only motion left is a quick fade on removal.
                         // separator slot
                         Item {
                             height: parent.height; clip: true
                             width: (nc.ord > 0 && !nc.sepHidden) ? ncSep.implicitWidth + 12 : 0
-                            Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                             Text {
                                 id: ncSep; anchors.centerIn: parent
                                 textFormat: Text.PlainText; text: "›"
@@ -5186,9 +5988,8 @@ ApplicationWindow {
                         Item {
                             height: parent.height; clip: true
                             width: nc.foldShown ? ncFoldPill.implicitWidth + (nct.folding ? 0 : 6) : 0
-                            Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                             opacity: nc.foldShown ? 1 : 0
-                            Behavior on opacity { NumberAnimation { duration: 160 } }
+                            Behavior on opacity { NumberAnimation { duration: 90 } }
                             Rectangle {
                                 id: ncFoldPill
                                 radius: 8; height: 26
@@ -5213,23 +6014,12 @@ ApplicationWindow {
                         Item {
                             height: parent.height; clip: true
                             width: nc.crumbHidden ? 0 : ncPill.implicitWidth
-                            Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                             opacity: nc.crumbHidden ? 0 : 1
-                            Behavior on opacity { NumberAnimation { duration: 160 } }
+                            Behavior on opacity { NumberAnimation { duration: 90 } }
                             Rectangle {
                                 id: ncPill
-                                // entered flips just after creation so new
-                                // crumbs rise in; with motion off only the
-                                // slot fade plays (same gate as RiseIn).
-                                property bool entered: false
-                                Timer { interval: 15; running: true; onTriggered: ncPill.entered = true }
                                 radius: 8; height: 26
                                 anchors.verticalCenter: parent.verticalCenter
-                                anchors.verticalCenterOffset:
-                                    root.hoverMotion && (!entered || nc.dying) ? 11 : 0
-                                Behavior on anchors.verticalCenterOffset { NumberAnimation { duration: 300; easing.type: Easing.OutBack } }
-                                opacity: root.hoverMotion && (!entered || nc.dying) ? 0 : 1
-                                Behavior on opacity { NumberAnimation { duration: 180 } }
                                 implicitWidth: ncTx.implicitWidth + 20; width: implicitWidth
                                 color: nc.isLast ? root.accentCont : root.surface2
                                 border.color: nc.isLast ? root.accentDim : root.border1
@@ -5249,8 +6039,15 @@ ApplicationWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 // ord is the pill's place in the TRAIL; navTo
                                 // indexes the whole history, which the trail is
-                                // a tail slice of (root.crumbBase).
-                                onClicked: root.navTo(root.crumbBase + nc.ord)
+                                // a tail slice of (root.crumbBase). A synthetic
+                                // section-root pill (root.crumbSynth) leads the
+                                // trail without a history entry behind it: it
+                                // climbs out of the drill instead, and shifts
+                                // every later pill's history index by one.
+                                onClicked: {
+                                    if (root.crumbSynth && nc.ord === 0) root.crumbSynthGo()
+                                    else root.navTo(root.crumbBase + nc.ord - (root.crumbSynth ? 1 : 0))
+                                }
                             }
                         }
                     }
@@ -5276,6 +6073,11 @@ ApplicationWindow {
             id: acArt
             width: ac.artSize; height: ac.artSize
             radius: 12
+            // Heroes tilt too: the landing's first shelf renders through the
+            // hero card, and it sat flat while every card around it moved
+            // (reported from livetesting). The on-art caption and scrim are
+            // children of the art, so they ride the same tilt.
+            hoverFx: true
             url: ac.card.art || ""
             // Declared first so the hover controls' own MouseAreas sit above it:
             // the artwork opens the page, the buttons keep their clicks.
@@ -5318,7 +6120,7 @@ ApplicationWindow {
             readonly property bool collection: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
             readonly property string kindLabel: ac.kind === "album" ? "album" : ac.kind === "playlist" ? "playlist" : "mix"
             readonly property bool controlsOn: collection
-                                               && (acMa.containsMouse || acWrapHover.hovered
+                                               && (acWrapHover.hovered
                                                    || root.dlSt(ac.card.id || "") !== "" || root.pvSt(ac.kind, ac.card.id || "") !== "")
             HoverHandler { id: acWrapHover }
             RiseIn {
@@ -5347,7 +6149,11 @@ ApplicationWindow {
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: st === "running" ? parent.width : implicitWidth
                     mediaId: ac.card.id || ""
-                    collectionCheck: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
+                    // No ownership rollup here: this button is visible only
+                    // while a LIVE download state exists, and live state always
+                    // outranks the owned rollup, so the rollup's result could
+                    // never render. Computing it per card was pure cost.
+                    collectionCheck: false
                     label: "Download " + acArt.kindLabel
                     onTap: function() { root.browseCardDownload(ac.card) }
                     Rectangle { anchors.fill: parent; z: -1; radius: root.btnRad; color: "#d90d0f12" }
@@ -5416,7 +6222,7 @@ ApplicationWindow {
             }
             RiseIn {
                 on: !acArt.collection
-                    && (acMa.containsMouse || acWrapHover.hovered || root.dlSt(ac.card.id || "") !== "")
+                    && (acWrapHover.hovered || root.dlSt(ac.card.id || "") !== "")
                 anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 10
                 width: 38; height: 36
             Rectangle {
@@ -5426,7 +6232,11 @@ ApplicationWindow {
                 DownIcon {
                     anchors.centerIn: parent
                     mediaId: ac.card.id || ""
-                    collectionCheck: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
+                    // This corner icon renders only for NON-collection kinds
+                    // (collections get the stacked controls above), so a
+                    // collection rollup here could never be seen; leaving it
+                    // on ran two membership rollups per collection card.
+                    collectionCheck: false
                     onTap: function() { root.browseCardDownload(ac.card) }
                 }
             }
@@ -5457,13 +6267,6 @@ ApplicationWindow {
                 }
             }
             CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width }
-        }
-        // Hover tracking only (feeds controlsOn), clicks belong to the art,
-        // the title, and the caption's artist links.
-        MouseArea {
-            id: acMa
-            anchors.fill: parent; z: -1; hoverEnabled: true
-            acceptedButtons: Qt.NoButton
         }
     }
 
@@ -5515,6 +6318,432 @@ ApplicationWindow {
     // each tile on its own beat. Until (or unless) covers arrive, the tile
     // falls back to the tone panel: wave glyphs from the WaveMark, or a big
     // era numeral for "1950s"-style titles.
+    // Shared scroll pane for the two Browse surfaces (landing and drilled
+    // page). Each pane keeps its own contentY for its whole life, which is
+    // what makes Back land already positioned: nothing is restored because
+    // nothing was lost. What remains here is the machinery for CONTENT
+    // swaps under the user (a landing revalidate, a page revalidate,
+    // endless-scroll growth): the column collapses for the rebuild turn and
+    // the clamp would yank contentY toward the top, so the scroll range is
+    // padded up to the held spot while armed and the very first frame lands
+    // ON it, content filling in around it.
+    component BrowseScroll: Flickable {
+        id: bsp
+        // The content column this pane scrolls (wired by the instance).
+        property Item col: null
+        // What this pane currently shows; a hold or restore is tagged with
+        // it so it only ever applies to the content it was taken against.
+        // The landing never changes key (""); the drill pane binds the
+        // page key.
+        property string restoreKey: ""
+        // Endless scroll is a drilled-listing concern only; the landing
+        // must never grow the drill pane's section from its own geometry.
+        property bool grows: false
+        clip: true
+        readonly property real realContentH: (col ? col.height : 0) + 32
+        readonly property real restorePad: pendingRestoreY >= 0
+            ? Math.max(0, pendingRestoreY + height - realContentH) : 0
+        contentWidth: width; contentHeight: realContentH + restorePad
+        ScrollBar.vertical: ScrollBar {}
+        boundsBehavior: Flickable.StopAtBounds
+        property real pendingRestoreY: -1
+        property string pendingRestoreKey: ""
+        // mayDisarm: only a real layout pass may spend the hold. Disarm only
+        // once the REAL content (pad excluded) reaches the target: the pad
+        // alone always satisfies the clamped check.
+        function applyRestore(mayDisarm) {
+            if (pendingRestoreY < 0 || restoreKey !== pendingRestoreKey) return
+            contentY = Math.min(pendingRestoreY, Math.max(0, contentHeight - height))
+            if (mayDisarm && Math.max(0, realContentH - height) >= pendingRestoreY)
+                pendingRestoreY = -1   // reached the target
+        }
+        // The reference the track-row shells size their "load me now" window
+        // against. They read THIS, never the live contentY: a Loader
+        // consults `asynchronous` once, when it is created, so binding
+        // hundreds of row shells to contentY spent that many JS
+        // re-evaluations per scrolled frame and could not change a single
+        // row. Exact whenever a hold is armed (every path that swaps
+        // content in place arms one first); free scrolling falls back to a
+        // 10-row band, inside the 12 rows of slack the window carries.
+        readonly property int rowBandH: 10 * 62
+        readonly property real rowAnchorY: pendingRestoreY >= 0
+            ? pendingRestoreY : Math.floor(contentY / rowBandH) * rowBandH
+        // Arm the hold-in-place across an in-place content swap. Runs for a
+        // hidden pane too: a landing revalidating behind an open page still
+        // collapses its column, and the clamp does not care about
+        // visibility. Only a pane the user is actively dragging declines.
+        function holdScroll() {
+            if (contentY <= 0 || (visible && moving)) return
+            pendingRestoreKey = restoreKey
+            pendingRestoreY = contentY
+        }
+        // A fresh page (drill-in, stack pop) starts at the top; a Back that
+        // armed a hold keeps its spot instead, applied in the SAME pass
+        // (before paint) so there is never a visible jump from the top.
+        onRestoreKeyChanged: {
+            if (pendingRestoreY >= 0 && restoreKey === pendingRestoreKey) applyRestore(false)
+            else contentY = 0
+        }
+        onMovingChanged: root.browseMoving = moving
+        onPendingRestoreYChanged: if (pendingRestoreY >= 0) bspGiveUp.restart()
+        // Watch the REAL height, not contentHeight: while a hold is armed
+        // the pad absorbs growth (contentHeight stays constant), so a
+        // contentHeight watcher would starve both the disarm check and the
+        // endless-scroll top-up until the give-up timer fired.
+        onRealContentHChanged: { applyRestore(true); maybeGrow() }
+        // Give-up: the content never grew back to the held spot (it truly
+        // changed). Drop the pad and settle at the real bottom.
+        Timer {
+            id: bspGiveUp; interval: 800
+            onTriggered: { bsp.pendingRestoreY = -1; bsp.returnToBounds() }
+        }
+        // Endless scroll on a drilled listing page (a full-listing grid or
+        // track list, one section that fills the page). Nearing the bottom
+        // fetches the next window. Multi-section pages (genre/mood) are
+        // horizontal shelves plus preview rows that each carry their own
+        // "show more", so the whole-page vertical scroll doesn't grow them.
+        // Guarded by browseGrow's in-flight/exhausted checks, so re-fires
+        // while sitting near the bottom are cheap no-ops.
+        function maybeGrow() {
+            if (!grows || root.browsePageKey === "" || !root.browsePage) return
+            var secs = root.browsePage.sections || []
+            if (secs.length !== 1 || !root.browseCanGrow(secs[0])) return
+            if (contentY + height >= contentHeight - 800) root.browseGrow(secs[0])
+        }
+        onContentYChanged: maybeGrow()
+    }
+
+    // One Browse content section (a card shelf, a track list, a link
+    // cloud, a drilled grid). Hoisted out of the pane so the landing and
+    // the drilled page can render the SAME component from two always-alive
+    // panes; `landing` replaces every "am I the landing?" read of the
+    // global page key, which cannot distinguish the panes now that both
+    // exist at once.
+    component BrowseSection: Column {
+        id: bsec
+        property var sec: null
+        property int secIndex: 0
+        property bool landing: false
+        // The scroll pane and content column this section lives in, for
+        // wheel redirection, row windowing and highlight centering.
+        property Item pane: null
+        property Item col: null
+        // Where this section sits in the pane's scroll space. The row window
+        // is measured from HERE, never from the top of the page: on the
+        // landing a track shelf can sit thousands of pixels down a column of
+        // twenty sections, and a window aimed with the page's own scroll
+        // offset then lands far past the end of every short shelf, so no row
+        // ever loads and the whole shelf shows as empty row cards. A landing
+        // shelf hangs off an async Loader (parent) while a drilled one is the
+        // delegate itself, hence the two shapes.
+        readonly property real secTop: (landing ? (parent ? parent.y : 0) : y)
+                                       + (col ? col.y : 0)
+        // The first landing shelf becomes the art-first hero row: big
+        // covers with the caption on the artwork.
+        readonly property bool artStyle: root.browseStyle === "art"
+        readonly property bool hero: artStyle && landing && secIndex === 0
+                                     && sec.rowKind === "cards"
+        // A drilled "show more" page (one lone card section) lays its cards
+        // out as a wrapping grid that scrolls with the page and re-flows on
+        // resize, not a horizontal shelf.
+        readonly property bool grid: sec.rowKind === "cards" && !landing
+                                     && !(root.browsePage && root.browsePage.header)
+                                     && ((root.browsePage && root.browsePage.sections) || []).length === 1
+        // Suppress an empty/generic section headline on a drilled page, the
+        // back bar already names it (avoids a stray "More" above e.g. the
+        // Record Labels grid).
+        readonly property bool showHeadline: ("" + (sec.title || "")).trim() !== ""
+        // Every card shelf's headline opens the full listing: TIDAL's own
+        // "show more" page when the row has one, else a local page built
+        // from the row's items. Inert only on an already-drilled grid page
+        // (self-link).
+        readonly property bool headlinable: !grid
+            && (!!sec.more || (sec.rowKind === "cards" && (sec.items || []).length > 0))
+        function openListing() {
+            if (sec.more) root.openBrowseLink(sec.more, sec.title || "More")
+            else root.openBrowseSection(sec)
+        }
+        spacing: 8
+        SectionHeader {
+            visible: !bsec.artStyle && bsec.showHeadline
+            label: (bsec.sec.title || "More").toUpperCase() + (bsec.headlinable ? "  \u203a" : "")
+            count: (bsec.sec.items || []).length
+            MouseArea {
+                anchors.fill: parent
+                enabled: bsec.headlinable
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: bsec.openListing()
+            }
+        }
+        Text {
+            id: bsecTitle
+            visible: bsec.artStyle && bsec.showHeadline
+            textFormat: Text.PlainText
+            // "\u203a" marks headlines that open the full listing
+            text: (bsec.sec.title || "More") + (bsec.headlinable ? "  \u203a" : "")
+            color: bsecTitleMa.containsMouse ? "#ffffff" : root.textHi
+            font.pixelSize: 17; font.bold: true
+            width: parent.width; elide: Text.ElideRight
+            topPadding: 6
+            MouseArea {
+                id: bsecTitleMa
+                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                width: Math.min(parent.width, parent.implicitWidth)
+                enabled: bsec.headlinable
+                hoverEnabled: enabled
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: bsec.openListing()
+            }
+        }
+        // full-listing wrap grid (drilled "show more" pages).
+        // Width snaps to whole columns and the block centers in the pane,
+        // so a half-column of dead space is split evenly left/right instead
+        // of dumped on the right until the window grows enough to add
+        // another column.
+        Flow {
+            visible: bsec.grid
+            readonly property real cardW: bsec.artStyle ? 200 : 156
+            spacing: bsec.artStyle ? 14 : 12
+            readonly property int cols: root.gridCols(cardW, spacing, (bsec.sec.items || []).length, parent.width)
+            width: cols * (cardW + spacing) - spacing
+            x: Math.max(0, (parent.width - width) / 2)
+            Repeater {
+                model: bsec.grid ? bsec.sec.items : []
+                delegate: Loader {
+                    id: bgridLd
+                    required property var modelData
+                    sourceComponent: bsec.artStyle ? bgridArt : bgridConsole
+                    Component {
+                        id: bgridArt
+                        ArtCard { card: bgridLd.modelData }
+                    }
+                    Component {
+                        id: bgridConsole
+                        BrowseCard { card: bgridLd.modelData }
+                    }
+                }
+            }
+        }
+        // Grid footer: tells you whether more is coming or you've reached
+        // the end, so a short editorial listing (e.g. 20 Top Albums)
+        // doesn't read as "stuck" the way an endless genre listing keeps
+        // flowing.
+        Item {
+            visible: bsec.grid
+            width: parent.width; height: 46
+            readonly property bool loadingMore: !!(bsec.sec.data && root.browseGrowing[bsec.sec.data])
+            Row {
+                anchors.centerIn: parent; spacing: 10
+                visible: parent.loadingMore || !root.browseCanGrow(bsec.sec)
+                Rectangle {
+                    visible: !parent.parent.loadingMore
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 28; height: 1; color: root.border1
+                }
+                Text {
+                    textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: parent.parent.loadingMore
+                            ? "Loading more…"
+                            : (bsec.sec.items || []).length + " total"
+                    color: root.textDim; font.family: root.mono; font.pixelSize: 11
+                }
+                Rectangle {
+                    visible: !parent.parent.loadingMore
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 28; height: 1; color: root.border1
+                }
+            }
+        }
+        // horizontal card shelf, console (framed cards)
+        ListView {
+            visible: !bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
+            width: parent.width; height: 238
+            orientation: ListView.Horizontal
+            spacing: 12; clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            // The model gate mirrors `visible`'s LOCAL terms, never
+            // `visible` itself: that is EFFECTIVE visibility, so gating on
+            // it tore down every card when the pane's ancestor hid (leaving
+            // the tab) and rebuilt them all synchronously inside the
+            // returning click's turn, ~180ms of jank on every switch back
+            // to Browse. Keeping the cards alive across a hidden pane is
+            // the whole point of the two-pane design.
+            model: !bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
+                   ? bsec.sec.items : []
+            delegate: BrowseCard {
+                required property var modelData
+                card: modelData
+            }
+            ShelfWheelRedirect { pane: bsec.pane }
+            ShelfEdgeFades {}
+            // endless scroll: reaching the shelf's right edge pulls the
+            // row's next window from TIDAL
+            onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.sec)
+        }
+        // horizontal card shelf, art-first (unframed covers)
+        ListView {
+            visible: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
+            width: parent.width; height: bsec.hero ? 284 : 250
+            orientation: ListView.Horizontal
+            spacing: 14; clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            // Local terms, not `visible` (see the console shelf above).
+            model: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
+                   ? bsec.sec.items : []
+            delegate: ArtCard {
+                required property var modelData
+                card: modelData
+                hero: bsec.hero
+            }
+            ShelfWheelRedirect { pane: bsec.pane }
+            ShelfEdgeFades {}
+            onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.sec)
+        }
+        // vertical track list (e.g. "New Tracks" on a genre page)
+        Column {
+            id: bsecRows
+            visible: bsec.sec.rowKind === "tracks"
+            width: parent.width
+            Repeater {
+                model: bsec.sec.rowKind === "tracks" ? bsec.sec.items : []
+                // Fixed-height shells, content windowed: a long playlist
+                // used to create every TrackRow in one synchronous pass,
+                // 1.7s of frozen GUI per click (measured, budget 100ms).
+                // The shells give the column its full geometry in the
+                // assignment turn (so the scroll range and highlight
+                // positions are exact from the first frame), then each
+                // row's real content loads asynchronously. Rows near the
+                // viewport (or the spot a hold is armed for) and the
+                // highlight target load synchronously, so what the user is
+                // actually looking at is never a shell.
+                delegate: Loader {
+                    id: btrLd
+                    required property var modelData
+                    required property int index
+                    width: bsec.width; height: 62   // TrackRow's fixed height
+                    readonly property bool hiRow: root.browseHighlightId !== "" && modelData.id === root.browseHighlightId
+                    // A screenful of rows, used to size the live window.
+                    readonly property real rps: Math.max(1, bsec.pane.height / 62)
+                    // Row 0 of THIS shelf, in the pane's scroll space, so the
+                    // window is expressed in this shelf's own row indices.
+                    readonly property real rowTop: bsec.secTop + bsecRows.y
+                    readonly property real anchorRow: (bsec.pane.rowAnchorY - rowTop) / 62
+                    // A shelf no longer than the window it would be measured
+                    // against is never worth windowing, and a short shelf is
+                    // exactly the case an aiming error can blank completely.
+                    readonly property bool shortSec: (bsec.sec.items || []).length <= 3 * rps
+                    // WINDOWED, not just incubated. Incubating every row
+                    // spread the build cost out but still left them all
+                    // alive: a 579-track playlist put ~76,000 items under
+                    // one Flickable (132 per built row, measured), and the
+                    // page stayed sluggish however long you sat on it,
+                    // because the cost is the live item tree, not the
+                    // build. Only the viewport plus two screens either side
+                    // is real; the rest stay 62px shells. The shell owns
+                    // the height, so unloading changes nothing about the
+                    // scroll range, the hold target or the endless-scroll
+                    // top-up, and two screens of slack is more than a flick
+                    // covers before the next band brings the following rows
+                    // in. The highlight row is exempt at any distance: it
+                    // arms browseHighlightPending and centres the page, so
+                    // it must exist even when the window is elsewhere.
+                    active: hiRow || shortSec
+                            || (index > anchorRow - 2 * rps
+                                && index < anchorRow + 3 * rps)
+                    asynchronous: {
+                        if (hiRow) return false
+                        // A few rows of slack either side absorb the fact
+                        // that anchorRow moves in bands, not per pixel.
+                        // rowAnchorY, not contentY: this binding must not
+                        // re-evaluate on every scrolled frame (see there).
+                        return index < anchorRow - 8 || index > anchorRow + rps + 12
+                    }
+                    // Empty row card while the content incubates, so a
+                    // streaming list reads as rows filling in, not holes.
+                    Rectangle {
+                        anchors.fill: parent; anchors.topMargin: 3; anchors.bottomMargin: 3
+                        radius: 10; color: root.surface; border.color: root.border1
+                        visible: btrLd.status !== Loader.Ready
+                    }
+                    sourceComponent: TrackRow {
+                        id: btr
+                        width: btrLd.width
+                        tId: btrLd.modelData.id; kind: btrLd.modelData.kind || "track"
+                        title: btrLd.modelData.title; artistName: btrLd.modelData.artist || ""; artistId: btrLd.modelData.artist_id || ""
+                        album: btrLd.modelData.album || ""; art: btrLd.modelData.art || ""; year: "" + (btrLd.modelData.year || ""); date: btrLd.modelData.date || ""
+                        duration: btrLd.modelData.duration || ""; quality: btrLd.modelData.quality || ""; popularity: btrLd.modelData.popularity || 0
+                        // Numbers only on item pages, where they're ordered
+                        // (album track #s / playlist positions), editorial
+                        // track shelves would all read "1".
+                        num: (!bsec.landing && root.browsePage && root.browsePage.header) ? (btrLd.modelData.num || 0) : 0
+                        albumId: btrLd.modelData.album_id || ""
+                        hi: btrLd.hiRow
+                        // Track click landed here: hide the page while it
+                        // lays out, center this row, then reveal, so the
+                        // scroll into place is never seen. onCompleted
+                        // fires before the first paint, so the page is
+                        // already hidden when this content would show at
+                        // the top.
+                        Component.onCompleted: if (btr.hi) root.browseHighlightPending = true
+                        Timer {
+                            interval: 120; running: btr.hi
+                            onTriggered: {
+                                var y = btr.mapToItem(bsec.col, 0, 0).y - (bsec.pane.height - btr.height) / 2
+                                bsec.pane.contentY = Math.max(0, Math.min(y, bsec.pane.contentHeight - bsec.pane.height))
+                                root.browseHighlightPending = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Sub-page links (genre / mood / decade / label tiles).
+        // In art mode these are fixed-size tiles, so they use the SAME
+        // centered, column-snapped, responsive geometry as the card grid,
+        // one presentation across every drilled box view. Console mode
+        // keeps the variable-width chip flow.
+        Flow {
+            visible: bsec.sec.rowKind === "links"
+            readonly property bool tiled: bsec.artStyle
+            readonly property real cardW: 200
+            spacing: tiled ? 14 : 8
+            readonly property int cols: root.gridCols(cardW, spacing, (bsec.sec.items || []).length, parent.width)
+            width: tiled ? cols * (cardW + spacing) - spacing : parent.width
+            x: tiled ? Math.max(0, (parent.width - width) / 2) : 0
+            Repeater {
+                model: bsec.sec.rowKind === "links" ? bsec.sec.items : []
+                delegate: Loader {
+                    id: blinkLd
+                    required property var modelData
+                    required property int index
+                    sourceComponent: bsec.artStyle ? blinkTile : blinkChip
+                    Component {
+                        id: blinkTile
+                        BrowseTile { title: blinkLd.modelData.title; path: blinkLd.modelData.path; idx: blinkLd.index; plOnly: !!blinkLd.modelData.pl }
+                    }
+                    Component {
+                        id: blinkChip
+                        Rectangle {
+                            id: blink
+                            radius: 8; implicitHeight: 30; implicitWidth: blRow.implicitWidth + 26
+                            color: "transparent"; border.color: root.border1
+                            Row {
+                                id: blRow; anchors.centerIn: parent; spacing: 7
+                                Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: root.textDim }
+                                Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: blinkLd.modelData.title; color: root.textLo; font.pixelSize: 13 }
+                            }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: blinkLd.modelData.pl ? root.openPlaylistsFolder(blinkLd.modelData.path, blinkLd.modelData.title)
+                                                                        : root.openBrowseLink(blinkLd.modelData.path, blinkLd.modelData.title) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
     component BrowseTile: Rectangle {
         id: bt
         property string title: ""
@@ -5548,6 +6777,49 @@ ApplicationWindow {
         // the browse cards, the drilled shelves, and these wayfinding tiles.
         width: 200; height: 200; radius: 12
         clip: true
+        // Hover tilt at tile level: the whole mosaic (cells, scrim, title)
+        // moves as one slab, matching the Art component's effect.
+        property real fxRx: 0
+        property real fxRy: 0
+        property real fxLift: 1.0
+        readonly property bool fxOn: root.artFxVariant !== "none"
+        // Same rest-before-tilt arming as Art: a tile wall scrolling under a
+        // stationary cursor must not spring every tile it drags past.
+        property bool fxArmed: false
+        function _fxAim(p) {
+            var cx = width / 2, cy = height / 2
+            fxRy =  ((p.x - cx) / cx) * root.artFxTilt
+            fxRx = -((p.y - cy) / cy) * root.artFxTilt
+        }
+        Timer {
+            id: btFxArm; interval: 90
+            onTriggered: {
+                if (!btFxHover.hovered) return
+                bt.fxArmed = true
+                bt.fxLift = root.artFxLift
+                bt._fxAim(btFxHover.point.position)
+            }
+        }
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        transform: [
+            Rotation { origin.x: bt.width / 2; origin.y: bt.height / 2; axis: Qt.vector3d(1, 0, 0); angle: bt.fxRx },
+            Rotation { origin.x: bt.width / 2; origin.y: bt.height / 2; axis: Qt.vector3d(0, 1, 0); angle: bt.fxRy },
+            Scale    { origin.x: bt.width / 2; origin.y: bt.height / 2; xScale: bt.fxLift; yScale: bt.fxLift }
+        ]
+        HoverHandler {
+            id: btFxHover
+            enabled: bt.fxOn
+            onHoveredChanged: {
+                if (hovered) btFxArm.restart()
+                else {
+                    btFxArm.stop(); bt.fxArmed = false
+                    bt.fxRx = 0; bt.fxRy = 0; bt.fxLift = 1.0
+                }
+            }
+            onPointChanged: if (bt.fxArmed) bt._fxAim(point.position)
+        }
         gradient: Gradient {
             GradientStop { position: 0; color: bt.tone[0] }
             GradientStop { position: 1; color: Qt.darker(bt.tone[0], 1.45) }
@@ -5765,15 +7037,27 @@ ApplicationWindow {
         reuseItems: true
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar {}
+        // Pin the scroll spot across a revalidate refill (same pattern as the
+        // playlist-folder list): the fill resets contentY, so the armed spot
+        // is re-applied as the delegates lay out, until it is reachable. A
+        // user drag disarms it, their hand always wins.
+        property real pendingY: -1
+        function applyRestore() {
+            if (pendingY < 0) return
+            var maxY = Math.max(0, contentHeight - height)
+            contentY = Math.min(pendingY, maxY)
+            if (maxY >= pendingY) pendingY = -1
+        }
+        onMovementStarted: pendingY = -1
         // Re-check on scroll AND on size/content changes: after a page is
         // appended (contentHeight grows) or if the first page doesn't fill the
         // viewport (so it can't scroll), contentY never changes on its own,
         // without these the loader would stall. All three are idempotent thanks
-        // to the libHasMore / libLoadingMore guards in libMaybeLoadMore.
+        // to the libCatHasMore / libLoadingMore guards in libMaybeLoadMore.
         onContentYChanged: root.libMaybeLoadMore(lv, lv.cat)
-        onContentHeightChanged: root.libMaybeLoadMore(lv, lv.cat)
+        onContentHeightChanged: { applyRestore(); root.libMaybeLoadMore(lv, lv.cat) }
         onHeightChanged: root.libMaybeLoadMore(lv, lv.cat)
-        // Breathing space inside the scroll area (see browsePane).
+        // Breathing space inside the scroll area (see BrowseScroll).
         header: Item { width: 1; height: 8 }
         footer: Item {
             width: lv.width
@@ -5995,6 +7279,14 @@ ApplicationWindow {
              : cat === "artists" ? libArtistsModel : cat === "playlists" ? libPlaylistsModel
              : cat === "mixes" ? libMixesModel : cat === "videos" ? libVideosModel : null
     }
+    // The keep-alive view pane for a category (for scroll pinning across a
+    // revalidate refill). The playlists pane pins its ROOT list; the drilled
+    // folder view keeps its own pendingY machinery.
+    function libViewFor(cat) {
+        return cat === "albums" ? libAlbumsList : cat === "tracks" ? libTracksList
+             : cat === "artists" ? libArtistsGrid : cat === "playlists" ? libPlaylistsList
+             : cat === "mixes" ? libMixesList : cat === "videos" ? libVideosList : null
+    }
     // ---- My Tidal sort (per category) --------------------------------------
     // Options adapt to the category; every category shares a "Recently added"
     // default so it matches the backend's default order with no extra fetch.
@@ -6018,6 +7310,8 @@ ApplicationWindow {
         for (var k in root.libSort) m[k] = root.libSort[k]
         m[cat] = { key: key, asc: asc }
         root.libSort = m
+        libPinRefill = false          // a re-sorted list restarts at the top
+        libCatHasMore[cat] = false
         waves.setLibrarySort(cat, key, asc ? "asc" : "desc")
     }
     // From a Home "Recently added" preview shelf, open the full My Tidal tab for
@@ -6031,10 +7325,10 @@ ApplicationWindow {
         if (g.key === "date" && !g.asc) { root.loadLib(cat); return }
         libraryCategory = cat
         libLoadingMore = false
-        libHasMore = false
-        expandedAlbums = ({})
-        libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
-        libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
+        libPinRefill = false          // the order is changing: land at the top
+        libCatHasMore[cat] = false
+        // Only this category restarts; the other keep-alive panes are untouched.
+        var mm = libModelFor(cat); if (mm) mm.clear()
         var m = {}
         for (var k in root.libSort) m[k] = root.libSort[k]
         m[cat] = { key: "date", asc: false }
@@ -6047,7 +7341,7 @@ ApplicationWindow {
     // Called as the active list scrolls; loads the next page well before the
     // bottom (~1.5 viewports early) so it feels endless.
     function libMaybeLoadMore(view, cat) {
-        if (cat !== root.libraryCategory || !root.libHasMore || root.libLoadingMore) return
+        if (cat !== root.libraryCategory || !root.libCatHasMore[cat] || root.libLoadingMore) return
         if (view.count === 0 || view.contentHeight <= 0) return
         if (view.contentY + view.height > view.contentHeight - view.height * 1.5) {
             root.libLoadingMore = true
@@ -6058,18 +7352,33 @@ ApplicationWindow {
     Connections {
         target: waves
         function onLibraryLoaded(cat, items, more) {
-            // Drop a stale first-page load for a category the user already left
-            // (the backend caches it, so returning to it re-emits from cache).
-            if (cat !== root.libraryCategory) return
-            libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
-            libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
-            root.libHasMore = more
+            root.libCatHasMore[cat] = more
+            // A load for a category the user already left still lands in that
+            // category's own (hidden, keep-alive) pane: returning to it later
+            // is then instant. Only the ACTIVE pane needs the flags and the
+            // scroll pinning.
+            if (cat !== root.libraryCategory) { root.libFill(cat, items); return }
             root.libLoadingMore = false
+            // A quiet revalidate that actually changed the rows replaces them
+            // under the user; pin the spot across the refill (BrowseScroll's
+            // holdScroll idea). Sort changes and fresh loads disarmed the pin,
+            // so those still land at the top as a restarted list should.
+            var v = root.libViewFor(cat)
+            var keepY = (root.libPinRefill && v && v.visible && !v.moving && v.contentY > 0)
+                ? v.contentY : -1
             root.libFill(cat, items)
+            if (keepY >= 0) { v.pendingY = keepY; v.applyRestore() }
+            else if (v) {
+                // A restarted list (fresh load, new sort order) begins at the
+                // top. Explicit, because a clear+refill leaves the old
+                // contentY in place when the new content is just as tall.
+                v.pendingY = -1
+                v.contentY = 0
+            }
         }
         function onLibraryMore(cat, items, more) {
             if (cat !== root.libraryCategory) return
-            root.libHasMore = more
+            root.libCatHasMore[cat] = more
             root.libLoadingMore = false
             root.libAppend(cat, items)
         }
@@ -6103,8 +7412,7 @@ ApplicationWindow {
         }
         function onHomeLoaded(sections) {
             if (root.libraryCategory !== "home") return
-            root.libHasMore = false          // Home is one self-contained landing
-            root.libLoadingMore = false
+            root.libLoadingMore = false      // Home is one self-contained landing
             // Only populate when the load actually returned shelves. An empty
             // result (a transient fetch failure) must not wipe shelves already on
             // screen; a still-empty first load simply leaves the placeholder glyph
@@ -6114,6 +7422,9 @@ ApplicationWindow {
         function onDownloadFolderMissing() { root.folderGateBlocking = true }
         function onDownloadFolderDefault() { root.folderNudge = true }
         function onDownloadFolderUnreachable(path) { root.folderUnreachablePath = path; root.folderUnreachable = true }
+        // The recovery watch saw the drive come back and already resumed the
+        // held downloads: the gate dialog closes itself.
+        function onDownloadFolderRecovered() { root.folderUnreachable = false }
         function onFfmpegMissingBlocked() { root.ffmpegBlocked = true }
         function onLoggedInChanged() {
             // Drop every QML-side copy of Browse data when the account flips:
@@ -6151,6 +7462,17 @@ ApplicationWindow {
             root.catPendingDl = ""
             root.catPendingPv = ""
             root.catDlPrompt = null
+            // The keep-alive My Tidal panes hold the previous account's
+            // favourites for their whole life; only the account flip may
+            // clear them (loadLib no longer clears on category switches).
+            libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
+            libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
+            root.libCatHasMore = ({})
+            root.libLoadingMore = false
+            // The saved Search drill-in can hold the previous account's artist
+            // page, restorable from the Search tab: same class of leak as the
+            // history stacks dropped above.
+            root.searchSaved = null
             // The drilled-into folder view holds the previous account's rows.
             root.plFolderReset()
             if (waves.loggedIn && root.browseOpen) {
@@ -6171,7 +7493,11 @@ ApplicationWindow {
             // Park it and apply it on the other side, where it is an ordinary
             // in-place refresh. Only a landing that already has content can
             // wait: a first build has nothing to reveal and must go through.
-            if (bootHandover.running && root.browseSections.length > 0) {
+            // The window spans the whole visible handover: the version drain
+            // (bootBlk) and the zoom/reveal (bootZoom), which the drain's
+            // last tick starts.
+            if ((bootHandover.running || bootBlk.running || bootZoom.running)
+                    && root.browseSections.length > 0) {
                 root._browseParked = p
                 return
             }
@@ -6191,6 +7517,9 @@ ApplicationWindow {
             // row never appears. Without this the pane flashed the top then scrolled
             // for an uncached album, e.g. one opened from a My Tidal Home shelf.
             if (!p.error && root.browseHighlightId !== "") root.browseHighlightPending = true
+            // A revalidate re-emit of the page already showing swaps it in
+            // place; hold the user's spot across the rebuild (see holdScroll).
+            if (root.browsePage && !p.error) browseDrill.holdScroll()
             root.browsePage = p.error ? null : p
         }
         function onBrowseSectionMore(p) {
@@ -6201,6 +7530,9 @@ ApplicationWindow {
             if (!root.videoNow || ("" + p.id) !== root.videoNow.id) return
             if (p.error) {
                 if (root.videoSwitching) { root.videoSwitching = false; return }  // keep the old stream playing
+                // Same for a promotion: the adopted peek keeps playing, just
+                // at glance resolution, and the user sees no failure at all.
+                if (root.videoUpgrading) { root._videoUpgradeGiveUp(); return }
                 root.videoLoading = false; root.videoError = true
                 return
             }
@@ -6212,7 +7544,7 @@ ApplicationWindow {
                 root.videoSwitching = false
                 root.videoNow = Object.assign({}, root.videoNow, { res: p.res || 0, heights: p.heights || [] })
                 var swapUrl = p.url
-                videoSurface.grabToImage(function(result) {
+                videoStage.grabToImage(function(result) {
                     root._videoGrab = result   // keep alive while displayed
                     videoFreeze.source = result.url
                     videoFreeze.visible = true
@@ -6233,8 +7565,30 @@ ApplicationWindow {
                               res: p.res || 0,
                               heights: p.heights || [] }
             root.videoLoading = false
+            if (root.videoUpgrading) {
+                // Promotion upgrade: the adopted peek is on stage and
+                // sounding, so the real stream starts MUTED on the off-stage
+                // sink and chases its clock (videoUpgradeRetry cuts across
+                // once they line up). Nothing visible happens until then.
+                videoOut.muted = true
+                root._videoUpTries = 0
+                root._videoUpAims = 0
+                root._videoUpPhase = 0
+                root._videoUpTarget = -1
+                videoPlayer.source = p.url
+                videoPlayer.play()
+                videoUpgradeRetry.restart()
+                return
+            }
             videoPlayer.source = p.url
             videoPlayer.play()
+        }
+        function onVideoPeekReady(p) {
+            // Stale resolve: the card closed, or retargeted to another video.
+            if (!root.peekNow || ("" + p.id) !== root.peekNow.id) return
+            if (p.error) { root.peekClose(); return }
+            peekPlayer.source = p.url
+            peekPlayer.play()
         }
         function onBrowseTileArt(path, arts) {
             // Mutate the buffer in place (no rebind) and coalesce via the timer.
@@ -6287,6 +7641,17 @@ ApplicationWindow {
                 if (artistsModel.get(i).id === id) { artistsModel.setProperty(i, "popularity", pop); break }
             }
         }
+        function onArtistLoadFailed(id) {
+            // A Back-restore whose artist reload failed (offline, API error):
+            // onArtistLoaded never fires, so clear the latch here or history
+            // recording stays dead until the next successful navigation.
+            if (root._navRestoring) root._navRestoring = false
+            if (root._artistRestoreState && root._artistRestoreState.id === ("" + id)) {
+                root._artistRestoreState = null
+                artistView.pendingRestoreKey = ""
+                artistView.pendingRestoreY = -1
+            }
+        }
         function onArtistLoaded(p) {
             // Background revalidation of a cached page: update in place only
             // if the user is still looking at this artist, never navigate. Never
@@ -6296,6 +7661,7 @@ ApplicationWindow {
             if (p.refresh) {
                 if (!root.artistOpen || !root.artistData || root.artistData.libraryScoped
                     || ("" + root.artistData.id) !== ("" + p.id)) return
+                artistView.holdScroll()   // in-place swap: keep the user's spot
                 root.artistData = p
                 root.fillMedia(artistAlbumsModel, p.albums)
                 root.fillMedia(artistEpModel, p.eps)
@@ -6738,71 +8104,19 @@ ApplicationWindow {
                 width: Math.min(implicitWidth, parent.width - 44)
             }
         }
-        Flickable {
-            id: browsePane
-            // The 8px breathing space lives INSIDE the scroll area (browseCol
-            // y), not as an outer margin: an outer gap showed a band of raw
-            // background with scrolled rows cut off floating above it.
+        // Two always-alive panes on a flip stand: the landing on one, the
+        // drilled page on the other, and navigation only ever changes which
+        // is visible. Neither is torn down by leaving, so Back arrives
+        // complete, already scrolled, with nothing to rebuild and nothing
+        // to restore. Content is only rebuilt when the DATA changes (a
+        // fresh landing payload, a different drilled page), never by
+        // navigation itself.
+        Item {
             Layout.fillWidth: true; Layout.fillHeight: true
             visible: root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen
-            clip: true
-            contentWidth: width; contentHeight: browseCol.height + 32
-            ScrollBar.vertical: ScrollBar {}
-            boundsBehavior: Flickable.StopAtBounds
-            // A fresh page change (drill-in) starts at the top; a Back that
-            // arms pendingRestoreY keeps its scroll instead. The restore is
-            // applied in onContentHeightChanged, which fires during the layout
-            // pass, BEFORE the frame paints, so Back lands on the saved spot
-            // directly, with no visible jump from the top.
-            // A Back restore is tagged with the page key it belongs to, so it
-            // only ever applies once that page is showing, never against the
-            // outgoing page. On the page-key change it applies in the SAME pass
-            // (before paint) so Back lands on the saved spot with no jump from
-            // the top; a fresh drill-in (no armed restore) starts at the top.
-            readonly property string _pageKey: root.browsePageKey
-            property real pendingRestoreY: -1
-            property string pendingRestoreKey: ""
-            // mayDisarm: only a real layout pass may spend the restore. On the
-            // page-key change contentHeight is still the OUTGOING page's (the
-            // key binding here is notified before the section Repeater's
-            // model), so a tall page like a playlist would clear the
-            // "reached the target" check against a height the landing does not
-            // have yet. The landing's shelves then incubate across frames:
-            // contentHeight collapses, contentY is clamped to the top, and the
-            // re-apply that should have caught it finds the restore spent.
-            function applyRestore(mayDisarm) {
-                if (pendingRestoreY < 0 || root.browsePageKey !== pendingRestoreKey) return
-                var maxY = Math.max(0, contentHeight - height)
-                contentY = Math.min(pendingRestoreY, maxY)
-                if (mayDisarm && maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
-            }
-            on_PageKeyChanged: {
-                if (pendingRestoreY >= 0 && root.browsePageKey === pendingRestoreKey) applyRestore(false)
-                else contentY = 0
-            }
-            onMovingChanged: root.browseMoving = moving
-            onPendingRestoreYChanged: if (pendingRestoreY >= 0) restoreGiveUp.restart()
-            onContentHeightChanged: { applyRestore(true); maybeGrow() }
-            Timer { id: restoreGiveUp; interval: 800; onTriggered: browsePane.pendingRestoreY = -1 }
-            // Endless scroll on a drilled listing page (a full-listing grid or
-            // track list, one section that fills the page). Nearing the bottom
-            // fetches the next window. Multi-section pages (genre/mood) are
-            // horizontal shelves plus preview rows that each carry their own
-            // "show more", so the whole-page vertical scroll doesn't grow them.
-            // Guarded by browseGrow's in-flight/exhausted checks, so re-fires
-            // while sitting near the bottom are cheap no-ops.
-            function maybeGrow() {
-                if (root.browsePageKey === "" || !root.browsePage) return
-                var secs = root.browsePage.sections || []
-                if (secs.length !== 1 || !root.browseCanGrow(secs[0])) return
-                if (contentY + height >= contentHeight - 800) root.browseGrow(secs[0])
-            }
-            // onContentHeightChanged also tops up a page that loads shorter than
-            // it can scroll (handled above alongside the scroll restore).
-            onContentYChanged: maybeGrow()
-            // Fetch on first reveal too (e.g. the user signed in while already
-            // on the tab); idempotent thanks to the loading flags here and the
-            // in-flight guard backend-side.
+            // Fetch on first reveal too (e.g. the user signed in while
+            // already on the tab); idempotent thanks to the loading flags
+            // here and the in-flight guard backend-side.
             onVisibleChanged: {
                 if (visible && waves.loggedIn && root.browseSections.length === 0 && !root.browseLoading) {
                     root.browseLoading = true; root.browseError = false
@@ -6812,609 +8126,453 @@ ApplicationWindow {
                 }
             }
 
-            // While the page loads or builds, the ambient wave video behind this
-            // transparent pane stays in view on purpose: the "Reading the wire…"
-            // hint sits on the living water and the finished rows then fade in
-            // over it (browseReveal), instead of a black floor snapping to rows.
-            Column {
-                id: browseCol
-                x: 22; y: 8; width: browsePane.width - 44; spacing: 8
-                // Hidden (but still laid out, so heights resolve) until the
-                // highlighted-track scroll has been applied: opening an album from
-                // a track then reveals it already on the row, never mid-jump.
-                // Landing on a highlighted track: hide the pane INSTANTLY while it
-                // lays out and scrolls to the row (entering the state has no
-                // transition, so the un-scrolled top never shows, that was the
-                // flash), then FADE the reveal in so the album eases into place
-                // already scrolled instead of dropping in blank. Only the reveal
-                // direction is animated (the Transition's `to: ""`); a Behavior
-                // can't do direction here without racing the pending change.
-                opacity: 1
-                states: State {
-                    name: "positioning"; when: root.browseHighlightPending
-                    PropertyChanges { target: browseCol; opacity: 0 }
-                }
-                transitions: Transition {
-                    to: ""   // leaving "positioning" == the reveal
-                    NumberAnimation { property: "opacity"; duration: 260; easing.type: Easing.OutCubic }
-                }
-
-                // Item header (playlist / mix / album page): a full-width hero,
-                // the artwork doubles as a dimmed backdrop so the strip above
-                // the track list isn't mostly empty panel.
-                Rectangle {
-                    id: browseItemHeader
-                    readonly property var hd: root.browsePage && root.browsePage.header ? root.browsePage.header : null
-                    visible: hd !== null
-                    width: parent.width; height: visible ? 224 : 0
-                    radius: 14; clip: true
-                    color: root.surface
-                    border.color: root.border1
-                    Image {
-                        anchors.fill: parent
-                        source: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
-                        fillMode: Image.PreserveAspectCrop
-                        sourceSize.width: 480
-                        opacity: 0.30
-                        asynchronous: true
-                        cache: true
-                    }
-                    // Left-to-right scrim: keep the caption side readable, let
-                    // the backdrop breathe on the right.
-                    Rectangle {
-                        anchors.fill: parent
-                        gradient: Gradient {
-                            orientation: Gradient.Horizontal
-                            GradientStop { position: 0.0; color: "#e6101318" }
-                            GradientStop { position: 0.55; color: "#a0101318" }
-                            GradientStop { position: 1.0; color: "#30101318" }
-                        }
-                    }
-                    Row {
-                        anchors.fill: parent
-                        anchors.margins: 22
-                        spacing: 24
-                        Art {
-                            width: 180; height: 180; radius: 12
-                            anchors.verticalCenter: parent.verticalCenter
-                            url: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
-                        }
-                        Column {
-                            spacing: 7
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - 180 - 24
-                            Text {
-                                textFormat: Text.PlainText
-                                text: browseItemHeader.hd
-                                      ? (browseItemHeader.hd.kind === "playlist" ? "PLAYLIST"
-                                         : browseItemHeader.hd.kind === "mix" ? "MIX" : "ALBUM")
-                                      : ""
-                                color: root.textDim; font.pixelSize: 11; font.family: root.uiFont
-                                font.bold: true; font.letterSpacing: 1.5
-                            }
-                            Text {
-                                textFormat: Text.PlainText
-                                text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : ""
-                                color: root.textHi; font.pixelSize: 26; font.bold: true
-                                width: parent.width; elide: Text.ElideRight
-                            }
-                            Text {
-                                id: bihSubtitle
-                                textFormat: Text.PlainText
-                                text: browseItemHeader.hd ? (browseItemHeader.hd.subtitle || "") : ""
-                                // Album subtitles carry the artist, make them read (and act) like a link.
-                                readonly property bool linked: browseItemHeader.hd ? !!browseItemHeader.hd.artist_id : false
-                                color: linked ? root.accentContTx : root.textLo
-                                font.pixelSize: 14
-                                width: parent.width; elide: Text.ElideRight
-                                MouseArea {
-                                    anchors.fill: parent
-                                    enabled: bihSubtitle.linked
-                                    cursorShape: bihSubtitle.linked ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: waves.loadArtist(browseItemHeader.hd.artist_id)
-                                }
-                            }
-                            Text {
-                                textFormat: Text.PlainText
-                                visible: text !== ""
-                                text: browseItemHeader.hd ? (browseItemHeader.hd.desc || "") : ""
-                                color: root.textLo; font.pixelSize: 12
-                                width: parent.width; wrapMode: Text.WordWrap
-                                maximumLineCount: 2; elide: Text.ElideRight
-                            }
-                            Text {
-                                textFormat: Text.PlainText
-                                visible: text !== ""
-                                text: browseItemHeader.hd ? (browseItemHeader.hd.stats || "") : ""
-                                color: root.textDim; font.pixelSize: 12; font.family: root.mono
-                            }
-                            Item { width: 1; height: 3 }
-                            DownloadButton {
-                                mediaId: browseItemHeader.hd ? (browseItemHeader.hd.id || "") : ""
-                                label: browseItemHeader.hd
-                                       ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
-                                          : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
-                                       : ""
-                                collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
-                                onTap: function() {
-                                    if (browseItemHeader.hd)
-                                        root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    id: browseHint
-                    visible: waves.loggedIn && (root.browsePageKey === ""
-                             ? root.browseLoading || root.browseBuilding : root.browsePageLoading)
-                    width: parent.width; horizontalAlignment: Text.AlignHCenter
-                    text: "Reading the wire…"
-                    color: root.textLo; font.pixelSize: 22; topPadding: 96
-                    // same gentle breathing as the search empty state
-                    SequentialAnimation on opacity {
-                        running: browseHint.visible; loops: Animation.Infinite
-                        NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
-                    }
-                }
-
+            // While the landing loads or builds, the ambient wave video
+            // behind this transparent pane stays in view on purpose: the
+            // "Reading the wire…" hint sits on the living water and the
+            // finished rows then fade in over it (browseReveal), instead of
+            // a black floor snapping to rows.
+            BrowseScroll {
+                id: browseLanding
+                anchors.fill: parent
+                visible: root.browsePageKey === ""
+                col: browseLandingCol
                 Column {
-                    visible: waves.loggedIn && (root.browsePageKey === "" ? root.browseError : root.browsePageError)
-                    width: parent.width; spacing: 12
+                    id: browseLandingCol
+                    // The 8px breathing space lives INSIDE the scroll area
+                    // (y), not as an outer margin: an outer gap showed a
+                    // band of raw background with scrolled rows cut off
+                    // floating above it.
+                    x: 22; y: 8; width: browseLanding.width - 44; spacing: 8
+
                     Text {
+                        id: browseLandingHint
+                        visible: waves.loggedIn && (root.browseLoading || root.browseBuilding)
                         width: parent.width; horizontalAlignment: Text.AlignHCenter
-                        text: "Browse could not be loaded"
-                        color: root.textLo; font.pixelSize: 18; topPadding: 80
+                        text: "Reading the wire…"
+                        color: root.textLo; font.pixelSize: 22; topPadding: 96
+                        // same gentle breathing as the search empty state
+                        SequentialAnimation on opacity {
+                            running: browseLandingHint.visible; loops: Animation.Infinite
+                            NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
+                        }
                     }
+
+                    Column {
+                        visible: waves.loggedIn && root.browseError
+                        width: parent.width; spacing: 12
+                        Text {
+                            width: parent.width; horizontalAlignment: Text.AlignHCenter
+                            text: "Browse could not be loaded"
+                            color: root.textLo; font.pixelSize: 18; topPadding: 80
+                        }
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            implicitWidth: bLandRetryTxt.implicitWidth + root.btnPadH * 2
+                            implicitHeight: bLandRetryTxt.implicitHeight + root.btnPadV * 2
+                            radius: root.btnRad; color: "transparent"; border.color: root.accentDim
+                            Text {
+                                id: bLandRetryTxt; anchors.centerIn: parent; text: "RETRY"
+                                color: root.accent; font.family: root.uiFont; font.pixelSize: 12
+                                font.bold: true; font.letterSpacing: root.btnTrack
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { root.browseLoading = true; root.browseError = false; waves.loadBrowse() }
+                            }
+                        }
+                    }
+
+                    // Landing, console style: the Genres / Moods / Decades
+                    // chip sets lead the page (the art-first layout renders
+                    // the same data as colour tiles BELOW the content
+                    // shelves instead). No page-key term: the landing pane
+                    // stays alive behind a drilled page, tearing the chips
+                    // down here is exactly the rebuild the two-pane design
+                    // exists to avoid.
+                    Repeater {
+                        model: root.browseStyle === "console" && !root.browseLoading && !root.browseError
+                               ? [["ALL PLAYLISTS", root.plChips(root.browseChips.moods)], ["GENRES", root.browseChips.genres],
+                                  ["MOODS & ACTIVITIES", root.browseChips.moods], ["DECADES", root.browseChips.decades]]
+                               : []
+                        // Async for the same reason as the content shelves
+                        // below: ~60 chips are a real chunk of the
+                        // browse-render turn.
+                        delegate: Loader {
+                            id: chipGroupLd
+                            required property var modelData
+                            width: browseLandingCol.width
+                            asynchronous: root._browseAsyncBuild
+                            opacity: root.browseReveal
+                            onLoaded: root._browseBuildTick()
+                            sourceComponent: chipGroupComp
+                            Component {
+                                id: chipGroupComp
+                                Column {
+                                    id: chipGroup
+                                    readonly property var modelData: chipGroupLd.modelData
+                                    width: browseLandingCol.width; spacing: 8
+                                    visible: modelData[1].length > 0
+                                    // The headline opens the whole set, exactly as the
+                                    // art-style cloud headlines do. Without it the console
+                                    // style had no route to the playlists-only view at all:
+                                    // its chips reach the mood folders, but openPlaylistsRoot
+                                    // (and with it every genre and decade playlist folder)
+                                    // was unreachable in this style.
+                                    SectionHeader {
+                                        label: chipGroup.modelData[0]
+                                        count: chipGroup.modelData[1].length
+                                        openable: true
+                                        onOpened: chipGroup.modelData[0] === "ALL PLAYLISTS"
+                                                  ? root.openPlaylistsRoot()
+                                                  : root.openBrowseCloud(chipGroup.modelData[0], chipGroup.modelData[1])
+                                    }
+                                    Flow {
+                                        width: parent.width; spacing: 8
+                                        Repeater {
+                                            model: chipGroup.modelData[1]
+                                            delegate: Rectangle {
+                                                id: bchip
+                                                required property var modelData
+                                                radius: 8; implicitHeight: 30; implicitWidth: bcRow.implicitWidth + 26
+                                                color: "transparent"; border.color: root.border1
+                                                Row {
+                                                    id: bcRow; anchors.centerIn: parent; spacing: 7
+                                                    Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: root.textDim }
+                                                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: bchip.modelData.title; color: root.textLo; font.pixelSize: 13 }
+                                                }
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: bchip.modelData.pl ? root.openPlaylistsFolder(bchip.modelData.path, bchip.modelData.title)
+                                                                                          : root.openBrowseLink(bchip.modelData.path, bchip.modelData.title) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Content shelves. Fresh landing shelves load through
+                    // asynchronous Loaders: the browseSections assignment
+                    // turn only creates n empty Loaders (a few ms), and
+                    // each shelf's delegate tree then incubates across
+                    // frames, so the nav-tab strike animation keeps its
+                    // frames instead of freezing for the ~250 ms a
+                    // synchronous build of every shelf used to take.
+                    Repeater {
+                        model: root.browseSections
+                        delegate: Loader {
+                            id: bsecLd
+                            required property var modelData
+                            required property int index
+                            width: browseLandingCol.width
+                            asynchronous: root._browseAsyncBuild
+                            // Invisible while the veil is up, but still laid out.
+                            opacity: root.browseBuilding ? 0 : 1
+                            onLoaded: root._browseBuildTick()
+                            sourceComponent: BrowseSection {
+                                sec: bsecLd.modelData
+                                secIndex: bsecLd.index
+                                landing: true
+                                pane: browseLanding
+                                col: browseLandingCol
+                            }
+                        }
+                    }
+
+                    // Landing, art-first: genre / mood / decade colour-tile
+                    // shelves close the page, content first, wayfinding
+                    // last, the way the streaming services arrange their
+                    // home pages.
+                    Repeater {
+                        model: root.browseStyle === "art" && !root.browseLoading && !root.browseError
+                               ? [["All Playlists", root.plChips(root.browseChips.moods)], ["Genres", root.browseChips.genres],
+                                  ["Moods & Activities", root.browseChips.moods], ["Decades", root.browseChips.decades]]
+                               : []
+                        // Async for the same reason as the content shelves above.
+                        delegate: Loader {
+                            id: tileGroupLd
+                            required property var modelData
+                            width: browseLandingCol.width
+                            asynchronous: root._browseAsyncBuild
+                            opacity: root.browseReveal
+                            onLoaded: root._browseBuildTick()
+                            sourceComponent: tileGroupComp
+                            Component {
+                                id: tileGroupComp
+                                Column {
+                                    id: tileGroup
+                                    readonly property var modelData: tileGroupLd.modelData
+                                    width: browseLandingCol.width; spacing: 8
+                                    visible: modelData[1].length > 0
+                                    Text {
+                                        id: cloudTitle
+                                        textFormat: Text.PlainText
+                                        // "›" marks the headline as openable, click to see
+                                        // the whole cloud as a wrapping grid, like every
+                                        // other section headline.
+                                        text: tileGroup.modelData[0] + "  ›"
+                                        color: cloudTitleMa.containsMouse ? "#ffffff" : root.textHi
+                                        font.pixelSize: 17; font.bold: true
+                                        width: parent.width; elide: Text.ElideRight
+                                        topPadding: 6
+                                        MouseArea {
+                                            id: cloudTitleMa
+                                            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                            width: Math.min(parent.width, parent.implicitWidth)
+                                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: tileGroup.modelData[0] === "All Playlists"
+                                                       ? root.openPlaylistsRoot()
+                                                       : root.openBrowseCloud(tileGroup.modelData[0], tileGroup.modelData[1])
+                                        }
+                                    }
+                                    ListView {
+                                        width: parent.width; height: 204
+                                        orientation: ListView.Horizontal
+                                        spacing: 14; clip: true
+                                        boundsBehavior: Flickable.StopAtBounds
+                                        model: tileGroup.modelData[1]
+                                        delegate: BrowseTile {
+                                            required property var modelData
+                                            required property int index
+                                            title: modelData.title; path: modelData.path; idx: index
+                                            plOnly: !!modelData.pl
+                                        }
+                                        ShelfWheelRedirect { pane: browseLanding }
+                                        ShelfEdgeFades {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The drilled page (playlist / album / mix / genre / cloud).
+            // Rebuilt only when the page DATA changes; hidden, alive and
+            // still positioned while the user is elsewhere, so returning to
+            // the same page (another tab and back) costs nothing.
+            BrowseScroll {
+                id: browseDrill
+                anchors.fill: parent
+                visible: root.browsePageKey !== ""
+                col: browseDrillCol
+                restoreKey: root.browsePageKey
+                grows: true
+                Column {
+                    id: browseDrillCol
+                    x: 22; y: 8; width: browseDrill.width - 44; spacing: 8
+                    // Hidden (but still laid out, so heights resolve) until
+                    // the highlighted-track scroll has been applied: opening
+                    // an album from a track then reveals it already on the
+                    // row, never mid-jump. Entering the state has no
+                    // transition, so the un-scrolled top never shows; the
+                    // reveal then FADES in so the album eases into place
+                    // already scrolled instead of dropping in blank. Only
+                    // the reveal direction is animated (the Transition's
+                    // `to: ""`); a Behavior can't do direction here without
+                    // racing the pending change.
+                    opacity: 1
+                    states: State {
+                        name: "positioning"; when: root.browseHighlightPending
+                        PropertyChanges { target: browseDrillCol; opacity: 0 }
+                    }
+                    transitions: Transition {
+                        to: ""   // leaving "positioning" == the reveal
+                        NumberAnimation { property: "opacity"; duration: 260; easing.type: Easing.OutCubic }
+                    }
+
+                    // Item header (playlist / mix / album page): a
+                    // full-width hero, the artwork doubles as a dimmed
+                    // backdrop so the strip above the track list isn't
+                    // mostly empty panel.
                     Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        implicitWidth: retryTxt.implicitWidth + root.btnPadH * 2
-                        implicitHeight: retryTxt.implicitHeight + root.btnPadV * 2
-                        radius: root.btnRad; color: "transparent"; border.color: root.accentDim
-                        Text {
-                            id: retryTxt; anchors.centerIn: parent; text: "RETRY"
-                            color: root.accent; font.family: root.uiFont; font.pixelSize: 12
-                            font.bold: true; font.letterSpacing: root.btnTrack
+                        id: browseItemHeader
+                        readonly property var hd: root.browsePage && root.browsePage.header ? root.browsePage.header : null
+                        visible: hd !== null
+                        width: parent.width; height: visible ? 224 : 0
+                        radius: 14; clip: true
+                        color: root.surface
+                        border.color: root.border1
+                        Image {
+                            anchors.fill: parent
+                            source: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 480
+                            opacity: 0.30
+                            asynchronous: true
+                            cache: true
                         }
-                        MouseArea {
-                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (root.browsePageKey !== "") root.openBrowseLink(root.browsePageKey, "")
-                                else { root.browseLoading = true; root.browseError = false; waves.loadBrowse() }
+                        // Left-to-right scrim: keep the caption side
+                        // readable, let the backdrop breathe on the right.
+                        Rectangle {
+                            anchors.fill: parent
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0.0; color: "#e6101318" }
+                                GradientStop { position: 0.55; color: "#a0101318" }
+                                GradientStop { position: 1.0; color: "#30101318" }
                             }
                         }
-                    }
-                }
-
-                // Empty state: a drilled page that loaded fine but has nothing
-                // Waves can render (e.g. an editorial article page with no
-                // music). Better than a blank page below the back bar.
-                Text {
-                    visible: waves.loggedIn && root.browsePageKey !== "" && root.browsePage
-                             && !root.browsePageLoading && !root.browsePageError
-                             && ((root.browsePage.sections || []).length === 0)
-                    width: parent.width; horizontalAlignment: Text.AlignHCenter
-                    textFormat: Text.PlainText
-                    text: "Nothing to show here"
-                    color: root.textLo; font.pixelSize: 18; topPadding: 96
-                }
-
-                // Landing, console style: the Genres / Moods / Decades chip
-                // sets lead the page (the art-first layout renders the same
-                // data as colour tiles BELOW the content shelves instead).
-                Repeater {
-                    model: root.browseStyle === "console" && root.browsePageKey === "" && !root.browseLoading && !root.browseError
-                           ? [["ALL PLAYLISTS", root.plChips(root.browseChips.moods)], ["GENRES", root.browseChips.genres],
-                              ["MOODS & ACTIVITIES", root.browseChips.moods], ["DECADES", root.browseChips.decades]]
-                           : []
-                    // Async for the same reason as the content shelves below:
-                    // ~60 chips are a real chunk of the browse-render turn.
-                    delegate: Loader {
-                        id: chipGroupLd
-                        required property var modelData
-                        width: browseCol.width
-                        asynchronous: root._browseAsyncBuild
-                        opacity: root.browseReveal
-                        onLoaded: root._browseBuildTick()
-                        sourceComponent: chipGroupComp
-                        Component {
-                            id: chipGroupComp
+                        Row {
+                            anchors.fill: parent
+                            anchors.margins: 22
+                            spacing: 24
+                            Art {
+                                width: 180; height: 180; radius: 12
+                                hoverFx: true
+                                anchors.verticalCenter: parent.verticalCenter
+                                url: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
+                            }
                             Column {
-                        id: chipGroup
-                        readonly property var modelData: chipGroupLd.modelData
-                        width: browseCol.width; spacing: 8
-                        visible: modelData[1].length > 0
-                        // The headline opens the whole set, exactly as the
-                        // art-style cloud headlines do. Without it the console
-                        // style had no route to the playlists-only view at all:
-                        // its chips reach the mood folders, but openPlaylistsRoot
-                        // (and with it every genre and decade playlist folder)
-                        // was unreachable in this style.
-                        SectionHeader {
-                            label: chipGroup.modelData[0]
-                            count: chipGroup.modelData[1].length
-                            openable: true
-                            onOpened: chipGroup.modelData[0] === "ALL PLAYLISTS"
-                                      ? root.openPlaylistsRoot()
-                                      : root.openBrowseCloud(chipGroup.modelData[0], chipGroup.modelData[1])
-                        }
-                        Flow {
-                            width: parent.width; spacing: 8
-                            Repeater {
-                                model: chipGroup.modelData[1]
-                                delegate: Rectangle {
-                                    id: bchip
-                                    required property var modelData
-                                    radius: 8; implicitHeight: 30; implicitWidth: bcRow.implicitWidth + 26
-                                    color: "transparent"; border.color: root.border1
-                                    Row {
-                                        id: bcRow; anchors.centerIn: parent; spacing: 7
-                                        Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: root.textDim }
-                                        Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: bchip.modelData.title; color: root.textLo; font.pixelSize: 13 }
-                                    }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: bchip.modelData.pl ? root.openPlaylistsFolder(bchip.modelData.path, bchip.modelData.title)
-                                                                              : root.openBrowseLink(bchip.modelData.path, bchip.modelData.title) }
-                                }
-                            }
-                        }
-                            }
-                        }
-                    }
-                }
-
-                // Content rows: the landing sections, or the drilled page's
-                Repeater {
-                    model: root.browsePageKey === "" ? root.browseSections
-                         : (root.browsePage ? root.browsePage.sections : [])
-                    // Landing shelves load through asynchronous Loaders: the
-                    // browseSections assignment turn only creates n empty
-                    // Loaders (a few ms), and each shelf's delegate tree then
-                    // incubates across frames, so the nav-tab strike animation
-                    // keeps its frames instead of freezing for the ~250 ms a
-                    // synchronous build of every shelf used to take. Drilled
-                    // pages stay synchronous: their highlight machinery
-                    // (browseHighlightPending + the 120 ms centering timer)
-                    // measures row positions right after load and needs the
-                    // full page laid out in one turn.
-                    delegate: Loader {
-                        id: bsecLd
-                        required property var modelData
-                        required property int index
-                        width: browseCol.width
-                        asynchronous: root.browsePageKey === "" && root._browseAsyncBuild
-                        // Invisible while the veil is up, but still laid out.
-                        opacity: root.browseBuilding && root.browsePageKey === "" ? 0 : 1
-                        onLoaded: root._browseBuildTick()
-                        sourceComponent: bsecComp
-                        Component {
-                            id: bsecComp
-                            Column {
-                        id: bsec
-                        readonly property var modelData: bsecLd.modelData
-                        readonly property int index: bsecLd.index
-                        // The first landing shelf becomes the art-first hero
-                        // row: big covers with the caption on the artwork.
-                        readonly property bool artStyle: root.browseStyle === "art"
-                        readonly property bool hero: artStyle && index === 0 && root.browsePageKey === ""
-                                                     && modelData.rowKind === "cards"
-                        // A drilled "show more" page (one lone card section) lays
-                        // its cards out as a wrapping grid that scrolls with the
-                        // page and re-flows on resize, not a horizontal shelf.
-                        readonly property bool grid: modelData.rowKind === "cards"
-                                                     && root.browsePageKey !== ""
-                                                     && !(root.browsePage && root.browsePage.header)
-                                                     && ((root.browsePage && root.browsePage.sections) || []).length === 1
-                        // Suppress an empty/generic section headline on a drilled
-                        // page, the back bar already names it (avoids a stray
-                        // "More" above e.g. the Record Labels grid).
-                        readonly property bool showHeadline: ("" + (modelData.title || "")).trim() !== ""
-                        // Every card shelf's headline opens the full listing:
-                        // TIDAL's own "show more" page when the row has one,
-                        // else a local page built from the row's items. Inert
-                        // only on an already-drilled grid page (self-link).
-                        readonly property bool headlinable: !grid
-                            && (!!modelData.more || (modelData.rowKind === "cards" && (modelData.items || []).length > 0))
-                        function openListing() {
-                            if (modelData.more) root.openBrowseLink(modelData.more, modelData.title || "More")
-                            else root.openBrowseSection(modelData)
-                        }
-                        width: browseCol.width; spacing: 8
-                        SectionHeader {
-                            visible: !bsec.artStyle && bsec.showHeadline
-                            label: (bsec.modelData.title || "More").toUpperCase() + (bsec.headlinable ? "  \u203a" : "")
-                            count: (bsec.modelData.items || []).length
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: bsec.headlinable
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: bsec.openListing()
-                            }
-                        }
-                        Text {
-                            id: bsecTitle
-                            visible: bsec.artStyle && bsec.showHeadline
-                            textFormat: Text.PlainText
-                            // "\u203a" marks headlines that open the full listing
-                            text: (bsec.modelData.title || "More") + (bsec.headlinable ? "  \u203a" : "")
-                            color: bsecTitleMa.containsMouse ? "#ffffff" : root.textHi
-                            font.pixelSize: 17; font.bold: true
-                            width: parent.width; elide: Text.ElideRight
-                            topPadding: 6
-                            MouseArea {
-                                id: bsecTitleMa
-                                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-                                width: Math.min(parent.width, parent.implicitWidth)
-                                enabled: bsec.headlinable
-                                hoverEnabled: enabled
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: bsec.openListing()
-                            }
-                        }
-                        // full-listing wrap grid (drilled "show more" pages).
-                        // Width snaps to whole columns and the block centers in
-                        // the pane, so a half-column of dead space is split
-                        // evenly left/right instead of dumped on the right until
-                        // the window grows enough to add another column.
-                        Flow {
-                            visible: bsec.grid
-                            readonly property real cardW: bsec.artStyle ? 200 : 156
-                            spacing: bsec.artStyle ? 14 : 12
-                            readonly property int cols: root.gridCols(cardW, spacing, (bsec.modelData.items || []).length, parent.width)
-                            width: cols * (cardW + spacing) - spacing
-                            x: Math.max(0, (parent.width - width) / 2)
-                            Repeater {
-                                model: bsec.grid ? bsec.modelData.items : []
-                                delegate: Loader {
-                                    id: bgridLd
-                                    required property var modelData
-                                    sourceComponent: bsec.artStyle ? bgridArt : bgridConsole
-                                    Component {
-                                        id: bgridArt
-                                        ArtCard { card: bgridLd.modelData }
-                                    }
-                                    Component {
-                                        id: bgridConsole
-                                        BrowseCard { card: bgridLd.modelData }
-                                    }
-                                }
-                            }
-                        }
-                        // Grid footer: tells you whether more is coming or you've
-                        // reached the end, so a short editorial listing (e.g. 20
-                        // Top Albums) doesn't read as "stuck" the way an endless
-                        // genre listing keeps flowing.
-                        Item {
-                            visible: bsec.grid
-                            width: parent.width; height: 46
-                            readonly property bool loadingMore: !!(bsec.modelData.data && root.browseGrowing[bsec.modelData.data])
-                            Row {
-                                anchors.centerIn: parent; spacing: 10
-                                visible: parent.loadingMore || !root.browseCanGrow(bsec.modelData)
-                                Rectangle {
-                                    visible: !parent.parent.loadingMore
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 28; height: 1; color: root.border1
+                                spacing: 7
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - 180 - 24
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: browseItemHeader.hd
+                                          ? (browseItemHeader.hd.kind === "playlist" ? "PLAYLIST"
+                                             : browseItemHeader.hd.kind === "mix" ? "MIX" : "ALBUM")
+                                          : ""
+                                    color: root.textDim; font.pixelSize: 11; font.family: root.uiFont
+                                    font.bold: true; font.letterSpacing: 1.5
                                 }
                                 Text {
                                     textFormat: Text.PlainText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: parent.parent.loadingMore
-                                            ? "Loading more…"
-                                            : (bsec.modelData.items || []).length + " total"
-                                    color: root.textDim; font.family: root.mono; font.pixelSize: 11
+                                    text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : ""
+                                    color: root.textHi; font.pixelSize: 26; font.bold: true
+                                    width: parent.width; elide: Text.ElideRight
                                 }
-                                Rectangle {
-                                    visible: !parent.parent.loadingMore
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 28; height: 1; color: root.border1
-                                }
-                            }
-                        }
-                        // horizontal card shelf, console (framed cards)
-                        ListView {
-                            visible: !bsec.artStyle && !bsec.grid && bsec.modelData.rowKind === "cards"
-                            width: parent.width; height: 238
-                            orientation: ListView.Horizontal
-                            spacing: 12; clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            // The model gate mirrors `visible`'s LOCAL terms, never
-                            // `visible` itself: that is EFFECTIVE visibility, so
-                            // gating on it tore down every card when the pane's
-                            // ancestor hid (leaving the tab) and rebuilt them all
-                            // synchronously inside the returning click's turn,
-                            // ~180ms of jank on every switch back to Browse.
-                            model: !bsec.artStyle && !bsec.grid && bsec.modelData.rowKind === "cards"
-                                   ? bsec.modelData.items : []
-                            delegate: BrowseCard {
-                                required property var modelData
-                                card: modelData
-                            }
-                            ShelfWheelRedirect { pane: browsePane }
-                            ShelfEdgeFades {}
-                            // endless scroll: reaching the shelf's right edge
-                            // pulls the row's next window from TIDAL
-                            onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.modelData)
-                        }
-                        // horizontal card shelf, art-first (unframed covers)
-                        ListView {
-                            visible: bsec.artStyle && !bsec.grid && bsec.modelData.rowKind === "cards"
-                            width: parent.width; height: bsec.hero ? 284 : 250
-                            orientation: ListView.Horizontal
-                            spacing: 14; clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            // Local terms, not `visible` (see the console shelf above).
-                            model: bsec.artStyle && !bsec.grid && bsec.modelData.rowKind === "cards"
-                                   ? bsec.modelData.items : []
-                            delegate: ArtCard {
-                                required property var modelData
-                                card: modelData
-                                hero: bsec.hero
-                            }
-                            ShelfWheelRedirect { pane: browsePane }
-                            ShelfEdgeFades {}
-                            onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.modelData)
-                        }
-                        // vertical track list (e.g. "New Tracks" on a genre page)
-                        Column {
-                            visible: bsec.modelData.rowKind === "tracks"
-                            width: parent.width
-                            Repeater {
-                                model: bsec.modelData.rowKind === "tracks" ? bsec.modelData.items : []
-                                delegate: TrackRow {
-                                    id: btr
-                                    required property var modelData
-                                    width: bsec.width
-                                    tId: modelData.id; kind: modelData.kind || "track"
-                                    title: modelData.title; artistName: modelData.artist || ""; artistId: modelData.artist_id || ""
-                                    album: modelData.album || ""; art: modelData.art || ""; year: "" + (modelData.year || ""); date: modelData.date || ""
-                                    duration: modelData.duration || ""; quality: modelData.quality || ""; popularity: modelData.popularity || 0
-                                    // Numbers only on item pages, where they're ordered
-                                    // (album track #s / playlist positions), editorial
-                                    // track shelves would all read "1".
-                                    num: (root.browsePage && root.browsePage.header) ? (modelData.num || 0) : 0
-                                    albumId: modelData.album_id || ""
-                                    hi: root.browseHighlightId !== "" && modelData.id === root.browseHighlightId
-                                    // Track click landed here: hide the page while it
-                                    // lays out, center this row, then reveal, so the
-                                    // scroll into place is never seen. onCompleted
-                                    // fires before the first paint, so the page is
-                                    // already hidden when this content would show at
-                                    // the top.
-                                    Component.onCompleted: if (btr.hi) root.browseHighlightPending = true
-                                    Timer {
-                                        interval: 120; running: btr.hi
-                                        onTriggered: {
-                                            var y = btr.mapToItem(browseCol, 0, 0).y - (browsePane.height - btr.height) / 2
-                                            browsePane.contentY = Math.max(0, Math.min(y, browsePane.contentHeight - browsePane.height))
-                                            root.browseHighlightPending = false
-                                        }
+                                Text {
+                                    id: bihSubtitle
+                                    textFormat: Text.PlainText
+                                    text: browseItemHeader.hd ? (browseItemHeader.hd.subtitle || "") : ""
+                                    // Album subtitles carry the artist, make them read (and act) like a link.
+                                    readonly property bool linked: browseItemHeader.hd ? !!browseItemHeader.hd.artist_id : false
+                                    color: linked ? root.accentContTx : root.textLo
+                                    font.pixelSize: 14
+                                    width: parent.width; elide: Text.ElideRight
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: bihSubtitle.linked
+                                        cursorShape: bihSubtitle.linked ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: waves.loadArtist(browseItemHeader.hd.artist_id)
                                     }
                                 }
-                            }
-                        }
-                        // Sub-page links (genre / mood / decade / label tiles).
-                        // In art mode these are fixed-size tiles, so they use the
-                        // SAME centered, column-snapped, responsive geometry as the
-                        // card grid, one presentation across every drilled box
-                        // view. Console mode keeps the variable-width chip flow.
-                        Flow {
-                            visible: bsec.modelData.rowKind === "links"
-                            readonly property bool tiled: bsec.artStyle
-                            readonly property real cardW: 200
-                            spacing: tiled ? 14 : 8
-                            readonly property int cols: root.gridCols(cardW, spacing, (bsec.modelData.items || []).length, parent.width)
-                            width: tiled ? cols * (cardW + spacing) - spacing : parent.width
-                            x: tiled ? Math.max(0, (parent.width - width) / 2) : 0
-                            Repeater {
-                                model: bsec.modelData.rowKind === "links" ? bsec.modelData.items : []
-                                delegate: Loader {
-                                    id: blinkLd
-                                    required property var modelData
-                                    required property int index
-                                    sourceComponent: bsec.artStyle ? blinkTile : blinkChip
-                                    Component {
-                                        id: blinkTile
-                                        BrowseTile { title: blinkLd.modelData.title; path: blinkLd.modelData.path; idx: blinkLd.index; plOnly: !!blinkLd.modelData.pl }
-                                    }
-                                    Component {
-                                        id: blinkChip
-                                        Rectangle {
-                                            id: blink
-                                            radius: 8; implicitHeight: 30; implicitWidth: blRow.implicitWidth + 26
-                                            color: "transparent"; border.color: root.border1
-                                            Row {
-                                                id: blRow; anchors.centerIn: parent; spacing: 7
-                                                Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: root.textDim }
-                                                Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: blinkLd.modelData.title; color: root.textLo; font.pixelSize: 13 }
-                                            }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: blinkLd.modelData.pl ? root.openPlaylistsFolder(blinkLd.modelData.path, blinkLd.modelData.title)
-                                                                                        : root.openBrowseLink(blinkLd.modelData.path, blinkLd.modelData.title) }
-                                        }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    visible: text !== ""
+                                    text: browseItemHeader.hd ? (browseItemHeader.hd.desc || "") : ""
+                                    color: root.textLo; font.pixelSize: 12
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    maximumLineCount: 2; elide: Text.ElideRight
+                                }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    visible: text !== ""
+                                    text: browseItemHeader.hd ? (browseItemHeader.hd.stats || "") : ""
+                                    color: root.textDim; font.pixelSize: 12; font.family: root.mono
+                                }
+                                Item { width: 1; height: 3 }
+                                DownloadButton {
+                                    mediaId: browseItemHeader.hd ? (browseItemHeader.hd.id || "") : ""
+                                    label: browseItemHeader.hd
+                                           ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
+                                              : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
+                                           : ""
+                                    collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
+                                    onTap: function() {
+                                        if (browseItemHeader.hd)
+                                            root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
                                     }
                                 }
-                            }
-                        }
                             }
                         }
                     }
-                }
 
-                // Landing, art-first: genre / mood / decade colour-tile
-                // shelves close the page, content first, wayfinding last,
-                // the way the streaming services arrange their home pages.
-                Repeater {
-                    model: root.browseStyle === "art" && root.browsePageKey === "" && !root.browseLoading && !root.browseError
-                           ? [["All Playlists", root.plChips(root.browseChips.moods)], ["Genres", root.browseChips.genres],
-                              ["Moods & Activities", root.browseChips.moods], ["Decades", root.browseChips.decades]]
-                           : []
-                    // Async for the same reason as the content shelves above.
-                    delegate: Loader {
-                        id: tileGroupLd
-                        required property var modelData
-                        width: browseCol.width
-                        asynchronous: root._browseAsyncBuild
-                        opacity: root.browseReveal
-                        onLoaded: root._browseBuildTick()
-                        sourceComponent: tileGroupComp
-                        Component {
-                            id: tileGroupComp
-                            Column {
-                        id: tileGroup
-                        readonly property var modelData: tileGroupLd.modelData
-                        width: browseCol.width; spacing: 8
-                        visible: modelData[1].length > 0
+                    Text {
+                        id: browseDrillHint
+                        visible: waves.loggedIn && root.browsePageLoading
+                        width: parent.width; horizontalAlignment: Text.AlignHCenter
+                        text: "Reading the wire…"
+                        color: root.textLo; font.pixelSize: 22; topPadding: 96
+                        // same gentle breathing as the search empty state
+                        SequentialAnimation on opacity {
+                            running: browseDrillHint.visible; loops: Animation.Infinite
+                            NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
+                        }
+                    }
+
+                    Column {
+                        visible: waves.loggedIn && root.browsePageError
+                        width: parent.width; spacing: 12
                         Text {
-                            id: cloudTitle
-                            textFormat: Text.PlainText
-                            // "›" marks the headline as openable, click to see
-                            // the whole cloud as a wrapping grid, like every
-                            // other section headline.
-                            text: tileGroup.modelData[0] + "  ›"
-                            color: cloudTitleMa.containsMouse ? "#ffffff" : root.textHi
-                            font.pixelSize: 17; font.bold: true
-                            width: parent.width; elide: Text.ElideRight
-                            topPadding: 6
+                            width: parent.width; horizontalAlignment: Text.AlignHCenter
+                            text: "Browse could not be loaded"
+                            color: root.textLo; font.pixelSize: 18; topPadding: 80
+                        }
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            implicitWidth: bDrillRetryTxt.implicitWidth + root.btnPadH * 2
+                            implicitHeight: bDrillRetryTxt.implicitHeight + root.btnPadV * 2
+                            radius: root.btnRad; color: "transparent"; border.color: root.accentDim
+                            Text {
+                                id: bDrillRetryTxt; anchors.centerIn: parent; text: "RETRY"
+                                color: root.accent; font.family: root.uiFont; font.pixelSize: 12
+                                font.bold: true; font.letterSpacing: root.btnTrack
+                            }
                             MouseArea {
-                                id: cloudTitleMa
-                                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-                                width: Math.min(parent.width, parent.implicitWidth)
-                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                onClicked: tileGroup.modelData[0] === "All Playlists"
-                                           ? root.openPlaylistsRoot()
-                                           : root.openBrowseCloud(tileGroup.modelData[0], tileGroup.modelData[1])
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: root.retryBrowsePage()
                             }
                         }
-                        ListView {
-                            width: parent.width; height: 204
-                            orientation: ListView.Horizontal
-                            spacing: 14; clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            model: tileGroup.modelData[1]
-                            delegate: BrowseTile {
-                                required property var modelData
-                                required property int index
-                                title: modelData.title; path: modelData.path; idx: index
-                                plOnly: !!modelData.pl
-                            }
-                            ShelfWheelRedirect { pane: browsePane }
-                            ShelfEdgeFades {}
-                        }
-                            }
+                    }
+
+                    // Empty state: a drilled page that loaded fine but has
+                    // nothing Waves can render (e.g. an editorial article
+                    // page with no music). Better than a blank page below
+                    // the back bar.
+                    Text {
+                        visible: waves.loggedIn && root.browsePageKey !== "" && root.browsePage
+                                 && !root.browsePageLoading && !root.browsePageError
+                                 && ((root.browsePage.sections || []).length === 0)
+                        width: parent.width; horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText
+                        text: "Nothing to show here"
+                        color: root.textLo; font.pixelSize: 18; topPadding: 96
+                    }
+
+                    // The drilled page's sections, synchronous: the
+                    // highlight machinery (browseHighlightPending + the
+                    // 120 ms centering timer) measures row positions right
+                    // after load and needs the full page laid out in one
+                    // turn. Long track lists are windowed inside
+                    // BrowseSection, so "the full page" is shells plus the
+                    // viewport, never five hundred built rows.
+                    Repeater {
+                        model: root.browsePage ? root.browsePage.sections : []
+                        delegate: BrowseSection {
+                            required property var modelData
+                            required property int index
+                            width: browseDrillCol.width
+                            sec: modelData
+                            secIndex: index
+                            landing: false
+                            pane: browseDrill
+                            col: browseDrillCol
                         }
                     }
                 }
             }
         }
 
+
         // ---- Search results --------------------------------------------
         Flickable {
             id: results
             // Breathing space inside the scroll area (contentCol y), not as
-            // an outer margin; see browsePane.
+            // an outer margin; see BrowseScroll.
             Layout.fillWidth: true; Layout.fillHeight: true
             visible: !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.browseOpen
             clip: true
@@ -7629,7 +8787,7 @@ ApplicationWindow {
                         Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
                         RowLayout {
                             anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 12
-                            VideoThumb { url: model.art }
+                            VideoThumb { url: model.art; videoId: model.id; vTitle: model.title; vArtist: model.artist }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 1
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -7659,7 +8817,7 @@ ApplicationWindow {
                         radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
                             anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 46; height: 46; url: model.art }
+                            Art { width: 46; height: 46; hoverFx: true; url: model.art }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -7686,7 +8844,7 @@ ApplicationWindow {
                         radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
                             anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 46; height: 46; url: model.art }
+                            Art { width: 46; height: 46; hoverFx: true; url: model.art }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -7726,13 +8884,19 @@ ApplicationWindow {
                 id: artistView
                 Layout.fillWidth: true; Layout.fillHeight: true
                 clip: true
-                contentWidth: width; contentHeight: artistCol.height + 32
+                // Hold-in-place restore while a Back restore is armed, same
+                // reasoning as BrowseScroll: the first frame lands on the saved
+                // spot and content fills in around it, never a visible ratchet.
+                readonly property real restorePad: pendingRestoreY >= 0
+                    ? Math.max(0, pendingRestoreY + height - realContentH) : 0
+                readonly property real realContentH: artistCol.height + 32
+                contentWidth: width; contentHeight: realContentH + restorePad
                 ScrollBar.vertical: ScrollBar {}
                 boundsBehavior: Flickable.StopAtBounds
                 // A fresh artist page starts at the top (it used to inherit the
                 // previous artist's scroll offset); a Back that arms a restore
                 // lands on the saved spot instead. Same pre-paint mechanism as
-                // browsePane: the restore is tagged with the artist id it
+                // BrowseScroll: the restore is tagged with the artist id it
                 // belongs to and applied on the id change and during layout
                 // (onContentHeightChanged), before the frame paints, so Back
                 // never visibly jumps. Explicit contentY writes (openSearch,
@@ -7740,23 +8904,35 @@ ApplicationWindow {
                 readonly property string _artistKey: root.artistData ? "" + (root.artistData.id || "") : ""
                 property real pendingRestoreY: -1
                 property string pendingRestoreKey: ""
-                // mayDisarm: as on browsePane, only a real layout pass may spend
+                // mayDisarm: as on BrowseScroll, only a real layout pass may spend
                 // the restore. On the id change contentHeight still belongs to
                 // the outgoing page, so a tall one would disarm it before the
                 // incoming artist has laid out.
                 function applyRestore(mayDisarm) {
                     if (pendingRestoreY < 0 || _artistKey !== pendingRestoreKey) return
-                    var maxY = Math.max(0, contentHeight - height)
-                    contentY = Math.min(pendingRestoreY, maxY)
-                    if (mayDisarm && maxY >= pendingRestoreY) pendingRestoreY = -1   // reached the target
+                    contentY = Math.min(pendingRestoreY, Math.max(0, contentHeight - height))
+                    // Real content only (pad excluded), as on BrowseScroll.
+                    if (mayDisarm && Math.max(0, realContentH - height) >= pendingRestoreY)
+                        pendingRestoreY = -1   // reached the target
+                }
+                // Pin the spot across an in-place revalidate swap of the same
+                // artist, exactly as BrowseScroll.holdScroll does.
+                function holdScroll() {
+                    if (!visible || contentY <= 0 || moving) return
+                    pendingRestoreKey = _artistKey
+                    pendingRestoreY = contentY
                 }
                 on_ArtistKeyChanged: {
                     if (pendingRestoreY >= 0 && _artistKey === pendingRestoreKey) applyRestore(false)
                     else contentY = 0
                 }
                 onPendingRestoreYChanged: if (pendingRestoreY >= 0) artistRestoreGiveUp.restart()
-                onContentHeightChanged: applyRestore(true)
-                Timer { id: artistRestoreGiveUp; interval: 800; onTriggered: artistView.pendingRestoreY = -1 }
+                // Real height, not the padded contentHeight: see BrowseScroll.
+                onRealContentHChanged: applyRestore(true)
+                Timer {
+                    id: artistRestoreGiveUp; interval: 800
+                    onTriggered: { artistView.pendingRestoreY = -1; artistView.returnToBounds() }
+                }
 
                 Column {
                     id: artistCol
@@ -7768,7 +8944,7 @@ ApplicationWindow {
                     width: parent.width; spacing: 20
                     Column {
                         spacing: 10
-                        Art { id: artistArt; width: 150; height: 150; url: root.artistData.art || "" }
+                        Art { id: artistArt; width: 150; height: 150; hoverFx: true; url: root.artistData.art || "" }
                         // No idle Preview button on the artist's own page, but if a
                         // preview is already playing (e.g. started from a card), the
                         // scrubber still surfaces here so it stays controllable.
@@ -8075,11 +9251,21 @@ ApplicationWindow {
                     cacheBuffer: 800
                     reuseItems: true
                     boundsBehavior: Flickable.StopAtBounds
-                    // Breathing space inside the scroll area (see browsePane).
+                    // Breathing space inside the scroll area (see BrowseScroll).
                     header: Item { width: 1; height: 8 }
                     ScrollBar.vertical: ScrollBar {}
+                    // Same revalidate scroll pinning as LibList (this grid is
+                    // the one category pane that isn't a LibList).
+                    property real pendingY: -1
+                    function applyRestore() {
+                        if (pendingY < 0) return
+                        var maxY = Math.max(0, contentHeight - height)
+                        contentY = Math.min(pendingY, maxY)
+                        if (maxY >= pendingY) pendingY = -1
+                    }
+                    onMovementStarted: pendingY = -1
                     onContentYChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
-                    onContentHeightChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
+                    onContentHeightChanged: { applyRestore(); root.libMaybeLoadMore(libArtistsGrid, "artists") }
                     onHeightChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
                     delegate: Item {
                         required property var model
@@ -8091,7 +9277,7 @@ ApplicationWindow {
                                 anchors.fill: parent; anchors.margins: 8; spacing: 6
                                 Item {
                                     width: parent.width; height: width
-                                    Art { anchors.centerIn: parent; width: parent.width; height: width; url: model.art }
+                                    Art { anchors.centerIn: parent; width: parent.width; height: width; hoverFx: true; url: model.art }
                                 }
                                 Text {
                                     textFormat: Text.PlainText; text: model.name
@@ -8361,7 +9547,7 @@ ApplicationWindow {
                         width: ListView.view.width; height: 64; radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
                             anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 44; height: 44; url: model.art }
+                            Art { width: 44; height: 44; hoverFx: true; url: model.art }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -8380,7 +9566,7 @@ ApplicationWindow {
                         Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
                         RowLayout {
                             anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 12
-                            VideoThumb { url: model.art }
+                            VideoThumb { url: model.art; videoId: model.id; vTitle: model.title; vArtist: model.artist }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 1
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -8407,6 +9593,50 @@ ApplicationWindow {
             id: statusBar
             Layout.fillWidth: true; implicitHeight: 28; color: root.surface0
             Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: root.border1 }
+            // Universal seek on the bottom playback line (seek-lab "spark"):
+            // no expansion, so casual mouse travel can't trigger anything by
+            // accident. The hit zone reaches 16px up from the edge so seeking
+            // never means aiming at the window's resize-grab strip; an aim
+            // tick + time flag ride the cursor and the single real seek fires
+            // on release. Declared FIRST among the bar's children so the
+            // status text and the mini player stack above it and keep their
+            // clicks; presses land here only where nothing else claims them.
+            Item {
+                visible: root.previewKind !== "" && root.previewDuration > 0
+                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                height: 16
+                MouseArea {
+                    id: bottomSeekMa
+                    anchors.fill: parent
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    preventStealing: true
+                    property bool scrubbing: false
+                    function frac(mx) { return width > 0 ? Math.max(0, Math.min(1, mx / width)) : 0 }
+                    onPressed: function(m){ m.accepted = true; scrubbing = true; root.previewScrubbing = true; root.scrubPreviewVisual(frac(m.x)) }
+                    onPositionChanged: function(m){ if (scrubbing) root.scrubPreviewVisual(frac(m.x)) }
+                    onReleased: function(m){ if (scrubbing) { scrubbing = false; root.previewScrubbing = false; root.seekPreview(frac(m.x)) } }
+                    onCanceled: { scrubbing = false; root.previewScrubbing = false }
+                }
+                // aim tick + time flag under the cursor
+                Rectangle {
+                    visible: bottomSeekMa.containsMouse || bottomSeekMa.scrubbing
+                    x: bottomSeekMa.mouseX; anchors.bottom: parent.bottom
+                    width: 1; height: 10; color: root.accentSoft; opacity: 0.8
+                }
+                Rectangle {
+                    visible: bottomSeekMa.containsMouse || bottomSeekMa.scrubbing
+                    x: Math.max(4, Math.min(parent.width - width - 4, bottomSeekMa.mouseX - width / 2))
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: 16
+                    width: bottomSeekTxt.implicitWidth + 12; height: 16; radius: 4
+                    color: root.surfaceHi; border.color: root.border1
+                    Text {
+                        id: bottomSeekTxt
+                        anchors.centerIn: parent; textFormat: Text.PlainText
+                        text: root.fmtMs(bottomSeekMa.frac(bottomSeekMa.mouseX) * root.previewDuration)
+                        color: root.accentContTx; font.family: root.mono; font.pixelSize: 9
+                    }
+                }
+            }
             // Browse layout switch (art-first vs console), floating over the
             // pane's bottom-right corner so it costs the landing page no row.
             Rectangle {
@@ -8499,11 +9729,66 @@ ApplicationWindow {
                 }
                 // Decorative, yield the right side to the now-playing bar when it
                 // shows -- and to the update notice, which outranks a wordmark.
-                Text {
+                RowLayout {
+                    id: statusMark
                     visible: !root.appUpdAvailable
-                    text: "TIDAL · WAVES CONSOLE"; color: root.textDim; font.family: root.mono; font.pixelSize: 11; font.letterSpacing: 0.5
+                    spacing: 0
                     opacity: root.previewKind !== "" ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 180 } }
+                    // "checking" while the probe is out, "current" for a few
+                    // seconds after a check that found nothing. A check that
+                    // DOES find something needs no state here: appUpdAvailable
+                    // flips and the gold notice takes this slot instead.
+                    property string verState: ""
+                    Text {
+                        textFormat: Text.PlainText
+                        text: "TIDAL · WAVES CONSOLE · "
+                        color: root.textDim; font.family: root.mono; font.pixelSize: 11; font.letterSpacing: 0.5
+                    }
+                    Text {
+                        id: verMark
+                        textFormat: Text.PlainText
+                        // Hover only brightens: swapping in a longer label would
+                        // shove the whole wordmark sideways under the cursor.
+                        // The transient check states are allowed to resize, they
+                        // follow a deliberate click.
+                        text: statusMark.verState === "checking" ? "CHECKING…"
+                            : statusMark.verState === "current" ? "UP TO DATE"
+                            : "v" + waves.appVersion
+                        color: statusMark.verState === "current" ? root.accent
+                             : verMa.containsMouse ? root.textLo : root.textDim
+                        font.family: root.mono; font.pixelSize: 11; font.letterSpacing: 0.5
+                        Behavior on color { ColorAnimation { duration: 140 } }
+                        MouseArea {
+                            id: verMa
+                            anchors.fill: parent; anchors.margins: -4
+                            hoverEnabled: true
+                            cursorShape: statusMark.verState === "checking" ? Qt.ArrowCursor
+                                                                           : Qt.PointingHandCursor
+                            // The same check the Settings card runs. Not marked
+                            // manual: the user is nowhere near the updater, so a
+                            // found update should still raise its toast.
+                            onClicked: {
+                                if (statusMark.verState === "checking") return
+                                statusMark.verState = "checking"
+                                waves.checkAppUpdate(false)
+                            }
+                        }
+                    }
+                    // A check that comes back empty says so, then goes quiet.
+                    Timer {
+                        id: verSettle
+                        interval: 3200
+                        onTriggered: statusMark.verState = ""
+                    }
+                    Connections {
+                        target: waves
+                        function onAppUpdateChecked(available, current, latest, manual) {
+                            if (statusMark.verState !== "checking") return
+                            statusMark.verState = available ? "" : "current"
+                            if (!available) verSettle.restart()
+                        }
+                    }
                 }
             }
             // Now playing, persists across every view so playback can always be
@@ -8668,12 +9953,22 @@ ApplicationWindow {
                     MouseArea { id: npStopMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.nowStop() }
                 }
             }
-            // Thin playback position line along the very bottom edge of the window.
+            // Playback position line along the very bottom edge, 4px so the
+            // seek target sits clear of the window's resize-grab edge, with a
+            // phosphor spark breathing at the playhead on the shared LED clock.
             Rectangle {
+                id: bottomSeekLine
                 anchors.bottom: parent.bottom; anchors.left: parent.left
-                height: 2; color: root.accent
+                height: 4; color: root.accent
                 visible: root.previewKind !== "" && root.previewDuration > 0
                 width: parent.width * root.pvFrac(root.previewKind, root.previewId)
+            }
+            Rectangle {
+                visible: bottomSeekLine.visible
+                x: bottomSeekLine.width - width / 2; anchors.bottom: parent.bottom
+                width: 5; height: 5; radius: 1
+                color: root.accentSoft
+                opacity: 0.35 + 0.65 * root.ledPulse
             }
         }
     }
@@ -9090,7 +10385,7 @@ ApplicationWindow {
                  : root.libraryCategory === "playlists" ? libPlaylistsList
                  : root.libraryCategory === "mixes" ? libMixesList
                  : root.libraryCategory === "videos" ? libVideosList : null)
-             : root.browseOpen ? browsePane
+             : root.browseOpen ? (root.browsePageKey === "" ? browseLanding : browseDrill)
              : root.settingsOpen ? null
              : results
     }
@@ -9105,7 +10400,7 @@ ApplicationWindow {
         visible: waves.sessionResolved && !waves.loggedIn
         // A logged-out cold launch fades in with the rest of the interface.
         opacity: root.bootContentShown
-        color: "#06070ed6"
+        color: "#d606070e"
         MouseArea { anchors.fill: parent }
         Rectangle {
             anchors.centerIn: parent; width: 460; radius: 14; color: root.surface2; border.color: root.outline
@@ -9207,7 +10502,7 @@ ApplicationWindow {
         objectName: "folderGate"
         anchors.fill: parent
         visible: root.folderGateBlocking
-        color: "#06070ef4"
+        color: "#f406070e"
         MouseArea { anchors.fill: parent; hoverEnabled: true }   // eat clicks behind the card
         Rectangle {
             anchors.centerIn: parent; width: 440
@@ -9240,7 +10535,7 @@ ApplicationWindow {
         objectName: "folderNudge"
         anchors.fill: parent
         visible: root.folderNudge
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: { root.folderNudge = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9275,7 +10570,7 @@ ApplicationWindow {
         objectName: "catDlGate"
         anchors.fill: parent
         visible: root.catDlPrompt !== null
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: root.catDlDismiss() }   // click-away cancels
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9337,7 +10632,7 @@ ApplicationWindow {
         objectName: "settingsResetGate"
         anchors.fill: parent
         visible: root.confirmSettingsReset
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: root.confirmSettingsReset = false }   // click-away cancels
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9376,7 +10671,7 @@ ApplicationWindow {
         objectName: "factoryResetGate"
         anchors.fill: parent
         visible: root.confirmFactoryReset
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: root.confirmFactoryReset = false }   // click-away cancels
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9416,7 +10711,7 @@ ApplicationWindow {
         objectName: "folderUnreachableGate"
         anchors.fill: parent
         visible: root.folderUnreachable
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: { root.folderUnreachable = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9434,7 +10729,7 @@ ApplicationWindow {
                 Text {
                     textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
                     color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
-                    text: "The folder is set, but writing to it failed just now. If it lives on a network drive or NAS, it may have disconnected while the computer slept. Reconnect it and try again, or choose a different folder. The download is held and will start once this is resolved."
+                    text: "The folder is set, but writing to it failed just now. If it lives on a network drive or NAS, it may have disconnected while the computer slept. Reconnect it, or choose a different folder. The download is held: Waves keeps checking and resumes on its own the moment the folder is back."
                 }
                 RowLayout {
                     Layout.fillWidth: true; Layout.topMargin: 4; spacing: 12
@@ -9459,7 +10754,7 @@ ApplicationWindow {
                 && appFfmpeg.stateKey === "missing" && !ffmpegGate.sessionSnoozed
                 && !setupSettings.ffmpegPromptDismissed)
         )
-        color: "#06070ef4"
+        color: "#f406070e"
         // Eat every click; the only way past is the Continue / "later" choice.
         MouseArea { anchors.fill: parent; hoverEnabled: true }
 
@@ -9832,7 +11127,7 @@ ApplicationWindow {
         objectName: "ffmpegBlockGate"
         anchors.fill: parent
         visible: root.ffmpegBlocked
-        color: "#06070ecc"
+        color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: { root.ffmpegBlocked = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
         Rectangle {
             anchors.centerIn: parent; width: 460
@@ -9867,7 +11162,7 @@ ApplicationWindow {
         id: termsGate
         anchors.fill: parent
         visible: waves.loggedIn && setupSettings.ffmpegSetupDone && !legalSettings.termsAccepted
-        color: "#06070ef4"
+        color: "#f406070e"
         // Eat every click so nothing behind the gate is reachable; with no close
         // control and no outside-click handler, the gate cannot be dismissed.
         MouseArea { anchors.fill: parent; hoverEnabled: true }
@@ -10073,7 +11368,14 @@ ApplicationWindow {
                     else out += base[i]
                 }
                 bootVer.text = out
-                if (tick > 3 * m) { stop(); tick = 0; bootVer.shown = 0 }
+                // The zoom starts HERE, welded to the walk actually finishing.
+                // It used to run after a wall-clock pause sized to runMs, but
+                // these ticks ride the GUI thread: any boot work (the landing
+                // assembling) slips them, and the readout was still draining
+                // while the interface faded up underneath (reported from
+                // livetesting). The drain's own last tick can never be early
+                // or late relative to itself.
+                if (tick > 3 * m) { stop(); tick = 0; bootVer.shown = 0; bootZoom.start() }
             }
         }
 
@@ -10108,16 +11410,16 @@ ApplicationWindow {
             ScriptAction { script: { handoverCap.restart(); bootOverlay.handover() } }
         }
 
+        // Handover = start the version drain; its last tick starts bootZoom
+        // (see bootBlk.onTriggered), so nothing of the readout is ever left
+        // on screen when the zoom and the interface reveal begin, however
+        // busy the GUI thread was during the walk.
         SequentialAnimation {
             id: bootHandover
             ScriptAction { script: { bootBlk.base = bootVer.text; bootBlk.restart() } }
-            // The whole fill/drain runs over this, and nothing of it is left
-            // when the zoom starts: the readout empties, then the wordmark
-            // goes. Bound to the walk (see bootBlk.runMs), so a longer or
-            // shorter version string can never put the two back on top of
-            // each other. The ScriptAction above set `base`, so this reads
-            // the length for the string actually draining.
-            PauseAnimation { duration: bootBlk.runMs }
+        }
+        SequentialAnimation {
+            id: bootZoom
             // Tight zoom: the wordmark is gone in ~0.7s and the interface only
             // starts appearing once the title is mostly faded, so text never
             // lingers over visible UI.
