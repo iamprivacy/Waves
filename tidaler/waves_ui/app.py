@@ -251,8 +251,15 @@ def _install_crash_diagnostics() -> None:
         log.critical(prefix, exc_info=exc_info)
         if _crash_log_file is not None:
             try:
-                _crash_log_file.write(f"{prefix}:\n")
-                traceback.print_exception(*exc_info, file=_crash_log_file)
+                # Scrub before writing. The logger call above passes through
+                # _RedactingFilter, but this handle is a bare open() with no
+                # filter, formatter or scrubber attached, so an unscrubbed
+                # write here puts the home path and the exception's own
+                # message (which routinely carries a media file path) into the
+                # very file the bug-report template asks users to paste
+                # publicly.
+                text = f"{prefix}:\n" + "".join(traceback.format_exception(*exc_info))
+                _crash_log_file.write(diagnostics.scrub(text))
                 _crash_log_file.flush()
             except Exception:
                 log.debug("could not append to crash.log", exc_info=True)

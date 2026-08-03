@@ -60,7 +60,7 @@ from tidaler.constants import (
 )
 from tidaler.download import Download
 from tidaler.helper.folders import FOLDER_PATH_TOKEN, apply_folder_path, walk_playlist_tree
-from tidaler.helper.path import format_path_media, format_str_media, path_config_base
+from tidaler.helper.path import format_path_media, format_str_media, path_config_base, path_file_sanitize
 from tidaler.helper.tidal import (
     get_tidal_media_id,
     get_tidal_media_type,
@@ -133,6 +133,21 @@ def _fit_frame(frame, screens):
     x = min(max(fx, sx), sx + sw - w)
     y = min(max(fy, sy), sy + sh - h)
     return (x, y, w, h)
+
+
+def _headless_platform() -> bool:
+    """True when the app is running on a windowing-free QPA platform.
+
+    Offscreen and minimal runs (the test suite, the benchmark harnesses) park
+    their window at 0,0, a position that means nothing on a real desktop, so
+    geometry persistence treats them as "never save". Module-level so tests can
+    pin either answer without needing a particular Qt state in-process.
+    """
+    try:
+        app = QtGui.QGuiApplication.instance()
+        return app is not None and app.platformName() in ("offscreen", "minimal")
+    except Exception:
+        return False
 
 
 # One keep-alive session for the video bandwidth probe, built on first use.
@@ -239,10 +254,15 @@ _FACTORY_WIPE_FILES = (
     "crash.log",
     "waves_dev.log",
 )
-# The two rotating logs number their backups (crash.log.1, waves_dev.log.1..N).
+# The two rotating logs number their backups (crash.log.1, waves_dev.log.1..N),
+# and exported diagnostic bundles carry a sub-second timestamp
+# (waves-diagnostics-YYYYMMDD-HHMMSS-mmm.txt, see diagnostics.export_bundle),
+# so none of them can appear in the exact-name list above. The bundle pattern
+# is anchored to that full digit shape: it can only ever match a Waves export.
 _FACTORY_WIPE_LOG_PATTERNS = (
     re.compile(r"crash\.log\.\d+\Z"),
     re.compile(r"waves_dev\.log\.\d+\Z"),
+    re.compile(r"waves-diagnostics-\d{8}-\d{6}-\d{3}\.txt\Z"),
 )
 # Waves-created subdirectories and the exact files Waves puts in them,
 # leaf-first so an emptied child lets its parent's rmdir succeed. Random-named
@@ -731,27 +751,67 @@ class _TrackedDownload(Download):
                 self._delivered[str(mid)] = {"tier": None}
         return urls
 
-    def _ownership_verdict(self, media) -> str | None:
+    def _ownership_verdict(self, media, file_template: str | None = None) -> str | None:
         """Ownership gate for one item: 'skip' (owned at equal-or-better quality,
         or a video, which has no quality tiers: never re-fetch), 'force' (owned
         at lower quality than this run targets: re-download and overwrite the old
         copy in place), or None (not owned: normal download). A record only comes
         back while the earlier download's file still exists on disk (ownership_of
         re-checks), so a deleted file downloads again. Any lookup failure means
-        no gate: downloading twice beats not downloading at all."""
-        if self._ownership_of is None or media is None or getattr(media, "id", None) is None:
+        no gate: downloading twice beats not downloading at all.
+
+        A merge-plan member is looked up by its IDENTITY id (that is the id its
+        download gets recorded under) and, because the whole point of a merge is
+        assembling one complete album folder, it may only be skipped when the
+        owned copy already sits in THIS job's destination folder. An owned copy
+        elsewhere (another edition's folder, a playlist folder) previously
+        satisfied the gate and left a hole in the merged album while the job
+        still reported done."""
+        if self._ownership_of is None or media is None:
+            return None
+        identity_id = getattr(media, "waves_identity_id", None)
+        media_id = identity_id or getattr(media, "id", None)
+        if media_id is None:
             return None
         try:
-            rec = self._ownership_of(str(media.id))
+            rec = self._ownership_of(str(media_id))
         except Exception:
             logger.debug("Ownership lookup failed; not gating", exc_info=True)
             return None
         if not rec:
             return None
+        if identity_id is not None and not self._owned_at_destination(rec, media, file_template):
+            return None
         # Rank -1 means no quality concept (a video's tier-less record): nothing
         # to upgrade to, so owned simply means skip.
         rank = int(rec.get("quality_rank", -1))
         return "skip" if rank < 0 or rank >= self._target_rank else "force"
+
+    def _owned_at_destination(self, rec: dict, media, file_template: str | None) -> bool:
+        """Whether an ownership record's file sits in the folder THIS job writes
+        into. Compares directories only (the extension depends on the delivered
+        codec) through the same template + sanitize pipeline item() uses, so a
+        sanitized album folder name compares equal to what was recorded. On any
+        doubt returns False: for a merge member, downloading again into the right
+        folder beats skipping and leaving the album incomplete."""
+        rec_path = str(rec.get("path") or "")
+        if not rec_path or not file_template:
+            return False
+        try:
+            relative = format_path_media(
+                file_template,
+                media,
+                self.settings.data.album_track_num_pad_min,
+                delimiter_artist=self.settings.data.filename_delimiter_artist,
+                delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
+                use_primary_album_artist=self.settings.data.use_primary_album_artist,
+            )
+            destination = (pathlib.Path(self.path_base).expanduser() / (relative + ".x")).absolute()
+            destination_dir = path_file_sanitize(destination, adapt=True).parent
+            return os.path.normcase(str(pathlib.Path(rec_path).parent)) == os.path.normcase(str(destination_dir))
+        except Exception:
+            logger.debug("Could not resolve a merge member's destination; not gating", exc_info=True)
+            return False
 
     def _emit_skip(self, media):
         """Report a track skipped because its earlier download is still on disk:
@@ -769,7 +829,7 @@ class _TrackedDownload(Download):
             name = name_builder_item(media)
             relay.track_event.emit(
                 {
-                    "id": str(media.id),
+                    "id": str(getattr(media, "waves_identity_id", None) or media.id),
                     "title": name_builder_title(media),
                     "num": int(getattr(media, "track_num", 0) or 0),
                     "vol": int(getattr(media, "volume_num", 1) or 1),
@@ -785,7 +845,7 @@ class _TrackedDownload(Download):
         # equal-or-better quality is skipped without a network round-trip; an
         # upgrade run forces the path skip off so the engine overwrites the old
         # copy in place.
-        verdict = self._ownership_verdict(media)
+        verdict = self._ownership_verdict(media, kwargs.get("file_template"))
         if verdict == "skip":
             return self._emit_skip(media)
         force = self._force_download() if verdict == "force" else contextlib.nullcontext()
@@ -797,7 +857,10 @@ class _TrackedDownload(Download):
             return ok, path
         name = name_builder_item(media)
         base = {
-            "id": str(media.id),
+            # A merge-plan member reports under its identity id: the queue row,
+            # the ownership record and the membership list all live under the
+            # identity edition, which is how the album is re-opened later.
+            "id": str(getattr(media, "waves_identity_id", None) or media.id),
             "title": name_builder_title(media),
             "num": int(getattr(media, "track_num", 0) or 0),
             "vol": int(getattr(media, "volume_num", 1) or 1),
@@ -827,6 +890,29 @@ class _TrackedDownload(Download):
             event["quality"] = quality
         relay.track_event.emit(event)
         return ok, path
+
+
+def _seed_merge_registry(merge_plan) -> dict[str, dict]:
+    """Pending queue-drawer rows for a merge plan (empty for a plain collection,
+    which fills in as tracks start). Rows are keyed by the IDENTITY edition's
+    track id: that is the id the drawer's album fetch and every track event
+    carry, so a source-id key would leave the row frozen at pending forever and
+    the drawer showing ghost rows."""
+    reg: dict[str, dict] = {}
+    for tnum_i, entry in enumerate(merge_plan or [], 1):
+        src, tnum, vnum, iid = entry
+        tid = str(iid or getattr(src, "id", "") or f"plan-{tnum_i}")
+        reg[tid] = {
+            "id": tid,
+            "title": name_builder_title(src),
+            "num": int(tnum or tnum_i),
+            "vol": int(vnum or 1),
+            "duration": _fmt_duration(getattr(src, "duration", 0)),
+            "desc": "",
+            "status": "pending",
+            "pct": 0.0,
+        }
+    return reg
 
 
 def _raise_download_incomplete(message: str) -> None:
@@ -986,6 +1072,66 @@ def _artist_id(obj) -> str:
         artists = getattr(obj, "artists", None) or []
         artist = artists[0] if artists else None
     return str(getattr(artist, "id", "")) if artist is not None else ""
+
+
+def _graft_scroll_growth(fresh: dict, cached: dict) -> None:
+    """Carry the user's endless-scroll growth from a cached browse payload into
+    its freshly revalidated replacement.
+
+    ``_browse_grow_cached`` extends cached rows in place, so a revalidate's
+    change comparison would read the user's own scrolling as "content changed"
+    and repaint the short first window over the grown row on every tab
+    revisit. For each fresh row whose window is a prefix of the cached row's
+    items, adopt the cached growth (and its paging bookkeeping); rows whose
+    head actually changed keep the fresh content."""
+    if not fresh or not cached:
+        return
+    by_key: dict = {}
+    for row in cached.get("sections") or []:
+        by_key.setdefault((row.get("data") or "", row.get("title") or ""), row)
+    for row in fresh.get("sections") or []:
+        old = by_key.get((row.get("data") or "", row.get("title") or ""))
+        if old is None:
+            continue
+        items = row.get("items") or []
+        old_items = old.get("items") or []
+        if len(old_items) > len(items) and old_items[: len(items)] == items:
+            row["items"] = list(old_items)
+            for k in ("offset", "total"):
+                if k in old:
+                    row[k] = old[k]
+
+
+def _link_tiles_of(payload: dict) -> list[tuple[str, str]]:
+    """(title, path) for every link tile in a browse page payload; the tiles
+    (e.g. Record Labels) carry no image of their own, so callers hand these to
+    the mosaic sampler."""
+    return [
+        (str(it.get("title", "")), str(it.get("path", "")))
+        for section in (payload or {}).get("sections") or []
+        if section.get("rowKind") == "links"
+        for it in section.get("items", [])
+        if it.get("path")
+    ]
+
+
+def _all_playlist_items(playlist) -> list:
+    """Every Track/Video in a playlist, paged past the endpoint's 100-item cap.
+
+    items() (not tracks()) so VIDEO entries keep their type: a video playlist's
+    rows must play/download as videos, not as their "Audio from video" shadow
+    tracks. Loops until a short page, with a ceiling well above any real
+    playlist so a misbehaving endpoint cannot spin forever.
+    """
+    out: list = []
+    off = 0
+    while off < 10000:
+        page_items = playlist.items(limit=100, offset=off) or []
+        out.extend(m for m in page_items if isinstance(m, Track | Video))
+        if len(page_items) < 100:
+            break
+        off += 100
+    return out
 
 
 def _primary_artist_name(obj) -> str:
@@ -1284,6 +1430,15 @@ def _collapse_album_editions(albums, tracks_of, quality_of, conflict: str = "kee
 # the plan can be unit-tested without network or Qt.
 _MergeRec = namedtuple("_MergeRec", "obj title dur isrc explicit", defaults=(False,))
 
+# One slot of a merge plan: the source track to fetch, the track/volume numbers
+# it takes in the merged layout, and the IDENTITY edition's track id for that
+# slot. All bookkeeping (per-track queue rows, ownership records, collection
+# membership) must use identity_id: the merged album is presented, browsed and
+# re-opened as the identity edition, so records keyed by the source edition's
+# ids would never be found again (the album read as not-downloaded forever and
+# the queue drawer showed ghost rows).
+_PlanEntry = namedtuple("_PlanEntry", "src track_num volume_num identity_id")
+
 
 def _track_isrc(track) -> str | None:
     """Normalised ISRC for cross-edition matching, or None when absent."""
@@ -1358,6 +1513,15 @@ def _build_merge_plan(group: list, recs_of, rank_of):
     trecs = recs[id(template)]
     if not trecs:
         return None, None
+    # An edition with NO recs is unknown content, not empty content: recs_of
+    # yields [] both for a failed track fetch and for a region-locked edition.
+    # The superset guard below would read 0 aligned < 0 recs and pass
+    # vacuously, silently dropping that edition's exclusive tracks, so refuse
+    # to merge instead (the caller's completeness fallback keeps it intact,
+    # exactly like _collapse_album_editions' own unknown-content guard).
+    for a in group:
+        if a is not template and not recs[id(a)]:
+            return None, None
     aligns = {id(a): _align_edition(trecs, recs[id(a)]) for a in group if a is not template}
     # Superset guard: bail if any edition has a track the template doesn't cover.
     for a in group:
@@ -1375,23 +1539,30 @@ def _build_merge_plan(group: list, recs_of, rank_of):
                 src, best_rank, upgraded = other.obj, rank_of(a), True
         track_num = getattr(tr.obj, "track_num", None) or (i + 1)
         volume_num = getattr(tr.obj, "volume_num", None) or 1
-        plan.append((src, track_num, volume_num))
+        plan.append(_PlanEntry(src, track_num, volume_num, str(getattr(tr.obj, "id", "") or "")))
     if not upgraded:
         return None, None
     return template, plan
 
 
-def _as_member_of(track, identity_album, track_num: int, volume_num: int):
+def _as_member_of(track, identity_album, track_num: int, volume_num: int, identity_id: str = ""):
     """A shallow copy of ``track`` re-tagged as ``track_num`` of ``identity_album``.
 
     Tags and the output path are read from ``track.album`` / ``track.track_num`` at
     download time, so re-pointing them on a COPY makes a borrowed (higher-quality)
     track land in the target album's folder with that album's title, cover and
-    totals, without ever mutating the cached original."""
+    totals, without ever mutating the cached original.
+
+    ``waves_identity_id`` carries the identity edition's track id for this slot.
+    ``member.id`` must stay the SOURCE id (that is the stream being fetched), but
+    every externally visible record of the download (track events, queue rows,
+    ownership, collection membership) must be keyed by the identity id, because
+    the merged album is re-opened as the identity edition."""
     member = copy.copy(track)
     member.album = identity_album
     member.track_num = track_num
     member.volume_num = volume_num
+    member.waves_identity_id = str(identity_id or getattr(track, "id", "") or "")
     return member
 
 
@@ -1467,12 +1638,10 @@ class WavesBridge(QObject):
     searchResults = Signal("QVariant")
     albumTracksLoaded = Signal(str, "QVariantList")
     artistLoaded = Signal("QVariant")
+    artistLoadFailed = Signal(str)  # id; a Back-restore clears its latch on this
     artistMetaLoaded = Signal(str, int)
     libraryLoaded = Signal(str, "QVariant", bool)  # category, items (replace), hasMore
     libraryMore = Signal(str, "QVariant", bool)  # category, items (append), hasMore
-    # "Recently added" strip at the top of My Tidal: a single merged, recency-
-    # sorted payload of the newest favourite albums, artists and tracks.
-    recentlyAddedLoaded = Signal("QVariant")
     # "Home" tab: a Browse-shaped, account-scoped landing. Carries a list of
     # shelf sections ({rowKind, title, items}) so the SAME card/track shelves
     # that render Browse render Home too.
@@ -1504,6 +1673,7 @@ class WavesBridge(QObject):
     pausedChanged = Signal()
     motionBgChanged = Signal()  # motion_background pref flipped; Main.qml re-reads it
     hoverMotionChanged = Signal()  # hover_control_motion pref flipped; Main.qml re-reads it
+    artHoverTiltChanged = Signal()  # art_hover_tilt pref flipped; Main.qml re-reads it
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
@@ -1512,6 +1682,11 @@ class WavesBridge(QObject):
     folderRemaining = Signal(str, int, int)  # folder_id, remaining, total
     playlistCategoryResolved = Signal(str, str, int, str)  # api_path, title, count, first playlist id
     confirmCategoryDlChanged = Signal()
+    # A backend path persisted schema-backed settings without applySettings
+    # (mute "Don't ask again", the player's video-quality menu, the download
+    # folder auto-heal): the Settings page listens and refreshes so it never
+    # shows values the app has already changed underneath it.
+    settingsPersistedExternally = Signal()
     # One drilled-into folder's rows (subfolders first, then its playlists),
     # served from the cached sweep: no network, so no staleness to guard.
     playlistFolderLoaded = Signal(str, "QVariant", str)  # folder_id, rows, path
@@ -1534,6 +1709,14 @@ class WavesBridge(QObject):
     # user reconnects and retries, or picks a new folder. Arg = the dead path,
     # for display in the dialog only (never logged).
     downloadFolderUnreachable = Signal(str)
+    # The unreachable folder came back on its own (the recovery watch saw the
+    # volume remount or a re-probe pass) and the held downloads were resumed:
+    # the QML gate dialog dismisses itself instead of waiting for "Try again".
+    downloadFolderRecovered = Signal()
+    # Worker -> GUI hop: the recovery watch (a QTimer + QFileSystemWatcher)
+    # must be started on the GUI thread, but the gate that wants it runs on a
+    # download worker.
+    _recoveryWatchWanted = Signal()
     # In-app audio preview. A preview is addressed by (kind, id) where kind is
     # "track" (id = track id) or "artist" (id = artist id, plays its top track),
     # so the same signals drive both the track-row button and the artist-artwork
@@ -1546,6 +1729,10 @@ class WavesBridge(QObject):
     # stream tidalapi resolves for the video (HLS or direct); QML's overlay
     # MediaPlayer plays it as-is (Qt Multimedia's ffmpeg backend speaks HLS).
     videoReady = Signal("QVariant")
+    # Hover peek: {id, url, error}. A deliberately light resolve (low variant,
+    # no album fallback) for the floating no-controls preview that grows out
+    # of a video thumbnail; the full overlay keeps using videoReady.
+    videoPeekReady = Signal("QVariant")
     # kind, id, title, artist, art, artistId, albumId, trackId, artists, the ids
     # let the now-playing bar open the artist page (artist name) or the track's
     # album page with the track highlighted (track name). trackId is the actual
@@ -1586,6 +1773,8 @@ class WavesBridge(QObject):
     # download slot on the GUI thread (downloads must start with GUI affinity
     # so their progress relays get GUI-thread delivery, see _albumsQueued).
     _mediaRefetched = Signal(str, str)  # bucket, media_id
+    _queueRetryRefetched = Signal(str, str, int)  # bucket, media_id, qid
+    _jobSignalsReleased = Signal(int)  # qid; queued so pending track events drain first
     # Internal twin of the above for the playlist-folder tree: something needed
     # the tree before any library sweep had run, so the sweep was kicked off on
     # a worker and this queued hop replays the waiting callers on the GUI
@@ -1654,6 +1843,7 @@ class WavesBridge(QObject):
         # In-app self-updater (dormant until its repo slug is configured).
         self._updater = AppUpdater(os.path.dirname(self.settings.file_path), _WAVES_VERSION)
         self._app_update_abort = Event()
+        self._app_update_inflight = False
         # Pristine (on-disk) values of the ffmpeg-dependent flags, captured before
         # any Download init can disable them in-memory when ffmpeg is absent; we
         # restore these once ffmpeg gets installed (see _restore_ffmpeg_flags).
@@ -1790,6 +1980,11 @@ class WavesBridge(QObject):
         # personalized For You rows that must not leak across accounts.
         self._page_cache_path = os.path.join(os.path.dirname(self.settings.file_path), "page_cache.json")
         self._page_cache_lock = Lock()
+        # Serializes insert-plus-evict on the capped caches below: two workers
+        # evicting concurrently raced dict iteration (RuntimeError/KeyError in
+        # a two-thread harness), killing the emit and _set_busy(False) behind
+        # them. Plain dict writes are GIL-atomic; the eviction loop is not.
+        self._evict_lock = Lock()
         # Video streaming quality. The persisted Video-quality setting is the
         # ceiling; until the user touches it (this run or a previous one is
         # indistinguishable, so: this run), the first video also gauges the
@@ -1800,13 +1995,18 @@ class WavesBridge(QObject):
         # genre/mood/decade page by a single background worker (serialized, one
         # page at a time) and persisted with a TTL so later launches don't
         # re-crawl ~46 editorial pages. Not account-specific, kept on logout.
-        self._tile_art_mem: dict[str, list[str]] = {}
+        self._tile_art_mem: dict[str, tuple[float, list[str]]] = {}  # path -> (sampled ts, arts)
         self._tile_art_running = False
         self._tile_art_path = os.path.join(os.path.dirname(self.settings.file_path), "browse_tile_art.json")
         # In-flight re-fetches of evicted download targets, keyed (bucket, id),
         # so a double-click can't spawn two network fetches for the same item.
         self._refetch_inflight: set[tuple[str, str]] = set()
         self._mediaRefetched.connect(self._on_media_refetched)
+        self._queueRetryRefetched.connect(self._on_queue_retry_refetched)
+        # Forced queued: the pop must run on the GUI thread AFTER any track
+        # events already posted from the same worker (FIFO event queue), or
+        # _track_lifecycle finds the relay gone and skips membership recording.
+        self._jobSignalsReleased.connect(self._drop_job_signals, QtCore.Qt.ConnectionType.QueuedConnection)
         # Callers parked until the first folder sweep lands, drained on the GUI
         # thread by _on_folder_tree_warmed.
         self._tree_warm_waiting: list = []
@@ -1822,6 +2022,12 @@ class WavesBridge(QObject):
         # last click when several downloads hit an unreachable mount together.
         self._pending_downloads: list[tuple[str, object]] = []
         self._pending_lock = Lock()
+        # Serializes structural queue mutations (append, rebind-filter). The
+        # GUI thread appends via _enqueue while download workers withdraw rows
+        # by rebinding a filtered copy; unlocked, a rebind built from a stale
+        # snapshot silently drops a row appended in between. Reads stay
+        # lock-free: a rebind swaps the reference atomically under the GIL.
+        self._queue_lock = Lock()
         # (base path, monotonic stamp) of the last write known to have landed
         # in the download folder: a finished track's file or a passed probe.
         # _gate_reachability skips the write probe inside this freshness
@@ -1850,6 +2056,37 @@ class WavesBridge(QObject):
         self._track_poll = QTimer(self)
         self._track_poll.setInterval(500)
         self._track_poll.timeout.connect(self._poll_track_progress)
+        # Recovery watch for the unreachable-folder gate: while downloads are
+        # held, notice the drive coming back on its own (a NAS waking, a share
+        # remounting under /Volumes) and resume them, instead of making the
+        # user click Browse or "Try again". A periodic re-probe is the
+        # backbone; on macOS a watcher on /Volumes (a LOCAL directory, per the
+        # dual-watcher rule) fires an immediate probe on mount changes. Runs
+        # only while something is actually held; stops itself otherwise.
+        self._recovery_poll = QTimer(self)
+        self._recovery_poll.setInterval(3_000)
+        self._recovery_poll.timeout.connect(self._recovery_probe)
+        self._recovery_watcher = None
+        self._recovery_inflight = False
+        # Warm-up window: a probe timeout on an idle queue holds the download
+        # QUIETLY (a cold SMB session reconnecting, not an outage) and the
+        # dialog is raised only if the folder is still silent past this
+        # deadline. _shown latches so the dialog is raised at most once per
+        # episode; the dead verdict sets it immediately (dialog already up).
+        self._recovery_dialog_shown = True
+        self._recovery_dialog_deadline = 0.0
+        self._recoveryWatchWanted.connect(self._start_recovery_watch, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.downloadFolderRecovered.connect(self._on_folder_recovered)
+        # Keep-warm: while the download base lives on a mounted network volume,
+        # a light directory listing every 60s keeps macOS's SMB session from
+        # idling out, so the first click after a quiet stretch does not hang
+        # behind a silent reconnect. Off-thread and self-collapsing, so a
+        # genuinely hung share costs nothing but a skipped tick.
+        self._keepwarm_inflight = False
+        self._keepwarm_poll = QTimer(self)
+        self._keepwarm_poll.setInterval(60_000)
+        self._keepwarm_poll.timeout.connect(self._keepwarm_tick)
+        self._keepwarm_poll.start()
         self._queueTracksFetched.connect(self._merge_queue_tracks)
         # Best-of-both merge plans awaiting download, keyed by the synthetic album
         # key that downloadAlbum() will route through _download(merge_plan=…).
@@ -2348,6 +2585,11 @@ class WavesBridge(QObject):
             self._reset_tidal_session()
         except Exception:
             logger.exception("Logout failed")
+        # Flip the flag FIRST: _save_page_cache gates on it, so a worker
+        # already mid-save can no longer re-create the signed-out account's
+        # snapshot after the os.remove below (factoryReset orders it the same
+        # way).
+        self._set_logged_in(False)
         # Drop the cached library and browse pages so a different account
         # doesn't see stale (or the previous user's personalized) rows, and bump
         # the load generations so an in-flight pre-logout page can't re-poison
@@ -2380,15 +2622,23 @@ class WavesBridge(QObject):
         self._tree_warm_waiting = []
         self._search_cache.clear()
         self._artist_pop_cache.clear()
+        # The live tidalapi objects belong to the old account's session; a
+        # revisited id under the next account must be re-fetched through ITS
+        # session, never served (or downloaded) through the dead one.
+        for bucket in self._objs.values():
+            bucket.clear()
         # The disk snapshot holds the old account's personalized pages, drop it.
         with contextlib.suppress(OSError):
             os.remove(self._page_cache_path)
-        self._set_logged_in(False)
         self._set_status("Signed out")
 
     # ----- page-cache persistence ----------------------------------------
 
     _ARTIST_CACHE_MAX = 60  # ~30-80 KB each, worst case a few MB on disk
+    # Browse drill-ins (editorial pages, pl: grids, item: pages) can each hold
+    # thousands of rows and the whole map is re-serialized on every cache
+    # write; every sibling cache is capped, so this one is too.
+    _BROWSE_PAGES_MAX = 40
 
     def _cache_user_id(self) -> str:
         try:
@@ -2405,36 +2655,44 @@ class WavesBridge(QObject):
         infinite-scroll tail can be huge and re-pages naturally."""
         if not self._logged_in or getattr(self, "_factory_reset", False):
             return
-        lib = {
-            cat: {
-                "items": e["items"][:_LIBRARY_PAGE],
-                "offset": _LIBRARY_PAGE,
-                "more": e["more"] or len(e["items"]) > _LIBRARY_PAGE,
-            }
-            for cat, e in self._lib_cache.items()
-            # Only persist the default order; a session-only custom sort restored
-            # from disk would be silently mislabelled as the default.
-            if cat not in self._lib_sort
-        }
-        data = {
-            # v2: the persisted default-sort library pages are now date-added
-            # descending (v1 held tidalapi's raw, non-date order), so drop v1
-            # snapshots rather than restore a stale order on launch.
-            # v3: playlists rows carry kind/sub/path (folder rows share the
-            # model); older snapshots would render rows the delegate misreads.
-            "version": 3,
-            "user": self._cache_user_id(),
-            "browse_root": self._browse_root_cache,
-            "browse_pages": self._browse_pages,
-            "artists": self._artist_cache,
-            "library": lib,
-            "home": self._home_cache,
-        }
+        # The caches are mutated by other worker threads with no lock (only
+        # savers take _page_cache_lock), so everything that iterates them must
+        # sit inside the try: a concurrent mutation then costs one skipped
+        # save instead of escaping work() and latching the busy indicator on.
+        # json.dumps (not dump) matters too: the one-shot C encoder runs no
+        # bytecode mid-encode, so it cannot observe a dict changing size the
+        # way dump's yielding pure-Python encoder demonstrably can.
         try:
+            lib = {
+                cat: {
+                    "items": e["items"][:_LIBRARY_PAGE],
+                    "offset": _LIBRARY_PAGE,
+                    "more": e["more"] or len(e["items"]) > _LIBRARY_PAGE,
+                }
+                for cat, e in list(self._lib_cache.items())
+                # Only persist the default order; a session-only custom sort restored
+                # from disk would be silently mislabelled as the default.
+                if cat not in self._lib_sort
+            }
+            data = {
+                # v2: the persisted default-sort library pages are now date-added
+                # descending (v1 held tidalapi's raw, non-date order), so drop v1
+                # snapshots rather than restore a stale order on launch.
+                # v3: playlists rows carry kind/sub/path (folder rows share the
+                # model); older snapshots would render rows the delegate misreads.
+                "version": 3,
+                "user": self._cache_user_id(),
+                "browse_root": self._browse_root_cache,
+                "browse_pages": self._browse_pages,
+                "artists": self._artist_cache,
+                "library": lib,
+                "home": self._home_cache,
+            }
+            serialized = json.dumps(data)
             with self._page_cache_lock:
                 tmp = self._page_cache_path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(data, fh)
+                    fh.write(serialized)
                 os.replace(tmp, self._page_cache_path)
         except Exception:
             logger.debug("page cache save failed", exc_info=True)
@@ -2474,19 +2732,21 @@ class WavesBridge(QObject):
             self._home_cache = data["home"]
         devlog.event("cache", "page cache restored", pages=len(self._browse_pages), artists=len(self._artist_cache))
 
+    def _remember_capped(self, d: dict, key, value, cap: int) -> None:
+        """Insert into a capped cache, evicting oldest-first, under the shared
+        eviction lock (concurrent evictions raced dict iteration)."""
+        with self._evict_lock:
+            d[key] = value
+            while len(d) > cap:
+                del d[next(iter(d))]  # evict oldest insert
+
     def _remember_artist_page(self, artist_id: str, payload: dict) -> None:
-        d = self._artist_cache
-        d[artist_id] = payload
-        while len(d) > self._ARTIST_CACHE_MAX:
-            del d[next(iter(d))]  # evict oldest insert
+        self._remember_capped(self._artist_cache, artist_id, payload, self._ARTIST_CACHE_MAX)
 
     _ALBUM_TRACKS_CACHE_MAX = 200  # small row dicts, a few hundred KB worst case
 
     def _remember_album_tracks(self, album_id: str, rows: list) -> None:
-        d = self._album_tracks_cache
-        d[album_id] = rows
-        while len(d) > self._ALBUM_TRACKS_CACHE_MAX:
-            del d[next(iter(d))]  # evict oldest insert
+        self._remember_capped(self._album_tracks_cache, album_id, rows, self._ALBUM_TRACKS_CACHE_MAX)
 
     # ----- search --------------------------------------------------------
 
@@ -2575,7 +2835,7 @@ class WavesBridge(QObject):
                 if pop >= 0:
                     self.artistMetaLoaded.emit(card["id"], pop)
             return
-        devlog.event("search", f"begin needle={needle}")
+        devlog.event("search", f"begin needle={diagnostics.content(needle)}")
         self._set_busy(True)
         self._set_status(f"Searching “{needle}”…")
         with self._objs_lock:
@@ -2635,7 +2895,7 @@ class WavesBridge(QObject):
             elapsed = devlog.clock() - t0
             devlog.done(
                 "search",
-                f"needle={needle}",
+                f"needle={diagnostics.content(needle)}",
                 elapsed,
                 api=devlog.fmt_dur(api),
                 proc=devlog.fmt_dur(elapsed - api),
@@ -2699,13 +2959,25 @@ class WavesBridge(QObject):
             self.albumTracksLoaded.emit(album_id, cached)
             return
         album = self._objs["album"].get(album_id)
-        if album is None:
-            return
 
         def work() -> None:
             t0 = devlog.clock()
+            obj = album
+            if obj is None:
+                # A new search clears every _objs bucket while expanded album
+                # rows outlive it; a silent return here would leave the row on
+                # "Loading tracks…" forever (albumTracksLoaded is the only
+                # writer of the QML track cache). Re-fetch by id instead, the
+                # same fallback the download entry points use.
+                try:
+                    obj = self.tidal.session.album(int(album_id))
+                    self._remember("album", album_id, obj)
+                except Exception:
+                    logger.exception("Could not re-fetch album %s for its tracks", album_id)
+                    self.albumTracksLoaded.emit(album_id, [])
+                    return
             try:
-                items = album.tracks()
+                items = obj.tracks()
             except Exception:
                 logger.exception("Could not load album tracks")
                 items = []
@@ -2723,12 +2995,15 @@ class WavesBridge(QObject):
                         "explicit": bool(getattr(track, "explicit", False)),
                     }
                 )
-            try:
-                self._ownership.record_members_replace(album_id, [row["id"] for row in out])
-                self.collectionMembershipChanged.emit(album_id)
-            except Exception:
-                logger.debug("Could not record collection membership", exc_info=True)
-            if out:  # never cache an empty list, it is more likely a fetch failure
+            if out:  # never cache or record an empty list, it is more likely a fetch failure
+                # The replace is destructive (an unconditional DELETE in the
+                # store), so it sits under the same guard as the session cache:
+                # a failed fetch must not wipe the album's learned membership.
+                try:
+                    self._ownership.record_members_replace(album_id, [row["id"] for row in out])
+                    self.collectionMembershipChanged.emit(album_id)
+                except Exception:
+                    logger.debug("Could not record collection membership", exc_info=True)
                 self._remember_album_tracks(album_id, out)
             self.albumTracksLoaded.emit(album_id, out)
             devlog.done("album", f"tracks id={album_id}", devlog.clock() - t0, n=len(out))
@@ -2767,24 +3042,37 @@ class WavesBridge(QObject):
                 if not refresh:
                     self._set_status("Could not load artist")
                     self._set_busy(False)
+                    # A Back-restore waits on artistLoaded to clear its latch;
+                    # with no cache there is nothing to emit, so tell the QML
+                    # explicitly or history recording stays dead until the
+                    # next successful navigation.
+                    self.artistLoadFailed.emit(artist_id)
                 return
             try:
                 bio = _clean_bio(artist.get_bio() or "")
             except Exception:
                 bio = ""
+            # Any section failing marks the whole page suspect: an OR over the
+            # sections is not enough (a 429 on get_albums alone, with EPs back
+            # fine, would otherwise cache and persist a gutted page, and the
+            # refresh emit would wipe the album grid on screen).
+            complete = True
             try:
                 albums = artist.get_albums()
             except Exception:
                 logger.exception("artist albums failed")
                 albums = []
+                complete = False
             try:
                 eps = artist.get_ep_singles()
             except Exception:
                 eps = []
+                complete = False
             try:
                 tops = artist.get_top_tracks(limit=10)
             except Exception:
                 tops = []
+                complete = False
 
             payload = {
                 "id": artist_id,
@@ -2802,10 +3090,10 @@ class WavesBridge(QObject):
             if gen != self._browse_gen:
                 return  # logged out mid-fetch, see loadBrowse's work()
             changed = payload != cached
-            # A page whose every section came back empty is more likely a
-            # transient fetch failure than a real artist with no catalogue,
-            # show it (first load) but never cache it or overwrite good data.
-            if changed and (payload["albums"] or payload["eps"] or payload["tracks"]):
+            # A page with a failed or empty-everywhere fetch is more likely a
+            # transient failure than a real artist with no catalogue, show it
+            # (first load) but never cache it or overwrite good data.
+            if changed and complete and (payload["albums"] or payload["eps"] or payload["tracks"]):
                 self._remember_artist_page(artist_id, payload)
                 self._save_page_cache()
             elif refresh:
@@ -2845,6 +3133,14 @@ class WavesBridge(QObject):
         try:
             favorites = self.tidal.session.user.favorites
             method = getattr(favorites, kind)
+            # A limit-N window can return FEWER than N rows (tidalapi drops
+            # unavailable items inside the window), so "done" must come from
+            # the total count, same as _library_page; a short window alone
+            # would silently truncate the whole favourites set.
+            try:
+                total = int(getattr(favorites, f"get_{kind}_count")())
+            except Exception:
+                total = None  # no count available: fall back to the short-window stop
             offset = 0
             while True:
                 try:
@@ -2855,13 +3151,21 @@ class WavesBridge(QObject):
                     paged = False
                 for o in batch:
                     ids.add(str(getattr(o, "id", "")))
-                if not paged or len(batch) < _LIBRARY_PAGE:
-                    break
                 offset += _LIBRARY_PAGE
+                if not paged:
+                    break
+                if total is not None:
+                    if offset >= total or not batch:  # empty guards a lying count
+                        break
+                elif len(batch) < _LIBRARY_PAGE:
+                    break
         except Exception:
             logger.exception("Could not load favourite %s ids", kind)
-            if entry is not None:
-                return entry[1]  # a refresh blip serves the stale set, not an empty one
+            # Serve what we have but never cache it: a stale set beats an empty
+            # one, and a partial set stamped fresh behind the 10-minute TTL
+            # reads as "you have nothing by this artist" on every
+            # library-scoped page until it expires.
+            return entry[1] if entry is not None else ids
         self._fav_ids[kind] = (time.monotonic(), ids)
         return ids
 
@@ -3000,7 +3304,15 @@ class WavesBridge(QObject):
         good tree with a partial one."""
         with self._media_lists_lock:
             entry = self._media_lists_cache
-        if entry is not None and (not refresh or time.monotonic() - entry[0] < self._MEDIA_LISTS_TTL):
+        # A Mixes-first visit caches the listing WITHOUT a tree (its
+        # walk=False sweep has no use for one). A walking caller must not
+        # accept that entry, or Playlists within the TTL renders (and
+        # persists) a folder-less list.
+        if (
+            entry is not None
+            and (not refresh or time.monotonic() - entry[0] < self._MEDIA_LISTS_TTL)
+            and (not walk or entry[2] is not None)
+        ):
             return entry[1], entry[2]
         fresh = user_media_lists(self.tidal.session)
         if not walk:
@@ -3041,7 +3353,7 @@ class WavesBridge(QObject):
         with self._media_lists_lock:
             return self._folder_tree
 
-    def _warm_folder_tree(self, then) -> bool:
+    def _warm_folder_tree(self, then, media_id: str = "") -> bool:
         """Run the library sweep for its folder tree, then replay ``then``.
 
         The tree is written in exactly one place (the sweep in
@@ -3055,11 +3367,16 @@ class WavesBridge(QObject):
         Returns False when no warm could be started (signed out), so the caller
         can keep its old not-ready behaviour. ``then`` runs on the GUI thread,
         exactly once, whether this call started the sweep or joined one already
-        running.
+        running, and ONLY if the sweep actually produced a tree: replaying into
+        a still-missing tree would just re-warm, forever (every parked caller
+        re-tests ``_current_folder_tree() is None``), so a failed sweep drops
+        the callbacks instead, clears the button named by ``media_id`` (the
+        download path lights "running" before parking), and leaves retrying to
+        the user's next click.
         """
         if not self._logged_in:
             return False
-        self._tree_warm_waiting.append(then)
+        self._tree_warm_waiting.append((then, str(media_id or "")))
         if self._tree_warm_inflight:
             return True
         self._tree_warm_inflight = True
@@ -3079,7 +3396,17 @@ class WavesBridge(QObject):
         self._tree_warm_inflight = False
         self._set_busy(False)
         waiting, self._tree_warm_waiting = self._tree_warm_waiting, []
-        for then in waiting:
+        if self._current_folder_tree() is None:
+            # The sweep failed: don't replay (each callback would re-warm and
+            # loop unbounded). Clear any buttons the parked downloads lit and
+            # tell the user; their next click is the retry.
+            for _then, mid in waiting:
+                if mid:
+                    self.downloadState.emit(mid, "")
+            if waiting:
+                self._set_status("Could not load your playlist folders, try again")
+            return
+        for then, _mid in waiting:
             try:
                 then()
             except Exception:
@@ -3240,6 +3567,7 @@ class WavesBridge(QObject):
 
         def work() -> None:
             t0 = devlog.clock()
+            failed = False
             try:
                 items, more = self._library_page(category, 0, _LIBRARY_PAGE)
             except Exception:
@@ -3247,7 +3575,7 @@ class WavesBridge(QObject):
                 if revalidate:
                     self._lib_loading.discard(category)
                     return  # keep showing the cached page, never repaint with an error
-                items, more = [], False
+                items, more, failed = [], False, True
             # Guard the cache write with the generation too: a load that started
             # before a logout (which clears the cache and bumps _lib_gen) must not
             # re-populate the cache for the next account. offset stores the *next*
@@ -3270,11 +3598,21 @@ class WavesBridge(QObject):
                 devlog.done("library", f"{category} revalidate", devlog.clock() - t0, n=len(items))
                 return
             if gen == self._lib_gen:
-                self._lib_cache[category] = {"items": items, "offset": _LIBRARY_PAGE, "more": more}
-                self._save_page_cache()
-                self.libraryLoaded.emit(category, items, more)
-                self._set_status(self._lib_status(category, self._lib_count(category, items), more))
-                self._set_busy(False)
+                if failed:
+                    # A failed FIRST load must not become the category's cached
+                    # (and disk-persisted) truth: an empty page with more=False
+                    # reads as a complete, empty library and disables the
+                    # infinite-scroll retry. Leave the cache alone so the next
+                    # tab visit takes the cold path and retries the fetch.
+                    self.libraryLoaded.emit(category, items, more)
+                    self._set_status("Could not load your library, reopen the tab to retry")
+                    self._set_busy(False)
+                else:
+                    self._lib_cache[category] = {"items": items, "offset": _LIBRARY_PAGE, "more": more}
+                    self._save_page_cache()
+                    self.libraryLoaded.emit(category, items, more)
+                    self._set_status(self._lib_status(category, self._lib_count(category, items), more))
+                    self._set_busy(False)
             devlog.done("library", category, devlog.clock() - t0, n=len(items), more=more)
 
         if revalidate:
@@ -3294,6 +3632,8 @@ class WavesBridge(QObject):
             return
         self._lib_loading.add(category)
         offset = cached["offset"]
+        gen = self._lib_gen
+        sort = self._lib_sort.get(category)
 
         def work() -> None:
             t0 = devlog.clock()
@@ -3307,6 +3647,12 @@ class WavesBridge(QObject):
                 # next scroll retries the same window.
                 logger.exception("Could not load more of library category %s", category)
                 items, more, failed = [], True, True
+            if gen != self._lib_gen or sort != self._lib_sort.get(category):
+                # The category was re-sorted (or the account changed) while
+                # this page was in flight: appending it would splice the OLD
+                # order into the new list and skip a window of the new one.
+                self._lib_loading.discard(category)
+                return
             entry = self._lib_cache.get(category)
             if entry is not None:
                 entry["items"].extend(items)
@@ -3343,37 +3689,6 @@ class WavesBridge(QObject):
         self._lib_cache.pop(category, None)
         self._lib_loading.discard(category)
         self.loadLibrary(category)
-
-    @Slot()
-    def loadRecentlyAdded(self) -> None:
-        """Build the 'Recent' tab: the newest favourite albums, artists and tracks
-        merged into one recency-sorted list, each row tagged with its ``kind``.
-        Mixes and playlists are excluded (no reliable added date)."""
-        if not self._logged_in:
-            self.recentlyAddedLoaded.emit([])
-            return
-        limit = 24
-        gen = self._browse_gen  # bumped on logout only
-
-        def work() -> None:
-            t0 = devlog.clock()
-            items: list = []
-            for cat, kind in (("albums", "album"), ("artists", "artist"), ("tracks", "track")):
-                try:
-                    # Force date-desc regardless of the category's own sort.
-                    rows, _ = self._library_page(cat, 0, limit, order_override=("date", "desc"))
-                except Exception:
-                    logger.exception("Recently added: %s page failed", cat)
-                    rows = []
-                items.extend({**r, "kind": kind} for r in rows)
-            # Merge across kinds by added date, newest first; ties keep a stable
-            # album/artist/track order from the loop above.
-            items.sort(key=lambda r: r.get("added") or "", reverse=True)
-            if gen == self._browse_gen:
-                self.recentlyAddedLoaded.emit(items[:limit])
-            devlog.done("library", "recently-added", devlog.clock() - t0, n=len(items))
-
-        self.threadpool.start(Worker(work))
 
     @Slot()
     @Slot(bool)
@@ -3551,9 +3866,17 @@ class WavesBridge(QObject):
         so one new TIDAL module would otherwise turn the whole page (and on
         Explore, the whole Browse landing) into an error state. Here an
         unparseable row is dropped and logged; the rest of the page lives."""
+        # Fetch OUTSIDE the lock. Only the parser needs serializing; the request
+        # does not, and tidalapi passes no timeout anywhere (its session is a
+        # bare requests.Session). Holding this process-wide, non-reentrant lock
+        # across an untimed request meant one wedged peer (the ACK-then-silence
+        # shape: a hung upstream, a load balancer, an intercepting middlebox)
+        # blocked every other acquirer indefinitely, including
+        # _refetch_for_download, and four blocked workers saturate the shared UI
+        # pool, taking search and artist pages down with Browse.
+        page = tidal_page.Page(self.tidal.session, title)
+        json_obj = page.request.request("GET", api_path, params={"deviceType": "BROWSER"}).json()
         with self._browse_lock:
-            page = tidal_page.Page(self.tidal.session, title)
-            json_obj = page.request.request("GET", api_path, params={"deviceType": "BROWSER"}).json()
             if "rows" not in json_obj:
                 # V2 home-feed shape, Browse never requests it, but degrade
                 # to the stock parser rather than misreading the payload.
@@ -3793,6 +4116,7 @@ class WavesBridge(QObject):
                 # Silent background refresh of a cached landing: re-emit (and
                 # re-persist) only if the editorial content actually changed;
                 # never repaint over good data with an error/empty payload.
+                _graft_scroll_growth(payload, cached)
                 if not payload["error"] and payload["sections"] and payload != cached:
                     self._browse_root_cache = payload
                     self._save_page_cache()
@@ -3924,16 +4248,24 @@ class WavesBridge(QObject):
             if revalidate:
                 # Silent refresh of a cached page: re-emit only on real change
                 # (the QML's key guard drops it if the user already left).
+                _graft_scroll_growth(payload, cached)
+                served = cached
                 if not payload["error"] and payload["sections"] and payload != cached:
-                    self._browse_pages[api_path] = payload
+                    self._remember_capped(self._browse_pages, api_path, payload, self._BROWSE_PAGES_MAX)
                     self._save_page_cache()
                     self.browsePageLoaded.emit(payload)
+                    served = payload
+                # Link tiles carry no image of their own and the QML holds no
+                # per-tile art cache, so even a revisit served straight from
+                # cache must re-emit the mosaics (the sampler serves cached art
+                # immediately) or the page renders art-less from launch 2 on.
+                self._sample_links_art(_link_tiles_of(served), gen)
                 devlog.done("browse", f"{api_path} revalidate", devlog.clock() - t0, n=len(payload["sections"]))
                 return
             if not payload["error"] and payload["sections"]:
                 # Same no-empty-cache rule as the landing: a page whose rows
                 # all failed to normalize shouldn't be pinned for the session.
-                self._browse_pages[api_path] = payload
+                self._remember_capped(self._browse_pages, api_path, payload, self._BROWSE_PAGES_MAX)
                 self._save_page_cache()
             self.browsePageLoaded.emit(payload)
             self._set_status(payload["title"] if not payload["error"] else f"Could not load {title}")
@@ -3942,15 +4274,7 @@ class WavesBridge(QObject):
             # Link tiles (e.g. Record Labels) carry no image of their own, so
             # sample cover mosaics for them the same way the landing chips fill.
             if not payload["error"]:
-                link_tiles = [
-                    (str(it.get("title", "")), str(it.get("path", "")))
-                    for section in payload["sections"]
-                    if section.get("rowKind") == "links"
-                    for it in section.get("items", [])
-                    if it.get("path")
-                ]
-                if link_tiles:
-                    self._sample_links_art(link_tiles, gen)
+                self._sample_links_art(_link_tiles_of(payload), gen)
 
         self.threadpool.start(Worker(work))
 
@@ -4024,7 +4348,7 @@ class WavesBridge(QObject):
                 # Silent refresh of a cached page: re-emit only on real change
                 # (the QML's key guard drops it if the user already left).
                 if not payload["error"] and payload["sections"] and payload != cached:
-                    self._browse_pages[key] = payload
+                    self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                     self._save_page_cache()
                     self.browsePageLoaded.emit(payload)
                 devlog.done("browse", f"{key} revalidate", devlog.clock() - t0, n=len(payload["sections"]))
@@ -4032,7 +4356,7 @@ class WavesBridge(QObject):
             if not payload["error"] and payload["sections"]:
                 # Same no-empty-cache rule as the landing: a page whose rows
                 # all failed to normalize shouldn't be pinned for the session.
-                self._browse_pages[key] = payload
+                self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                 self._save_page_cache()
             self.browsePageLoaded.emit(payload)
             self._set_status(payload["title"] if not payload["error"] else f"Could not load {title}")
@@ -4087,16 +4411,7 @@ class WavesBridge(QObject):
                     tracks = [t for t in raw if isinstance(t, Track | Video)]
                     subtitle = str(getattr(obj, "sub_title", "") or "Mix")
                 elif kind == "playlist":
-                    # items() (not tracks()) so VIDEO entries keep their type:
-                    # a video playlist's rows must play/download as videos, not
-                    # as their "Audio from video" shadow tracks. Paged because
-                    # the endpoint caps at 100 per call.
-                    tracks = []
-                    for off in (0, 100):
-                        page_items = obj.items(limit=100, offset=off) or []
-                        tracks.extend(m for m in page_items if isinstance(m, Track | Video))
-                        if len(page_items) < 100:
-                            break
+                    tracks = _all_playlist_items(obj)
                 else:
                     tracks = list(obj.tracks(limit=200) or [])
                 if kind == "playlist":
@@ -4203,13 +4518,13 @@ class WavesBridge(QObject):
             if revalidate:
                 # Silent refresh (e.g. a playlist gained tracks since caching).
                 if has_items and payload != cached:
-                    self._browse_pages[key] = payload
+                    self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                     self._save_page_cache()
                     self.browsePageLoaded.emit(payload)
                 devlog.done("browse", f"{key} revalidate", devlog.clock() - t0)
                 return
             if has_items:
-                self._browse_pages[key] = payload
+                self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                 self._save_page_cache()
             self.browsePageLoaded.emit(payload)
             self._set_status(payload["title"] if not payload["error"] else "Could not open that item")
@@ -4348,15 +4663,22 @@ class WavesBridge(QObject):
         now = time.time()
         missing: list[tuple[str, str]] = []
         for title, path in links:
-            arts = self._tile_art_mem.get(path)
+            # Memory entries carry the sample's own timestamp and honour the
+            # TTL: an always-on app previously served day-0 mosaics forever
+            # because the mem hit short-circuited the disk TTL check.
+            arts = None
+            held = self._tile_art_mem.get(path)
+            if held is not None and now - held[0] < self._TILE_ART_TTL:
+                arts = held[1]
             if arts is None:
                 entry = disk.get(path)
                 if entry and now - float(entry.get("ts", 0)) < self._TILE_ART_TTL:
                     arts = [str(u) for u in entry.get("arts", [])]
-                    self._tile_art_mem[path] = arts
+                    # Keep the DISK stamp, so the memory copy can't outlive it.
+                    self._tile_art_mem[path] = (float(entry.get("ts", 0)), arts)
             if arts:
                 self.browseTileArt.emit(path, arts)
-            elif arts is None:
+            if arts is None:
                 missing.append((title, path))
         if not missing or self._tile_art_running:
             return
@@ -4375,7 +4697,7 @@ class WavesBridge(QObject):
                         continue
                     # Remember misses too (as []) so a page with no usable
                     # covers isn't re-crawled every session within the TTL.
-                    self._tile_art_mem[path] = arts
+                    self._tile_art_mem[path] = (time.time(), arts)
                     disk[path] = {"arts": arts, "ts": time.time(), "v": self._TILE_ART_V}
                     fetched += 1
                     if arts:
@@ -4474,24 +4796,25 @@ class WavesBridge(QObject):
     ) -> int:
         self._queue_seq += 1
         qid = self._queue_seq
-        self._queue.append(
-            {
-                "qid": qid,
-                "name": name,
-                "type": type_media,
-                "status": "queued",
-                "progress": 0.0,
-                "media_id": media_id,
-                "template": template,
-                "collection": collection,
-                # Shown in the queue row ("artist · done/total tracks"); the QML
-                # derives the done count from progress and the track total.
-                "artist": artist,
-                "tracks": tracks,
-                # Cover/thumb URL for the queue card (empty when unavailable).
-                "art": art,
-            }
-        )
+        with self._queue_lock:
+            self._queue.append(
+                {
+                    "qid": qid,
+                    "name": name,
+                    "type": type_media,
+                    "status": "queued",
+                    "progress": 0.0,
+                    "media_id": media_id,
+                    "template": template,
+                    "collection": collection,
+                    # Shown in the queue row ("artist · done/total tracks"); the QML
+                    # derives the done count from progress and the track total.
+                    "artist": artist,
+                    "tracks": tracks,
+                    # Cover/thumb URL for the queue card (empty when unavailable).
+                    "art": art,
+                }
+            )
         self._emit_queue()
         return qid
 
@@ -4583,9 +4906,15 @@ class WavesBridge(QObject):
             row["pct"] = 100.0
         if ev["status"] == "done":
             # A finished track just proved the download folder writable: feed
-            # the reachability gate's liveness window (cheap, no I/O).
-            if ev.get("path"):
-                self._note_download_base_ok()
+            # the reachability gate's liveness window (cheap, no I/O). Only
+            # when it landed under the CURRENT setting: a job still writing to
+            # the previous folder must not vouch for a never-written new one.
+            landed = str(ev.get("path") or "")
+            if landed:
+                base = self.settings.data.download_base_path
+                base_abs = str(pathlib.Path(base).expanduser())
+                if landed == base_abs or landed.startswith(base_abs + os.sep):
+                    self._note_download_base_ok(base)
             # Recording ownership resolves the real path (os.path.realpath
             # walks and stats every component) and writes sqlite. Against a
             # busy network mount that realpath alone can stall for seconds, so
@@ -4642,6 +4971,7 @@ class WavesBridge(QObject):
             }
             with self._own_lock:
                 self._own_cache[str(ev.get("id"))] = (time.monotonic(), rec)
+                self._evict_own_cache_locked()
             self.ownershipChanged.emit(str(ev.get("id")))
         except Exception:
             logger.debug("Could not record ownership", exc_info=True)
@@ -4656,6 +4986,15 @@ class WavesBridge(QObject):
     # share. Tracks finishing during the download stay instant regardless:
     # _record_ownership asserts their cache entries directly, no stat.
     _OWN_TTL_BUSY = 45.0
+    # The cache is keyed by every track id ever scrolled past; in an
+    # always-on app that grows without bound, so cap it far above one
+    # session's realistic working set and evict oldest-inserted first.
+    _OWN_CACHE_MAX = 4000
+
+    def _evict_own_cache_locked(self) -> None:
+        """Bound _own_cache; caller holds _own_lock."""
+        while len(self._own_cache) > self._OWN_CACHE_MAX:
+            del self._own_cache[next(iter(self._own_cache))]
 
     def _target_quality_rank(self) -> int:
         """Rank of the audio quality this run targets, for "already have
@@ -4676,6 +5015,7 @@ class WavesBridge(QObject):
         with self._own_lock:
             prev = self._own_cache.get(tid)
             self._own_cache[tid] = (time.monotonic(), rec)
+            self._evict_own_cache_locked()
             self._own_pending.discard(tid)
         if (prev[1] if prev else None) != rec:
             self.ownershipChanged.emit(tid)
@@ -4858,6 +5198,9 @@ class WavesBridge(QObject):
         d = self.settings.data
         for key, value in _FIRST_RUN_OVERRIDES.items():
             setattr(d, key, value)
+        # Bare save on purpose: this runs from __init__ before ffmpeg is
+        # resolved, so there are no transient injections to undo yet and
+        # _save_settings' restores would read attributes that do not exist.
         self.settings.save()
 
     def _default_waves_prefs(self) -> dict:
@@ -4892,6 +5235,9 @@ class WavesBridge(QObject):
             # Hover controls (preview / download over artwork) rise in with a
             # soft bounce; off restores the plain fade they used before.
             "hover_control_motion": True,
+            # Cover art tilts toward the cursor and lifts once the pointer
+            # rests on it; off holds every artwork flat and still.
+            "art_hover_tilt": True,
             # Diagnostics (Settings > Diagnostics). Verbose is off by default:
             # the on-disk log then carries only warnings/errors plus breadcrumb
             # dumps. The redact-content flag applies to exported bundles only.
@@ -4979,6 +5325,8 @@ class WavesBridge(QObject):
             self.motionBgChanged.emit()
         elif key == "hover_control_motion":
             self.hoverMotionChanged.emit()
+        elif key == "art_hover_tilt":
+            self.artHoverTiltChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
 
@@ -5042,6 +5390,12 @@ class WavesBridge(QObject):
         per call, and only when something actually changed."""
         if w <= 0 or h <= 0:
             return  # a 0x0 during teardown must never clobber a good save
+        # A headless run (offscreen/minimal QPA: tests, benchmark harnesses)
+        # parks its window at 0,0, and persisting that would poison the real
+        # frame the user's next launch restores to. Positions only mean
+        # something on a real windowing platform.
+        if _headless_platform():
+            return
         changed = False
         for key, val in (("win_x", int(x)), ("win_y", int(y)), ("win_w", int(w)), ("win_h", int(h))):
             if self._waves_prefs.get(key) != val:
@@ -5303,9 +5657,23 @@ class WavesBridge(QObject):
                 os.makedirs(p, exist_ok=True)
                 probe = p / f".waves-probe-{os.urandom(4).hex()}"
                 probe.write_bytes(b"w")
-                probe.unlink()
+            except PermissionError:
+                # The mount is there but the OS refused the write: on macOS
+                # this is the Privacy & Security network-volumes gate, not a
+                # dead share. Distinct breadcrumb so a report can tell
+                # "denied" from "dead" (no path: share names are identity).
+                logger.info("Folder probe denied by OS permissions, not a dead mount")
+                return False
             except OSError:
                 return False
+            try:
+                probe.unlink()
+            except OSError:
+                # The write already proved the folder works. A share with odd
+                # delete semantics must not read as dead (that verdict blocks
+                # every download), and retrying here would just litter another
+                # probe file per attempt.
+                logger.debug("probe cleanup failed", exc_info=True)
             return True
 
         base = pathlib.Path(path).expanduser()
@@ -5325,7 +5693,14 @@ class WavesBridge(QObject):
             for cand in siblings:
                 if cand != vol and re.sub(r"[ -]\d+$", "", cand) == stem:
                     live = pathlib.Path(volumes_root, cand, *rest)
-                    if writable(live):
+                    # Identity check before any write: a genuine remount of
+                    # the same share already carries the library folder, while
+                    # a DIFFERENT drive that merely shares the name stem
+                    # ("Backup-1" vs "Backup-2", or a second "T7" auto-
+                    # suffixed) does not, and healing onto it would silently
+                    # split the library across drives. Never create the tree
+                    # on a candidate just to test it.
+                    if rest and live.is_dir() and writable(live):
                         return ("healed", str(live))
         return ("dead", path)
 
@@ -5370,12 +5745,15 @@ class WavesBridge(QObject):
     # for this long; clicks inside the window skip the write probe entirely.
     _BASE_OK_TTL_SEC = 30.0
 
-    def _note_download_base_ok(self) -> None:
-        """Remember that a write to the download base just verifiably worked (a
-        finished track's file landed there, or a reachability probe passed).
-        Cheap (no I/O), callable from any thread; a lost race between two
-        writers only makes the stamp a moment older, which is harmless."""
-        self._base_ok = (self.settings.data.download_base_path, time.monotonic())
+    def _note_download_base_ok(self, proven_base: str) -> None:
+        """Remember that a write under ``proven_base`` just verifiably worked
+        (a finished track's file landed there, or a reachability probe passed).
+        The caller names the path it actually proved: stamping the live
+        setting instead let a folder changed mid-download inherit the old
+        folder's proof of life and skip its own probe. Cheap (no I/O),
+        callable from any thread; a lost race between two writers only makes
+        the stamp a moment older, which is harmless."""
+        self._base_ok = (proven_base, time.monotonic())
 
     def _downloads_running(self) -> bool:
         """True while any queue row is actively downloading. Read from download
@@ -5401,7 +5779,7 @@ class WavesBridge(QObject):
             return True
         verdict, live = self._probe_download_base()
         if verdict == "ok":
-            self._note_download_base_ok()
+            self._note_download_base_ok(live)
             return True
         if verdict == "healed":
             # Follow the live mount and persist it, exactly what re-picking the
@@ -5409,8 +5787,8 @@ class WavesBridge(QObject):
             # logs (share names are identity), the category is enough.
             logger.info("Download folder auto-healed onto a remounted volume")
             self.settings.data.download_base_path = live
-            self.settings.save()
-            self._note_download_base_ok()
+            self._save_settings()
+            self._note_download_base_ok(live)
             return True
         if verdict == "timeout" and self._downloads_running():
             # The probe missed its deadline while other downloads are actively
@@ -5419,10 +5797,111 @@ class WavesBridge(QObject):
             # fails with its own retries and the job is marked failed.
             logger.info("Download folder probe timed out under active download load; treating as busy, not dead")
             return True
+        if verdict == "timeout":
+            # A mounted-but-cold share: macOS drops an idle SMB session while
+            # keeping the mount point, and the FIRST access hangs for seconds
+            # while it silently reconnects (the probe's own I/O is what wakes
+            # it). That is a warming share, not a dead one, and it must not
+            # bounce the user into a dialog: hold the download quietly and let
+            # the recovery watch resume it; the dialog is raised only if the
+            # folder still has not answered when the warm-up deadline passes.
+            logger.info("Download folder probe timed out with an idle queue; waiting out a possible warm-up")
+            self._set_status("Waking the download folder, the download starts by itself")
+            self._recovery_dialog_shown = False
+            self._recovery_dialog_deadline = time.monotonic() + self._WARMUP_DIALOG_DELAY_SEC
+            self._stash_pending_download(media_id, retry)
+            self._recoveryWatchWanted.emit()
+            return False
         self._set_status("Download folder isn't reachable")
+        self._recovery_dialog_shown = True
         self._stash_pending_download(media_id, retry)
         self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
+        self._recoveryWatchWanted.emit()
         return False
+
+    # How long a timed-out probe is treated as a share warming up (held
+    # quietly, watch running) before the unreachable dialog is raised. Cold
+    # SMB reconnects land well inside this; a real outage exceeds it.
+    _WARMUP_DIALOG_DELAY_SEC = 30.0
+
+    def _keepwarm_tick(self) -> None:
+        """GUI thread (60s timer): touch the network download base so its SMB
+        session never idles out. A plain listdir on a daemon thread; errors are
+        irrelevant (the gate owns verdicts) and a hung share only means the
+        inflight flag stays set and later ticks skip."""
+        base = self.settings.data.download_base_path or ""
+        if not base.startswith("/Volumes/") or self._keepwarm_inflight:
+            return
+        self._keepwarm_inflight = True
+
+        def touch() -> None:
+            try:
+                with contextlib.suppress(OSError):
+                    os.listdir(base)
+            finally:
+                self._keepwarm_inflight = False
+
+        Thread(target=touch, daemon=True).start()
+
+    def _start_recovery_watch(self) -> None:
+        """GUI thread: begin watching for the unreachable folder to come back.
+        The 10s re-probe timer is the backbone (a share can revive at the same
+        mount point with no /Volumes change); on macOS a directory watcher on
+        /Volumes turns a remount into an immediate probe instead of a wait."""
+        if sys.platform == "darwin" and self._recovery_watcher is None and os.path.isdir("/Volumes"):
+            w = QtCore.QFileSystemWatcher(self)
+            w.addPath("/Volumes")
+            w.directoryChanged.connect(self._recovery_probe)
+            self._recovery_watcher = w
+        self._recovery_poll.start()
+
+    def _recovery_probe(self) -> None:
+        """GUI thread (timer tick or /Volumes change): re-probe the folder off
+        thread and, when it answers, resume the held downloads. Stops the
+        watch when nothing is held anymore (the user resolved or dismissed the
+        gate); overlapping probes are collapsed to one."""
+        with self._pending_lock:
+            pending = bool(self._pending_downloads)
+        if not pending:
+            self._recovery_poll.stop()
+            return
+        if self._recovery_inflight:
+            return
+        self._recovery_inflight = True
+
+        def work() -> None:
+            try:
+                verdict, live = self._probe_download_base(timeout_s=4.0)
+                if verdict == "ok":
+                    self._note_download_base_ok(live)
+                elif verdict == "healed":
+                    # Same persist as the gate's heal: follow the live mount.
+                    logger.info("Download folder auto-healed onto a remounted volume (recovery watch)")
+                    self.settings.data.download_base_path = live
+                    self._save_settings()
+                    self._note_download_base_ok(live)
+                else:
+                    # Still not answering. If the quiet warm-up window has run
+                    # out and the user has not seen the dialog yet, raise it
+                    # now (once): past this point it is a real outage, not a
+                    # cold share waking up.
+                    if not self._recovery_dialog_shown and time.monotonic() > self._recovery_dialog_deadline:
+                        self._recovery_dialog_shown = True
+                        self._set_status("Download folder isn't reachable")
+                        self.downloadFolderUnreachable.emit(self.settings.data.download_base_path)
+                    return
+                logger.info("Download folder became reachable again; resuming held downloads")
+                self.downloadFolderRecovered.emit()
+            finally:
+                self._recovery_inflight = False
+
+        self.threadpool.start(Worker(work))
+
+    def _on_folder_recovered(self) -> None:
+        """GUI thread (queued from the recovery probe worker): stop watching
+        and replay every held download through the full gate."""
+        self._recovery_poll.stop()
+        self._run_pending_downloads()
 
     def _stash_pending_download(self, media_id: str, retry) -> None:
         """Hold a gated download for later replay. Keyed by media id so a
@@ -5447,7 +5926,7 @@ class WavesBridge(QObject):
         """The user chose to keep the legacy default: remember the decision (so the
         nudge never asks again) and run the downloads that were held back."""
         self.settings.data.download_folder_prompted = True
-        self.settings.save()
+        self._save_settings()
         self._run_pending_downloads()
 
     @Slot()
@@ -5455,9 +5934,15 @@ class WavesBridge(QObject):
         """The user chose to change the folder (or dismissed the nudge): drop the
         held-back downloads. Nothing is queued; they re-initiate after choosing a
         folder. The one-time flag is left unset so an unresolved default is asked
-        about again next time."""
+        about again next time. Buttons that left idle before the stash (the
+        refetch path lights "running" as its re-click guard) are returned to
+        idle here, otherwise they refuse clicks for the rest of the session;
+        an idle button ignores the "" emit, so this is safe for the rest."""
         with self._pending_lock:
-            self._pending_downloads = []
+            pending, self._pending_downloads = self._pending_downloads, []
+        for mid, _fn in pending:
+            if mid:
+                self.downloadState.emit(mid, "")
 
     @Slot()
     def bypassFfmpegGate(self) -> None:
@@ -5466,6 +5951,22 @@ class WavesBridge(QObject):
         breadcrumb from _warn_if_ffmpeg_missing still records the skip)."""
         self._ffmpeg_gate_bypassed = True
         self._run_pending_downloads()
+
+    def _ffmpeg_gate_holds(self, media_id: str, retry) -> bool:
+        """FFmpeg gate: without it the files come out degraded (no FLAC
+        extraction, no video conversion, no track-length repair, so strict
+        players can show 0:00). Hold the download so the user can fix it first;
+        "Continue anyway" bypasses for the session. Returns True when the gate
+        held (dialog raised, ``retry`` stashed). Bulk entry points must run this
+        BEFORE publishing any rollup state: with the gate closed, _download
+        rejects every member, so no queue row would ever tick the group down and
+        its button would sit at "running" for the rest of the session."""
+        if self._ffmpeg_source_label() != "none" or self._ffmpeg_gate_bypassed:
+            return False
+        self._set_status("Set up FFmpeg to download at full quality")
+        self.ffmpegMissingBlocked.emit()
+        self._stash_pending_download(media_id, retry)
+        return True
 
     @Slot()
     def retryDownloadFolder(self) -> None:
@@ -5499,6 +6000,14 @@ class WavesBridge(QObject):
         to call from this download worker thread: it posts a deferred-delete to
         the object's home (GUI) thread, processed after any still-queued progress
         emits, so nothing is deleted out from under an in-flight signal."""
+        # The dict pop is deferred through a QUEUED signal, not done here: a
+        # worker releasing right after its last track event would otherwise
+        # remove the relay while those events are still queued for the GUI
+        # thread, and _track_lifecycle's membership recording (its only call
+        # site) silently skips when the relay is gone.
+        self._jobSignalsReleased.emit(qid)
+
+    def _drop_job_signals(self, qid: int) -> None:
         sig = self._job_signals.pop(qid, None)
         if sig is not None:
             sig.deleteLater()
@@ -5521,7 +6030,12 @@ class WavesBridge(QObject):
         # playlists, mixes and whole-artist queues.
         gate = self._download_gate()
         if gate == "block":
-            return  # nothing set (fresh install): download did not start
+            # Nothing set (fresh install): download did not start. Clear the
+            # button too: the refetch path lights "running" before dispatching
+            # here, and without this emit that button is dead for the session
+            # (idle buttons ignore the "" emit, so it is safe for direct clicks).
+            self.downloadState.emit(media_id, "")
+            return
         if gate == "nudge":
             # Still on the legacy default: hold this exact download until the
             # user decides. The queue is untouched, so the download button
@@ -5532,17 +6046,10 @@ class WavesBridge(QObject):
                 lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
             )
             return
-        # FFmpeg gate: without it the files come out degraded (no FLAC
-        # extraction, no video conversion, no track-length repair, so strict
-        # players can show 0:00). Hold the download so the user can fix it
-        # first; "Continue anyway" bypasses for the session.
-        if self._ffmpeg_source_label() == "none" and not self._ffmpeg_gate_bypassed:
-            self._set_status("Set up FFmpeg to download at full quality")
-            self.ffmpegMissingBlocked.emit()
-            self._stash_pending_download(
-                media_id,
-                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
-            )
+        if self._ffmpeg_gate_holds(
+            media_id,
+            lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+        ):
             return
         # Artist + total track count for the queue row label. Collections report
         # their track total; a single track/video counts as one.
@@ -5569,21 +6076,7 @@ class WavesBridge(QObject):
         if collection or merge_plan is not None:
             # Seed the per-track registry. A merge plan knows its exact track
             # list up front; a plain collection fills in as tracks start.
-            reg: dict[str, dict] = {}
-            for tnum_i, entry in enumerate(merge_plan or [], 1):
-                src, tnum, vnum = entry
-                tid = str(getattr(src, "id", "") or f"plan-{tnum_i}")
-                reg[tid] = {
-                    "id": tid,
-                    "title": name_builder_title(src),
-                    "num": int(tnum or tnum_i),
-                    "vol": int(vnum or 1),
-                    "duration": _fmt_duration(getattr(src, "duration", 0)),
-                    "desc": "",
-                    "status": "pending",
-                    "pct": 0.0,
-                }
-            self._job_tracks[qid] = reg
+            self._job_tracks[qid] = _seed_merge_registry(merge_plan)
             self._job_dls[qid] = dl
             if not self._track_poll.isActive():
                 self._track_poll.start()
@@ -5618,9 +6111,15 @@ class WavesBridge(QObject):
                 self._release_job_signals(qid)
                 self._job_dls.pop(qid, None)
                 self._job_tracks.pop(qid, None)
-                self._queue = [q for q in self._queue if q["qid"] != qid]
+                with self._queue_lock:
+                    self._queue = [q for q in self._queue if q["qid"] != qid]
                 self._emit_queue()
                 return
+            # The gate may have auto-healed the folder onto a remounted
+            # volume; this job's Download snapshotted path_base at
+            # construction, so follow the healed setting or every track fails
+            # against the old mount while the gate keeps saying all is well.
+            dl.path_base = self.settings.data.download_base_path
             self._set_queue_status(qid, "running")
             self.downloadState.emit(media_id, "running")
             self._set_status(f"Downloading {name}…")
@@ -5710,14 +6209,14 @@ class WavesBridge(QObject):
                 pool.submit(
                     dl.item,
                     file_template=file_template,
-                    media=_as_member_of(src, identity_album, tnum, vnum),
+                    media=_as_member_of(src, identity_album, tnum, vnum, iid),
                     is_parent_album=True,
                     list_position=i,
                     list_total=total,
                     keep_album=True,  # trust the deluxe identity we re-tagged onto the track
                     event_stop=job_abort,
                 )
-                for i, (src, tnum, vnum) in enumerate(plan, 1)
+                for i, (src, tnum, vnum, iid) in enumerate(plan, 1)
             ]
             for fut in as_completed(futs):
                 try:
@@ -5795,37 +6294,45 @@ class WavesBridge(QObject):
     def _bump_artist_group(self, media_id: str, pct, state) -> None:
         """Roll an album's progress into any 'download discography' group it
         belongs to, emitting the averaged progress under the artist id so the
-        artist button shows a real bar. Cheap no-op for non-grouped downloads."""
+        artist button shows a real bar. Cheap no-op for non-grouped downloads.
+
+        Groups legitimately overlap, so this must not stop at the first match
+        (same hazard :meth:`_bump_folder_group` documents): two discographies
+        queued together share every album and guest track they have in common
+        ('keys' holds album ids plus guest track ids, and the per-scan dedup
+        only covers one artist). Crediting only the first group would leave the
+        second one permanently short: never finished, never deleted, its button
+        stuck at "running"."""
         if not self._artist_groups:
             return
+        updates: list[tuple] = []
         with self._artist_lock:
-            aid = next((a for a, g in self._artist_groups.items() if media_id in g["keys"]), None)
-            if aid is None:
-                return
-            grp = self._artist_groups[aid]
-            if state == "done":
-                grp["prog"][media_id] = 100.0
-                grp["done"].add(media_id)
-            elif state == "failed":
-                grp["done"].add(media_id)
-                grp["failed"].add(media_id)
-            elif pct is not None:
-                grp["prog"][media_id] = float(pct)
-            total = len(grp["keys"]) or 1
-            agg = sum(grp["prog"].get(k, 0.0) for k in grp["keys"]) / total
-            finished = len(grp["done"]) >= len(grp["keys"])
-            any_failed = bool(grp["failed"])
+            for aid in [a for a, g in self._artist_groups.items() if media_id in g["keys"]]:
+                grp = self._artist_groups[aid]
+                if state == "done":
+                    grp["prog"][media_id] = 100.0
+                    grp["done"].add(media_id)
+                elif state == "failed":
+                    grp["done"].add(media_id)
+                    grp["failed"].add(media_id)
+                elif pct is not None:
+                    grp["prog"][media_id] = float(pct)
+                total = len(grp["keys"]) or 1
+                agg = sum(grp["prog"].get(k, 0.0) for k in grp["keys"]) / total
+                finished = len(grp["done"]) >= len(grp["keys"])
+                updates.append((aid, agg, finished, bool(grp["failed"])))
+                if finished:
+                    del self._artist_groups[aid]
+        for aid, agg, finished, any_failed in updates:
             if finished:
-                del self._artist_groups[aid]
-        if finished:
-            if any_failed:
-                self.downloadState.emit(aid, "failed")
+                if any_failed:
+                    self.downloadState.emit(aid, "failed")
+                else:
+                    self.downloadProgress.emit(aid, 100.0)
+                    self.downloadState.emit(aid, "done")
             else:
-                self.downloadProgress.emit(aid, 100.0)
-                self.downloadState.emit(aid, "done")
-        else:
-            self.downloadProgress.emit(aid, float(agg))
-            self.downloadState.emit(aid, "running")
+                self.downloadProgress.emit(aid, float(agg))
+                self.downloadState.emit(aid, "running")
 
     def _preview_source(self, track, whole: bool = False) -> str:
         """Produce a small, **seekable** local ``.m4a`` for ``track`` and return
@@ -5925,6 +6432,15 @@ class WavesBridge(QObject):
             # Fixed ffmpeg argument list (no shell, no user-supplied flags); the
             # only variable inputs are our own temp paths and a TIDAL CDN URL.
             subprocess.run(cmd, check=True, capture_output=True, timeout=90, creationflags=proc.NO_WINDOW)  # noqa: S603
+        except BaseException:
+            # The clip never materialized (ffmpeg failure or timeout): remove
+            # the just-created output temp. It is not yet in _preview_clips,
+            # the only collection shutdown sweeps, so nothing else would ever
+            # collect it. Deliberately NOT a finally: on success the file IS
+            # the preview and must survive this method.
+            with contextlib.suppress(OSError):
+                os.remove(out_path)
+            raise
         finally:
             if m3u_path is not None:
                 with contextlib.suppress(OSError):
@@ -6040,9 +6556,7 @@ class WavesBridge(QObject):
             logger.exception("Bad video quality %r", height)
             return
         self._video_user_quality = True  # explicit choice beats the bandwidth auto-cap
-        self._restore_ffmpeg_flags()
-        self._restore_ffmpeg_path()
-        self.settings.save()
+        self._save_settings()
         if self._logged_in:
             self._init_download()  # downloads honour the new resolution too
         self._set_status(f"Video quality: {int(height)}p")
@@ -6127,6 +6641,57 @@ class WavesBridge(QObject):
 
         self.threadpool.start(Worker(work))
 
+    def _pick_peek_stream(self, master_url: str) -> str:
+        """Smallest variant for the hover peek. The peek card is thumbnail
+        scale, so resolution is invisible and instant start is everything;
+        it never touches the persisted quality setting or the bandwidth
+        probe (a click hands off to the full player, which resolves at the
+        real preference). Falls back to the master playlist untouched on
+        anything unexpected."""
+        try:
+            master = self._load_playlist(master_url)
+            if not master.is_variant:
+                return master_url
+            cands = sorted(
+                (int(p.stream_info.resolution[1]), str(p.absolute_uri))
+                for p in master.playlists
+                if p.stream_info and p.stream_info.resolution
+            )
+            if not cands:
+                return master_url
+            return cands[0][1]
+        except Exception:
+            logger.debug("peek variant selection failed; using master playlist", exc_info=True)
+            return master_url
+
+    @Slot(str)
+    def peekVideo(self, video_id: str) -> None:
+        """Resolve a video's stream for the hover peek card, off the GUI
+        thread. Same source resolution as playVideo but deliberately light:
+        a low variant for instant start, and none of the album/track fallback
+        lookups (the card shows no metadata, the row already has it)."""
+        video_id = str(video_id or "")
+        if not video_id or not self._logged_in:
+            return
+
+        def work() -> None:
+            payload = {"id": video_id, "url": "", "error": True}
+            try:
+                obj = self._objs["video"].get(video_id)
+                if obj is None:
+                    obj = self.tidal.session.video(int(video_id))
+                    self._remember("video", video_id, obj)
+                url = str(obj.get_url() or "")
+                if url:
+                    payload["url"] = self._pick_peek_stream(url)
+                    payload["error"] = False
+                    devlog.event("video", f"peek {video_id}")
+            except Exception:
+                logger.exception("Could not resolve video peek %s", video_id)
+            self.videoPeekReady.emit(payload)
+
+        self.threadpool.start(Worker(work))
+
     @Slot(str)
     def previewTrack(self, track_id: str) -> None:
         """Stream a single track. Resolves the URL off the GUI thread and hands
@@ -6164,13 +6729,19 @@ class WavesBridge(QObject):
     def previewArtist(self, artist_id: str) -> None:
         """Stream an artist's top track. The preview stays addressed to the
         artist id so the artwork overlay lights up while the song plays."""
-        artist = self._get_artist(artist_id)
-        if artist is None:
-            self.previewState.emit("artist", artist_id, "")
-            return
         self.previewState.emit("artist", artist_id, "loading")
 
         def work() -> None:
+            # Resolve on the worker, never in the slot body: a QML-to-slot call
+            # is a synchronous call on the GUI thread, and on an _objs miss
+            # _get_artist issues an untimed tidalapi request (its session is a
+            # bare requests.Session with no timeout anywhere), which freezes the
+            # window. Misses are ordinary: every fresh search clears the _objs
+            # buckets, and a cache-hit re-search does not repopulate them.
+            artist = self._get_artist(artist_id)
+            if artist is None:
+                self.previewState.emit("artist", artist_id, "")
+                return
             try:
                 tops = artist.get_top_tracks(limit=1)
                 if not tops:
@@ -6365,16 +6936,32 @@ class WavesBridge(QObject):
         if obj is None or self._dl is None:
             return
         self._set_status("Scanning editions…")
+        # Button feedback that doubles as the re-click guard, published BEFORE
+        # the multi-request edition scan like every other async-hop entry
+        # point: without it a second click during the scan queues a plain
+        # download while the scan still queues the merge, into two directories.
+        self.downloadState.emit(album_id, "running")
 
         def work() -> None:
-            group = self._sibling_editions(obj)
-            identity, plan = (None, None)
-            if len(group) >= 2:
-                identity, plan = _build_merge_plan(group, self._merge_recs_factory(), _quality_rank)
+            try:
+                group = self._sibling_editions(obj)
+                identity, plan = (None, None)
+                if len(group) >= 2:
+                    identity, plan = _build_merge_plan(group, self._merge_recs_factory(), _quality_rank)
+            except Exception:
+                logger.exception("Edition scan failed for album %s", album_id)
+                self.downloadState.emit(album_id, "failed")
+                self._set_status("Could not scan editions, try again")
+                return
             if plan:
                 key = str(getattr(identity, "id", id(identity)))
                 self._remember("album", key, identity)
                 self._merge_plans[key] = plan
+                if key != album_id:
+                    # The merge downloads under the identity edition's id; hand
+                    # the clicked button back to idle or it strands at
+                    # "running" forever (nothing ever ticks album_id again).
+                    self.downloadState.emit(album_id, "")
                 self._albumsQueued.emit([key])
                 self._set_status(f"Best of both: {name_builder_title(identity)}")
             else:
@@ -6417,7 +7004,9 @@ class WavesBridge(QObject):
         # Paste a share link on a cold session and this is the whole story: no
         # tree, so the tracks land outside the playlist's folder, and the same
         # download after opening My Tidal writes a second full copy inside it.
-        if self._needs_folder_tree() and self._warm_folder_tree(lambda: self.downloadPlaylist(playlist_id)):
+        if self._needs_folder_tree() and self._warm_folder_tree(
+            lambda: self.downloadPlaylist(playlist_id), playlist_id
+        ):
             self.downloadState.emit(playlist_id, "running")  # button feedback, _download re-emits
             return
         self._download(
@@ -6451,6 +7040,8 @@ class WavesBridge(QObject):
             return
         if gate == "nudge":
             self._stash_pending_download(folder_id, lambda: self.downloadFolder(folder_id))
+            return
+        if self._ffmpeg_gate_holds(folder_id, lambda: self.downloadFolder(folder_id)):
             return
         keys: list[str] = []
         weights: dict[str, int] = {}
@@ -6501,7 +7092,7 @@ class WavesBridge(QObject):
     def muteCategoryDlConfirm(self) -> None:
         """The confirm dialog's "Don't ask again": persist the opt-out."""
         self.settings.data.confirm_category_download = False
-        self.settings.save()
+        self._save_settings()
         self.confirmCategoryDlChanged.emit()
 
     def _category_page_rest(self, pl: dict, gen: int) -> list:
@@ -6656,6 +7247,18 @@ class WavesBridge(QObject):
         if gate == "nudge":
             self._stash_pending_download(f"cat:{api_path}", lambda: self.downloadPlaylistCategory(api_path))
             return
+        if self._ffmpeg_gate_holds(f"cat:{api_path}", lambda: self.downloadPlaylistCategory(api_path)):
+            return
+        # Cold session: {folder_path} would resolve to "" for every foldered
+        # playlist in the category, writing a second complete copy outside its
+        # folder (see _playlist_template). Warm the tree first, exactly like
+        # downloadPlaylist; the button feedback targets the cat: rollup id so
+        # a failed sweep clears the right button.
+        if self._needs_folder_tree() and self._warm_folder_tree(
+            lambda: self.downloadPlaylistCategory(api_path), f"cat:{api_path}"
+        ):
+            self.downloadState.emit(f"cat:{api_path}", "running")
+            return
         group_id = f"cat:{api_path}"
         keys: list[str] = []
         weights: dict[str, int] = {}
@@ -6706,21 +7309,26 @@ class WavesBridge(QObject):
             return
         self._download(obj, "mix", name_builder_title(obj), self.settings.data.format_mix, True, mix_id)
 
-    def _artist_releases(self, artist) -> tuple[list, list]:
+    def _artist_releases(self, artist) -> tuple[list, list, bool]:
         """Gather an artist's releases for a discography download, per the user's
         per-source toggles (all but appears-on default on): studio albums, EPs & singles,
         featured guest spots, and various-artists compilations. De-duplicated by
         release id (a release can show up under more than one source).
 
-        Returns ``(own, guest)``: the artist's own releases are downloaded whole;
-        guest releases (someone else's album the artist appears on) contribute
-        only the artist's own tracks, never the full album.
+        Returns ``(own, guest, complete)``: the artist's own releases are
+        downloaded whole; guest releases (someone else's album the artist
+        appears on) contribute only the artist's own tracks, never the full
+        album. ``complete`` is False when any ENABLED source failed to load: a
+        swallowed failure either reads as "No albums to download" or, worse,
+        silently downloads a truncated discography that then completes as a
+        clean success, so the caller must refuse to act on a partial scan.
 
         TIDAL exposes 'featured' and 'appears-on' as a single bucket (``get_other``
         / COMPILATIONS); we fetch it once and partition by the primary credit,
         a named artist → 'Featured', a Various-Artists placeholder → 'Appears on'."""
         own: list = []
         guest: list = []
+        complete = True
         seen: set = set()
 
         def add(a, into: list) -> None:
@@ -6741,6 +7349,7 @@ class WavesBridge(QObject):
                     add(a, own)
             except Exception:
                 logger.exception("Could not load artist releases for %s", pref)
+                complete = False
 
         # The shared 'other' bucket, split into featured (named artist) vs
         # appears-on (various-artists compilation) by the primary credit.
@@ -6753,19 +7362,19 @@ class WavesBridge(QObject):
             except Exception:
                 logger.exception("Could not load artist releases for appears-on")
                 others = []
+                complete = False
             for a in others:
                 is_comp = _is_compilation_release(a)
                 if want_appears if is_comp else want_featured:
                     add(a, guest)
 
-        devlog.event("artist_releases", own=len(own), guest=len(guest))
-        return own, guest
+        devlog.event("artist_releases", own=len(own), guest=len(guest), complete=complete)
+        return own, guest, complete
 
     @Slot(str)
     def downloadArtist(self, artist_id: str) -> None:
         """Queue every album of an artist for download."""
-        artist = self._get_artist(artist_id)
-        if artist is None or self._dl is None:
+        if self._dl is None:
             return
         # Bail before the (network-heavy) discography scan if there's nowhere to
         # save to; _download would reject each album anyway.
@@ -6776,6 +7385,8 @@ class WavesBridge(QObject):
             # Hold the whole-artist queue behind the same decision; replay re-runs
             # this scan once the user keeps the default folder.
             self._stash_pending_download(artist_id, lambda: self.downloadArtist(artist_id))
+            return
+        if self._ffmpeg_gate_holds(artist_id, lambda: self.downloadArtist(artist_id)):
             return
         self._set_status("Loading artist discography…")
         self.downloadProgress.emit(artist_id, 0.0)
@@ -6789,7 +7400,25 @@ class WavesBridge(QObject):
             if not self._gate_reachability(lambda: self.downloadArtist(artist_id), artist_id):
                 self.downloadState.emit(artist_id, "")
                 return
-            albums, guest = self._artist_releases(artist)
+            # Resolve on the worker, never in the slot body: on an _objs miss
+            # _get_artist issues an untimed tidalapi request, and a QML-to-slot
+            # call runs synchronously on the GUI thread, so the window froze for
+            # the length of that request. Clear the button on failure, the
+            # "running" state was already published above.
+            artist = self._get_artist(artist_id)
+            if artist is None:
+                self.downloadState.emit(artist_id, "")
+                self._set_status("Could not load that artist")
+                return
+            albums, guest, complete = self._artist_releases(artist)
+            if not complete:
+                # A partial scan must not act: empty reads as "No albums to
+                # download", and partial (albums fine, EPs failed) silently
+                # downloads a truncated discography that completes as a clean
+                # success. Fail visibly; the next click is the retry.
+                self.downloadState.emit(artist_id, "")
+                self._set_status("Could not load the full discography, try again")
+                return
             deduped = self._dedup_albums(albums)
             plans: list = []
             if self._waves_pref_bool("collapse_editions"):
@@ -6822,7 +7451,13 @@ class WavesBridge(QObject):
                             if _artist_on_track(t, artist_id):
                                 gtracks.append(t)
                     except Exception:
+                        # Same partial-scan rule as _artist_releases: a failed
+                        # track fetch would silently drop this release's guest
+                        # spots from a download that then reports clean success.
                         logger.exception("Could not load tracks for a guest release")
+                        self.downloadState.emit(artist_id, "")
+                        self._set_status("Could not load the full discography, try again")
+                        return
                 for t in self._dedup_tracks(gtracks):
                     tkey = str(getattr(t, "id", id(t)))
                     self._remember("track", tkey, t)
@@ -6895,7 +7530,8 @@ class WavesBridge(QObject):
             self._folder_groups.clear()
         for fid in folder_ids:
             self.downloadState.emit(fid, "")
-        self._queue = []
+        with self._queue_lock:
+            self._queue = []
         self._emit_queue()
         self._set_status("Downloads stopped")
 
@@ -6917,11 +7553,25 @@ class WavesBridge(QObject):
             ev.set()
         if getattr(self, "_event_run", None) is not None:
             self._event_run.set()  # release any paused worker so it hits the abort
+        # An in-flight FFmpeg install honours exactly one event; without it a
+        # quit mid-install orphans a partial archive in the config dir.
+        try:
+            if getattr(self, "_ffmpeg_abort", None) is not None:
+                self._ffmpeg_abort.set()
+        except Exception:
+            logger.debug("shutdown: no ffmpeg abort event", exc_info=True)
         for pool in (self.dl_pool, self._scan_pool, self.threadpool):
             pool.clear()
         self.dl_pool.waitForDone(4000)
         self._scan_pool.waitForDone(1000)
         self.threadpool.waitForDone(1000)
+        # Drain the ownership pool BEFORE closing its store: its workers write
+        # sqlite, and closing underneath them turns an orderly quit into
+        # "database is closed" tracebacks right before os._exit. Deliberately
+        # no clear(): a queued ownership write is a real record of a finished
+        # track and must land. The pool holds at most quick sqlite/stat work,
+        # so the bound is a formality.
+        self._own_pool.waitForDone(2000)
         try:
             self._ownership.close()
         except Exception:
@@ -6934,6 +7584,25 @@ class WavesBridge(QObject):
         self._preview_clips.clear()
 
     # ----- in-app FFmpeg manager ----------------------------------------- #
+    def _save_settings(self) -> None:
+        """Persist settings with the transient ffmpeg injections undone first.
+
+        ``Download`` force-disables ``video_convert_mp4`` / ``extract_flac`` in
+        memory when ffmpeg is missing, and ``_resolve_ffmpeg`` injects the
+        managed binary path into ``path_binary_ffmpeg``. ``Settings`` is a
+        singleton and ``save()`` serialises the whole dataclass, so a bare save
+        from anywhere writes those transient values to disk: the user silently
+        loses FLAC extraction and video conversion until they notice, and a
+        machine path (containing the username) lands in settings.json, which
+        the bug template asks users to paste publicly.
+
+        Every save must go through here. Callers that need a specific ordering
+        around the restores (``applySettings``) do them explicitly instead."""
+        self._restore_ffmpeg_flags()
+        self._restore_ffmpeg_path()
+        self.settings.save()
+        self.settingsPersistedExternally.emit()
+
     def _restore_ffmpeg_flags(self) -> None:
         """Re-enable video/FLAC features that ``Download`` may have disabled
         in-memory when ffmpeg was missing, now that it's installed."""
@@ -7125,30 +7794,41 @@ class WavesBridge(QObject):
         for a package-manager-owned copy, run the manager's own upgrade; the
         updater routes internally). On success the UI offers a restart (see
         ``restartForUpdate``)."""
+        # One installer at a time. A second Install click (the Settings button
+        # and the update toast are independent surfaces) would run two workers
+        # over the same staging directory, each rmtree-ing it out from under
+        # the other, and the clear() below would discard a pending cancel.
+        # GUI-thread slot, so the flag needs no lock.
+        if self._app_update_inflight:
+            return
+        self._app_update_inflight = True
+        self._app_update_abort.clear()
 
         def work() -> None:
-            self._app_update_abort.clear()
-            self.appUpdateStateChanged.emit("downloading", "Downloading update…")
             try:
-                result = self._updater.install(
-                    progress_cb=lambda p: self.appUpdateProgress.emit(float(p)),
-                    log_cb=lambda m: self.appUpdateStateChanged.emit("downloading", m),
-                    abort=self._app_update_abort,
+                self.appUpdateStateChanged.emit("downloading", "Downloading update…")
+                try:
+                    result = self._updater.install(
+                        progress_cb=lambda p: self.appUpdateProgress.emit(float(p)),
+                        log_cb=lambda m: self.appUpdateStateChanged.emit("downloading", m),
+                        abort=self._app_update_abort,
+                    )
+                except UpdateCancelled:
+                    self.appUpdateStateChanged.emit("cancelled", "Cancelled")
+                    return
+                except Exception as exc:
+                    logger.exception("App update failed")
+                    self.appUpdateStateChanged.emit("failed", str(exc) or "Update failed")
+                    return
+                # A managed upgrade may not know the version tag (offline resolve);
+                # "Updated to . Restart" reads broken, so degrade the message whole.
+                ver = result.get("version", "")
+                self.appUpdateStateChanged.emit(
+                    "done", (f"Updated to {ver}. " if ver else "Updated. ") + "Restart to finish."
                 )
-            except UpdateCancelled:
-                self.appUpdateStateChanged.emit("cancelled", "Cancelled")
-                return
-            except Exception as exc:
-                logger.exception("App update failed")
-                self.appUpdateStateChanged.emit("failed", str(exc) or "Update failed")
-                return
-            # A managed upgrade may not know the version tag (offline resolve);
-            # "Updated to . Restart" reads broken, so degrade the message whole.
-            ver = result.get("version", "")
-            self.appUpdateStateChanged.emit(
-                "done", (f"Updated to {ver}. " if ver else "Updated. ") + "Restart to finish."
-            )
-            self.appUpdateStatusChanged.emit()
+                self.appUpdateStatusChanged.emit()
+            finally:
+                self._app_update_inflight = False
 
         self.threadpool.start(Worker(work))
 
@@ -7190,12 +7870,14 @@ class WavesBridge(QObject):
         item = self._queue_item(qid)
         if item is not None:
             self.downloadState.emit(str(item.get("media_id", "")), "")
-        self._queue = [q for q in self._queue if q["qid"] != qid]
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["qid"] != qid]
         self._emit_queue()
 
     @Slot()
     def clearFinished(self) -> None:
-        self._queue = [q for q in self._queue if q["status"] not in {"done", "failed", "cancelled"}]
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["status"] not in {"done", "failed", "cancelled"}]
         self._emit_queue()
 
     @Slot()
@@ -7210,12 +7892,14 @@ class WavesBridge(QObject):
                 ev = self._job_aborts.get(q["qid"])
                 if ev is not None:
                     ev.set()
-        self._queue = [q for q in self._queue if q["status"] == "running"]
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["status"] == "running"]
         self._emit_queue()
 
     @Slot(int)
     def removeQueueItem(self, qid: int) -> None:
-        self._queue = [q for q in self._queue if q["qid"] != qid]
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["qid"] != qid]
         self._emit_queue()
 
     @Slot(int)
@@ -7225,8 +7909,15 @@ class WavesBridge(QObject):
             return
         obj = self._objs.get(item["type"], {}).get(item["media_id"])
         if obj is None:
+            # A new search clears every _objs bucket while queue rows survive
+            # it; a silent return here makes the row's RETRY a dead control for
+            # the session. Re-fetch by id (same fallback as the download entry
+            # points), then re-enter through this slot: the row keeps its
+            # stored name/template/collection/merge plan on the second pass.
+            self._retry_queue_refetch(item)
             return
-        self._queue = [q for q in self._queue if q["qid"] != qid]
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["qid"] != qid]
         self._emit_queue()
         # Preserve a failed 'best of both' merge as a merge on retry, its plan
         # is kept stashed (only dropped on success), so a retried album isn't
@@ -7235,6 +7926,54 @@ class WavesBridge(QObject):
         self._download(
             obj, item["type"], item["name"], item["template"], item["collection"], item["media_id"], merge_plan=plan
         )
+
+    def _retry_queue_refetch(self, item: dict) -> None:
+        """Re-fetch a failed queue row's vanished object, then retry the row.
+
+        The row stays in the queue, still failed, until the object is back and
+        the retry re-enters ``retryQueueItem`` (via the GUI hop), so a failed
+        re-fetch leaves RETRY available instead of consuming the row."""
+        bucket, media_id, qid = item["type"], item["media_id"], item["qid"]
+        key = (bucket, media_id)
+        if key in self._refetch_inflight or not self._logged_in:
+            return
+        self._refetch_inflight.add(key)
+        gen = self._browse_gen
+        self._set_status("Fetching item…")
+
+        def work() -> None:
+            obj = None
+            try:
+                session = self.tidal.session
+                fetch = {
+                    "album": lambda: session.album(int(media_id)),
+                    "track": lambda: session.track(int(media_id)),
+                    "video": lambda: session.video(int(media_id)),
+                    "playlist": lambda: session.playlist(media_id),
+                    "mix": lambda: session.mix(media_id),
+                }.get(bucket)
+                if fetch is not None:
+                    with self._browse_lock:  # see _refetch_for_download
+                        obj = fetch()
+            except Exception:
+                logger.exception("Could not re-fetch %s %s for retry", bucket, media_id)
+            if gen != self._browse_gen:
+                self._refetch_inflight.discard(key)
+                return
+            if obj is None:
+                self._refetch_inflight.discard(key)
+                self._set_status("That item is no longer available")
+                return
+            self._remember(bucket, media_id, obj)
+            self._queueRetryRefetched.emit(bucket, media_id, qid)
+
+        self.threadpool.start(Worker(work))
+
+    def _on_queue_retry_refetched(self, bucket: str, media_id: str, qid: int) -> None:
+        # GUI-thread dispatch, same anti-double-click gap rule as
+        # _on_media_refetched: the in-flight marker lives until here.
+        self._refetch_inflight.discard((bucket, media_id))
+        self.retryQueueItem(qid)
 
     @Slot(str, str)
     def copyShareUrl(self, bucket: str, media_id: str) -> None:
@@ -7449,6 +8188,17 @@ class WavesBridge(QObject):
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("hover_control_motion"),
+                },
+                {
+                    "key": "art_hover_tilt",
+                    "label": "Cover art tilts on hover",
+                    "help": (
+                        "Album and artist artwork tilts toward your cursor and lifts slightly "
+                        "once the pointer rests on it, springing back when you move away. Turn "
+                        "this off to keep every cover flat and still."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("art_hover_tilt"),
                 },
                 {
                     "key": "verbose_diagnostics",
@@ -7692,6 +8442,7 @@ class WavesBridge(QObject):
                 "fields": [
                     "motion_background",
                     "hover_control_motion",
+                    "art_hover_tilt",
                     "downsample_target",
                     "downloads_simultaneous_per_track_max",
                     "download_delay_sec_min",
@@ -7750,7 +8501,7 @@ class WavesBridge(QObject):
             elif kind == "mix":
                 out = format_path_media(format_path_media(template, mx, **kw), trk, pad, 4, 23, **kw) + ".flac"
             elif kind == "video":
-                out = format_path_media(template, vid, **kw) + ".mp4"
+                out = format_path_media(template, vid, pad, **kw) + ".mp4"
             else:
                 out = ""
         except Exception:

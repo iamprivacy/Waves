@@ -35,7 +35,6 @@ feature.
 | `libraryLoaded(category, items, hasMore)` | First page of a My Tidal category (replace)                                           |
 | `libraryMore(category, items, hasMore)`   | Next page (append, infinite scroll)                                                   |
 | `homeLoaded(sections)`                    | My Tidal's Home landing (Browse-shaped shelves, account-scoped)                       |
-| `recentlyAddedLoaded(items)`              | The merged newest-favourites strip on Home                                            |
 
 ## Browse (editorial pages)
 
