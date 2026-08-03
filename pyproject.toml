@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.13"
+version = "0.1.14"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -144,6 +144,9 @@ ignore = [
 # Qt boot (S603, fixed argv), and its boot -> drive -> assert scenario is one
 # deliberately linear function (C901).
 "tests/test_browse_back_scroll.py" = ["S603", "C901"]
+# Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
+# helper for real on macOS (S603, fixed argv).
+"tests/test_apple_double_cleanup.py" = ["S603"]
 # Same subprocess-isolation + linear-scenario shape as the scroll guard.
 "tests/test_forward_history_account_switch.py" = ["S603", "C901"]
 "tests/test_playlist_folder_qml.py" = ["S603", "C901"]
@@ -157,6 +160,7 @@ ignore = [
 "tests/test_folder_badge_and_crumb_labels.py" = ["S603", "C901"]
 "tests/test_hover_swell_fade.py" = ["S603", "C901"]
 "tests/test_browse_console_wayfinding.py" = ["S603", "C901"]
+"tests/test_browse_row_window.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
