@@ -103,8 +103,9 @@ Item {
     // Deep-link: land the view on a section card, e.g. arriving from the
     // status bar's update notice. Deliberately a jump, not an animated
     // scroll: the user should drop in where they need to be, not watch the
-    // page fly past. The card itself is already expanded by its own open
-    // rule (the Updates section auto-opens while an update is available).
+    // page fly past. The destination card is opened as part of the jump:
+    // with every section starting collapsed, a deep link to a shut card
+    // would otherwise land on a bare header.
     function jumpToCard(cardId) {
         for (var i = 0; i < secRep.count; i++) {
             var it = secRep.itemAt(i)
@@ -115,6 +116,7 @@ Item {
                 // An explicit destination outranks the remembered spot, which
                 // would otherwise be re-applied on the same open and fight it.
                 page.pendingY = -1
+                page.setSectionOpen(it.modelData.id, true)
                 settingsFlick.contentY = Math.max(0, Math.min(it.y, settingsFlick.contentHeight - settingsFlick.height))
                 return
             }
@@ -135,9 +137,19 @@ Item {
     // Which sections the user opened or shut by hand. Kept on the page, not
     // on the cards: `groups` is reassigned on every schema refresh (saving a
     // setting triggers one), and that destroys and rebuilds every delegate,
-    // taking their open state with it. Only a real click writes here, so the
-    // auto-open rules below still decide anything the user never touched.
+    // taking their open state with it. Only a real click (or a deep link)
+    // writes here, so the auto-open rules below still decide anything the
+    // user never touched. Persisted as a waves pref so the page reopens the
+    // way it was left, across visits and across launches.
     property var openSections: ({})
+    function loadOpenSections() {
+        var v = waves.wavesPref("settings_open_sections")
+        if (!v) return
+        try {
+            var m = JSON.parse(v)
+            if (m && typeof m === "object") openSections = m
+        } catch (e) { /* a corrupt pref just means default (collapsed) */ }
+    }
     function sectionOpen(id, dflt) {
         var v = openSections[id]
         return v === undefined ? dflt : v
@@ -146,6 +158,7 @@ Item {
         var m = Object.assign({}, openSections)
         m[id] = on
         openSections = m
+        waves.setWavesPref("settings_open_sections", JSON.stringify(m))
     }
     // Where the page is scrolled to, for anything outside that needs to read
     // or set it (and for the bench that pins this behaviour).
@@ -153,8 +166,16 @@ Item {
     property alias scrollViewport: settingsFlick
     function _restoreScroll() {
         if (pendingY < 0 || settingsFlick.height <= 0) return
-        settingsFlick.contentY = Math.max(0, Math.min(pendingY, settingsFlick.contentHeight - settingsFlick.height))
-        pendingY = -1
+        var most = Math.max(0, settingsFlick.contentHeight - settingsFlick.height)
+        settingsFlick.contentY = Math.min(pendingY, most)
+        // Consume the restore only once it fit in full. A schema refresh on
+        // the way back in rebuilds every card, so contentHeight passes
+        // through near-zero before regrowing (the open animation takes
+        // 220ms); consuming on the first, clamped application would strand
+        // the page near the top. Staying armed rides each re-measure until
+        // the remembered spot is reachable; any real user scroll or a
+        // section click disarms it below.
+        if (pendingY <= most) pendingY = -1
     }
 
     function val(f) { return editMap[f.key] !== undefined ? editMap[f.key] : f.value }
@@ -250,7 +271,7 @@ Item {
     // Front-load the build at startup (behind the login overlay) so every
     // open of the page is instant. The startup update check is opt-in and
     // throttled in the backend, it no-ops unless the user enabled it.
-    Component.onCompleted: { refreshSchema(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
+    Component.onCompleted: { loadOpenSections(); refreshSchema(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
 
     onActiveChanged: {
         if (active) {
@@ -658,6 +679,10 @@ Item {
             // spot back in that same pass, before it paints.
             onHeightChanged: page._restoreScroll()
             onContentHeightChanged: page._restoreScroll()
+            // The user taking over cancels a partially-applied restore, so a
+            // later re-measure can't yank the view away from where they
+            // scrolled to.
+            onMovementStarted: page.pendingY = -1
 
             Column {
                 id: col
@@ -1417,14 +1442,16 @@ Item {
                     border.color: card.open ? "#30343c" : page.border1
                     implicitHeight: hd.implicitHeight + bodyWrap.height
                     Behavior on border.color { ColorAnimation { duration: 200 } }
-                    // Downloads opens by default; Processing opens when FFmpeg is
-                    // missing so the install button is visible. The rest start
-                    // collapsed. The Processing trigger latches on `ffEverMissing`
-                    // (not the live state) so a successful install, which flips
-                    // the state missing → managed, doesn't snap the card shut.
+                    // Every section starts collapsed and then stays the way
+                    // the user last left it (persisted). Two auto-open rules
+                    // outrank a never-touched default: Processing opens when
+                    // FFmpeg is missing so the install button is visible, and
+                    // Updates opens while an update is available. The
+                    // Processing trigger latches on `ffEverMissing` (not the
+                    // live state) so a successful install, which flips the
+                    // state missing to managed, doesn't snap the card shut.
                     property bool open: page.sectionOpen(card.modelData.id,
-                           modelData.open === true
-                        || (modelData.card === "ffmpeg" && page.ffEverMissing)
+                           (modelData.card === "ffmpeg" && page.ffEverMissing)
                         || (modelData.card === "updates" && page.auUpdate))
 
                     // Card header, icon + title + count chip + rotating chevron.
@@ -1498,6 +1525,9 @@ Item {
                             // binding above, and the next schema refresh would
                             // otherwise rebuild this card back to its default.
                             onClicked: {
+                                // Toggling re-measures the page; a still-armed
+                                // restore must not ride that and jump the view.
+                                page.pendingY = -1
                                 card.open = !card.open
                                 page.setSectionOpen(card.modelData.id, card.open)
                             }
@@ -1732,7 +1762,11 @@ Item {
                                                             var v = page.val(modelData)
                                                             if (modelData.browse === "dir") {
                                                                 folderDlg.targetKey = modelData.key
-                                                                var du = page.pathUrl(v)
+                                                                // A folder that is gone right now (an unmounted
+                                                                // share) opens at its nearest existing ancestor
+                                                                // instead of wherever the picker last was.
+                                                                var live = waves.existingFolder(v)
+                                                                var du = page.pathUrl(live !== "" ? live : v)
                                                                 if (du !== "") folderDlg.currentFolder = du
                                                                 folderDlg.open()
                                                             } else {
@@ -1941,45 +1975,54 @@ Item {
                                         required property var modelData
                                         // Flags that need FFmpeg are greyed and inert while it's missing.
                                         readonly property bool ffBlocked: modelData.requires_ffmpeg === true && page.ff.stateKey === "missing"
+                                        // Flags that only matter while another flag is on (e.g. the
+                                        // lyrics-source preference needs a lyrics switch) grey out
+                                        // live: requires_any maps each prerequisite key to its saved
+                                        // value, and unsaved toggles in editMap override it.
+                                        readonly property bool depBlocked: modelData.requires_any !== undefined && !Object.keys(modelData.requires_any).some(function(k) {
+                                            return (page.editMap[k] !== undefined ? page.editMap[k] : modelData.requires_any[k]) === true
+                                        })
+                                        readonly property bool blocked: ffBlocked || depBlocked
                                         // A tile may carry a nested child (e.g. Save cover.jpg ->
                                         // "Also save for single tracks"): a compact checkbox that appears
                                         // UNDER the description while the parent flag is on. The box keeps
                                         // its fixed size; the column just re-centres to make room, so the
                                         // tile never grows or shifts its neighbours.
                                         readonly property bool hasChild: modelData.child_key !== undefined
-                                        readonly property bool childOn: flagTile.hasChild && !flagTile.ffBlocked && (page.val(flagTile.modelData) === true)
+                                        readonly property bool childOn: flagTile.hasChild && !flagTile.blocked && (page.val(flagTile.modelData) === true)
                                         width: (inner.width - 10) / 2
                                         height: 92
                                         radius: 10; border.color: page.border1
-                                        opacity: ffBlocked ? 0.45 : 1
+                                        opacity: blocked ? 0.45 : 1
                                         // Ease the tile back to full strength when ffmpeg
                                         // arrives, in step with the toggle animating on.
                                         Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-                                        color: (tileMouse.containsMouse && !ffBlocked) ? page.surface2 : page.surface
+                                        color: (tileMouse.containsMouse && !blocked) ? page.surface2 : page.surface
 
                                         // Whole-tile click toggles the parent flag; the child checkbox
                                         // sits above this and swallows its own clicks.
                                         MouseArea {
                                             id: tileMouse
                                             anchors.fill: parent; hoverEnabled: true
-                                            enabled: !flagTile.ffBlocked
-                                            cursorShape: flagTile.ffBlocked ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                            enabled: !flagTile.blocked
+                                            cursorShape: flagTile.blocked ? Qt.ArrowCursor : Qt.PointingHandCursor
                                             onClicked: page.setv(flagTile.modelData.key, !page.val(flagTile.modelData))
                                         }
                                         RowLayout {
                                             anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
                                             SToggle {
                                                 Layout.alignment: Qt.AlignVCenter
-                                                // While ffmpeg is missing the feature can't run, so the
-                                                // toggle reads OFF (greyed) regardless of the saved value;
-                                                // when ffmpeg lands it animates back to the real preference.
-                                                checked: page.val(flagTile.modelData) && !flagTile.ffBlocked
+                                                // While a prerequisite is missing (ffmpeg, or a required
+                                                // flag) the feature can't run, so the toggle reads OFF
+                                                // (greyed) regardless of the saved value; it animates back
+                                                // to the real preference once the prerequisite arrives.
+                                                checked: page.val(flagTile.modelData) && !flagTile.blocked
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 3
                                                 Text { text: flagTile.modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
                                                 Text {
-                                                    visible: flagTile.modelData.help !== "" && !flagTile.ffBlocked
+                                                    visible: flagTile.modelData.help !== "" && !flagTile.blocked
                                                     text: flagTile.modelData.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
                                                     // Trim the helper to two lines while the child checkbox is
                                                     // showing, so both fit the fixed box.
@@ -1988,6 +2031,11 @@ Item {
                                                 Text {
                                                     visible: flagTile.ffBlocked
                                                     text: "Requires FFmpeg"; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
+                                                }
+                                                Text {
+                                                    visible: flagTile.depBlocked && !flagTile.ffBlocked
+                                                    text: flagTile.modelData.requires_hint !== undefined ? flagTile.modelData.requires_hint : "Requires another option"
+                                                    color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
                                                 }
                                                 // Nested child: a compact checkbox + label, shown only while
                                                 // the parent flag is on (layouts skip it when hidden, so other

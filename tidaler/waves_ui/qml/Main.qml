@@ -33,10 +33,18 @@ ApplicationWindow {
     // switch the variants already had, so one binding turns the effect off
     // everywhere it reaches (Art, the track discs, the Browse hero cards).
     property bool artHoverTilt: waves.wavesPref("art_hover_tilt") !== false
+    // Settings > Advanced > "Videos preview on hover". Off gates peekOpen, so
+    // pointing at a thumbnail no longer grows the sound-on preview card; a
+    // click still plays the video in full. An open peek closes on the flip.
+    property bool videoHoverPeek: waves.wavesPref("video_hover_peek") !== false
     Connections {
         target: waves
         function onArtHoverTiltChanged() {
             root.artHoverTilt = waves.wavesPref("art_hover_tilt") !== false
+        }
+        function onVideoHoverPeekChanged() {
+            root.videoHoverPeek = waves.wavesPref("video_hover_peek") !== false
+            if (!root.videoHoverPeek && root.peekNow) root.peekClose()
         }
     }
     property string artFxVariant: root.artHoverTilt ? "tilt" : "none"
@@ -222,6 +230,8 @@ ApplicationWindow {
     property bool sortAsc: false
     property bool bioExpanded: false
     property var albumsRaw: []            // unsorted album dicts, re-sorted into albumsModel
+    property var tracksRaw: []            // same, for tracksModel
+    property var videosRaw: []            // same, for videosModel
     // Default "home": the first My Tidal press of a session lands there, and
     // later presses return to whichever category this last held (openLibrary).
     property string libraryCategory: "home"
@@ -496,16 +506,20 @@ ApplicationWindow {
     property bool artistTracksCollapsed: waves.wavesPref("artist_sec_tracks_collapsed") === true
     property bool artistAlbumsCollapsed: waves.wavesPref("artist_sec_albums_collapsed") === true
     property bool artistEpsCollapsed: waves.wavesPref("artist_sec_eps_collapsed") === true
+    property bool artistVideosCollapsed: waves.wavesPref("artist_sec_videos_collapsed") === true
     function toggleArtistSection(which) {
         var v
         if (which === "tracks") { v = artistTracksCollapsed = !artistTracksCollapsed }
         else if (which === "albums") { v = artistAlbumsCollapsed = !artistAlbumsCollapsed }
+        else if (which === "videos") { v = artistVideosCollapsed = !artistVideosCollapsed }
         else { v = artistEpsCollapsed = !artistEpsCollapsed }
         waves.setWavesPref("artist_sec_" + which + "_collapsed", v)
     }
     // Top tracks show only the first 5; SHOW ALL reveals the rest for this
     // page visit only (deliberately not persisted).
     property bool topTracksExpanded: false
+    // Same first-5 rule for the artist page's video grid.
+    property bool artistVideosExpanded: false
     // The search page (mixed All view) shows each section's first 5 results with
     // a SHOW ALL beneath it, so the page reads as a quick overview instead of a
     // wall. A section the user expands is remembered (prefs) and stays expanded
@@ -1194,6 +1208,7 @@ ApplicationWindow {
     property bool peekReady: false       // first frames are on the surface
     property bool peekThumbHover: false  // pointer is over the source thumb
     function peekOpen(anchor, id, title, artist, art) {
+        if (!videoHoverPeek) return   // Settings > Advanced switched previews off
         if (!id || videoNow) return
         if (peekNow && peekNow.id === ("" + id)) return
         peekPlayer.stop(); peekPlayer.source = ""
@@ -1207,8 +1222,14 @@ ApplicationWindow {
     function peekClose() {
         peekLinger.stop()
         peekPlayer.stop(); peekPlayer.source = ""
+        if (peekNow) { peekCooldown = true; peekCooldownTimer.restart() }
         peekNow = null; peekReady = false
     }
+    // Brief rest after a peek ends before the next may start earning its
+    // dwell, so glances across a grid of large thumbnails cannot chain-fire
+    // stream requests (see BigVideoThumb).
+    property bool peekCooldown: false
+    Timer { id: peekCooldownTimer; interval: 400; onTriggered: root.peekCooldown = false }
     // The card lives while the pointer is over the thumb OR the card; when
     // both are gone a short grace covers the travel between them (and the
     // moment the growing card slides under the cursor).
@@ -1391,7 +1412,8 @@ ApplicationWindow {
         if (artistOpen) return { v: "artist", id: artistData ? "" + artistData.id : "",
                                  label: artistData ? (artistData.name || "Artist") : "Artist",
                                  scrollY: artistView.contentY, ex: expandedAlbums,
-                                 bio: bioExpanded, tops: topTracksExpanded }
+                                 bio: bioExpanded, tops: topTracksExpanded,
+                                 vids: artistVideosExpanded }
         if (browseOpen) return { v: "browse", key: browsePageKey, page: browsePage,
                                  stack: browseStack.slice(), hi: browseHighlightId,
                                  scrollY: browsePageKey === "" ? browseLanding.contentY : browseDrill.contentY,
@@ -1469,6 +1491,7 @@ ApplicationWindow {
                 expandedAlbums = s.ex || ({})
                 bioExpanded = !!s.bio
                 topTracksExpanded = !!s.tops
+                artistVideosExpanded = !!s.vids
                 if (s.scrollY !== undefined)
                     artistView.contentY = Math.min(s.scrollY, Math.max(0, artistView.contentHeight - artistView.height))
             } else if (s.id) {
@@ -1477,7 +1500,7 @@ ApplicationWindow {
                 // and stash the expansion state for onArtistLoaded to re-apply.
                 artistView.pendingRestoreKey = s.id
                 artistView.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
-                _artistRestoreState = { id: s.id, ex: s.ex, bio: s.bio, tops: s.tops }
+                _artistRestoreState = { id: s.id, ex: s.ex, bio: s.bio, tops: s.tops, vids: s.vids }
                 waves.loadArtist(s.id); return   // flag cleared in onArtistLoaded
             }
         } else if (s.v === "browse") {
@@ -1713,7 +1736,7 @@ ApplicationWindow {
         if (navOrigin !== "search" || settingsOpen) return
         searchSaved = (artistOpen && artistData && artistData.id)
             ? { artistData: artistData, expandedAlbums: expandedAlbums,
-                bio: bioExpanded, tops: topTracksExpanded,
+                bio: bioExpanded, tops: topTracksExpanded, vids: artistVideosExpanded,
                 artistY: artistView.contentY, resultsY: results.contentY }
             : { resultsY: results.contentY }
     }
@@ -1734,6 +1757,7 @@ ApplicationWindow {
                     expandedAlbums = s.expandedAlbums || ({})
                     bioExpanded = !!s.bio
                     topTracksExpanded = !!s.tops
+                    artistVideosExpanded = !!s.vids
                     artistOpen = true
                     browseOpen = false; libraryOpen = false; settingsOpen = false
                     // Same-frame restore: the pane becomes visible this frame,
@@ -1762,8 +1786,8 @@ ApplicationWindow {
         searchField.text = ""
         trackCache = ({}); expandedAlbums = ({})
         _searchBuildStart(0)   // a mid-build blank must drop the veil with the cards
-        artistsModel.clear(); albumsRaw = []; applySort()
-        tracksModel.clear(); videosModel.clear(); playlistsModel.clear(); mixesModel.clear()
+        artistsModel.clear(); albumsRaw = []; tracksRaw = []; videosRaw = []; applySort()
+        playlistsModel.clear(); mixesModel.clear()
         searchField.forceActiveFocus()
     }
     function loadLib(cat) {
@@ -2399,7 +2423,10 @@ ApplicationWindow {
         function growFrom(ax, ay, aw, ah) {
             peekGrow.stop()
             x = ax; y = ay; width = aw; height = ah
-            var tw = Math.min(360, root.width - 24)
+            // Grow relative to the source: a 88px row thumb keeps the old
+            // 360 card, a search-grid thumb steps up from its own size so the
+            // peek still reads as an expansion rather than a shrink.
+            var tw = Math.min(Math.max(360, aw + 80), root.width - 24)
             var th = Math.round(tw * 9 / 16)
             gx.to = Math.max(12, Math.min(ax + aw / 2 - tw / 2, root.width - tw - 12))
             gy.to = Math.max(12, Math.min(ay + ah / 2 - th / 2, root.height - th - 12))
@@ -2420,10 +2447,49 @@ ApplicationWindow {
             opacity: root.peekReady ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 180 } }
         }
-        Art {
-            anchors.fill: parent; anchors.margins: 1; radius: 7
-            url: root.peekNow ? root.peekNow.art : ""
+        // Waiting surface: rather than blowing the thumbnail up to a size it
+        // was never made for, the card waits on its own with a game of snake
+        // running quietly behind the label.
+        Item {
+            anchors.fill: parent; anchors.margins: 1
             visible: !root.peekReady
+            SnakeField {
+                anchors.fill: parent
+                running: parent.visible && root.peekNow !== null
+                plateW: peekWaitPlate.width
+                plateH: peekWaitPlate.height
+                opacity: 0.85
+            }
+            Rectangle {
+                id: peekWaitPlate
+                anchors.centerIn: parent
+                radius: 6
+                color: "#cc06090c"
+                border.color: root.border1; border.width: 1
+                // Sized for the label with all its dots, so the plate (and
+                // the snake's ring around it) never shifts as they march.
+                implicitWidth: peekWaitTm.width + 26
+                implicitHeight: 30
+                TextMetrics { id: peekWaitTm; font: peekWaitTx.font; text: "LOADING VIDEO..." }
+                Text {
+                    id: peekWaitTx
+                    anchors.left: parent.left; anchors.leftMargin: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                    // The dots march instead of the label pulsing: one clock,
+                    // no fade to fight the snake behind it.
+                    textFormat: Text.PlainText
+                    text: "LOADING VIDEO" + ".".repeat(peekWaitDots.tick)
+                    color: root.textLo
+                    font.family: root.mono; font.pixelSize: 11; font.bold: true
+                }
+                Timer {
+                    id: peekWaitDots
+                    property int tick: 0
+                    running: parent.visible
+                    interval: 380; repeat: true
+                    onTriggered: tick = (tick + 1) % 4
+                }
+            }
         }
         HoverHandler { id: peekCardHover; onHoveredChanged: root.peekHoverCheck() }
         MouseArea {
@@ -2437,7 +2503,11 @@ ApplicationWindow {
                 root.peekClose()
                 if (p) root.openVideo(p.id, p.title, p.artist)
             }
-            onWheel: function(w){ w.accepted = true }
+            // A scroll is page navigation, not a peek interaction. The card
+            // grows centred on the thumb, i.e. right under the cursor, so
+            // swallowing the wheel froze scrolling wherever a peek was open.
+            // Let the glance go and hand the event on to the page.
+            onWheel: function(w){ root.peekClose(); w.accepted = false }
         }
     }
     Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null; onActivated: root.peekClose() }
@@ -2992,6 +3062,10 @@ ApplicationWindow {
         // Set (via qualMixList) when the album mixes tiers, replaces the
         // single-tier pill with MIXED + per-tier counts (/ sep).
         property var mix: []
+        // Real per-item spec when we know it (a video's actual resolution);
+        // empty falls back to the tier's standard spec.
+        property string spec: ""
+        readonly property string specText: spec !== "" ? spec : root.qualSpec(qt.q)
         readonly property bool mixed: mix.length > 1
         visible: q !== "" || mixed
         Rectangle {
@@ -3014,8 +3088,8 @@ ApplicationWindow {
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    visible: root.qualSpec(qt.q) !== ""
-                    text: root.qualSpec(qt.q); color: root.qualSpecFg(qt.q); font.family: root.mono; font.pixelSize: 9
+                    visible: qt.specText !== ""
+                    text: qt.specText; color: root.qualSpecFg(qt.q); font.family: root.mono; font.pixelSize: 9
                 }
             }
         }
@@ -4990,18 +5064,14 @@ ApplicationWindow {
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
             height: Math.round(parent.height * 0.42)
             radius: pb.radius
+            // Eased, and with no band squaring off the top edge: the scrim is
+            // fully transparent up there, so its rounded top corners never
+            // showed anyway, while the band's own step from transparent to
+            // #33 drew a hard line straight across a grid-sized thumbnail.
             gradient: Gradient {
                 GradientStop { position: 0.0; color: "#0006090c" }
+                GradientStop { position: 0.45; color: "#4406090c" }
                 GradientStop { position: 1.0; color: pb.lit ? "#dd06090c" : "#cc06090c" }
-            }
-            // Square off the scrim's top edge (radius rounds all four corners).
-            Rectangle {
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                height: parent.radius
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: "#0006090c" }
-                    GradientStop { position: 1.0; color: "#3306090c" }
-                }
             }
         }
         Canvas {
@@ -5053,6 +5123,197 @@ ApplicationWindow {
             id: vtDwell
             interval: 450
             onTriggered: if (vtHover.hovered) root.peekOpen(vt, vt.videoId, vt.vTitle, vt.vArtist, vt.url)
+        }
+    }
+
+    // Search-results video thumbnail: the same peek behaviour as VideoThumb at
+    // 16:9 and several hundred pixels wide, with the duration in the corner.
+    // At this size a glance costs a real stream, so the dwell is longer and
+    // guarded: any movement inside the thumb restarts it (only a resting
+    // pointer counts) and a closed peek holds a brief cooldown, so a pointer
+    // crossing the grid never chain-fires previews.
+    component BigVideoThumb: Item {
+        id: bvt
+        property string url: ""
+        property string urlBig: ""
+        property string videoId: ""
+        property string vTitle: ""
+        property string vArtist: ""
+        property string vDuration: ""
+        property string spec: ""
+        readonly property bool peekable: videoId !== ""
+        scale: peekable && bvtHover.hovered ? 1.03 : 1
+        Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        z: bvtHover.hovered ? 4 : 0
+        Art { anchors.fill: parent; radius: 8; url: bvt.urlBig !== "" ? bvt.urlBig : bvt.url }
+        PlayBadge { radius: 8; lit: bvtHover.hovered }
+        // Resolution rides the thumbnail's top-right corner (gold, the video
+        // tier's colour), same plate as the duration below it. On a 16:9
+        // thumbnail "video" goes without saying, so the badge is the spec
+        // alone and the title below keeps its full width.
+        Rectangle {
+            visible: bvt.spec !== ""
+            anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6
+            radius: 4; color: "#cc06090c"
+            implicitHeight: 18; implicitWidth: bvtSpec.implicitWidth + 10
+            Text {
+                id: bvtSpec
+                anchors.centerIn: parent
+                textFormat: Text.PlainText; text: bvt.spec
+                color: root.gold; font.family: root.mono; font.pixelSize: 10
+            }
+        }
+        Rectangle {
+            visible: bvt.vDuration !== ""
+            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 6
+            radius: 4; color: "#cc06090c"
+            implicitHeight: 18; implicitWidth: bvtDur.implicitWidth + 10
+            Text {
+                id: bvtDur
+                anchors.centerIn: parent
+                textFormat: Text.PlainText; text: bvt.vDuration
+                color: root.textHi; font.family: root.mono; font.pixelSize: 10
+            }
+        }
+        // Rest detection needs the pointer's own travel, not raw point
+        // updates: art hover effects move the thumb under a still cursor,
+        // which re-delivers hover events every frame. Restarting on those
+        // would hold the dwell off forever, so only real movement past a
+        // few pixels counts as "not resting yet".
+        property real _restX: -1
+        property real _restY: -1
+        HoverHandler {
+            id: bvtHover
+            enabled: bvt.peekable
+            onHoveredChanged: {
+                if (hovered) {
+                    // Landing on a neighbour drops the open card at once:
+                    // peekThumbHover is shared, so without this a sideways
+                    // slide across the grid would pin the card open.
+                    if (root.peekNow && root.peekNow.id !== bvt.videoId) root.peekClose()
+                    root.peekThumbHover = true
+                    bvt._restX = point.scenePosition.x; bvt._restY = point.scenePosition.y
+                    bvtDwell.restart()
+                } else {
+                    bvtDwell.stop(); root.peekThumbHover = false; root.peekHoverCheck()
+                }
+            }
+            onPointChanged: {
+                if (!hovered || !bvtDwell.running) return
+                var dx = point.scenePosition.x - bvt._restX
+                var dy = point.scenePosition.y - bvt._restY
+                if (dx * dx + dy * dy < 16) return   // within 4px: still resting
+                bvt._restX = point.scenePosition.x; bvt._restY = point.scenePosition.y
+                bvtDwell.restart()
+            }
+        }
+        Timer {
+            id: bvtDwell
+            interval: 700
+            onTriggered: {
+                if (!bvtHover.hovered) return
+                if (root.peekCooldown) { bvtDwell.restart(); return }
+                root.peekOpen(bvt, bvt.videoId, bvt.vTitle, bvt.vArtist, bvt.urlBig !== "" ? bvt.urlBig : bvt.url)
+            }
+        }
+        MouseArea {
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: -1
+            onClicked: root.openVideo(bvt.videoId, bvt.vTitle, bvt.vArtist)
+        }
+    }
+
+    // One art-first video result cell: the 16:9 thumbnail with the title,
+    // quality tag riding the title's end, artist and release date baseline-
+    // aligned below, and the download button centred on the text block. The
+    // search VIDEOS grid and the artist page's VIDEOS section are the same
+    // cell at whatever width their grid hands it.
+    component VideoCell: Column {
+        id: vcell
+        property string vid: ""
+        property string vcTitle: ""
+        property string vcArtist: ""
+        property string artUrl: ""
+        property string artBigUrl: ""
+        property string vcDuration: ""
+        property bool vcExplicit: false
+        property string vcSpec: ""
+        property string vcDate: ""
+        spacing: 8
+        BigVideoThumb {
+            width: vcell.width
+            height: Math.round(vcell.width * 9 / 16)
+            url: vcell.artUrl; urlBig: vcell.artBigUrl !== "" ? vcell.artBigUrl : vcell.artUrl
+            videoId: vcell.vid; vTitle: vcell.vcTitle; vArtist: vcell.vcArtist
+            vDuration: vcell.vcDuration
+            // The resolution lives on the thumbnail, not beside the title:
+            // a tag there ate most of the title on typical song names.
+            spec: vcell.vcSpec !== "" ? vcell.vcSpec : root.qualSpec("VIDEO")
+        }
+        Item {
+            width: vcell.width
+            height: vMetaCol.height
+            Column {
+                id: vMetaCol
+                anchors.left: parent.left; anchors.top: parent.top
+                width: parent.width - vDl.width - 12
+                spacing: 4
+                Item {
+                    width: parent.width
+                    height: 22
+                    readonly property real avail: width
+                        - (vExp.visible ? vExp.width + 6 : 0)
+                    Text {
+                        id: vTitleTx
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.max(0, Math.min(implicitWidth, parent.avail))
+                        textFormat: Text.PlainText; text: vcell.vcTitle
+                        color: root.textHi; font.pixelSize: 15; font.bold: true
+                        elide: Text.ElideRight; maximumLineCount: 1
+                    }
+                    ExplicitMark {
+                        id: vExp
+                        visible: vcell.vcExplicit
+                        anchors.left: vTitleTx.right; anchors.leftMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                // Baseline-aligned, not centred: the mono date and the UI-font
+                // artist have different descents, so matching line boxes still
+                // reads crooked.
+                Item {
+                    width: parent.width
+                    // Never collapse: a video with no artist credits still
+                    // shows its date.
+                    height: Math.max(vArtists.height, 18)
+                    ArtistLinks {
+                        id: vArtists
+                        anchors.left: parent.left; anchors.top: parent.top
+                        artists: root.artistsById[vcell.vid] || []
+                    }
+                    Text {
+                        id: vDot
+                        visible: vcell.vcDate !== ""
+                        anchors.left: vArtists.right; anchors.leftMargin: 8
+                        anchors.baseline: vArtists.baseline
+                        text: "·"; color: root.textDim
+                        font.family: root.mono; font.pixelSize: 11
+                    }
+                    Text {
+                        visible: vcell.vcDate !== ""
+                        anchors.left: vDot.right; anchors.leftMargin: 8
+                        anchors.baseline: vArtists.baseline
+                        textFormat: Text.PlainText; text: vcell.vcDate
+                        color: root.textLo; font.family: root.mono; font.pixelSize: 11
+                    }
+                }
+            }
+            DownloadButton {
+                id: vDl
+                mediaId: vcell.vid; ownedCheck: true; label: "Download"
+                anchors.right: parent.right
+                anchors.verticalCenter: vMetaCol.verticalCenter
+                onTap: function(){ waves.downloadVideo(vcell.vid) }
+            }
         }
     }
 
@@ -5368,6 +5629,144 @@ ApplicationWindow {
         }
     }
 
+    // A small snake circling the loading label, used as the waiting surface
+    // of the peek card. It laps a ring laid around the plate, eating the
+    // bites dropped on the path and growing a little with each one; only a
+    // wait long enough to fill most of the ring (minutes, i.e. genuinely bad
+    // internet) makes the run start over. The body is just (head, length)
+    // along the ring, so the card resizing mid-grow re-lays the path without
+    // ever scattering segments. The clock only runs while the field is both
+    // visible and armed, so a closed peek costs nothing.
+    component SnakeField: Item {
+        id: sf
+        property bool running: false
+        property real cell: 9
+        property real gap: 12
+        property real plateW: 0
+        property real plateH: 0
+        // Pixel top-left corners of the ring cells, walked clockwise.
+        property var ring: []
+        property int head: 0
+        property int len: 5
+        property int food: -1
+
+        function _buildRing() {
+            var w = plateW + gap * 2 + cell
+            var h = plateH + gap * 2 + cell
+            if (plateW <= 0 || plateH <= 0 || width < w + cell || height < h + cell) { ring = []; cv.requestPaint(); return }
+            var x0 = (width - w) / 2
+            var y0 = (height - h) / 2
+            var nx = Math.max(4, Math.round(w / cell))
+            var ny = Math.max(3, Math.round(h / cell))
+            var sx = w / nx
+            var sy = h / ny
+            var r = []
+            var i
+            for (i = 0; i < nx; i++) r.push({ x: x0 + i * sx, y: y0 })
+            for (i = 1; i < ny; i++) r.push({ x: x0 + (nx - 1) * sx, y: y0 + i * sy })
+            for (i = nx - 2; i >= 0; i--) r.push({ x: x0 + i * sx, y: y0 + (ny - 1) * sy })
+            for (i = ny - 2; i >= 1; i--) r.push({ x: x0, y: y0 + i * sy })
+            var wasEmpty = ring.length === 0
+            ring = r
+            // The card opens smaller than the ring needs and grows into it,
+            // so the run truly starts here, on the frame the ring first fits
+            // (a reset against the empty ring parked food at -1 for good).
+            if (wasEmpty && running) { reset(); return }
+            if (head >= r.length) head = head % r.length
+            if (len > r.length - 4) len = Math.max(3, r.length - 4)
+            if (food < 0 || food >= r.length) _placeFood()
+            cv.requestPaint()
+        }
+        function _occupied(idx) {
+            var n = ring.length
+            for (var i = 0; i < len; i++) if ((head - i + n * 2) % n === idx) return true
+            return false
+        }
+        function _placeFood() {
+            var n = ring.length
+            if (n === 0) { food = -1; return }
+            // Drop the bite somewhere ahead on the lap, never on the snake.
+            for (var t = 0; t < 30; t++) {
+                var idx = (head + 3 + Math.floor(Math.random() * Math.max(1, n - len - 4))) % n
+                if (!_occupied(idx)) { food = idx; return }
+            }
+            food = -1
+        }
+        function reset() {
+            len = 5
+            var n = ring.length
+            if (n === 0) { food = -1; cv.requestPaint(); return }
+            // Random start, so two peeks in a row are not the same run.
+            head = Math.floor(Math.random() * n)
+            // The first bite lands just ahead of the head (3 to 6 cells, well
+            // under a second away), so even a quick load shows the snake eat
+            // at least once. Clamped clear of the tail on a tiny ring.
+            var off = 3 + Math.floor(Math.random() * 4)
+            if (off > n - len - 1) off = Math.max(1, n - len - 1)
+            food = (head + off) % n
+            cv.requestPaint()
+        }
+        function step() {
+            var n = ring.length
+            if (n === 0) return
+            head = (head + 1) % n
+            if (head === food) {
+                len += 1
+                // Filling most of the lap takes minutes of eating: shed the
+                // weight and keep going rather than catching the tail.
+                if (len >= n - 4) len = 5
+                _placeFood()
+            }
+            cv.requestPaint()
+        }
+        onRunningChanged: if (running) { _buildRing(); reset() }
+        onWidthChanged: _buildRing()
+        onHeightChanged: _buildRing()
+        onPlateWChanged: _buildRing()
+        onPlateHChanged: _buildRing()
+        Timer {
+            running: sf.running && sf.visible
+            interval: 110; repeat: true
+            onTriggered: sf.step()
+        }
+        Canvas {
+            id: cv
+            anchors.fill: parent
+            onPaint: {
+                var c = getContext("2d")
+                c.reset()
+                var n = sf.ring.length
+                if (n === 0) return
+                var s = sf.cell
+                var pad = Math.max(1, Math.round(s * 0.18))
+                if (sf.food >= 0 && sf.food < n) {
+                    var f = sf.ring[sf.food]
+                    c.fillStyle = "" + root.goldDim
+                    c.fillRect(f.x + pad, f.y + pad, s - pad * 2, s - pad * 2)
+                }
+                for (var i = 0; i < sf.len; i++) {
+                    var seg = sf.ring[(sf.head - i + n * 2) % n]
+                    // Head brightest, fading down the tail: reads as motion
+                    // even in a still frame.
+                    var a = Math.max(0.14, 0.55 - i * 0.55 / Math.max(1, sf.len))
+                    c.fillStyle = "" + Qt.alpha(root.accent, a)
+                    c.fillRect(seg.x + pad, seg.y + pad, s - pad * 2, s - pad * 2)
+                }
+            }
+        }
+    }
+
+    // Explicit-content mark, in the app's mono data voice.
+    component ExplicitMark: Rectangle {
+        radius: 3; color: "transparent"
+        border.color: root.textDim; border.width: 1
+        implicitWidth: 14; implicitHeight: 14
+        Text {
+            anchors.centerIn: parent; text: "E"; color: root.textDim
+            font.family: root.mono; font.pixelSize: 9; font.bold: true
+        }
+    }
+
     // A line of comma-separated artist names, each individually clickable.
     component ArtistLinks: Row {
         id: al
@@ -5376,6 +5775,11 @@ ApplicationWindow {
         property string albumId: ""      // set -> the suffix (album name) links to the album page
         property int px: 12
         clip: true
+        // A Row has no baseline of its own; publish the name text's so callers
+        // can baseline-align a date or tag sitting beside it (centring two
+        // fonts with different descents reads crooked).
+        FontMetrics { id: alFm; font.pixelSize: al.px }
+        baselineOffset: alFm.ascent
         Repeater {
             model: al.artists
             delegate: Row {
@@ -7079,6 +7483,7 @@ ApplicationWindow {
     ListModel { id: mixesModel }
     ListModel { id: queueModel }
     ListModel { id: artistAlbumsModel }
+    ListModel { id: artistVideosModel }
     ListModel { id: artistEpModel }
     ListModel { id: artistTracksModel }
     ListModel { id: libAlbumsModel }
@@ -7627,9 +8032,9 @@ ApplicationWindow {
                                  + (r.playlists || []).length + (r.mixes || []).length)
             root.fill(artistsModel, r.artists)
             root.albumsRaw = r.albums || []
+            root.tracksRaw = r.tracks || []
+            root.videosRaw = r.videos || []
             root.applySort()
-            root.fillMedia(tracksModel, r.tracks)
-            root.fillMedia(videosModel, r.videos)
             root.fill(playlistsModel, r.playlists)
             root.fill(mixesModel, r.mixes)
         }
@@ -7666,6 +8071,7 @@ ApplicationWindow {
                 root.fillMedia(artistAlbumsModel, p.albums)
                 root.fillMedia(artistEpModel, p.eps)
                 root.fillMedia(artistTracksModel, p.tracks)
+                root.fillMedia(artistVideosModel, p.videos || [])
                 return
             }
             if (root.videoNow) root.closeVideo()   // artist link from the video player
@@ -7681,9 +8087,11 @@ ApplicationWindow {
                 root.expandedAlbums = pr.ex || ({})
                 root.bioExpanded = !!pr.bio
                 root.topTracksExpanded = !!pr.tops
+                root.artistVideosExpanded = !!pr.vids
             } else {
                 root.bioExpanded = false
                 root.topTracksExpanded = false
+                root.artistVideosExpanded = false
                 root.expandedAlbums = ({})
             }
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
@@ -7691,6 +8099,7 @@ ApplicationWindow {
             root.fillMedia(artistAlbumsModel, p.albums)
             root.fillMedia(artistEpModel, p.eps)
             root.fillMedia(artistTracksModel, p.tracks)
+            root.fillMedia(artistVideosModel, p.videos || [])
         }
         function onQueueChanged(q) {
             root.reconcileQueue(q)
@@ -7784,10 +8193,15 @@ ApplicationWindow {
 
     // ====================================================================
     ColumnLayout {
+        id: mainColumn
         anchors.fill: parent
         spacing: 0
         // Hidden until the launch sequence hands over (see bootOverlay).
+        // Invisible must also mean inert: opacity does not gate input, so
+        // without the enabled gate every control is live under the launch
+        // screen from the first frame (issue #13).
         opacity: root.bootContentShown
+        enabled: root.bootContentShown > 0
 
         // ---- Header -----------------------------------------------------
         // The top bar and the search controls share one surface: the panel
@@ -8774,30 +9188,34 @@ ApplicationWindow {
 
                 // VIDEOS
                 SectionHeader { id: videosHead; opacity: root.searchReveal; visible: root.sectionVisible("videos", videosModel.count); label: "VIDEOS"; count: videosModel.count }
-                Repeater {
-                    model: videosModel
-                    delegate: Loader {
-                        visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded)
-                        width: contentCol.width; height: 50
-                        asynchronous: root.searchBuilding
-                        opacity: root.searchReveal
-                        onLoaded: root._searchBuildTick()
-                        sourceComponent: Rectangle {
-                        color: "transparent"
-                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
-                        RowLayout {
-                            anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 12
-                            VideoThumb { url: model.art; videoId: model.id; vTitle: model.title; vArtist: model.artist }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 1
-                                Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
-                                ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[model.id] || [] }
+                // Art-first video results: 16:9 thumbnails at grid size, with
+                // the title, artist, release date and a full download button
+                // reading underneath. Cells are sized from the section width,
+                // so the column count follows the window.
+                Flow {
+                    id: videoGrid
+                    width: contentCol.width
+                    spacing: 18
+                    readonly property int cols: Math.max(2, Math.floor(width / 320))
+                    readonly property real cellW: (width - (cols - 1) * spacing) / cols
+                    Repeater {
+                        model: videosModel
+                        delegate: Loader {
+                            visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded)
+                            width: videoGrid.cellW
+                            height: Math.round(videoGrid.cellW * 9 / 16) + 54
+                            asynchronous: root.searchBuilding
+                            opacity: root.searchReveal
+                            onLoaded: root._searchBuildTick()
+                            sourceComponent: VideoCell {
+                                width: videoGrid.cellW
+                                vid: model.id; vcTitle: model.title; vcArtist: model.artist
+                                artUrl: model.art; artBigUrl: model.art_big || ""
+                                vcDuration: model.duration
+                                vcExplicit: model.explicit === true
+                                vcSpec: model.quality || ""
+                                vcDate: model.date
                             }
-                            Text { textFormat: Text.PlainText; text: model.duration; color: root.textLo; font.pixelSize: 12; Layout.preferredWidth: 42 }
-                            QualTag { q: "VIDEO" }
-                            DownIcon { mediaId: model.id; onTap: function(){ waves.downloadVideo(model.id) } }
-                        }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: root.openVideo(model.id, model.title, model.artist) }
                         }
                     }
                 }
@@ -9068,6 +9486,50 @@ ApplicationWindow {
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
                     }
+                }
+
+                // Videos: the same art-first grid as the search results, at
+                // the bottom of the page. The preview shows whole rows only
+                // (at least 6: two rows of 3 at the usual width), because a
+                // grid cut off at 5 leaves a hole where the sixth cell goes;
+                // SHOW ALL reveals the rest, same as Top tracks, and the
+                // collapse persists across artist pages.
+                SectionHeader {
+                    id: artistVideosHead
+                    visible: artistVideosModel.count > 0
+                    label: "VIDEOS"; count: artistVideosModel.count
+                    collapsible: true; collapsed: root.artistVideosCollapsed
+                    onToggled: root.toggleArtistSection("videos")
+                }
+                Flow {
+                    id: artistVideoGrid
+                    width: artistCol.width
+                    spacing: 18
+                    readonly property int cols: Math.max(2, Math.floor(width / 320))
+                    readonly property real cellW: (width - (cols - 1) * spacing) / cols
+                    readonly property int fillCount: Math.ceil(6 / cols) * cols
+                    Repeater {
+                        model: root.artistVideosCollapsed ? null : artistVideosModel
+                        delegate: VideoCell {
+                            required property var model
+                            required property int index
+                            visible: index < artistVideoGrid.fillCount || root.artistVideosExpanded
+                            width: artistVideoGrid.cellW
+                            vid: model.id; vcTitle: model.title; vcArtist: model.artist
+                            artUrl: model.art; artBigUrl: model.art_big || ""
+                            vcDuration: model.duration
+                            vcExplicit: model.explicit === true
+                            vcSpec: model.quality || ""
+                            vcDate: model.date
+                        }
+                    }
+                }
+                ShowAllLabel {
+                    visible: !root.artistVideosCollapsed && artistVideosModel.count > artistVideoGrid.fillCount
+                    sectionTop: artistVideosHead
+                    expanded: root.artistVideosExpanded
+                    count: artistVideosModel.count
+                    onToggled: root.artistVideosExpanded = !root.artistVideosExpanded
                 }
             }
             }
@@ -10008,14 +10470,23 @@ ApplicationWindow {
     }
 
     // Sort the original full search data (not a lossy model copy) so every
-    // field, including the full date, survives re-sorting.
+    // field, including the full date, survives re-sorting. One control, every
+    // section that has the data: albums, tracks and videos all follow it.
+    // Artists, playlists and mixes carry no date to sort by and stay in the
+    // API's relevance order.
     function applySort() {
-        var arr = (root.albumsRaw || []).slice()
         var dir = root.sortAsc ? 1 : -1
-        if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.date || a.year || "").localeCompare(b.date || b.year || "")) })
-        else if (sortBox.currentIndex === 2) arr.sort(function(a, b){ return dir * a.title.localeCompare(b.title) })
-        else arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })  // Relevance = popularity
-        root.fillMedia(albumsModel, arr)
+        function ordered(raw, hasPop) {
+            var arr = (raw || []).slice()
+            if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.date || a.year || "").localeCompare(b.date || b.year || "")) })
+            else if (sortBox.currentIndex === 2) arr.sort(function(a, b){ return dir * a.title.localeCompare(b.title) })
+            else if (hasPop) arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })  // Relevance = popularity
+            else if (root.sortAsc) arr.reverse()  // no popularity data: relevance is the API's order, the arrow flips it
+            return arr
+        }
+        root.fillMedia(albumsModel, ordered(root.albumsRaw, true))
+        root.fillMedia(tracksModel, ordered(root.tracksRaw, true))
+        root.fillMedia(videosModel, ordered(root.videosRaw, false))
     }
 
     // ====================================================================
@@ -11244,6 +11715,21 @@ ApplicationWindow {
         property bool started: false
         property bool done: false
 
+        // Input shield. The interface underneath hides by opacity alone, so
+        // without this it stays clickable and hoverable while invisible: a
+        // click on the launch water could land on a preview control and start
+        // full-volume audio, and the hand cursor roamed over buttons nobody
+        // could see (issue #13). Eats clicks, hover, and wheel, and keeps the
+        // plain arrow cursor, until the reveal starts painting the content.
+        MouseArea {
+            id: bootShield
+            anchors.fill: parent
+            enabled: root.bootContentShown === 0
+            hoverEnabled: enabled
+            acceptedButtons: Qt.AllButtons
+            onWheel: function(w){ w.accepted = true }
+        }
+
         function maybeStart() {
             if (started || done) return
             if (!waves.sessionResolved) return
@@ -11259,10 +11745,18 @@ ApplicationWindow {
         }
         Connections {
             target: root
-            function onBrowseSectionsChanged() { bootOverlay.maybeStart() }
+            // Held handover: the landing's first payload arrived, re-check the
+            // gate (the build it just started re-holds until the shelves are
+            // in, so the reveal still lands on a finished page).
+            function onBrowseSectionsChanged() { bootOverlay.maybeStart(); if (bootOverlay.handoverHeld) bootOverlay.handover() }
             // Held handover: the landing finished assembling, go now.
             function onBrowseBuildingChanged() {
                 if (bootOverlay.handoverHeld && !root.browseBuilding) bootOverlay.handover()
+            }
+            // Held handover: the fetch failed; nothing further is coming, so
+            // reveal the error state rather than sit on the wordmark.
+            function onBrowseErrorChanged() {
+                if (bootOverlay.handoverHeld && root.browseError) bootOverlay.handover()
             }
         }
         // Readiness cap: never hold the launch look longer than this.
@@ -11284,6 +11778,17 @@ ApplicationWindow {
         property bool handoverHeld: false
         function handover() {
             if (done) return
+            // Data still in flight: signed in but the landing has nothing to
+            // reveal yet (a slow token check or first fetch outran the opening
+            // frame; the readiness cap below starts the sequence regardless).
+            // Hold here, wordmark and version still up, exactly the frame the
+            // bootSeq comment says any wait belongs on; the payload arriving,
+            // the fetch erroring, or the cap releases it. Without this leg the
+            // gate only covered the shelf assembly, and a slow login revealed
+            // onto the bare "Reading the wire…" landing (reported from
+            // livetesting).
+            if (waves.loggedIn && root.browseSections.length === 0 && !root.browseError
+                    && !handoverCap.expired) { handoverHeld = true; return }
             if (root.browseBuilding && !handoverCap.expired) { handoverHeld = true; return }
             handoverHeld = false
             handoverCap.stop()
@@ -11292,7 +11797,12 @@ ApplicationWindow {
         Timer {
             id: handoverCap
             property bool expired: false
-            interval: 2500
+            // Sized for the data wait (login round-trip + first landing fetch
+            // on a slow network), not just the shelf assembly: the build leg
+            // has its own 800ms stall guard (browseBuildGuard), so only a
+            // genuinely dead network ever rides this cap to the end, and even
+            // then the launch screen cannot be pinned past it.
+            interval: 8000
             onTriggered: { expired = true; bootOverlay.handover() }
         }
 
