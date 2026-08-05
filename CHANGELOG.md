@@ -17,6 +17,105 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.15 (2026-08-05)
+
+### ✨ Added
+
+- ✨ Lyrics now come from the community LRCLIB database first (the same
+  source the LRCGet app uses), with TIDAL's own lyrics as the fallback.
+  TIDAL machine-transcribes lyrics for many newer track IDs (re-recordings
+  and reissues especially) and often gets them badly wrong; LRCLIB carries
+  human-submitted synced lyrics. A new "Prefer LRCLIB lyrics" switch in
+  Settings turns this off.
+- ✨ Saved lyrics files now match their content: timed lyrics keep the
+  .lrc extension, untimed lyrics are written as .txt instead of a fake
+  .lrc. A nested "Only when lyrics are timed" option under Save lyrics
+  file skips the .txt entirely if you want lyrics files only when they
+  are timed.
+- ✨ A "Videos preview on hover" switch in Settings > Advanced: turn it
+  off and video thumbnails stay still, with no sound-on preview growing
+  from a hover; videos then play only when clicked.
+
+### 🔧 Changed
+
+- 🔧 Video search results are art-first: each video is now a large 16:9
+  thumbnail in a grid that follows the window width, with its title,
+  artist, release date, resolution and a full Download button underneath
+  instead of a thin one-line row. Hovering still previews the video, and
+  clicking still opens the player.
+- 🔧 Hovering across video results no longer previews every thumbnail the
+  pointer crosses: a preview waits for the pointer to actually rest on a
+  video, and a brief pause follows one closing.
+- 🔧 The mouse wheel scrolls the results again while a video preview is
+  open, instead of being swallowed by the preview card.
+- 🔧 Artist pages now end with a VIDEOS section: the artist's music
+  videos in the same art-first grid as the search results (hover
+  preview and all), whole rows only with SHOW ALL, collapsible like
+  the other sections.
+- 🔧 A video's resolution now sits as a small gold badge on the
+  thumbnail's top-right corner instead of a VIDEO tag beside the
+  title, which ate most of the title on typical song names.
+- 🔧 Duplicate video listings (the same video re-listed per quality,
+  region or clean/explicit edit) now collapse to one, following the
+  explicit preference, exactly as albums and tracks already did.
+  Same-titled but genuinely different videos are kept.
+- 🔧 The search sort control (Relevance, Release date, Name and the
+  direction arrow) now reorders the tracks and videos sections too,
+  instead of quietly applying to albums only.
+- 🔧 A video preview that is still loading now waits on a "LOADING VIDEO"
+  panel with a small snake circling it, eating the bites laid on its
+  path and growing as it laps (the first bite always lands right ahead
+  of it, so even a quick load shows a catch), instead of blowing the
+  thumbnail up to a size it was never made for.
+- 🔧 The lyrics settings are linked instead of free-floating: the
+  synced-only option lives inside the Save lyrics file tile, and Prefer
+  LRCLIB lyrics greys out while both lyrics switches are off.
+- 🔧 Settings sections all start collapsed on a first visit (Downloads
+  is no longer forced open) and remember which ones you open or close,
+  across visits and across launches. Links that jump to a specific
+  section still open it for you.
+
+### 🐛 Fixed
+
+- 🐛 The opening wave animation no longer hides a live, clickable
+  interface: a click on the launch screen used to land on the invisible
+  page behind it and could start a full-volume preview out of nowhere,
+  which read as Waves autoplaying at startup
+  ([issue #13](https://github.com/iamprivacy/Waves/issues/13)). The
+  launch screen now swallows clicks and scrolling, the interface stays
+  inert until it is actually visible, and the cursor no longer turns
+  into a pointing hand over buttons that cannot be seen.
+- 🐛 The launch animation holds its opening frame until your home
+  landing has actually arrived, so a slower sign-in no longer ends the
+  reveal on an empty page that loads in afterwards. A dead network
+  still can't pin the launch screen.
+- 🐛 A download folder on a network share that macOS quietly ejected
+  (sleep, a network blip) now gets mounted back automatically, the same
+  request Finder makes when you navigate to the share by hand. Waves
+  remembers where the share came from while it is healthy and asks
+  macOS to reconnect it (using the credentials saved in your keychain)
+  whenever a download, "Try again" or the background recovery watch
+  finds the volume gone, instead of endlessly re-checking a mount point
+  that could never come back on its own.
+- 🐛 A network mount that is still listed but answers nothing (the
+  zombie state a hung SMB session leaves behind) is now force-ejected
+  and mounted back after a few seconds of silence, instead of being
+  watched forever.
+- 🐛 A download that loses its folder mid-flight (share ejected or hung
+  between the start check and the writes) is now held and retried
+  automatically like any other folder outage, instead of turning the
+  button red with a failure no dialog ever explained.
+- 🐛 The Browse button in Settings opens at the saved folder's nearest
+  existing ancestor when the folder itself is unavailable, instead of
+  wherever the picker last was.
+- 🐛 Returning to Settings now puts you back at the exact spot you
+  left, even right after saving a change (the save used to rebuild the
+  page on the way back in and strand the view near the top).
+- 🐛 Tracks with only untimed lyrics now show them in players that read
+  just the main lyrics tag (the FLAC and M4A primary field used to stay
+  empty unless timed lyrics existed). Re-downloading a track that later
+  gains timed lyrics upgrades the tag to them.
+
 ## 🗂️ v0.1.14 (2026-08-03)
 
 ### ✨ Added
