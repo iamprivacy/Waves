@@ -77,6 +77,7 @@ from tidaler.helper.tidal import (
     name_builder_item,
     name_builder_title,
 )
+from tidaler.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
 from tidaler.metadata import Metadata, MetadataUnreadable
 from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from tidaler.model.gui_data import ProgressBars
@@ -1360,16 +1361,17 @@ class Download:
 
         tmp_path_lyrics: pathlib.Path | None = None
         tmp_path_cover: pathlib.Path | None = None
+        lyrics_suffix: str = EXTENSION_LYRICS
 
         # Write metadata to file.
         if media_stream:
-            _result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
+            _result_metadata, tmp_path_lyrics, lyrics_suffix, tmp_path_cover = self.metadata_write(
                 media, tmp_path_file, is_parent_album, media_stream
             )
 
         # Move lyrics file
         if self.settings.data.lyrics_file and tmp_path_lyrics:
-            self._move_lyrics(tmp_path_lyrics, path_media_dst)
+            self._move_lyrics(tmp_path_lyrics, path_media_dst, suffix=lyrics_suffix)
 
         # Move cover file
         if self.settings.data.cover_album_file and tmp_path_cover:
@@ -1775,18 +1777,21 @@ class Download:
             raise
         return True
 
-    def _move_lyrics(self, path_lyrics: pathlib.Path, file_media_dst: pathlib.Path) -> bool:
+    def _move_lyrics(
+        self, path_lyrics: pathlib.Path, file_media_dst: pathlib.Path, suffix: str = EXTENSION_LYRICS
+    ) -> bool:
         """Move a lyrics file to the destination.
 
         Args:
             path_lyrics (pathlib.Path): Source lyrics file.
             file_media_dst (pathlib.Path): Destination media file path.
+            suffix (str): Lyrics file extension, ".lrc" (timed) or ".txt" (untimed).
 
         Returns:
             bool: True if moved, False otherwise.
         """
         # Build tmp lyrics filename
-        path_file_lyrics: pathlib.Path = file_media_dst.with_suffix(EXTENSION_LYRICS)
+        path_file_lyrics: pathlib.Path = file_media_dst.with_suffix(suffix)
         result: bool = self._move_file(path_lyrics, path_file_lyrics, overwrite=True)
 
         return result
@@ -1919,42 +1924,36 @@ class Download:
             return embedded_data
         return self.cover_data(url=track.album.image(int(file_dim)))
 
-    def metadata_write(
-        self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream
-    ) -> tuple[bool, pathlib.Path | None, pathlib.Path | None]:
-        """Write metadata, lyrics, and cover to a media file.
+    def _retrieve_lyrics(self, track: Track) -> tuple[str, str, str]:
+        """Fetch lyrics for a track, LRCLIB first, TIDAL as the fallback.
 
-        Args:
-            track (Track): Track object.
-            path_media (pathlib.Path): Path to media file.
-            is_parent_album (bool): Whether this is a parent album.
-            media_stream (Stream): Stream object.
+        TIDAL serves machine-transcribed lyrics for track IDs without
+        human-submitted text (recent re-recordings especially), while LRCLIB
+        carries community-synced lyrics, so LRCLIB wins when the preference is
+        on. A miss or outage there falls through to TIDAL's own lyrics, so the
+        worst case is exactly the historical behaviour.
 
         Returns:
-            tuple[bool, pathlib.Path | None, pathlib.Path | None]: (Success, path to lyrics, path to cover)
+            tuple[str, str, str]: (lyrics, synced, unsynced); lyrics is the
+            best available form (synced over unsynced), all empty when neither
+            source has any.
         """
-        result: bool = False
-        path_lyrics: pathlib.Path | None = None
-        path_cover: pathlib.Path | None = None
-        release_date: str = (
-            track.album.available_release_date.strftime("%Y-%m-%d")
-            if track.album.available_release_date
-            else track.album.release_date.strftime("%Y-%m-%d") if track.album.release_date else ""
-        )
-        copy_right: str = track.copyright if hasattr(track, "copyright") and track.copyright else ""
-        isrc: str = track.isrc if hasattr(track, "isrc") and track.isrc else ""
         lyrics: str = ""
         lyrics_synced: str = ""
         lyrics_unsynced: str = ""
-        cover_data: bytes = None
-        release_type: str = (
-            track.album.type.lower()
-            if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type
-            else ""
-        )
 
-        if self.settings.data.lyrics_embed or self.settings.data.lyrics_file:
-            # Try to retrieve lyrics.
+        if getattr(self.settings.data, "lyrics_prefer_lrclib", True):
+            lyrics_synced, lyrics_unsynced = fetch_lrclib_lyrics(
+                self._shared_http(),
+                artist=track.artist.name if track.artist else "",
+                title=name_builder_title(track),
+                album=track.album.name if track.album else "",
+                duration=track.duration or 0,
+                title_bare=track.name,
+            )
+            lyrics = lyrics_synced or lyrics_unsynced
+
+        if not lyrics:
             try:
                 lyrics_obj = track.lyrics()
 
@@ -1968,8 +1967,55 @@ class Download:
                 lyrics = ""
                 self.fn_logger.debug(f"Could not retrieve lyrics for `{log_content(name_builder_item(track))}`.")
 
-        if lyrics and self.settings.data.lyrics_file:
-            path_lyrics = self.lyrics_to_file(path_media.parent, lyrics)
+        return lyrics, lyrics_synced, lyrics_unsynced
+
+    def metadata_write(
+        self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream
+    ) -> tuple[bool, pathlib.Path | None, str, pathlib.Path | None]:
+        """Write metadata, lyrics, and cover to a media file.
+
+        Args:
+            track (Track): Track object.
+            path_media (pathlib.Path): Path to media file.
+            is_parent_album (bool): Whether this is a parent album.
+            media_stream (Stream): Stream object.
+
+        Returns:
+            tuple[bool, pathlib.Path | None, str, pathlib.Path | None]: (Success,
+            path to lyrics, lyrics file suffix, path to cover). The suffix is
+            ".lrc" for timed lyrics and ".txt" for untimed ones.
+        """
+        result: bool = False
+        path_lyrics: pathlib.Path | None = None
+        lyrics_suffix: str = EXTENSION_LYRICS
+        path_cover: pathlib.Path | None = None
+        release_date: str = (
+            track.album.available_release_date.strftime("%Y-%m-%d")
+            if track.album.available_release_date
+            else track.album.release_date.strftime("%Y-%m-%d") if track.album.release_date else ""
+        )
+        copy_right: str = track.copyright if hasattr(track, "copyright") and track.copyright else ""
+        isrc: str = track.isrc if hasattr(track, "isrc") and track.isrc else ""
+        lyrics_synced: str = ""
+        lyrics_unsynced: str = ""
+        cover_data: bytes = None
+        release_type: str = (
+            track.album.type.lower()
+            if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type
+            else ""
+        )
+
+        if self.settings.data.lyrics_embed or self.settings.data.lyrics_file:
+            _lyrics, lyrics_synced, lyrics_unsynced = self._retrieve_lyrics(track)
+
+        if self.settings.data.lyrics_file:
+            file_lyrics, lyrics_suffix = lyrics_file_choice(
+                lyrics_synced,
+                lyrics_unsynced,
+                getattr(self.settings.data, "lyrics_file_synced_only", False),
+            )
+            if file_lyrics:
+                path_lyrics = self.lyrics_to_file(path_media.parent, file_lyrics)
 
         cover_dimension = self.settings.data.metadata_cover_dimension
         # The separately-saved cover.jpg can use its own size (see the helpers
@@ -2041,7 +2087,7 @@ class Download:
             self.fn_logger.exception(f"Could not write metadata; file is unreadable: {name_builder_item(track)}")
             result = False
 
-        return result, path_lyrics, path_cover
+        return result, path_lyrics, lyrics_suffix, path_cover
 
     def items(
         self,

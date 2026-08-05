@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dataclasses_json import dataclass_json
 from tidalapi import Quality
@@ -12,6 +12,13 @@ class Settings:
     skip_existing: bool = True
     lyrics_embed: bool = False
     lyrics_file: bool = False
+    # When saving lyrics files: timed lyrics go to .lrc, untimed to .txt.
+    # This switch skips the .txt entirely so only synced lyrics produce a file.
+    lyrics_file_synced_only: bool = False
+    # Try LRCLIB (lrclib.net, community-synced lyrics) before TIDAL's own
+    # lyrics, which are machine-transcribed for tracks nobody has submitted
+    # text for yet. TIDAL remains the fallback when LRCLIB has no match.
+    lyrics_prefer_lrclib: bool = True
     use_primary_album_artist: bool = (
         False  # When True, uses first album artist instead of track artists for folder paths
     )
@@ -32,6 +39,14 @@ class Settings:
     # shown to existing users who never changed "~/download". Set once the nudge
     # is shown or dismissed so it never nags again.
     download_folder_prompted: bool = False
+    # Where each network volume the download folder has lived on came from:
+    # {"/Volumes/Media": "smb://user@nas/Media"}, recorded while the share is
+    # healthy (statfs, see waves_ui/netmount.py). When macOS quietly ejects
+    # the share, this is what lets the app mount it back the way Finder
+    # would, instead of watching a path that cannot return by itself. Origin
+    # URLs are identity (host, maybe user): internal only, never shown in the
+    # settings UI, registered as diagnostics secrets on load and on record.
+    network_mount_origins: dict[str, str] = field(default_factory=dict)
     quality_audio: Quality = Quality.low_320k
     quality_video: QualityVideo = QualityVideo.P480
     download_dolby_atmos: bool = False
@@ -125,7 +140,15 @@ class HelpSettings:
     album_cover_save: str = "Save cover to album folder."
     lyrics_embed: str = "Embed lyrics in audio file, if lyrics are available."
     use_primary_album_artist: str = "Use only the primary album artist for folder paths instead of track artists."
-    lyrics_file: str = "Save lyrics to separate *.lrc file, if lyrics are available."
+    lyrics_file: str = "Save lyrics next to the track: timed lyrics as a *.lrc file, untimed ones as *.txt."
+    lyrics_file_synced_only: str = (
+        "Only save a lyrics file when timed (synced) lyrics exist; untimed lyrics " "then produce no *.txt file."
+    )
+    lyrics_prefer_lrclib: str = (
+        "Fetch lyrics from the community LRCLIB database first (the source behind LRCGet), "
+        "falling back to TIDAL's lyrics when it has no match. TIDAL's own lyrics are "
+        "machine-transcribed for many newer track IDs and often wrong."
+    )
     api_key_index: str = "Set the device API KEY."
     album_info_save: str = "Save album info to track?"
     video_download: str = "Allow download of videos."

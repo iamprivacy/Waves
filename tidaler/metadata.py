@@ -187,6 +187,17 @@ class Metadata:
 
         return True
 
+    def _primary_lyrics(self) -> str:
+        """Lyrics for the container's primary lyrics field: timed when available.
+
+        Most players read only the primary field (FLAC ``LYRICS``, MP4 ``©lyr``)
+        and ignore the unsynced sibling, so a track that only has untimed lyrics
+        falls back to them there rather than showing nothing. Never a downgrade:
+        every save rewrites the full tag set, so a later re-download that finds
+        timed lyrics replaces the untimed text with the better form.
+        """
+        return self.lyrics or self.lyrics_unsynced
+
     def _rg_pairs(self):
         # One place to guard and format the four ReplayGain values before each
         # container maps them into its own tag scheme.
@@ -211,7 +222,7 @@ class Metadata:
         self.m.tags["ORIGINALDATE"] = self.date
         self.m.tags["COMPOSER"] = self.composer
         self.m.tags["ISRC"] = self.isrc
-        self.m.tags["LYRICS"] = self.lyrics
+        self.m.tags["LYRICS"] = self._primary_lyrics()
         self.m.tags["UNSYNCEDLYRICS"] = self.lyrics_unsynced
         self.m.tags["URL"] = self.url_share
         self.m.tags[self.target_upc["FLAC"]] = self.upc
@@ -258,7 +269,7 @@ class Metadata:
         # self.m.tags['\xa9gen'] = self.genre
         self.m.tags["\xa9day"] = self.date
         self.m.tags["\xa9wrt"] = self.composer
-        self.m.tags["\xa9lyr"] = self.lyrics
+        self.m.tags["\xa9lyr"] = self._primary_lyrics()
         self.m.tags["----:com.apple.iTunes:UNSYNCEDLYRICS"] = self.lyrics_unsynced.encode("utf-8")
         self.m.tags["isrc"] = self.isrc
         self.m.tags["\xa9url"] = self.url_share
