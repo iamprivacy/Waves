@@ -83,7 +83,7 @@ from tidaler.waves_ui.session import WavesTidal
 from tidaler.worker import Worker
 
 from . import __version__ as _WAVES_VERSION
-from . import devlog, diagnostics
+from . import devlog, diagnostics, netmount
 from .ffmpeg_manager import FfmpegCancelled, FfmpegManager
 from .updater import AppUpdater, UpdateCancelled
 
@@ -181,6 +181,8 @@ _FLAG_FIELDS = [
     "video_convert_mp4",
     "lyrics_embed",
     "lyrics_file",
+    "lyrics_file_synced_only",
+    "lyrics_prefer_lrclib",
     "download_delay",
     "extract_flac",
     "metadata_cover_embed",
@@ -474,7 +476,9 @@ _FIELD_LABELS = {
     "metadata_cover_embed": "Embed cover art",
     "cover_album_file": "Save cover.jpg",
     "lyrics_embed": "Embed lyrics",
-    "lyrics_file": "Save .lrc file",
+    "lyrics_file": "Save lyrics file",
+    "lyrics_file_synced_only": "Only synced lyrics files",
+    "lyrics_prefer_lrclib": "Prefer LRCLIB lyrics",
     "mark_explicit": "Mark explicit in title",
     # Advanced
     "path_binary_ffmpeg": "FFmpeg binary path",
@@ -1015,6 +1019,19 @@ def _release_date(obj) -> str:
         return date.strftime("%Y-%m-%d")
     except Exception:
         return str(date)
+
+
+def _video_spec(video) -> str:
+    """Resolution label for a video ("1080p"), from TIDAL's MP4_1080P tier.
+
+    Returns "" when the tier is missing or unrecognised, so the tag falls back
+    to the generic VIDEO spec rather than showing a raw enum name.
+    """
+    tier = str(getattr(video, "video_quality", "") or "")
+    for part in reversed(tier.split("_")):
+        if part[:-1].isdigit() and part[-1:].upper() == "P":
+            return part.lower()
+    return ""
 
 
 def _date_added(obj) -> str:
@@ -1674,6 +1691,7 @@ class WavesBridge(QObject):
     motionBgChanged = Signal()  # motion_background pref flipped; Main.qml re-reads it
     hoverMotionChanged = Signal()  # hover_control_motion pref flipped; Main.qml re-reads it
     artHoverTiltChanged = Signal()  # art_hover_tilt pref flipped; Main.qml re-reads it
+    videoHoverPeekChanged = Signal()  # video_hover_peek pref flipped; Main.qml re-reads it
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
     downloadState = Signal(str, str)
@@ -1797,6 +1815,10 @@ class WavesBridge(QObject):
         # it's easy to find; see tidaler.waves_ui.devlog (WAVES_DEBUG to toggle).
         log_path = devlog.init(log_dir=os.path.dirname(self.settings.file_path))
         devlog.event("app", "WavesBridge starting", log=str(log_path or "stderr"))
+        # Persisted share origins are identity (host, maybe a username): make
+        # sure they can never surface in a log line or a diagnostics export.
+        for _origin in (self.settings.data.network_mount_origins or {}).values():
+            diagnostics.register_secret(_origin, "‹share-origin›")
         self._help = HelpSettings()
         # WavesTidal (a Tidal subclass) keeps the saved token through a transient
         # network at launch instead of deleting it and forcing a full re-login.
@@ -2068,6 +2090,7 @@ class WavesBridge(QObject):
         self._recovery_poll.timeout.connect(self._recovery_probe)
         self._recovery_watcher = None
         self._recovery_inflight = False
+        self._recovery_started = 0.0
         # Warm-up window: a probe timeout on an idle queue holds the download
         # QUIETLY (a cold SMB session reconnecting, not an outage) and the
         # dialog is raised only if the folder is still silent past this
@@ -2087,6 +2110,18 @@ class WavesBridge(QObject):
         self._keepwarm_poll.setInterval(60_000)
         self._keepwarm_poll.timeout.connect(self._keepwarm_tick)
         self._keepwarm_poll.start()
+        # First touch right after launch, not a minute in: the tick is also
+        # what records the share's origin (see _keepwarm_tick), and a share
+        # ejected two minutes into a session must already have been seen.
+        QTimer.singleShot(2_500, self._keepwarm_tick)
+        # Remount-on-demand: which volume roots have had their origin recorded
+        # this session (one statfs each, taken only on proof of life), and a
+        # cooldown so a dead share is asked to mount back at most once per
+        # window, however many probes fail in it.
+        self._share_origin_noted: set[str] = set()
+        self._remount_lock = Lock()
+        self._remount_last = -1e9
+        self._last_probe_remounted = False
         self._queueTracksFetched.connect(self._merge_queue_tracks)
         # Best-of-both merge plans awaiting download, keyed by the synthetic album
         # key that downloadAlbum() will route through _download(merge_plan=…).
@@ -2439,9 +2474,14 @@ class WavesBridge(QObject):
             "artist": name_builder_artist(video),
             "artists": _artists_list(video),
             "art": _image(video, 320),
+            # The results grid shows videos 16:9 at several hundred pixels
+            # wide, where the 320 thumbnail alone goes soft.
+            "art_big": _image(video, 750),
             "duration": _fmt_duration(getattr(video, "duration", 0)),
             "explicit": bool(getattr(video, "explicit", False)),
             "added": _date_added(video),
+            "date": _release_date(video),
+            "quality": _video_spec(video),
         }
 
     def _playlist_dict(self, playlist) -> dict:
@@ -2872,7 +2912,7 @@ class WavesBridge(QObject):
             albums = [self._album_dict(a) for a in self._dedup_albums((results.get("albums") or [])[:60])[:40]]
             tracks = [self._track_dict(t) for t in self._dedup_tracks((results.get("tracks") or [])[:80])[:60]]
 
-            videos = [self._video_dict(v) for v in (results.get("videos") or [])[:30]]
+            videos = [self._video_dict(v) for v in self._dedup_videos((results.get("videos") or [])[:30])]
             playlists = [self._playlist_dict(p) for p in (results.get("playlists") or [])[:20]]
             mixes = [self._mix_dict(m) for m in (results.get("mixes") or [])[:20]]
 
@@ -3073,6 +3113,11 @@ class WavesBridge(QObject):
             except Exception:
                 tops = []
                 complete = False
+            try:
+                vids = artist.get_videos(limit=50)
+            except Exception:
+                vids = []
+                complete = False
 
             payload = {
                 "id": artist_id,
@@ -3085,6 +3130,7 @@ class WavesBridge(QObject):
                 "albums": [self._album_dict(a) for a in self._dedup_albums(albums)],
                 "eps": [self._album_dict(a) for a in self._dedup_albums(eps)],
                 "tracks": [self._track_dict(t) for t in self._dedup_tracks(tops)],
+                "videos": [self._video_dict(v) for v in self._dedup_videos(vids)],
             }
             self._artist_loading.discard(artist_id)
             if gen != self._browse_gen:
@@ -5238,6 +5284,15 @@ class WavesBridge(QObject):
             # Cover art tilts toward the cursor and lifts once the pointer
             # rests on it; off holds every artwork flat and still.
             "art_hover_tilt": True,
+            # Resting the pointer on a video thumbnail grows a live preview
+            # card with sound; off keeps thumbnails still (click to play).
+            "video_hover_peek": True,
+            # Settings page: which section cards the user left open, as a JSON
+            # object of id -> bool ("" = never touched, everything collapsed).
+            # Housekeeping state, not a user-facing setting, so not in
+            # settingsSchema; auto-open rules (FFmpeg missing, update ready)
+            # still apply to sections the user never touched.
+            "settings_open_sections": "",
             # Diagnostics (Settings > Diagnostics). Verbose is off by default:
             # the on-disk log then carries only warnings/errors plus breadcrumb
             # dumps. The redact-content flag applies to exported bundles only.
@@ -5327,6 +5382,8 @@ class WavesBridge(QObject):
             self.hoverMotionChanged.emit()
         elif key == "art_hover_tilt":
             self.artHoverTiltChanged.emit()
+        elif key == "video_hover_peek":
+            self.videoHoverPeekChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
 
@@ -5465,6 +5522,18 @@ class WavesBridge(QObject):
         artist = _primary_artist_name(track) or name_builder_artist(track)
         return (_norm_title(name_builder_title(track)), _norm_artist(artist))
 
+    def _video_key(self, video):
+        # Same normalised title + artist + roughly the same length is the same
+        # video: quality/region re-listings share all three. Duration rides in
+        # the key in ~15s buckets, so a clean and an explicit edit of one
+        # video (a few seconds apart) still meet in one group and follow the
+        # explicit preference, while same-titled but genuinely different
+        # videos (a webisode series re-using its name, minutes apart) key
+        # differently and are never silently dropped.
+        artist = _primary_artist_name(video) or name_builder_artist(video)
+        dur = int(getattr(video, "duration", 0) or 0)
+        return (_norm_title(name_builder_title(video)), _norm_artist(artist), round(dur / 15))
+
     def _max_quality_rank(self) -> int:
         """Rank of the user's configured maximum audio quality (the cap that
         search results are filtered down to)."""
@@ -5480,6 +5549,12 @@ class WavesBridge(QObject):
         mode = self._waves_prefs.get("explicit_mode", "explicit")
         out = _dedup_versions(tracks, self._track_key, mode, self._max_quality_rank())
         devlog.event("dedup", "tracks", inp=len(tracks), out=len(out), mode=mode)
+        return out
+
+    def _dedup_videos(self, videos: list) -> list:
+        mode = self._waves_prefs.get("explicit_mode", "explicit")
+        out = _dedup_versions(videos, self._video_key, mode, self._max_quality_rank())
+        devlog.event("dedup", "videos", inp=len(videos), out=len(out), mode=mode)
         return out
 
     def _collapse_editions(self, albums: list) -> list:
@@ -5710,13 +5785,32 @@ class WavesBridge(QObject):
         `timeout_s`, not a 30s+ SMB stall. A probe that misses the deadline
         reports "timeout" rather than "dead": on a network share that is busy
         (not broken) the write probe itself queues behind the download traffic,
-        and the caller must be able to tell the two apart."""
+        and the caller must be able to tell the two apart.
+
+        A dead or silent verdict earns one second chance: when the volume's
+        mount point is gone entirely and its origin was recorded while
+        healthy, the share is mounted back (see
+        :meth:`_remount_download_share`) and probed once more, so "Try
+        again", the download gate and the recovery watch all actually
+        remount instead of watching a path that cannot return by itself."""
         path = self.settings.data.download_base_path
-        result: list[tuple[str, str]] = []
-        t = Thread(target=lambda: result.append(self._probe_folder_verdict(path)), daemon=True)
-        t.start()
-        t.join(timeout_s)
-        return result[0] if result else ("timeout", path)
+
+        def guarded() -> tuple[str, str]:
+            result: list[tuple[str, str]] = []
+            t = Thread(target=lambda: result.append(self._probe_folder_verdict(path)), daemon=True)
+            t.start()
+            t.join(timeout_s)
+            return result[0] if result else ("timeout", path)
+
+        verdict = guarded()
+        self._last_probe_remounted = False
+        if verdict[0] in ("dead", "timeout") and self._remount_download_share(path):
+            # Read right after the call on the same thread (the mid-flight
+            # failure handler uses it to tell "the folder died and we just
+            # brought it back" from "the track itself failed").
+            self._last_probe_remounted = True
+            verdict = guarded()
+        return verdict
 
     def _download_gate(self) -> str:
         """Apply :meth:`_folder_gate_action` with its side effects: set the status
@@ -5754,6 +5848,106 @@ class WavesBridge(QObject):
         callable from any thread; a lost race between two writers only makes
         the stamp a moment older, which is harmless."""
         self._base_ok = (proven_base, time.monotonic())
+        self._remember_share_origin(proven_base)
+
+    def _remember_share_origin(self, base: str) -> None:
+        """A write under ``base`` just verifiably worked: if it lives on a
+        network volume, record the volume's origin URL (settings) so a share
+        macOS quietly ejects later can be mounted back (see
+        :meth:`_remount_download_share`). One statfs per volume per session,
+        taken only on proof of life, so this never touches a dead mount."""
+        if sys.platform != "darwin" or not base.startswith("/Volumes/"):
+            return
+        parts = pathlib.PurePosixPath(base).parts
+        if len(parts) < 3:
+            return
+        root = os.path.join("/Volumes", parts[2])
+        if root in self._share_origin_noted:
+            return
+        self._share_origin_noted.add(root)
+        fstype, from_name = netmount.mount_origin(root)
+        url = netmount.origin_url(fstype, from_name)
+        if not url:
+            return
+        # Origin strings are identity (host, maybe a username): scrub them
+        # from every future log line before anything can mention them.
+        diagnostics.register_secret(from_name, "‹share-origin›")
+        diagnostics.register_secret(url, "‹share-origin›")
+        origins = dict(self.settings.data.network_mount_origins or {})
+        if origins.get(root) == url:
+            return
+        origins[root] = url
+        self.settings.data.network_mount_origins = origins
+        self._save_settings()
+        logger.info("Recorded the download share's origin for later remounts")
+
+    # A failed remount is not retried inside this window, however many probes
+    # fail meanwhile: the recovery watch re-probes every few seconds, and each
+    # attempt costs a NetFS call.
+    _REMOUNT_COOLDOWN_SEC = 25.0
+
+    def _remount_download_share(self, path: str, wedged: bool = False) -> bool:
+        """The volume under ``path`` reads as dead: if its mount point is GONE
+        from /Volumes (macOS quietly ejects idle network shares on sleep or a
+        network blip) and its origin was recorded while healthy, ask macOS to
+        mount it back, the same request Finder serves when the user navigates
+        to the share by hand, minus the window. True when the mount call
+        succeeded and the folder deserves one more probe. A mount point that
+        still exists is normally left alone (present-but-cold is the warm-up
+        path's job, and mounting over a live mount would fight the OS), UNLESS
+        the caller has watched it time out long enough to declare it wedged:
+        a zombie SMB mount answers nothing forever, so the recovery watch
+        passes ``wedged=True`` to force-unmount the corpse first and mount the
+        share back fresh, the by-hand remedy for a hung network mount."""
+        if sys.platform != "darwin" or not path.startswith("/Volumes/"):
+            return False
+        parts = pathlib.PurePosixPath(path).parts
+        if len(parts) < 3:
+            return False
+        vol = parts[2]
+        try:
+            # listdir, not exists(): reading /Volumes never stats the mounts
+            # themselves, so a different stale mount cannot hang this check.
+            present = vol in os.listdir("/Volumes")
+        except OSError:
+            return False
+        if present and not wedged:
+            return False
+        now = time.monotonic()
+        with self._remount_lock:
+            if now - self._remount_last < self._REMOUNT_COOLDOWN_SEC:
+                return False
+            self._remount_last = now
+        origins = self.settings.data.network_mount_origins or {}
+        root = os.path.join("/Volumes", vol)
+        url = origins.get(root, "")
+        if not url:
+            # The share may have last been healthy under a suffixed twin of
+            # this name ("Media 1"), or vice versa: same stem, same share.
+            stem = re.sub(r"[ -]\d+$", "", vol)
+            for known, candidate in origins.items():
+                if re.sub(r"[ -]\d+$", "", os.path.basename(known)) == stem:
+                    url = candidate
+                    break
+        if not url:
+            logger.info("Download volume is gone and no origin is recorded; cannot mount it back")
+            return False
+        if present:
+            # Wedged: the mount point exists but has answered nothing for the
+            # whole watch window. Force the corpse off first; if even that
+            # fails, mounting on top would only stack a second zombie.
+            logger.info("Download volume is wedged; force-unmounting the hung mount")
+            try:
+                argv = ["/usr/sbin/diskutil", "unmount", "force", os.path.join("/Volumes", vol)]
+                out = subprocess.run(argv, capture_output=True, timeout=15)  # noqa: S603
+            except (OSError, subprocess.SubprocessError):
+                logger.info("Force unmount of the wedged volume errored")
+                return False
+            if out.returncode != 0:
+                logger.info("Force unmount of the wedged volume was declined")
+                return False
+        logger.info("Download volume is gone; asking macOS to mount it back")
+        return netmount.remount(url, timeout_s=20.0)
 
     def _downloads_running(self) -> bool:
         """True while any queue row is actively downloading. Read from download
@@ -5824,6 +6018,41 @@ class WavesBridge(QObject):
     # SMB reconnects land well inside this; a real outage exceeds it.
     _WARMUP_DIALOG_DELAY_SEC = 30.0
 
+    def _download_failed_with_folder(self, retry, media_id: str, qid: int, name: str) -> bool:
+        """A download raised: decide whether the download FOLDER itself is the
+        culprit (the share was ejected or wedged mid-flight, after the gate
+        had already passed, e.g. inside the proof-of-life freshness window),
+        and if so route the job into the same held-and-recovered flow as a
+        gate block. Without this, a share dying mid-download painted a red
+        failed button that no dialog ever explained and nothing ever retried.
+        Returns True when the failure was claimed (the caller must not mark
+        the job failed). The probe below includes the remount second chance,
+        so a share that can be mounted back usually IS back before this
+        returns, and the stashed replay fires immediately."""
+        verdict, _live = self._probe_download_base(timeout_s=4.0)
+        remounted = self._last_probe_remounted
+        if verdict in ("ok", "healed") and not remounted:
+            return False  # the folder answers fine: the track itself failed
+        logger.info("Download failed because the folder is gone; holding it for recovery instead of failing it")
+        self._stash_pending_download(media_id, retry)
+        # Withdraw the row and reset the button, matching the gate-block
+        # contract: the queue reads as if the download never started.
+        self.downloadState.emit(media_id, "")
+        self._job_tracks.pop(qid, None)
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["qid"] != qid]
+        self._emit_queue()
+        if verdict in ("ok", "healed"):
+            # Our own remount already brought the share back: replay now.
+            self._set_status(f"Reconnected the download folder, retrying {name}…")
+            self.downloadFolderRecovered.emit()
+        else:
+            self._set_status("Waking the download folder, the download resumes by itself")
+            self._recovery_dialog_shown = False
+            self._recovery_dialog_deadline = time.monotonic() + self._WARMUP_DIALOG_DELAY_SEC
+            self._recoveryWatchWanted.emit()
+        return True
+
     def _keepwarm_tick(self) -> None:
         """GUI thread (60s timer): touch the network download base so its SMB
         session never idles out. A plain listdir on a daemon thread; errors are
@@ -5836,12 +6065,25 @@ class WavesBridge(QObject):
 
         def touch() -> None:
             try:
-                with contextlib.suppress(OSError):
+                try:
                     os.listdir(base)
+                except OSError:
+                    return
+                # The share just answered: this is exactly the healthy moment
+                # to remember where it came from, so a later ejection can be
+                # mounted back even if nothing was downloaded this session.
+                # Merely having the app open while the share is mounted is
+                # enough; a download must not be the prerequisite.
+                self._remember_share_origin(base)
             finally:
                 self._keepwarm_inflight = False
 
         Thread(target=touch, daemon=True).start()
+
+    # How long the recovery watch tolerates a mount point that exists but
+    # answers nothing before declaring it wedged and force-remounting it. A
+    # cold share reconnecting answers well inside this; a zombie never does.
+    _WEDGE_FORCE_SEC = 9.0
 
     def _start_recovery_watch(self) -> None:
         """GUI thread: begin watching for the unreachable folder to come back.
@@ -5853,6 +6095,8 @@ class WavesBridge(QObject):
             w.addPath("/Volumes")
             w.directoryChanged.connect(self._recovery_probe)
             self._recovery_watcher = w
+        if not self._recovery_poll.isActive():
+            self._recovery_started = time.monotonic()
         self._recovery_poll.start()
 
     def _recovery_probe(self) -> None:
@@ -5881,10 +6125,15 @@ class WavesBridge(QObject):
                     self._save_settings()
                     self._note_download_base_ok(live)
                 else:
-                    # Still not answering. If the quiet warm-up window has run
-                    # out and the user has not seen the dialog yet, raise it
-                    # now (once): past this point it is a real outage, not a
-                    # cold share waking up.
+                    # Still not answering. A mount point that has sat silent
+                    # past the wedge window is a zombie: force it off and
+                    # mount the share back (cooldown-guarded inside), then let
+                    # the next tick find it healthy and resume.
+                    if time.monotonic() - self._recovery_started > self._WEDGE_FORCE_SEC:
+                        self._remount_download_share(self.settings.data.download_base_path, wedged=True)
+                    # If the quiet warm-up window has run out and the user has
+                    # not seen the dialog yet, raise it now (once): past this
+                    # point it is a real outage, not a cold share waking up.
                     if not self._recovery_dialog_shown and time.monotonic() > self._recovery_dialog_deadline:
                         self._recovery_dialog_shown = True
                         self._set_status("Download folder isn't reachable")
@@ -5975,6 +6224,36 @@ class WavesBridge(QObject):
         the folder is still dead (or has healed onto a remounted volume) the
         right thing happens again."""
         self._run_pending_downloads()
+
+    @Slot(str, result=str)
+    def existingFolder(self, path: str) -> str:
+        """Nearest existing directory at or above ``path``, so the folder
+        picker's Browse can open where the setting points even when the exact
+        folder is gone (an unmounted share opens at /Volumes, not at the
+        picker's stale default). Bounded: the walk runs off-thread with a
+        short deadline, so a stale network mount can never hang the click;
+        returns "" on timeout or when nothing on the path exists, and the
+        picker falls back to its default."""
+        raw = (path or "").strip()
+        if not raw:
+            return ""
+        found: list[str] = []
+
+        def walk() -> None:
+            p = pathlib.Path(raw).expanduser()
+            for cand in (p, *p.parents):
+                try:
+                    if cand.is_dir():
+                        found.append(str(cand))
+                        return
+                except OSError:
+                    continue
+            found.append("")
+
+        t = Thread(target=walk, daemon=True)
+        t.start()
+        t.join(1.2)
+        return found[0] if found else ""
 
     @Slot()
     def revealDownloadPath(self) -> None:
@@ -6173,6 +6452,18 @@ class WavesBridge(QObject):
                     self._set_queue_status(qid, "cancelled")
                     self._bump_download_groups(media_id, None, "failed")
                     self._set_status(f"Cancelled {name}")
+                elif self._download_failed_with_folder(
+                    lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+                    media_id,
+                    qid,
+                    name,
+                ):
+                    # The folder itself died mid-download (share ejected or
+                    # wedged between the gate and the writes): held, not
+                    # failed. The helper stashed the replay and either already
+                    # remounted the share (retry fires immediately) or armed
+                    # the recovery watch (retry fires when it comes back).
+                    pass
                 else:
                     logger.exception("Download failed for %s", name)
                     self.downloadState.emit(media_id, "failed")
@@ -8201,6 +8492,17 @@ class WavesBridge(QObject):
                     "value": self._waves_pref_bool("art_hover_tilt"),
                 },
                 {
+                    "key": "video_hover_peek",
+                    "label": "Videos preview on hover",
+                    "help": (
+                        "Resting the pointer on a video thumbnail grows a small live preview "
+                        "with sound. Turn this off to keep thumbnails still: videos then play "
+                        "only when you click them."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("video_hover_peek"),
+                },
+                {
                     "key": "verbose_diagnostics",
                     "label": "Verbose diagnostics",
                     "help": (
@@ -8290,6 +8592,23 @@ class WavesBridge(QObject):
                 f["child_value"] = bool(getattr(d, "cover_single_track_file", False))
                 f["child_label"] = "Also save for single tracks"
                 f["child_help"] = "Write cover.jpg for a single track downloaded on its own, not just full albums."
+            if key == "lyrics_file":
+                # "Only synced" is meaningless while no lyrics file is saved, so
+                # it rides inside this tile as a nested checkbox (same pattern
+                # as cover_album_file) instead of a free-floating toggle.
+                f["child_key"] = "lyrics_file_synced_only"
+                f["child_value"] = bool(getattr(d, "lyrics_file_synced_only", False))
+                f["child_label"] = "Only when lyrics are timed (skip the .txt)"
+                f["child_help"] = self._help_for("lyrics_file_synced_only")
+            if key == "lyrics_prefer_lrclib":
+                # The source preference only matters while lyrics are fetched at
+                # all; the tile greys out (live, unsaved toggles included) when
+                # both lyrics switches are off.
+                f["requires_any"] = {
+                    "lyrics_embed": bool(getattr(d, "lyrics_embed", False)),
+                    "lyrics_file": bool(getattr(d, "lyrics_file", False)),
+                }
+                f["requires_hint"] = "Turn on a lyrics option first"
             if key in ("auto_update", "update_cadence", "ffmpeg_auto_update", "ffmpeg_update_cadence"):
                 # Rendered inside the updater / FFmpeg cards (toggle + cadence
                 # segment), not as the generic tile/row controls.
@@ -8344,7 +8663,6 @@ class WavesBridge(QObject):
             {
                 "group": "Downloads",
                 "id": "downloads",
-                "open": True,
                 "desc": "Where your music is saved and how good it sounds.",
                 "fields": [
                     "download_base_path",
@@ -8386,6 +8704,9 @@ class WavesBridge(QObject):
                     "cover_album_file",
                     "lyrics_embed",
                     "lyrics_file",
+                    # lyrics_file_synced_only renders as a child inside the
+                    # lyrics_file tile, not as its own tile.
+                    "lyrics_prefer_lrclib",
                     "mark_explicit",
                     "clean_album_artist",
                 ],
@@ -8443,6 +8764,7 @@ class WavesBridge(QObject):
                     "motion_background",
                     "hover_control_motion",
                     "art_hover_tilt",
+                    "video_hover_peek",
                     "downsample_target",
                     "downloads_simultaneous_per_track_max",
                     "download_delay_sec_min",
