@@ -59,6 +59,15 @@ class RecoveryHost:
     _run_pending_downloads = WavesBridge._run_pending_downloads
     _recovery_probe = WavesBridge._recovery_probe
     _on_folder_recovered = WavesBridge._on_folder_recovered
+    # Proof of life records the share's origin (real method, real state: no
+    # mount to statfs here, so it stays a quiet no-op in these tests).
+    _remember_share_origin = WavesBridge._remember_share_origin
+    # A watch that has run past the wedge window force-remounts the share;
+    # real method + real state (no origins recorded here, so it's a no-op,
+    # and _recovery_started is stamped fresh so the window never elapses).
+    _remount_download_share = WavesBridge._remount_download_share
+    _REMOUNT_COOLDOWN_SEC = WavesBridge._REMOUNT_COOLDOWN_SEC
+    _WEDGE_FORCE_SEC = WavesBridge._WEDGE_FORCE_SEC
     _save_settings = WavesBridge._save_settings
     _restore_ffmpeg_flags = WavesBridge._restore_ffmpeg_flags
     _restore_ffmpeg_path = WavesBridge._restore_ffmpeg_path
@@ -69,7 +78,14 @@ class RecoveryHost:
         def save() -> None:
             self.saved += 1
 
-        self.settings = SimpleNamespace(data=SimpleNamespace(download_base_path=base, path_binary_ffmpeg=""), save=save)
+        self.settings = SimpleNamespace(
+            data=SimpleNamespace(download_base_path=base, path_binary_ffmpeg="", network_mount_origins={}),
+            save=save,
+        )
+        self._share_origin_noted: set = set()
+        self._remount_lock = Lock()
+        self._remount_last = -1e9
+        self._recovery_started = time.monotonic()
         self._ffmpeg_flag_prefs: dict = {}
         self._ffmpeg_user_path = ""
         self._base_ok = ("", 0.0)

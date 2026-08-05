@@ -77,8 +77,17 @@ def _run_scenario() -> int:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT
 
+    class _QuietBridge(WavesBridge):
+        # Flipping loggedIn mid-scenario makes the QML login handler call
+        # loadBrowse(), a real network fetch whose asynchronous failure would
+        # race the data-wait pin below (its error payload releases the very
+        # hold being asserted). Landing payloads in this scenario are always
+        # driven by hand, so the fetch is silenced at the source.
+        def loadBrowse(self) -> None:
+            return
+
     engine = QQmlApplicationEngine()
-    bridge = WavesBridge(tidal=None)
+    bridge = _QuietBridge(tidal=None)
     engine.rootContext().setContextProperty("waves", bridge)
     engine.rootContext().setContextProperty("monoFont", _load_mono())
     engine.rootContext().setContextProperty("uiFontFamily", app.font().family())
@@ -177,8 +186,44 @@ def _run_scenario() -> int:
         and not bool(q("browseBuilding"))
     )
 
-    print(f"held={held} handed={handed} drained={drained} parked={parked} applied={applied}", flush=True)
-    ok = held and handed and drained and parked and applied
+    # The gate must also hold while the landing DATA is still in flight:
+    # signed in, no sections yet, no error. The original gate only covered the
+    # shelf assembly, so a login or first fetch slower than the opening frame
+    # revealed onto the bare "Reading the wire…" landing (reported from
+    # livetesting).
+    q("bootHandover.stop()")
+    q("bootBlk.stop()")
+    q("bootZoom.stop()")
+    q("handoverCap.stop()")
+    q("handoverCap.expired = false")
+    q("bootOverlay.done = false")
+    q("bootVer.shown = 1")
+    q("bootContentShown = 0")
+    q("browseSections = []")
+    q("browseBuilding = false")
+    q("browseError = false")
+    bridge._set_logged_in(True)
+    settle()
+
+    q("bootOverlay.handover()")
+    settle(300)
+    data_held = (
+        bool(q("bootOverlay.handoverHeld"))
+        and not bool(q("bootOverlay.done"))
+        and q("bootVer.shown") == 1  # still on the opening frame, version up
+    )
+
+    # The first payload arriving releases the hold and the reveal runs.
+    q("browseSections = [{rowKind: 'albums', title: 'Landed', items: []}]")
+    settle(3000)
+    data_handed = bool(q("bootOverlay.done")) and q("bootContentShown") == 1
+
+    print(
+        f"held={held} handed={handed} drained={drained} parked={parked} applied={applied} "
+        f"data_held={data_held} data_handed={data_handed}",
+        flush=True,
+    )
+    ok = held and handed and drained and parked and applied and data_held and data_handed
     return _EXIT_OK if ok else _EXIT_REGRESSED
 
 

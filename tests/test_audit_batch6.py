@@ -364,7 +364,9 @@ def test_the_download_worker_follows_a_healed_base():
 
 
 def test_liveness_stamps_the_proven_path():
-    stub = SimpleNamespace(_base_ok=("", 0.0))
+    # _remember_share_origin rides on proof of life (share-remount feature);
+    # here only the stamp itself is under test.
+    stub = SimpleNamespace(_base_ok=("", 0.0), _remember_share_origin=lambda base: None)
     WavesBridge._note_download_base_ok(stub, "/Volumes/A/Music")
     assert stub._base_ok[0] == "/Volumes/A/Music"
 

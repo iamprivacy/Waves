@@ -41,6 +41,12 @@ class GateHost:
     _run_pending_downloads = WavesBridge._run_pending_downloads
     _probe_download_base = WavesBridge._probe_download_base
     _probe_folder_verdict = staticmethod(WavesBridge._probe_folder_verdict)
+    # Proof of life records the share's origin, and a dead probe may try a
+    # remount: real methods, real state (no origins recorded and no mount to
+    # statfs here, so both are quiet no-ops in these tests).
+    _remember_share_origin = WavesBridge._remember_share_origin
+    _remount_download_share = WavesBridge._remount_download_share
+    _REMOUNT_COOLDOWN_SEC = WavesBridge._REMOUNT_COOLDOWN_SEC
     # Saves go through the guarded helper, which undoes the transient ffmpeg
     # injections before writing (see tests/test_settings_save_guard.py).
     _save_settings = WavesBridge._save_settings
@@ -53,7 +59,13 @@ class GateHost:
         def save() -> None:
             self.saved += 1
 
-        self.settings = SimpleNamespace(data=SimpleNamespace(download_base_path=base, path_binary_ffmpeg=""), save=save)
+        self.settings = SimpleNamespace(
+            data=SimpleNamespace(download_base_path=base, path_binary_ffmpeg="", network_mount_origins={}),
+            save=save,
+        )
+        self._share_origin_noted: set = set()
+        self._remount_lock = Lock()
+        self._remount_last = -1e9
         self._ffmpeg_flag_prefs: dict = {}
         self._ffmpeg_user_path = ""
         self._base_ok = ("", 0.0)

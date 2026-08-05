@@ -123,6 +123,9 @@ class _FlakyArtist:
     def get_top_tracks(self, limit=10):
         return []
 
+    def get_videos(self, limit=None):
+        return []
+
 
 class _LoadArtistStub:
     loadArtist = WavesBridge.loadArtist
@@ -151,6 +154,9 @@ class _LoadArtistStub:
 
     def _dedup_tracks(self, tracks):
         return tracks
+
+    def _dedup_videos(self, videos):
+        return videos
 
     def _album_dict(self, a):
         return {"id": a.id}

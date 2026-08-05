@@ -86,6 +86,20 @@ def test_registered_secret_is_replaced_everywhere(diag):
     assert "‹account›" in out
 
 
+def test_registered_share_origin_never_survives(diag):
+    """A recorded network-share origin (netmount) carries a hostname and maybe
+    a username; once registered it must be gone from every log form it could
+    appear in: the raw statfs from-name and the derived mount URL."""
+    diag.register_secret("//carol@nas-box._smb._tcp.local/Media", "‹share-origin›")
+    diag.register_secret("smb://carol@nas-box._smb._tcp.local/Media", "‹share-origin›")
+    out = diag.scrub(
+        "mount check: smb://carol@nas-box._smb._tcp.local/Media from //carol@nas-box._smb._tcp.local/Media"
+    )
+    assert "carol" not in out
+    assert "nas-box" not in out
+    assert "‹share-origin›" in out
+
+
 def test_short_secrets_are_ignored(diag):
     diag.register_secret("ab")  # too short: literal-replacing it would shred text
     assert diag.scrub("about") == "about"
