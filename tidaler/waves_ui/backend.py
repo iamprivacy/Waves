@@ -92,6 +92,13 @@ logger = logging.getLogger("waves")
 # breadcrumbs are attributable in a crash report. Coordinates and sizes are not
 # PII, so they are logged in the clear (no register_secret / content wrapping).
 _win_log = logging.getLogger("waves.window")
+# Child loggers for the newer subsystems (the house diagnostics rule), so
+# their breadcrumbs are attributable in a crash report: the preview pipeline
+# (HLS localise + remux), the music-video source, and the update opt-in /
+# self-update flow.
+_preview_log = logging.getLogger("waves.preview")
+_video_log = logging.getLogger("waves.videos")
+_update_log = logging.getLogger("waves.update")
 
 
 def _fit_frame(frame, screens):
@@ -167,6 +174,84 @@ def _probe_http():
         if _http_probe is None:
             _http_probe = _tidaler_download.pooled_session()
         return _http_probe
+
+
+# How many preview segments are fetched at once (see _localise_hls). ffmpeg's
+# HLS reader opens segments strictly one at a time, so a whole track costs
+# dozens of serial round trips and the wait is latency-bound, not bandwidth
+# bound: a fast connection does not help. Eight parallel fetches turn that
+# into one burst without behaving like a download.
+_PREVIEW_SEG_WORKERS = 8
+
+# Length of a non-``whole`` preview: a quick taste of the track.
+_PREVIEW_TASTE_SECONDS = 30
+
+# Segment fetches currently in flight, and the gauge that reports them to the
+# perf sampler. The pool itself is created per preview (abandoning one clip
+# must not leave its queue in front of the next one), and the sampler holds
+# what it is given for the life of the run, so the registered object is this
+# one counter rather than a pool per clip played.
+_preview_seg_busy = 0
+_preview_seg_lock = Lock()
+_preview_seg_registered = False
+
+
+class _PreviewSegGauge:
+    """QThreadPool-shaped view of the preview segment fetches.
+
+    The sampler reads ``activeThreadCount``/``maxThreadCount`` off every pool
+    it was given. Two previews overlapping for a moment can read above the
+    maximum: the count is the whole burst, not one pool's share of it.
+    """
+
+    def activeThreadCount(self) -> int:  # (Qt's spelling)
+        return _preview_seg_busy
+
+    def maxThreadCount(self) -> int:
+        return _PREVIEW_SEG_WORKERS
+
+
+def _register_preview_gauge() -> None:
+    """Register the segment gauge with diagnostics, once per run."""
+    global _preview_seg_registered
+    with _preview_seg_lock:
+        if _preview_seg_registered:
+            return
+        _preview_seg_registered = True
+    diagnostics.register_pool("preview", _PreviewSegGauge())
+
+
+def _url_media_ext(url: str) -> str:
+    """The file extension (with dot) of a media URL's path, or "".
+
+    Query string and fragment are not part of the name; an extension is only
+    believed when it is 1-4 alphanumerics, anything else is noise (a dotted
+    directory, a trailing dot, an escaped blob).
+    """
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name:
+        return ""
+    ext = name.rsplit(".", 1)[1]
+    return "." + ext if ext.isalnum() and 1 <= len(ext) <= 4 else ""
+
+
+# Keep-alive session for those segment fetches, sized to the fan-out. Separate
+# from _http_probe so a preview and a video probe never queue behind each
+# other on the same connection pool.
+_http_preview = None
+_http_preview_lock = Lock()
+
+
+def _preview_http():
+    global _http_preview
+    with _http_preview_lock:
+        if _http_preview is None:
+            _http_preview = _tidaler_download.pooled_session(
+                pool_connections=_PREVIEW_SEG_WORKERS,
+                pool_maxsize=_PREVIEW_SEG_WORKERS,
+            )
+        return _http_preview
 
 
 # The trackpad back-gesture (horizontal scroll → navigate back) is a macOS-only
@@ -335,6 +420,7 @@ _TEMPLATE_TOKEN_GROUPS = ["Names", "Numbers", "Discs", "Dates", "Extras", "IDs &
 _SAMPLE_FOLDER_PATH = "Country/Bluegrass"
 _TEMPLATE_TOKENS = [
     ("artist_name", "Names", "Track artist(s), joined by your delimiter"),
+    ("artist_name_primary", "Names", "Primary credited artist only"),
     ("album_artist", "Names", "First album artist only"),
     ("album_artists", "Names", "All album artists"),
     ("track_title", "Names", "Track title"),
@@ -351,6 +437,9 @@ _TEMPLATE_TOKENS = [
     ("album_num_volumes", "Discs", "Number of discs"),
     ("album_year", "Dates", "Release year"),
     ("album_date", "Dates", "Full release date"),
+    ("video_year", "Dates", "Video release year (video paths)"),
+    ("video_date", "Dates", "Full video release date (video paths)"),
+    ("video_year_optional", "Dates", "“[Year] ” prefix, or nothing without a date (video paths)"),
     ("track_explicit", "Extras", "“ (Explicit)”, or nothing when clean"),
     ("album_explicit", "Extras", "Same, for the album"),
     ("track_quality", "Extras", "Audio quality tag"),
@@ -445,6 +534,10 @@ def _build_template_sample():
     vid.track_num = 1
     vid.volume_num = 1
     vid.album = alb
+    # A real date, so the live Settings preview renders the shipped default's
+    # "[Year] " prefix instead of silently dropping the one thing the video
+    # template is about (Video.release_date defaults to None).
+    vid.release_date = _dt.datetime(2026, 1, 15)
 
     return trk, alb, pl, mx, vid
 
@@ -456,9 +549,11 @@ _FIELD_LABELS = {
     "download_base_path": "Download folder",
     "quality_audio": "Audio quality",
     "quality_video": "Video quality",
-    "downloads_concurrent_max": "Concurrent downloads",
+    "downloads_concurrent_max": "Concurrent track downloads",
     "download_dolby_atmos": "Download Dolby Atmos",
     "confirm_category_download": "Confirm bulk downloads",
+    # Discography & editions (a source toggle like the disco_* prefs)
+    "video_download": "Music videos",
     # File organization
     "format_track": "Track path & name",
     "format_album": "Album path & name",
@@ -546,10 +641,30 @@ def _enum_options(key: str, members) -> list:
 # thousands of delegates at once.
 _LIBRARY_PAGE = 100
 
+# Page size for an artist's videos (see _all_artist_videos). The artist page
+# asks for one window of 50 to fill its VIDEOS shelf; a download pages through
+# the lot.
+_ARTIST_VIDEO_PAGE = 50
+
+# Group id prefix for the VIDEOS section's "download all" button. Namespaced
+# so its rollup state never collides with the artist discography button,
+# which is keyed by the bare artist id. Main.qml builds the same id for the
+# header button's mediaId.
+_VIDEOS_GROUP_PREFIX = "vids:"
+
 # The download folder Waves used to ship as a silent default. A blank path now
 # means "unset" (fresh installs), but existing users who never changed it still
 # carry this exact value; it triggers the one-time "choose a folder" nudge.
 _LEGACY_DEFAULT_DOWNLOAD_PATH = "~/download"
+# Video path templates as shipped in past releases; a stored value equal to
+# any of these is silently upgraded to the current dataclass default at
+# launch. Oldest first: the flat pre-v0.1.15 pool, then the brief per-artist
+# default that joined ALL credited artists into the folder name (one folder
+# per collab combination, replaced by {artist_name_primary}).
+_LEGACY_FORMAT_VIDEOS = (
+    "Videos/{artist_name} - {track_title}{track_explicit}",
+    "Videos/{artist_name}/{video_year_optional}{track_title}{track_explicit}",
+)
 
 # My Tidal sort: map the order keys QML sends to per-category tidalapi enums.
 # Direction is applied separately. Built only when the enums are importable;
@@ -1132,23 +1247,52 @@ def _link_tiles_of(payload: dict) -> list[tuple[str, str]]:
     ]
 
 
-def _all_playlist_items(playlist) -> list:
+def _all_playlist_items(playlist) -> tuple[list, bool]:
     """Every Track/Video in a playlist, paged past the endpoint's 100-item cap.
 
     items() (not tracks()) so VIDEO entries keep their type: a video playlist's
     rows must play/download as videos, not as their "Audio from video" shadow
     tracks. Loops until a short page, with a ceiling well above any real
-    playlist so a misbehaving endpoint cannot spin forever.
+    playlist so a misbehaving endpoint cannot spin forever. Returns
+    (items, complete): complete is False when the loop hit the ceiling, so a
+    caller never mistakes a truncated scan for the whole set (the partial-scan
+    rule, same as _artist_releases).
     """
     out: list = []
     off = 0
+    complete = False
     while off < 10000:
         page_items = playlist.items(limit=100, offset=off) or []
         out.extend(m for m in page_items if isinstance(m, Track | Video))
         if len(page_items) < 100:
+            complete = True
             break
         off += 100
-    return out
+    return out, complete
+
+
+def _all_artist_videos(artist) -> tuple[list, bool]:
+    """Every music video credited to an artist, paged past the endpoint's cap.
+
+    The artist page shows the first window and stops there, which is fine for
+    browsing; a discography download cannot, because a truncated scan would
+    report clean success over a set it never saw (the partial-scan rule). Same
+    shape as _all_playlist_items: loop until a short page, with a ceiling well
+    above any real videography so a misbehaving endpoint cannot spin forever,
+    and a (videos, complete) return so a ceiling hit is a visible refusal for
+    the caller instead of a silent truncation.
+    """
+    out: list = []
+    off = 0
+    complete = False
+    while off < 2000:
+        page = artist.get_videos(limit=_ARTIST_VIDEO_PAGE, offset=off) or []
+        out.extend(page)
+        if len(page) < _ARTIST_VIDEO_PAGE:
+            complete = True
+            break
+        off += _ARTIST_VIDEO_PAGE
+    return out, complete
 
 
 def _primary_artist_name(obj) -> str:
@@ -1654,6 +1798,7 @@ class WavesBridge(QObject):
     loginUrlReady = Signal(str)
     searchResults = Signal("QVariant")
     albumTracksLoaded = Signal(str, "QVariantList")
+    playlistTracksLoaded = Signal(str, "QVariantList")
     artistLoaded = Signal("QVariant")
     artistLoadFailed = Signal(str)  # id; a Back-restore clears its latch on this
     artistMetaLoaded = Signal(str, int)
@@ -1785,6 +1930,9 @@ class WavesBridge(QObject):
     # Internal: same batch marshalling for individual tracks (an artist's guest
     # appearances on other artists' releases).
     _tracksQueued = Signal("QVariantList")
+    # Internal: same batch marshalling for an artist's music videos (queued by
+    # 'Download discography' when the Music videos source is on).
+    _videosQueued = Signal("QVariantList")
     # Internal: a download was requested for an id whose live object had been
     # evicted from _objs (a new search clears every bucket). The object is
     # re-fetched by id on a worker, then this queued hop re-dispatches the
@@ -1811,6 +1959,11 @@ class WavesBridge(QObject):
         self.settings = Settings()
         if fresh_install:
             self._apply_first_run_defaults()
+        elif self._migrate_video_template():
+            # Bare save for the same reason as _apply_first_run_defaults:
+            # this runs before ffmpeg is resolved, so there are no transient
+            # injections for _save_settings to undo yet.
+            self.settings.save()
         # Dev timing/diagnostics log lands next to the app's settings file so
         # it's easy to find; see tidaler.waves_ui.devlog (WAVES_DEBUG to toggle).
         log_path = devlog.init(log_dir=os.path.dirname(self.settings.file_path))
@@ -1844,7 +1997,17 @@ class WavesBridge(QObject):
         self._scan_pool = QtCore.QThreadPool()
         self._scan_pool.setMaxThreadCount(1)
         self.dl_pool = QtCore.QThreadPool()
-        self.dl_pool.setMaxThreadCount(max(2, int(self.settings.data.downloads_concurrent_max or 3)))
+        # ONE queue item at a time, strictly in the order they were queued.
+        # This pool used to run downloads_concurrent_max items side by side,
+        # which read as the queue jumping around: a 21-track album (whose
+        # tracks also carry the 3-5s anti-hammer delay) ground along while
+        # single tracks queued after it zipped past, and every concurrent item
+        # fought the album for the shared 10-connection HTTP pool (livetest
+        # report). Parallelism lives INSIDE a collection instead: the engine's
+        # track executor still fans out downloads_concurrent_max tracks, and a
+        # lone track saturates the socket pool by itself, so serial items cost
+        # little throughput and the queue keeps its promise of order.
+        self.dl_pool.setMaxThreadCount(1)
         # Let the verbose perf sampler report saturation per pool by name.
         diagnostics.register_pool("ui", self.threadpool)
         diagnostics.register_pool("scan", self._scan_pool)
@@ -2035,6 +2198,12 @@ class WavesBridge(QObject):
         self._tree_warm_inflight = False
         self._folderTreeWarmed.connect(self._on_folder_tree_warmed)
         self._queue: list[dict] = []
+        # qid -> row dict, mirroring _queue. _queue_item() is on the per-tick
+        # progress path (via _report_pct) and a discography with videos can
+        # hold ~2000 rows; a linear scan there is GUI-thread work per tick.
+        # Kept in step under _queue_lock: append sites add, rebuild sites call
+        # _reindex_queue().
+        self._queue_index: dict[int, dict] = {}
         self._queue_seq = 0
         self._paused = False
         # Downloads deferred by a gate dialog (default-folder nudge, FFmpeg
@@ -2136,8 +2305,10 @@ class WavesBridge(QObject):
         # thread) are enqueued together on the GUI thread.
         self._albumsQueued.connect(self._enqueue_albums)
         self._tracksQueued.connect(self._enqueue_tracks)
+        self._videosQueued.connect(self._enqueue_videos)
         self._waves_prefs_path = os.path.join(os.path.dirname(self.settings.file_path), "waves.json")
         self._waves_prefs = self._load_waves_prefs()
+        self._migrate_video_flag()
         # Latched by factoryReset: once the config dir is being wiped, every
         # persistence path below must stay silent so nothing (a debounced
         # window-geometry save, a page-cache snapshot) re-creates the files
@@ -2180,8 +2351,23 @@ class WavesBridge(QObject):
           hijacks them; the gesture path always returns False so scrolling
           is never affected. (NativeGesture events only fire on macOS.) The
           swipe stays back-only, there is no forward swipe gesture.
+
+        It also swallows the window's activate/deactivate events (see below),
+        which is why it must stay installed on the application.
         """
         try:
+            if event.type() in (QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate) and obj.isWindowType():
+                # Swallow the activation-change event before QQuickWindow
+                # forwards it item by item: Qt walks the ENTIRE scene on every
+                # app switch (its active/inactive palette pass), and through
+                # PySide's notify wrapper that walk blocks the GUI thread for
+                # ~0.3-0.5s on a scene this size (sampled live), freezing the
+                # water and every other animation at once, both on losing and
+                # gaining focus. Nothing in Waves styles active vs inactive,
+                # so the walk buys nothing. Window.active bindings and focus
+                # handling are unaffected: they ride the QWindow signal and
+                # the separate focus events, not this event.
+                return True
             if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
                 # DblClick included: Qt reports a rapid second press as a
                 # double-click, which would otherwise drop every second
@@ -3051,6 +3237,61 @@ class WavesBridge(QObject):
         self.threadpool.start(Worker(work))
 
     @Slot(str)
+    def loadPlaylistTracks(self, playlist_id: str) -> None:
+        """Row list for a search playlist's inline expand (PlaylistBlock),
+        the playlist counterpart of loadAlbumTracks.
+
+        No session cache on purpose: unlike a released album a playlist
+        mutates, and the always-on freshness rule forbids caches only a
+        restart would refresh. Every expand refetches; the QML keeps the
+        rows for the life of the search page only. Video entries keep their
+        kind so the QML routes their preview and download as videos."""
+        pl = self._objs["playlist"].get(playlist_id)
+
+        def work() -> None:
+            t0 = devlog.clock()
+            obj = pl
+            if obj is None:
+                # Same _objs-eviction fallback as loadAlbumTracks: a new
+                # search clears the buckets while expanded rows outlive it.
+                try:
+                    obj = self.tidal.session.playlist(playlist_id)
+                    self._remember("playlist", playlist_id, obj)
+                except Exception:
+                    logger.exception("Could not re-fetch playlist %s for its tracks", playlist_id)
+                    self.playlistTracksLoaded.emit(playlist_id, [])
+                    return
+            try:
+                # complete=False (ceiling hit) is fine for BROWSING: showing
+                # the first 10000 rows beats showing none. Downloads are the
+                # surface that must refuse a partial set.
+                items, _complete = _all_playlist_items(obj)
+            except Exception:
+                logger.exception("Could not load playlist tracks")
+                items = []
+            out = []
+            for i, item in enumerate(items, start=1):
+                key = str(getattr(item, "id", id(item)))
+                is_video = isinstance(item, Video)
+                self._remember("video" if is_video else "track", key, item)
+                out.append(
+                    {
+                        "id": key,
+                        "kind": "video" if is_video else "track",
+                        "num": i,
+                        "title": name_builder_title(item),
+                        "artist": name_builder_artist(item),
+                        "duration": _fmt_duration(getattr(item, "duration", 0)),
+                        "popularity": _popularity(item),
+                        "explicit": bool(getattr(item, "explicit", False)),
+                    }
+                )
+            self.playlistTracksLoaded.emit(playlist_id, out)
+            devlog.done("playlist", f"tracks id={playlist_id}", devlog.clock() - t0, n=len(out))
+
+        self.threadpool.start(Worker(work))
+
+    @Slot(str)
     def loadArtist(self, artist_id: str) -> None:
         """Build a rich artist page: bio, albums, EPs/singles, top tracks.
 
@@ -3114,7 +3355,7 @@ class WavesBridge(QObject):
                 tops = []
                 complete = False
             try:
-                vids = artist.get_videos(limit=50)
+                vids = artist.get_videos(limit=_ARTIST_VIDEO_PAGE)
             except Exception:
                 vids = []
                 complete = False
@@ -4457,7 +4698,9 @@ class WavesBridge(QObject):
                     tracks = [t for t in raw if isinstance(t, Track | Video)]
                     subtitle = str(getattr(obj, "sub_title", "") or "Mix")
                 elif kind == "playlist":
-                    tracks = _all_playlist_items(obj)
+                    # Browsing surface: a ceiling-truncated page is still
+                    # worth rendering (see loadPlaylistTracks).
+                    tracks, _complete = _all_playlist_items(obj)
                 else:
                     tracks = list(obj.tracks(limit=200) or [])
                 if kind == "playlist":
@@ -4829,6 +5072,18 @@ class WavesBridge(QObject):
             self._queue_emit_suspended = False
         self._emit_queue()
 
+    def _enqueue_videos(self, keys) -> None:
+        """Batch counterpart of _enqueue_albums for an artist's music videos
+        (queued by a discography download when the Music videos source is on).
+        Same GUI-thread affinity and coalesced queueChanged rationale."""
+        self._queue_emit_suspended = True
+        try:
+            for key in keys:
+                self.downloadVideo(str(key))
+        finally:
+            self._queue_emit_suspended = False
+        self._emit_queue()
+
     def _enqueue(
         self,
         name: str,
@@ -4842,30 +5097,35 @@ class WavesBridge(QObject):
     ) -> int:
         self._queue_seq += 1
         qid = self._queue_seq
+        row = {
+            "qid": qid,
+            "name": name,
+            "type": type_media,
+            "status": "queued",
+            "progress": 0.0,
+            "media_id": media_id,
+            "template": template,
+            "collection": collection,
+            # Shown in the queue row ("artist · done/total tracks"); the QML
+            # derives the done count from progress and the track total.
+            "artist": artist,
+            "tracks": tracks,
+            # Cover/thumb URL for the queue card (empty when unavailable).
+            "art": art,
+        }
         with self._queue_lock:
-            self._queue.append(
-                {
-                    "qid": qid,
-                    "name": name,
-                    "type": type_media,
-                    "status": "queued",
-                    "progress": 0.0,
-                    "media_id": media_id,
-                    "template": template,
-                    "collection": collection,
-                    # Shown in the queue row ("artist · done/total tracks"); the QML
-                    # derives the done count from progress and the track total.
-                    "artist": artist,
-                    "tracks": tracks,
-                    # Cover/thumb URL for the queue card (empty when unavailable).
-                    "art": art,
-                }
-            )
+            self._queue.append(row)
+            self._queue_index[qid] = row
         self._emit_queue()
         return qid
 
+    def _reindex_queue(self) -> None:
+        """Rebuild the qid index after a wholesale _queue rebuild. Caller must
+        hold _queue_lock."""
+        self._queue_index = {it["qid"]: it for it in self._queue}
+
     def _queue_item(self, qid: int) -> dict | None:
-        return next((it for it in self._queue if it["qid"] == qid), None)
+        return self._queue_index.get(qid)
 
     def _set_queue_status(self, qid: int, status: str) -> None:
         item = self._queue_item(qid)
@@ -4897,13 +5157,20 @@ class WavesBridge(QObject):
         # so an ungated broadcast fires dozens of GUI-thread rebinds in a burst.
         # Gate it to a 0.5% min delta or a ~10 Hz ceiling per media id, but never
         # swallow the terminal 100% (a bar must be able to complete). The queue
-        # row and artist-group updates below stay every-tick: the first is
-        # already targeted (queueItemProgress) and keeps item["progress"] fresh
-        # for the monotonic clamp above.
-        if self._should_broadcast_pct(media_id, pct):
+        # row update below stays every-tick: it is already targeted
+        # (queueItemProgress) and keeps item["progress"] fresh for the
+        # monotonic clamp above. The group rollup rides the SAME gate as the
+        # broadcast: it re-sums a group's whole key set and emits two signals,
+        # and a discography group can hold ~2000 keys, so an ungated call is
+        # O(group) GUI-thread work per segment tick. Terminal done/failed
+        # bumps come from the download epilogue, not this path, so completion
+        # accounting never depends on the gate.
+        broadcast = self._should_broadcast_pct(media_id, pct)
+        if broadcast:
             self.downloadProgress.emit(media_id, pct)
         self._set_queue_progress(qid, pct)
-        self._bump_download_groups(media_id, pct, None)
+        if broadcast:
+            self._bump_download_groups(media_id, pct, None)
 
     def _should_broadcast_pct(self, media_id: str, pct: float) -> bool:
         """Rate-gate the downloadProgress broadcast for one media id. GUI-thread
@@ -5235,6 +5502,40 @@ class WavesBridge(QObject):
 
     # ----- Waves-only preferences (kept out of tidaler's Settings) -------
 
+    def _migrate_video_template(self) -> bool:
+        """Follow the video template's shipped default forward for users who
+        never customized it.
+
+        The default changed after v0.1.15 (flat Videos/ pool to a per-artist
+        folder with a bracketed year prefix, then all-artists folder names to
+        primary-artist only). Only a stored value that IS one of the old
+        defaults follows along; a template the user customized is never
+        touched. Returns True when a change was made and needs persisting."""
+        if self.settings.data.format_video not in _LEGACY_FORMAT_VIDEOS:
+            return False
+        self.settings.data.format_video = _shipped_default("format_video")
+        return True
+
+    def _migrate_video_flag(self) -> None:
+        """One-time force-off for video_download (stamped in waves.json).
+
+        The key predates its wiring: until it became a discography source it
+        was an inert switch (upstream default True, shown but connected to
+        nothing), so an existing install's stored value is arbitrary, and
+        honoring a leftover True would queue whole videographies the first
+        time "Download discography" runs after the upgrade. Forcing it off
+        once changes nothing observable for those users; opting in is a
+        conscious flip in Settings > Discography & editions. Runs from
+        __init__ right after the prefs load (the stamp needs them) and still
+        before ffmpeg is resolved, so the bare save is safe."""
+        if self._waves_prefs.get("video_flag_migrated"):
+            return
+        if bool(getattr(self.settings.data, "video_download", False)):
+            self.settings.data.video_download = False
+            self.settings.save()
+        self._waves_prefs["video_flag_migrated"] = True
+        self._save_waves_prefs()
+
     def _apply_first_run_defaults(self) -> None:
         """Waves' opinionated defaults for a brand-new install, layered over
         tidaler's stock dataclass defaults and persisted. Only called when no
@@ -5259,6 +5560,11 @@ class WavesBridge(QObject):
             "disco_eps": True,
             "disco_featured": True,
             "disco_appears_on": False,
+            # Stamp for the one-time video_download force-off in __init__ (the
+            # toggle was inert before it became a discography source, so a
+            # stored True from that era must not be honored). Housekeeping,
+            # not in settingsSchema.
+            "video_flag_migrated": False,
             "clean_album_artist": True,
             # Updates: opt-in, off by default (preserves the no-phone-home-by-
             # default promise). update_last_check is housekeeping state, not a
@@ -6041,6 +6347,7 @@ class WavesBridge(QObject):
         self._job_tracks.pop(qid, None)
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["qid"] != qid]
+            self._reindex_queue()
         self._emit_queue()
         if verdict in ("ok", "healed"):
             # Our own remount already brought the share back: replay now.
@@ -6392,6 +6699,7 @@ class WavesBridge(QObject):
                 self._job_tracks.pop(qid, None)
                 with self._queue_lock:
                     self._queue = [q for q in self._queue if q["qid"] != qid]
+                    self._reindex_queue()
                 self._emit_queue()
                 return
             # The gate may have auto-healed the folder onto a remounted
@@ -6465,7 +6773,10 @@ class WavesBridge(QObject):
                     # the recovery watch (retry fires when it comes back).
                     pass
                 else:
-                    logger.exception("Download failed for %s", name)
+                    # content(): user-chosen media name; ERROR replays the
+                    # breadcrumb ring to disk, so it must honor the "also hide
+                    # titles and searches" export switch.
+                    logger.exception("Download failed for %s", diagnostics.content(name))
                     self.downloadState.emit(media_id, "failed")
                     self._set_queue_status(qid, "failed")
                     self._bump_download_groups(media_id, None, "failed")
@@ -6637,9 +6948,11 @@ class WavesBridge(QObject):
         the player scrubs freely. ffmpeg (unlike QMediaPlayer) accepts a protocol
         whitelist, so it reads the ``https`` segments from a local ``.m3u8``.
 
-        ``whole`` remuxes the entire track (the artist scrubber wants the full
-        song); otherwise only the first ~35s, a quick track taste. At LOW/AAC a
-        whole track is a couple of MB, so the remux is ~1s.
+        ``whole`` remuxes the entire track (every production caller passes
+        True: the scrubber, and the gapless promote where the preview becomes
+        the player, both need the full stream); ``whole=False`` truncates to a
+        ~30s taste (_PREVIEW_TASTE_SECONDS) and is lab-only today. At LOW/AAC
+        a whole track is a couple of MB, so the remux is ~1s.
 
         The stream fetch holds ``stream_lock`` and restores the session's
         configured quality in ``finally`` (``restore_normal_session`` early-returns
@@ -6658,7 +6971,7 @@ class WavesBridge(QObject):
         ffmpeg = self._preview_ffmpeg_bin()
         if not ffmpeg:
             raise RuntimeError("preview: ffmpeg unavailable")  # noqa: TRY003
-        with self.tidal.stream_lock:
+        with devlog.span("preview", "stream resolve"), self.tidal.stream_lock:
             try:
                 if not self.tidal.restore_normal_session():
                     raise RuntimeError("preview: could not normalise session")  # noqa: TRY003
@@ -6677,7 +6990,8 @@ class WavesBridge(QObject):
                 # Canonical resting quality, NOT restore_normal_session(), which
                 # leaves quality untouched in normal mode (config.py).
                 self.tidal.session.audio_quality = Quality(self.settings.data.quality_audio)
-        out_path = self._remux_preview(ffmpeg, src, hls, whole)
+        with devlog.span("preview", "fetch and remux", whole=whole):
+            out_path = self._remux_preview(ffmpeg, src, hls, whole)
         self._remember_preview_clip(clip_key, out_path)
         return pathlib.Path(out_path).as_uri()
 
@@ -6696,33 +7010,171 @@ class WavesBridge(QObject):
         self._resolve_ffmpeg()  # points settings at the managed copy if present
         return self.settings.data.path_binary_ffmpeg or shutil.which("ffmpeg")
 
+    def _localise_hls(self, hls: str, whole: bool, work_dir: str) -> str | None:
+        """Fetch an HLS preview's segments in parallel into ``work_dir`` and
+        write a playlist pointing at the local copies; return its path.
+
+        Returns None when the playlist is not shaped for this (unparsable,
+        relative segment URIs, an encryption key, or a failed fetch), and the
+        caller then hands the original playlist to ffmpeg, which fetches the
+        https segments itself. That fallback is correct but serial, see
+        ``_PREVIEW_SEG_WORKERS`` for why serial is the slow part.
+
+        A taste clip (``whole=False``) only fetches the segments it will
+        actually play; production previews run whole (see _preview_source), so
+        that truncation branch is lab-only today.
+        """
+        import m3u8
+
+        try:
+            pl = m3u8.loads(hls)
+            segments = list(pl.segments)
+        except Exception:
+            _preview_log.debug("preview: unparsable HLS playlist", exc_info=True)
+            return None
+        if not segments:
+            return None
+        if any(getattr(seg.key, "method", None) not in (None, "NONE") for seg in segments):
+            return None  # keyed segments belong to the download+decrypt path
+        if not whole:
+            keep, total = 0, 0.0
+            for seg in segments:
+                keep += 1
+                total += float(seg.duration or 0)
+                if total >= _PREVIEW_TASTE_SECONDS:
+                    break
+            segments = segments[:keep]
+        # An fMP4 rendition carries its init segment in EXT-X-MAP; it has to
+        # come along or the local playlist is undecodable.
+        init_uri = str(getattr(getattr(segments[0], "init_section", None), "uri", "") or "")
+        remote = [str(seg.uri or "") for seg in segments]
+        if init_uri:
+            remote.append(init_uri)
+        if not all(u.startswith(("http://", "https://")) for u in remote):
+            # Relative URIs resolve against the playlist's own URL, which a
+            # bare manifest string does not carry.
+            return None
+        # The local copies must keep the CDN's file extension. ffmpeg's HLS
+        # demuxer hard-blocks segments whose extension it does not recognise
+        # (and since 8.x also probes that the extension matches the content),
+        # so an invented or missing extension kills the whole remux. The
+        # remote name's extension already passed those same checks when
+        # ffmpeg read it over https, so it is correct locally too; a URL
+        # without a usable one falls back to the serial path.
+        exts = [_url_media_ext(u) for u in remote]
+        if not all(exts):
+            return None
+
+        local = [os.path.join(work_dir, f"seg{i:05d}{exts[i]}") for i in range(len(remote))]
+
+        # Set when the burst is given up on, so a fetch already past the queue
+        # does not write into a work_dir the caller is about to remove.
+        abandoned = Event()
+
+        def fetch(i: int) -> None:
+            global _preview_seg_busy
+            if abandoned.is_set():
+                return
+            with _preview_seg_lock:
+                _preview_seg_busy += 1
+            try:
+                with _preview_http().get(remote[i], timeout=20) as r:
+                    r.raise_for_status()
+                    data = r.content
+                if abandoned.is_set():
+                    return
+                with open(local[i], "wb") as fh:
+                    fh.write(data)
+            finally:
+                with _preview_seg_lock:
+                    _preview_seg_busy -= 1
+
+        _register_preview_gauge()
+        pool = ThreadPoolExecutor(max_workers=_PREVIEW_SEG_WORKERS)
+        try:
+            for fut in as_completed([pool.submit(fetch, i) for i in range(len(remote))]):
+                fut.result()
+        except Exception:
+            _preview_log.debug("preview: parallel segment fetch failed", exc_info=True)
+            abandoned.set()
+            return None
+        finally:
+            # cancel_futures, and no waiting: one failed segment makes every
+            # queued one pointless, and a plain shutdown would run the whole
+            # tail (20s timeout each) before the serial ffmpeg fallback could
+            # even start, holding the preview for minutes.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        target = max(1, int(max((float(s.duration or 0) for s in segments), default=1)) + 1)
+        lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD"]
+        lines += [f"#EXT-X-TARGETDURATION:{target:d}", "#EXT-X-MEDIA-SEQUENCE:0"]
+        if init_uri:
+            lines.append(f'#EXT-X-MAP:URI="{local[-1]}"')
+        # The init segment is the extra tail entry in `local`, so zip stops at
+        # the media segments on its own; strict= would be wrong here.
+        for seg, path in zip(segments, local):  # noqa: B905
+            lines.append(f"#EXTINF:{float(seg.duration or 0):.3f},")
+            lines.append(path)
+        lines.append("#EXT-X-ENDLIST")
+        m3u_path = os.path.join(work_dir, "preview.m3u8")
+        with open(m3u_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        devlog.event("preview", "segments fetched", count=len(remote))
+        return m3u_path
+
     def _remux_preview(self, ffmpeg: str, src_url: str | None, hls: str | None, whole: bool) -> str:
         """Fetch + remux a preview into a faststart local ``.m4a``; return its path.
 
         The produced clip is kept (see ``_remember_preview_clip``) so replaying
-        a recent preview is free. ``-c copy`` keeps it fast (no re-encode); the
-        HLS input needs the protocol whitelist so ffmpeg may open the https
-        segments.
+        a recent preview is free. ``-c copy`` keeps it fast (no re-encode).
+        HLS segments are fetched in parallel up front (``_localise_hls``) so
+        ffmpeg reads them off disk; when that is not possible ffmpeg fetches
+        them itself over https, which needs the protocol whitelist.
         """
         m3u_path = None
+        tmp_m3u = None  # a standalone temp (fallback path), removed separately
+        work_dir = None
         if hls is not None:
-            fd, m3u_path = tempfile.mkstemp(prefix="waves_preview_", suffix=".m3u8")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(hls)
+            work_dir = tempfile.mkdtemp(prefix="waves_preview_")
+            m3u_path = self._localise_hls(hls, whole, work_dir)
+            if m3u_path is None:
+                fd, tmp_m3u = tempfile.mkstemp(prefix="waves_preview_", suffix=".m3u8")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(hls)
+                m3u_path = tmp_m3u
         fd_out, out_path = tempfile.mkstemp(prefix="waves_preview_", suffix=".m4a")
         os.close(fd_out)
         cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y"]
         if m3u_path is not None:
-            cmd += ["-protocol_whitelist", "file,crypto,data,https,tls,tcp", "-i", m3u_path]
+            # Local segments need no network protocols at all; the fallback
+            # playlist still points at https.
+            whitelist = "file,crypto,data" if tmp_m3u is None else "file,crypto,data,https,tls,tcp"
+            cmd += ["-protocol_whitelist", whitelist, "-i", m3u_path]
         else:
             cmd += ["-i", src_url]
         if not whole:
-            cmd += ["-t", "30"]  # a quick 30s taste (the clip length == what plays)
+            cmd += ["-t", str(_PREVIEW_TASTE_SECONDS)]  # the clip length == what plays
         cmd += ["-c", "copy", "-movflags", "+faststart", out_path]
         try:
             # Fixed ffmpeg argument list (no shell, no user-supplied flags); the
             # only variable inputs are our own temp paths and a TIDAL CDN URL.
             subprocess.run(cmd, check=True, capture_output=True, timeout=90, creationflags=proc.NO_WINDOW)  # noqa: S603
+        except subprocess.CalledProcessError as e:
+            # The exit status alone diagnoses nothing; keep ffmpeg's last few
+            # stderr lines, with every URL masked (CDN URLs carry auth in the
+            # query string and must never reach a log).
+            tail = (e.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-4:]
+            masked = re.sub(r"https?://\S+", "<url>", " | ".join(tail))
+            # ffmpeg names the file it choked on, and the temp directory it
+            # sits in runs through the user's home on Windows. The filename is
+            # the useful half; the directory is not ours to log.
+            masked = masked.replace(tempfile.gettempdir(), "<tmp>")
+            # error, not exception: the caller logs the traceback; this line
+            # exists only to carry the stderr detail the traceback lacks.
+            _preview_log.error("preview remux failed (exit %s): %s", e.returncode, masked)
+            with contextlib.suppress(OSError):
+                os.remove(out_path)
+            raise
         except BaseException:
             # The clip never materialized (ffmpeg failure or timeout): remove
             # the just-created output temp. It is not yet in _preview_clips,
@@ -6733,9 +7185,11 @@ class WavesBridge(QObject):
                 os.remove(out_path)
             raise
         finally:
-            if m3u_path is not None:
+            if tmp_m3u is not None:
                 with contextlib.suppress(OSError):
-                    os.remove(m3u_path)
+                    os.remove(tmp_m3u)
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
         return out_path
 
     def _probe_video_mbps(self, seg_url: str) -> float:
@@ -6757,7 +7211,7 @@ class WavesBridge(QObject):
             dt = time.monotonic() - t0
             return (n * 8 / 1e6) / dt if dt > 0 and n > 0 else -1
         except Exception:
-            logger.debug("video bandwidth probe failed", exc_info=True)
+            _video_log.debug("video bandwidth probe failed", exc_info=True)
             return -1
 
     def _pick_video_stream(self, master_url: str) -> tuple[str, int, list[int]]:
@@ -6802,8 +7256,8 @@ class WavesBridge(QObject):
             # (res 0 shows AUTO, picks re-resolve into the same fallback) and
             # Qt plays whichever variant its ffmpeg backend prefers. It hid at
             # DEBUG for months while packaged builds failed on every video.
-            logger.warning("video variant selection failed (%s); using master playlist", type(exc).__name__)
-            logger.debug("video variant selection failure detail", exc_info=True)
+            _video_log.warning("video variant selection failed (%s); using master playlist", type(exc).__name__)
+            _video_log.debug("video variant selection failure detail", exc_info=True)
             return master_url, 0, []
         return url, height, heights
 
@@ -6844,7 +7298,7 @@ class WavesBridge(QObject):
         try:
             self.settings.data.quality_video = QualityVideo(str(int(height)))
         except Exception:
-            logger.exception("Bad video quality %r", height)
+            _video_log.exception("Bad video quality %r", height)
             return
         self._video_user_quality = True  # explicit choice beats the bandwidth auto-cap
         self._save_settings()
@@ -6876,7 +7330,7 @@ class WavesBridge(QObject):
                         self._remember("track", tid, tr)
                         return album_id, tid
         except Exception:
-            logger.debug("video album fallback failed", exc_info=True)
+            _video_log.debug("video album fallback failed", exc_info=True)
         return "", ""
 
     @Slot(str)
@@ -6927,7 +7381,7 @@ class WavesBridge(QObject):
                     payload["heights"] = heights
                     payload["error"] = False
             except Exception:
-                logger.exception("Could not resolve video %s", video_id)
+                _video_log.exception("Could not resolve video %s", video_id)
             self.videoReady.emit(payload)
 
         self.threadpool.start(Worker(work))
@@ -6978,10 +7432,32 @@ class WavesBridge(QObject):
                     payload["error"] = False
                     devlog.event("video", f"peek {video_id}")
             except Exception:
-                logger.exception("Could not resolve video peek %s", video_id)
+                _video_log.exception("Could not resolve video peek %s", video_id)
             self.videoPeekReady.emit(payload)
 
         self.threadpool.start(Worker(work))
+
+    def _emit_preview_meta(self, kind: str, ident: str, track, artist_id: str | None = None) -> None:
+        """Publish the 'now previewing' label for ``track``, addressed to the
+        (kind, ident) the preview is keyed by.
+
+        Always emitted *before* the source resolve: everything here comes off
+        the track object we already hold, while the resolve takes seconds, and
+        an empty card for the whole wait made the load feel far longer than it
+        is. ``artist_id`` overrides the credit link for an artist preview, whose
+        card belongs to the artist rather than the track's primary credit.
+        """
+        self.previewMeta.emit(
+            kind,
+            ident,
+            name_builder_title(track),
+            name_builder_artist(track),
+            _image(track, 160),
+            artist_id if artist_id is not None else _artist_id(track),
+            str(getattr(getattr(track, "album", None), "id", "") or ""),
+            str(getattr(track, "id", "") or ""),
+            _artists_list(track),
+        )
 
     @Slot(str)
     def previewTrack(self, track_id: str) -> None:
@@ -6997,21 +7473,11 @@ class WavesBridge(QObject):
             # Worker.run() does not catch, guarantee a terminal state so the
             # button can never stick spinning.
             try:
+                self._emit_preview_meta("track", track_id, track)
                 url = self._preview_source(track, whole=True)  # full track, seekable
-                self.previewMeta.emit(
-                    "track",
-                    track_id,
-                    name_builder_title(track),
-                    name_builder_artist(track),
-                    _image(track, 160),
-                    _artist_id(track),
-                    str(getattr(getattr(track, "album", None), "id", "") or ""),
-                    track_id,
-                    _artists_list(track),
-                )
                 self.previewReady.emit("track", track_id, url)
             except Exception:
-                logger.exception("Preview failed for track %s", track_id)
+                _preview_log.exception("Preview failed for track %s", track_id)
                 self.previewState.emit("track", track_id, "error")
 
         self.threadpool.start(Worker(work))
@@ -7040,21 +7506,11 @@ class WavesBridge(QObject):
                     return
                 top = tops[0]
                 self._remember("track", str(getattr(top, "id", id(top))), top)
+                self._emit_preview_meta("artist", artist_id, top, artist_id=artist_id)
                 url = self._preview_source(top, whole=True)  # full track for the scrubber
-                self.previewMeta.emit(
-                    "artist",
-                    artist_id,
-                    name_builder_title(top),
-                    name_builder_artist(top),
-                    _image(top, 160),
-                    artist_id,
-                    str(getattr(getattr(top, "album", None), "id", "") or ""),
-                    str(getattr(top, "id", "") or ""),
-                    _artists_list(top),
-                )
                 self.previewReady.emit("artist", artist_id, url)
             except Exception:
-                logger.exception("Preview failed for artist %s", artist_id)
+                _preview_log.exception("Preview failed for artist %s", artist_id)
                 self.previewState.emit("artist", artist_id, "error")
 
         self.threadpool.start(Worker(work))
@@ -7093,21 +7549,11 @@ class WavesBridge(QObject):
                     return
                 pick = random.choice(tracks)  # noqa: S311, a taste, not crypto
                 self._remember("track", str(getattr(pick, "id", id(pick))), pick)
+                self._emit_preview_meta(kind, media_id, pick)
                 url = self._preview_source(pick, whole=True)  # full track for the scrubber
-                self.previewMeta.emit(
-                    kind,
-                    media_id,
-                    name_builder_title(pick),
-                    name_builder_artist(pick),
-                    _image(pick, 160),
-                    _artist_id(pick),
-                    str(getattr(getattr(pick, "album", None), "id", "") or ""),
-                    str(getattr(pick, "id", "") or ""),
-                    _artists_list(pick),
-                )
                 self.previewReady.emit(kind, media_id, url)
             except Exception:
-                logger.exception("Preview failed for %s %s", kind, media_id)
+                _preview_log.exception("Preview failed for %s %s", kind, media_id)
                 self.previewState.emit(kind, media_id, "error")
 
         self.threadpool.start(Worker(work))
@@ -7154,11 +7600,18 @@ class WavesBridge(QObject):
                 # new user never asked for.
                 self._refetch_inflight.discard(key)
                 self.downloadState.emit(media_id, "")
+                self._bump_download_groups(media_id, None, "failed")
                 return
             if obj is None:
                 self._refetch_inflight.discard(key)
                 self.downloadState.emit(media_id, "failed")
                 self._set_status("That item is no longer available")
+                # A group member that never re-materialised must still be
+                # accounted for: without this bump a discography whose video
+                # or track was evicted from _objs and then failed its refetch
+                # leaves the artist button "running" forever (done can never
+                # reach keys).
+                self._bump_download_groups(media_id, None, "failed")
                 return
             self._remember(bucket, media_id, obj)
             self._mediaRefetched.emit(bucket, media_id)
@@ -7754,7 +8207,36 @@ class WavesBridge(QObject):
                     self._remember("track", tkey, t)
                     track_keys.append(tkey)
                 devlog.event("guest_tracks", releases=len(guest), tracks=len(track_keys))
-            if not keys and not track_keys:
+            # Music videos ride along when their source toggle (Settings >
+            # Discography & editions) is on; manual per-video downloads never
+            # consult it.
+            video_keys: list[str] = []
+            if bool(getattr(self.settings.data, "video_download", False)):
+                self._set_status("Scanning music videos…")
+                try:
+                    vids, vids_complete = _all_artist_videos(artist)
+                except Exception:
+                    # Same partial-scan rule as _artist_releases: a failed
+                    # video fetch would silently drop the videos from a
+                    # download that then reports clean success.
+                    _video_log.exception("Could not load the artist's music videos")
+                    self.downloadState.emit(artist_id, "")
+                    self._set_status("Could not load the full discography, try again")
+                    return
+                if not vids_complete:
+                    # Ceiling hit: the scan saw only part of the videography,
+                    # and queueing it would report clean success over a set it
+                    # never saw. Refuse, same as the fetch-failure path.
+                    _video_log.warning("Artist videography exceeded the scan ceiling, refusing a partial discography")
+                    self.downloadState.emit(artist_id, "")
+                    self._set_status("Could not load the full discography, try again")
+                    return
+                for v in self._dedup_videos(vids or []):
+                    vkey = str(getattr(v, "id", id(v)))
+                    self._remember("video", vkey, v)
+                    video_keys.append(vkey)
+                devlog.event("discography_videos", videos=len(video_keys))
+            if not keys and not track_keys and not video_keys:
                 self.downloadState.emit(artist_id, "")
                 self._set_status("No albums to download")
                 return
@@ -7764,7 +8246,7 @@ class WavesBridge(QObject):
             # members finish.
             with self._artist_lock:
                 self._artist_groups[artist_id] = {
-                    "keys": set(keys) | set(track_keys),
+                    "keys": set(keys) | set(track_keys) | set(video_keys),
                     "done": set(),
                     "failed": set(),
                     "prog": {},
@@ -7781,15 +8263,97 @@ class WavesBridge(QObject):
                 self._albumsQueued.emit(keys)
             if track_keys:
                 self._tracksQueued.emit(track_keys)
+            if video_keys:
+                self._videosQueued.emit(video_keys)
             parts = []
             if keys:
                 parts.append(f"{len(keys)} albums")
             if track_keys:
                 parts.append(f"{len(track_keys)} guest tracks")
+            if video_keys:
+                parts.append(f"{len(video_keys)} videos")
             self._set_status("Downloading " + " + ".join(parts) + "…")
 
         # Serialised scan pool: queueing several artists scans them one at a time
         # rather than racing on the shared tidalapi session and caches.
+        self._scan_pool.start(Worker(work))
+
+    @Slot(str)
+    def downloadArtistVideos(self, artist_id: str) -> None:
+        """Queue every music video of an artist, and only the videos.
+
+        The VIDEOS section header's own download-all. Deliberately independent
+        of the "Music videos" discography source toggle: clicking a
+        videos-specific button already IS the explicit intent that toggle
+        exists to capture, so it works with the toggle off. State rides the
+        shared artist-group rollup under a namespaced id
+        (:data:`_VIDEOS_GROUP_PREFIX`), so the header button gets the same
+        queued / running / done / failed lifecycle as the discography button
+        without ever colliding with it."""
+        if self._dl is None:
+            return
+        gid = _VIDEOS_GROUP_PREFIX + artist_id
+        gate = self._download_gate()
+        if gate == "block":
+            return
+        if gate == "nudge":
+            self._stash_pending_download(gid, lambda: self.downloadArtistVideos(artist_id))
+            return
+        if self._ffmpeg_gate_holds(gid, lambda: self.downloadArtistVideos(artist_id)):
+            return
+        self._set_status("Loading the artist's videos…")
+        self.downloadProgress.emit(gid, 0.0)
+        self.downloadState.emit(gid, "running")
+
+        def work() -> None:
+            # Same worker-side ordering as downloadArtist, for the same
+            # reasons: the reachability probe and the artist resolve can both
+            # cost seconds, so neither may run in the slot body.
+            if not self._gate_reachability(lambda: self.downloadArtistVideos(artist_id), gid):
+                self.downloadState.emit(gid, "")
+                return
+            artist = self._get_artist(artist_id)
+            if artist is None:
+                self.downloadState.emit(gid, "")
+                self._set_status("Could not load that artist")
+                return
+            try:
+                vids, vids_complete = _all_artist_videos(artist)
+            except Exception:
+                _video_log.exception("Could not load the artist's music videos")
+                self.downloadState.emit(gid, "")
+                self._set_status("Could not load the artist's videos, try again")
+                return
+            if not vids_complete:
+                # Partial-scan rule: a ceiling-hit scan saw only part of the
+                # videography, and queueing it would report clean success over
+                # a set it never saw.
+                _video_log.warning("Artist videography exceeded the scan ceiling, refusing a partial set")
+                self.downloadState.emit(gid, "")
+                self._set_status("Could not load the artist's videos, try again")
+                return
+            video_keys: list[str] = []
+            for v in self._dedup_videos(vids or []):
+                vkey = str(getattr(v, "id", id(v)))
+                self._remember("video", vkey, v)
+                video_keys.append(vkey)
+            if not video_keys:
+                self.downloadState.emit(gid, "")
+                self._set_status("No videos to download")
+                return
+            with self._artist_lock:
+                self._artist_groups[gid] = {
+                    "keys": set(video_keys),
+                    "done": set(),
+                    "failed": set(),
+                    "prog": {},
+                }
+            self.downloadProgress.emit(gid, 0.0)
+            self.downloadState.emit(gid, "running")
+            self._videosQueued.emit(video_keys)
+            devlog.event("artist_videos_all", videos=len(video_keys))
+            self._set_status(f"Downloading {len(video_keys)} videos…")
+
         self._scan_pool.start(Worker(work))
 
     @Slot()
@@ -7823,6 +8387,7 @@ class WavesBridge(QObject):
             self.downloadState.emit(fid, "")
         with self._queue_lock:
             self._queue = []
+            self._reindex_queue()
         self._emit_queue()
         self._set_status("Downloads stopped")
 
@@ -8012,7 +8577,7 @@ class WavesBridge(QObject):
             try:
                 available, current, latest = self._updater.update_available()
             except Exception:
-                logger.debug("app update check failed", exc_info=True)
+                _update_log.debug("app update check failed", exc_info=True)
                 self._emit_from_worker("appUpdateChecked", False, "", "", manual)
                 return
             self._emit_from_worker("appUpdateChecked", bool(available), current, latest, manual)
@@ -8039,6 +8604,28 @@ class WavesBridge(QObject):
         self._waves_prefs["update_last_check"] = now
         self._save_waves_prefs()
         self.checkAppUpdate()
+
+    @Slot(bool)
+    def resolveUpdateOptIn(self, enabled: bool) -> None:
+        """The one-time update opt-in prompt was answered. Persist the choice,
+        tell the Settings page its schema moved underneath it, and on an accept
+        fire a check right away so a pending release surfaces this session
+        instead of tomorrow (startupUpdateCheck: auto_update is now on and
+        update_last_check is still unstamped, so the throttle passes)."""
+        _update_log.info("update opt-in prompt: %s", "checks enabled" if enabled else "declined")
+        if not enabled:
+            return
+        # Clear any stale throttle stamp (a user who once enabled then disabled
+        # auto-update in Settings still carries one), so the accept always
+        # produces the immediate check the button promises. Reset to 0, never
+        # pop: the key doubles as setWavesPref's whitelist entry, and the
+        # dormant-updater early return in startupUpdateCheck would otherwise
+        # leave it missing for the rest of the session.
+        self._waves_prefs["update_last_check"] = 0
+        self._waves_prefs["auto_update"] = True
+        self._save_waves_prefs()
+        self.settingsPersistedExternally.emit()
+        self.startupUpdateCheck()
 
     @Slot()
     def startupFfmpegUpdateCheck(self) -> None:
@@ -8108,7 +8695,7 @@ class WavesBridge(QObject):
                     self.appUpdateStateChanged.emit("cancelled", "Cancelled")
                     return
                 except Exception as exc:
-                    logger.exception("App update failed")
+                    _update_log.exception("App update failed")
                     self.appUpdateStateChanged.emit("failed", str(exc) or "Update failed")
                     return
                 # A managed upgrade may not know the version tag (offline resolve);
@@ -8163,12 +8750,14 @@ class WavesBridge(QObject):
             self.downloadState.emit(str(item.get("media_id", "")), "")
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["qid"] != qid]
+            self._reindex_queue()
         self._emit_queue()
 
     @Slot()
     def clearFinished(self) -> None:
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["status"] not in {"done", "failed", "cancelled"}]
+            self._reindex_queue()
         self._emit_queue()
 
     @Slot()
@@ -8185,12 +8774,14 @@ class WavesBridge(QObject):
                     ev.set()
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["status"] == "running"]
+            self._reindex_queue()
         self._emit_queue()
 
     @Slot(int)
     def removeQueueItem(self, qid: int) -> None:
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["qid"] != qid]
+            self._reindex_queue()
         self._emit_queue()
 
     @Slot(int)
@@ -8209,6 +8800,7 @@ class WavesBridge(QObject):
             return
         with self._queue_lock:
             self._queue = [q for q in self._queue if q["qid"] != qid]
+            self._reindex_queue()
         self._emit_queue()
         # Preserve a failed 'best of both' merge as a merge on retry, its plan
         # is kept stashed (only dropped on success), so a retried album isn't
@@ -8600,6 +9192,15 @@ class WavesBridge(QObject):
                 f["child_value"] = bool(getattr(d, "lyrics_file_synced_only", False))
                 f["child_label"] = "Only when lyrics are timed (skip the .txt)"
                 f["child_help"] = self._help_for("lyrics_file_synced_only")
+            if key == "video_download":
+                # Lives with the other 'Download discography' sources; the
+                # stock tidaler help ("Allow download of videos") no longer
+                # describes what it does. Videos downloaded one at a time
+                # never consult it.
+                f["help"] = (
+                    "The artist's music videos, saved with the video path template. "
+                    "Downloading a single video yourself always works, with or without this."
+                )
             if key == "lyrics_prefer_lrclib":
                 # The source preference only matters while lyrics are fetched at
                 # all; the tile greys out (live, unsaved toggles included) when
@@ -8669,7 +9270,6 @@ class WavesBridge(QObject):
                     "quality_audio",
                     "quality_video",
                     "downloads_concurrent_max",
-                    "video_download",
                     "download_dolby_atmos",
                     "skip_existing",
                     "confirm_category_download",
@@ -8739,6 +9339,7 @@ class WavesBridge(QObject):
                     "disco_eps",
                     "disco_featured",
                     "disco_appears_on",
+                    "video_download",
                     "collapse_editions",
                 ],
             },
@@ -8944,9 +9545,10 @@ class WavesBridge(QObject):
         # status so the glyph + toggles update live (no reopen needed).
         if "path_binary_ffmpeg" in values:
             self.ffmpegStatusChanged.emit()
-        # Resize the download pool to the (possibly changed) concurrency cap; it
-        # was only sized once at startup, so a saved change had no effect before.
-        self.dl_pool.setMaxThreadCount(max(2, int(self.settings.data.downloads_concurrent_max or 3)))
+        # No dl_pool resize: the queue is serial by design (one item at a time,
+        # in order). downloads_concurrent_max sizes the engine's per-collection
+        # track executor, which reads settings.data live on each download, so a
+        # saved change takes effect on the next item with no reapply here.
         # Quality / path / ffmpeg changes only take effect on a fresh Download.
         if self._logged_in:
             self._init_download()
