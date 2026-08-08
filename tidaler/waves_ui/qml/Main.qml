@@ -114,6 +114,7 @@ ApplicationWindow {
     // the router; search results show when none of them are on.
     property string filterType: "all"     // search-results chip: all/artists/albums/...
     property var trackCache: ({})         // albumId -> [tracks], filled by albumTracksLoaded
+    property var playlistTrackCache: ({}) // playlistId -> [rows], filled by playlistTracksLoaded
     property var artistsById: ({})        // artistId -> name, for link resolution
     property bool artistOpen: false
     property bool settingsOpen: false
@@ -180,7 +181,16 @@ ApplicationWindow {
     onWidthChanged:      if (_geomReady) winGeomSaveTimer.restart()
     onHeightChanged:     if (_geomReady) winGeomSaveTimer.restart()
     onVisibilityChanged: if (_geomReady) winGeomSaveTimer.restart()
-    onClosing:           _winPersist()   // best-effort final flush; not the only save path
+    onClosing: function (close) {
+        _winPersist()   // best-effort final flush; not the only save path
+        // Downloads still running: veto the close and ask first. EXIT ANYWAY
+        // re-closes with confirmed set, so this runs at most once per attempt.
+        // Qt.quit() paths (factory reset) bypass by design: nothing to save.
+        if (root.activeQueueCount > 0 && !setupSettings.exitWarnMuted && !exitGate.confirmed) {
+            close.accepted = false
+            exitGate.open = true
+        }
+    }
 
     Component.onCompleted: {
         // Restore the saved window frame BEFORE the first present (see the
@@ -239,6 +249,8 @@ ApplicationWindow {
     // AlbumBlock, so it survives ListView delegate recycling in the virtualised
     // My Tidal lists.
     property var expandedAlbums: ({})
+    // Same, for the search PLAYLISTS rows (PlaylistBlock).
+    property var expandedPlaylists: ({})
     // Expanding a row scrolls it up to this fraction of the viewport height
     // (a sliver of padding kept above), so the tracks it reveals are on
     // screen instead of below the fold. Scrolls down only: a row already
@@ -796,7 +808,8 @@ ApplicationWindow {
     // A muted, seamlessly looping ocean video (public-domain loop, re-encoded
     // 720p) sits behind every page under a heavy scrim so the Console palette
     // and text contrast survive. z:-1 keeps it below all content; playback
-    // pauses while the window is hidden/minimised to spare battery.
+    // pauses via presentStalled (see onPresentStalledChanged below) once
+    // frames stop reaching the glass, which covers hidden/minimised too.
     Video {
         id: bgWave
         anchors.fill: parent
@@ -828,6 +841,19 @@ ApplicationWindow {
         fillMode: VideoOutput.PreserveAspectCrop
         autoPlay: true
         onErrorOccurred: visible = false   // missing/undecodable asset: fall back to flat bg
+        // Presentation continuity: the position of the last frame that
+        // actually reached the glass (recorded per swap by onFrameSwapped).
+        // While macOS holds presentation, the media clock keeps running, so
+        // whenever frames return after a hold the loop seeks back here and
+        // the water continues from the exact frame the user last saw.
+        property int shownPos: 0
+        function noteShown() {
+            if (playbackState === MediaPlayer.PlayingState) shownPos = position
+        }
+        function seekShown() {
+            if (!seekable || duration <= 0) return
+            position = Math.min(Math.max(0, shownPos), duration - 40)
+        }
         Connections {
             target: waves
             function onMotionBgChanged() {
@@ -838,12 +864,22 @@ ApplicationWindow {
         }
         Connections {
             target: root
-            function onVisibilityChanged() {
+            // One mechanism for every "nobody can see us" case: minimised,
+            // hidden AND fully occluded (the old visibility branch missed
+            // occlusion, so the loop played on under the covering window and
+            // re-expose jumped to a different frame). The clock has already
+            // run for the detector's threshold by the time the stall trips,
+            // so pausing alone would park the loop past the last visible
+            // frame: pause, then seek back to that frame, and re-expose
+            // presents it immediately before playback resumes.
+            function onPresentStalledChanged() {
                 if (!bgWave.motionOn) return
-                if (root.visibility === Window.Hidden || root.visibility === Window.Minimized)
+                if (root.presentStalled) {
                     bgWave.pause()
-                else
+                    bgWave.seekShown()
+                } else {
                     bgWave.play()
+                }
             }
         }
     }
@@ -879,11 +915,61 @@ ApplicationWindow {
     // the beginning. Same one-write-per-tick discipline as ledPulse; when
     // nothing is queued nothing binds it.
     property int marchTick: 0
+    // Presentation stall detector. When the window is fully covered (or
+    // minimised/hidden), macOS stops asking it to render: frameSwapped goes
+    // quiet while the media clock and every Timer keep running, so on
+    // re-expose the water video and the ASCII clocks snapped to "now", a
+    // visible jump to a completely different frame (livetest, confirmed by
+    // the reactivation position jump in the diag trace). Watch presentation
+    // itself: no swap for ~½s means nobody can see us, pause the decorative
+    // motion, and the first swap after re-expose resumes it from the exact
+    // frame the user last saw. Any real repaint (input, progress, an
+    // animation) keeps the swaps flowing, so a visible-but-idle window
+    // cannot false-positive its own clocks off: those clocks only stop
+    // once frames already stopped.
+    property bool presentStalled: false
+    // Seeded with "now", not 0: the detector below runs from t=0 and a zero
+    // seed reads as an hours-old swap, latching a spurious stall during boot
+    // before the first frameSwapped has been delivered.
+    property double _lastSwap: Date.now()
+    onFrameSwapped: {
+        _lastSwap = Date.now()
+        bgWave.noteShown()
+        if (presentStalled) presentStalled = false
+    }
+    // True while frames are demonstrably reaching the glass. Only meaningful
+    // with the wave video playing (its sink keeps swaps flowing whenever the
+    // window is presented); video off, scenes legitimately go idle between
+    // repaints and swap age says nothing, so the gate stands open.
+    function presentFresh() {
+        return bgWave.playbackState !== MediaPlayer.PlayingState
+            || Date.now() - _lastSwap <= 120
+    }
     Timer {
-        running: root.active
+        interval: 400; repeat: true; running: true
+        // 1.1s: comfortably past the ~0.6s presentation hiccup macOS causes
+        // on every app-switch transaction, so only a genuinely covered or
+        // minimised window trips the pause; the switch hiccup must ride
+        // through undisturbed.
+        onTriggered: if (Date.now() - root._lastSwap > 1100) root.presentStalled = true
+    }
+    // On screen = not hidden or minimised, and actually being presented.
+    // Decorative clocks (this one, the WaveMark water, the browse ticker,
+    // the login phrases) pause on THIS, never on window focus: an unfocused
+    // window usually stays fully visible next to whatever stole focus, and
+    // the water freezing the instant the app loses focus (then lurching
+    // back on refocus) reads as a glitch (livetest report).
+    readonly property bool onScreen: visibility !== Window.Hidden && visibility !== Window.Minimized
+                                     && !presentStalled
+    Timer {
+        running: root.onScreen
         interval: 50; repeat: true
         property real phase: 0
         onTriggered: {
+            // Hold the step while presentation is stalled (app-switch hold,
+            // covered window): stepped state advancing unseen is exactly the
+            // "jumps forward when frames return" glitch the water video had.
+            if (!root.presentFresh()) return
             phase = (phase + 0.05 / 1.04) % 1   // 1.04s breathe = 2 x 520ms
             root.ledPulse = 0.28 + 0.57 * (0.5 + 0.5 * Math.cos(2 * Math.PI * phase))
             root.shimmerPhase = (root.shimmerPhase + 0.05 / 1.6) % 1   // 1.6s twinkle cycle
@@ -1785,6 +1871,7 @@ ApplicationWindow {
         searchSaved = null
         searchField.text = ""
         trackCache = ({}); expandedAlbums = ({})
+        playlistTrackCache = ({}); expandedPlaylists = ({})
         _searchBuildStart(0)   // a mid-build blank must drop the veil with the cards
         artistsModel.clear(); albumsRaw = []; tracksRaw = []; videosRaw = []; applySort()
         playlistsModel.clear(); mixesModel.clear()
@@ -2961,7 +3048,7 @@ ApplicationWindow {
                         SequentialAnimation on opacity {
                             // Pause the blink when hidden or unfocused, same
                             // reasoning as the WaveMark parallax scroll.
-                            running: artRoot.artState === "loading" && artTerm.visible && root.active
+                            running: artRoot.artState === "loading" && artTerm.visible && root.onScreen
                             loops: Animation.Infinite
                             NumberAnimation { from: 1; to: 0; duration: 60 } PauseAnimation { duration: 420 }
                             NumberAnimation { from: 0; to: 1; duration: 60 } PauseAnimation { duration: 420 }
@@ -3477,6 +3564,7 @@ ApplicationWindow {
             id: coverWrap
             anchors.centerIn: parent
             width: 34; height: 34   // artR * 2: a 34px circle centred in the 48px box
+            rotation: paVinyl.rot   // buffering vinyl spins the cover itself
             // Grey disc under the art: shows while a cover is still decoding and
             // stays when there is no url, matching the old surface3 fill.
             Rectangle { anchors.fill: parent; radius: width / 2; color: root.surface3 }
@@ -3543,7 +3631,11 @@ ApplicationWindow {
             visible: pa.active
             anchors.fill: parent
             readonly property real ringR: 19.5
-            readonly property bool aiming: paZone.ringHover || paZone.scrubbing
+            // Aim UI waits for the pointer to REST over the band (or a press):
+            // the straight path to the disc's play/pause crosses the ring, and
+            // the readout flashing on every pass-through read as jarring
+            // (livetest report). Scrubbing always aims instantly.
+            readonly property bool aiming: (paZone.ringHover && paZone.aimArmed) || paZone.scrubbing
             Shape {
                 anchors.fill: parent
                 antialiasing: true
@@ -3559,7 +3651,7 @@ ApplicationWindow {
                         startAngle: -90; sweepAngle: 360
                     }
                 }
-                // lit arc
+                // lit arc (parked at zero while the buffering vinyl settles)
                 ShapePath {
                     strokeColor: root.accent
                     strokeWidth: 3.2; fillColor: "transparent"
@@ -3568,8 +3660,75 @@ ApplicationWindow {
                         centerX: ledRing.width / 2; centerY: ledRing.height / 2
                         radiusX: ledRing.ringR; radiusY: ledRing.ringR
                         startAngle: -90
-                        sweepAngle: 360 * Math.max(0, Math.min(1, pa.frac))
+                        sweepAngle: paVinyl.busy ? 0 : 360 * Math.max(0, Math.min(1, pa.frac))
                     }
+                }
+            }
+            // Buffering vinyl (lab round 2 winner): while the stream resolves,
+            // the cover itself spins up like a record, accelerating through
+            // the first turn then cruising, while the ring stays calm. The
+            // moment the song is ready the disc eases to rest at its original
+            // orientation (always completing the current turn forward) and
+            // the playhead sparks in at 12 o'clock, where the progress arc
+            // then rises. Smooth and continuous by design: no dots, no
+            // segments (livetest direction).
+            Item {
+                id: paVinyl
+                anchors.fill: parent
+                readonly property bool loadingNow: pa.st === "loading"
+                property bool settling: false
+                readonly property bool busy: loadingNow || settling
+                property real rot: 0
+                onLoadingNowChanged: {
+                    if (loadingNow) {
+                        vinylSettle.stop(); settling = false
+                        rot = 0; vinylSpin.restart()
+                    } else if (pa.st === "playing" || pa.st === "paused") {
+                        vinylSpin.stop(); settling = true; vinylSettle.restart()
+                    } else {
+                        vinylSpin.stop(); settling = false; rot = 0
+                    }
+                }
+                SequentialAnimation {
+                    id: vinylSpin
+                    // spin-up through the first turn, then a steady cruise;
+                    // the long tail outlasts any realistic load (4+ minutes)
+                    NumberAnimation { target: paVinyl; property: "rot"; from: 0; to: 360; duration: 1300; easing.type: Easing.InQuad }
+                    NumberAnimation { target: paVinyl; property: "rot"; from: 360; to: 360 * 400; duration: 400 * 650 }
+                }
+                Rectangle {
+                    id: vinylSpark
+                    x: ledRing.width / 2 - width / 2
+                    y: ledRing.height / 2 - ledRing.ringR - height / 2
+                    width: 5; height: 5; radius: 2.5; color: root.accentSoft
+                    antialiasing: true; opacity: 0
+                }
+                SequentialAnimation {
+                    id: vinylSparkPop
+                    ParallelAnimation {
+                        NumberAnimation { target: vinylSpark; property: "opacity"; from: 0; to: 1; duration: 110 }
+                        NumberAnimation { target: vinylSpark; property: "scale"; from: 2.2; to: 1; duration: 260; easing.type: Easing.OutBack }
+                    }
+                    NumberAnimation { target: vinylSpark; property: "opacity"; to: 0; duration: 200 }
+                }
+                SequentialAnimation {
+                    id: vinylSettle
+                    // The settle target is snapshotted here, not bound on the
+                    // NumberAnimation: a `to:` binding reading `rot` re-evaluates
+                    // on every frame the animation itself writes, which is one
+                    // easing overshoot away from a ratcheting runaway.
+                    ScriptAction {
+                        script: {
+                            vinylSparkPop.restart()
+                            vinylSettleAnim.to = Math.ceil(paVinyl.rot / 360) * 360
+                        }
+                    }
+                    NumberAnimation {
+                        id: vinylSettleAnim
+                        target: paVinyl; property: "rot"
+                        duration: 520; easing.type: Easing.OutCubic
+                    }
+                    ScriptAction { script: { paVinyl.rot = 0; paVinyl.settling = false } }
                 }
             }
             // Ghost cursor (seek lab): a marker dot at the aim angle, bright
@@ -3577,7 +3736,9 @@ ApplicationWindow {
             // arc over the played side, so it stands out on both sides of
             // the playhead.
             Rectangle {
-                visible: ledRing.aiming
+                opacity: ledRing.aiming ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: 110 } }
                 readonly property real ang: -Math.PI / 2 + pa.aimFrac * 2 * Math.PI
                 readonly property bool played: pa.aimFrac <= pa.frac
                 antialiasing: true
@@ -3593,43 +3754,44 @@ ApplicationWindow {
         Rectangle {
             anchors.centerIn: parent; width: 34; height: 34; radius: 17; color: "#000000"
             opacity: pa.showGlyph ? 0.34 : 0
-            Behavior on opacity { NumberAnimation { duration: 120 } }
+            Behavior on opacity { NumberAnimation { duration: 150 } }
         }
         Item {
-            anchors.centerIn: parent; visible: pa.showGlyph; width: 30; height: 30
-            // Play/pause/error as a vector glyph; the loading state keeps the
-            // breathing "buffering" word. A soft dark disc behind the glyph gives
-            // the same legibility over art the Text.Outline used to.
-            Rectangle {
-                anchors.centerIn: parent; width: 26; height: 26; radius: 13
-                color: "#55000000"; visible: pa.st !== "loading"
-            }
-            Ico {
-                anchors.centerIn: parent
-                visible: pa.st !== "loading"
-                name: pa.st === "playing" ? "pause" : (pa.st === "error" ? "close" : "play")
-                color: pa.st === "error" ? root.red : root.accent
-                size: 17
-            }
-            Text {
-                anchors.centerIn: parent; textFormat: Text.PlainText
-                visible: pa.st === "loading"
-                text: "buffering"
-                color: root.accent; font.family: root.mono
-                font.pixelSize: 8; font.bold: true
-                style: Text.Outline; styleColor: "#cc000000"
-                property real breathe: 1
-                opacity: breathe
-                SequentialAnimation on breathe {
-                    running: pa.st === "loading"; loops: Animation.Infinite
-                    NumberAnimation { from: 1.0; to: 0.3; duration: 520; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.3; to: 1.0; duration: 520; easing.type: Easing.InOutSine }
+            anchors.centerIn: parent; width: 30; height: 30
+            // The glyph eases in and out with the scrim (fade plus a slight
+            // settle) instead of popping with the hover flag (livetest report).
+            opacity: pa.showGlyph ? 1 : 0
+            scale: pa.showGlyph ? 1 : 0.8
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 150 } }
+            Behavior on scale { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+            // Play/pause/error as a vector glyph. Loading shows no glyph:
+            // the buffering animation (paVinyl spins the cover) is the activity
+            // indicator, over the lightly scrimmed art. A soft dark disc
+            // behind the glyph gives the same legibility over art the
+            // Text.Outline used to.
+            Item {
+                anchors.fill: parent
+                opacity: pa.st !== "loading" ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+                Rectangle {
+                    anchors.centerIn: parent; width: 26; height: 26; radius: 13
+                    color: "#55000000"
+                }
+                Ico {
+                    anchors.centerIn: parent
+                    name: pa.st === "playing" ? "pause" : (pa.st === "error" ? "close" : "play")
+                    color: pa.st === "error" ? root.red : root.accent
+                    size: 17
                 }
             }
         }
         // The would-seek time, floating above the art while aiming at the ring.
         Rectangle {
-            visible: ledRing.aiming
+            opacity: ledRing.aiming ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
             anchors.horizontalCenter: parent.horizontalCenter
             y: -18
             width: paAimTxt.implicitWidth + 12; height: 16; radius: 4
@@ -3644,7 +3806,7 @@ ApplicationWindow {
         // Pointer zone (seek-lab ghost cursor). Idle, the whole box starts the
         // preview exactly as the old full-box MouseArea did. While this track
         // is active, the disc toggles play/pause and the band around it is the
-        // seek surface: hover aims the ghost marker, press/drag scrubs the
+        // seek surface: a resting hover aims the ghost marker, press/drag scrubs the
         // fill locally, the single real seek fires on release (same discipline
         // as the PreviewBar scrubber, no mid-gesture flush pop).
         MouseArea {
@@ -3655,6 +3817,17 @@ ApplicationWindow {
             preventStealing: true
             property bool scrubbing: false
             property bool ringHover: false
+            // Rest-armed aim (same idiom as the art tilt): the readout and
+            // ghost marker appear only once the pointer stops moving over the
+            // band, so crossing the ring on the way to play/pause never
+            // flashes them. The arm timer restarts on every move while
+            // unarmed; a press (scrub) bypasses arming entirely.
+            property bool aimArmed: false
+            onRingHoverChanged: if (!ringHover) { paAimArm.stop(); aimArmed = false }
+            Timer {
+                id: paAimArm; interval: 160
+                onTriggered: paZone.aimArmed = true
+            }
             readonly property real discR: 17
             readonly property real bandR: 28
             readonly property real idleR: 24
@@ -3668,6 +3841,7 @@ ApplicationWindow {
                 var d = dist(m.x, m.y)
                 pa.hovered = pa.active ? d <= discR : d <= idleR
                 ringHover = pa.active && d > discR && d <= bandR
+                if (ringHover && !aimArmed) paAimArm.restart()
                 if (ringHover || scrubbing) {
                     pa.aimFrac = pa.angFrac(m.x + x, m.y + y)
                     if (scrubbing) root.scrubPreviewVisual(pa.aimFrac)
@@ -4371,11 +4545,14 @@ ApplicationWindow {
         readonly property real idleLoopSecs: 20
         property real idleT: 0
         Timer {
-            // Pause while the window is unfocused/minimised, no one's watching
-            // the logo then, so don't burn CPU animating it. Resumes on refocus.
-            running: wm.visible && root.active
+            // Pause while the window is off screen (hidden/minimised). Focus
+            // is deliberately NOT part of the gate: an unfocused window is
+            // still on screen, and the water freezing on every focus change
+            // looked like a rendering glitch (livetest report).
+            running: wm.visible && root.onScreen
             interval: 50; repeat: true                // 20 Hz step (see delegate note)
             onTriggered: {
+                if (!root.presentFresh()) return   // no step while unpresented (see the LED clock)
                 wm.t = (wm.t + 0.05 / wm.loopSecs) % 1
                 wm.idleT = (wm.idleT + 0.05 / wm.idleLoopSecs) % 1
             }
@@ -4616,6 +4793,40 @@ ApplicationWindow {
         MouseArea { id: gaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ga.clicked() }
     }
 
+    // Console-spec button: the app's ordinary hugging button (label + btnPadH*2
+    // wide, btnRad corners, uiFont 13 bold UPPERCASE) as a reusable component.
+    // For dialogs it is the pair shape: a SINGLE stacked CTA stays a full-width
+    // GateAction, but two actions side by side hug their labels in a centred
+    // row instead of stretching half-empty across the card. primary = lit cell
+    // (accentCont/accentDim, hover lightens like GateAction), secondary =
+    // outlined with the label warming textLo -> textHi on hover.
+    component SpecBtn: Rectangle {
+        id: sb
+        property string label: ""
+        property bool primary: false
+        // GateAction's red recipe (red on redCont, translucent red border) on
+        // the hugging shape, for the destructive half of a button pair.
+        property bool danger: false
+        signal clicked()
+        readonly property color bg: danger ? root.redCont : (primary ? root.accentCont : "transparent")
+        implicitWidth: sbTxt.implicitWidth + root.btnPadH * 2
+        implicitHeight: sbTxt.implicitHeight + root.btnPadV * 2
+        radius: root.btnRad
+        color: (sbMa.containsMouse && (sb.primary || sb.danger)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
+        border.width: 1; border.color: danger ? Qt.alpha(root.red, 0.55) : (primary ? root.accentDim : root.border1)
+        Text {
+            id: sbTxt; anchors.centerIn: parent
+            textFormat: Text.PlainText; text: sb.label
+            color: sb.danger ? root.red : (sb.primary ? root.accent : (sbMa.containsMouse ? root.textHi : root.textLo))
+            font.family: root.uiFont; font.pixelSize: 13; font.bold: true
+            font.letterSpacing: root.btnTrack
+        }
+        MouseArea {
+            id: sbMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: sb.clicked()
+        }
+    }
+
     // Tap-card option: title + description + optional mono chip, arrow right.
     // Used where a pop-up offers a choice; tapping the card takes the action,
     // so there is no separate confirm button. highlight marks the recommended
@@ -4750,7 +4961,7 @@ ApplicationWindow {
                         // Only run while the login panel is actually showing (banner
                         // lives on it, visible: !waves.loggedIn). QML animations don't
                         // stop on invisibility, so gate them off once signed in.
-                        running: wtile.width > 0 && !waves.loggedIn && root.active
+                        running: wtile.width > 0 && !waves.loggedIn && root.onScreen
                         from: 0; to: -wtile.width
                         duration: Math.max(1, Math.round(wtile.width / (banner.wavePxPerSec * modelData.par) * 1000))
                         loops: Animation.Infinite
@@ -4782,7 +4993,7 @@ ApplicationWindow {
                     Text { textFormat: Text.PlainText; id: mqMain; x: 0; y: 0; text: banner.phrase.repeat(8); font.family: banner.titleFamily; font.pixelSize: banner.titleSize; font.bold: banner.bold; color: banner.ink }
                     NumberAnimation on x {
                         // Same gating as the wave layers: stop once signed in / hidden.
-                        running: phraseM.advanceWidth > 0 && !waves.loggedIn && root.active
+                        running: phraseM.advanceWidth > 0 && !waves.loggedIn && root.onScreen
                         from: 0; to: -phraseM.advanceWidth
                         duration: Math.max(1, Math.round(phraseM.advanceWidth / banner.titleSpeed * 1000))
                         loops: Animation.Infinite
@@ -4949,10 +5160,18 @@ ApplicationWindow {
         // is the target, never the rule that runs to the count badge.
         property bool openable: false
         signal opened()
+        // Optional trailing control (the VIDEOS download-all button), sits
+        // between the rule and the count badge. The row takes z 1 so the
+        // control's own MouseArea receives clicks above the whole-header
+        // collapse target; nothing else in the row accepts mouse events (the
+        // openable label's MouseArea is disabled outside openable mode), so
+        // header and label clicks fall through to secMa exactly as before.
+        property Component trailing: null
         anchors.left: parent ? parent.left : undefined
         anchors.right: parent ? parent.right : undefined
         implicitHeight: 36
         RowLayout {
+            z: 1   // lets the trailing control sit above secMa
             anchors.left: parent.left; anchors.right: parent.right
             anchors.bottom: parent.bottom; anchors.bottomMargin: 7
             spacing: 12
@@ -4979,6 +5198,12 @@ ApplicationWindow {
                 }
             }
             Rectangle { Layout.fillWidth: true; height: 1; color: root.divider }
+            Loader {
+                active: secHead.trailing !== null
+                visible: active
+                sourceComponent: secHead.trailing
+                Layout.alignment: Qt.AlignVCenter
+            }
             Rectangle {
                 visible: count >= 0; radius: 4; color: "transparent"; border.color: root.border1
                 implicitHeight: 18; implicitWidth: cntT.implicitWidth + 16
@@ -5285,9 +5510,19 @@ ApplicationWindow {
                     // Never collapse: a video with no artist credits still
                     // shows its date.
                     height: Math.max(vArtists.height, 18)
+                    // The dot and date reserve their (short, fixed) width
+                    // first and the artist list clips to what remains, so a
+                    // long credit line cannot push the date out of the meta
+                    // column and under the download button.
+                    // Clamped to the column width so an extreme narrowing can
+                    // never push the dot + date past the meta column and under
+                    // the download button.
+                    readonly property real dateW: vDateTx.visible
+                        ? Math.min(width, vDot.implicitWidth + vDateTx.implicitWidth + 16) : 0
                     ArtistLinks {
                         id: vArtists
                         anchors.left: parent.left; anchors.top: parent.top
+                        width: Math.max(0, Math.min(implicitWidth, parent.width - parent.dateW))
                         artists: root.artistsById[vcell.vid] || []
                     }
                     Text {
@@ -5299,6 +5534,7 @@ ApplicationWindow {
                         font.family: root.mono; font.pixelSize: 11
                     }
                     Text {
+                        id: vDateTx
                         visible: vcell.vcDate !== ""
                         anchors.left: vDot.right; anchors.leftMargin: 8
                         anchors.baseline: vArtists.baseline
@@ -5621,6 +5857,209 @@ ApplicationWindow {
                                 PopMeter { value: modelData.popularity; showNum: false }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
                                 DownIcon { mediaId: modelData.id; onTap: function(){ waves.downloadTrack(modelData.id) } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Playlist row + inline expand: the playlist counterpart of AlbumBlock,
+    // same interaction grammar (row click expands the track list in place,
+    // the title opens the dedicated page). Unlike an album a playlist
+    // mutates, so every expand refetches its rows instead of caching them
+    // for the session; video entries keep their kind so preview and
+    // download route as videos.
+    component PlaylistBlock: Column {
+        id: pb
+        property string plId: ""
+        property string title: ""
+        property string creator: ""
+        property string art: ""
+        property int trackCount: 0
+        readonly property bool expanded: root.expandedPlaylists[plId] === true
+        // sel maps ROW INDEX -> kind ("track"/"video") so Download selected
+        // routes each pick to the right slot. Keyed by index, not by track id:
+        // a playlist may legitimately list the same track twice, and an id key
+        // would tie those rows to one checkbox (and leave allSelected forever
+        // false). Same recycling rationale as AlbumBlock: expand state global,
+        // selection per delegate.
+        property var sel: ({})
+        onPlIdChanged: sel = ({})
+        readonly property var trackList: root.playlistTrackCache[plId] || []
+        // Row indices only mean something against the list they were picked
+        // from, and a re-expand refetches (playlists mutate). A replaced list
+        // must not point the old indices at other tracks, but wholesale
+        // dropping the selection eats ticks made during the refetch window
+        // (the stale rows stay on screen while the fetch runs), so remap by
+        // track id instead: a tick survives if its track is still in the
+        // list, and vanishes with the track if the playlist lost it.
+        // Plain [] on purpose: a binding here would re-evaluate to the NEW
+        // list before the handler below could read the old one.
+        property var _selList: []
+        onTrackListChanged: {
+            var old = _selList, byId = {}, s = {}
+            for (var i = 0; i < trackList.length; ++i) byId[trackList[i].id] = i
+            for (var k in sel) {
+                var t = old[k]
+                if (t && byId[t.id] !== undefined) s[byId[t.id]] = sel[k]
+            }
+            sel = s
+            _selList = trackList
+        }
+        readonly property int selCount: Object.keys(sel).length
+        readonly property bool allSelected: trackList.length > 0 && selCount === trackList.length
+        readonly property string subLabel: (trackCount > 0 ? trackCount + " tracks" : "Playlist") + (creator ? "  ·  " + creator : "")
+        spacing: 6
+
+        function toggle() {
+            var e = Object.assign({}, root.expandedPlaylists)
+            if (e[plId]) { delete e[plId] }
+            else { e[plId] = true; waves.loadPlaylistTracks(plId) }
+            root.expandedPlaylists = e
+            if (e[plId]) Qt.callLater(function() { if (pb.expanded) root.scrollExpandedIntoView(pb) })
+        }
+        function setSel(row, kind, v) { var s = Object.assign({}, sel); if (v) s[row] = kind; else delete s[row]; sel = s }
+        function toggleAll() {
+            if (allSelected) { sel = ({}) }
+            else { var s = {}; for (var i = 0; i < trackList.length; ++i) s[i] = trackList[i].kind; sel = s }
+        }
+        function downloadSelected() {
+            for (var k in sel) {
+                var row = trackList[k]
+                if (!row) continue
+                if (sel[k] === "video") waves.downloadVideo(row.id); else waves.downloadTrack(row.id)
+            }
+        }
+
+        // --- Row ---
+        Rectangle {
+            width: parent.width
+            height: 64
+            radius: 10
+            color: pbRowMa.containsMouse ? root.surface2 : root.surface
+            border.color: expanded ? root.outline : root.border1
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 14; spacing: 12
+                Text {
+                    text: "›"; rotation: expanded ? 90 : 0
+                    color: expanded ? root.accent : root.textDim; font.pixelSize: 16
+                    Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
+                    Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                }
+                Art { width: 46; height: 46; hoverFx: true; url: art }
+                ColumnLayout {
+                    Layout.fillWidth: true; spacing: 2
+                    Text {
+                        textFormat: Text.PlainText; text: title
+                        color: pbRowTitleMa.containsMouse ? "#ffffff" : root.textHi
+                        font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true
+                        // Title -> the playlist's dedicated page (row click still expands)
+                        MouseArea {
+                            id: pbRowTitleMa
+                            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                            width: Math.min(parent.width, parent.implicitWidth)
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.openPlaylistPage(plId, title)
+                        }
+                    }
+                    Text { textFormat: Text.PlainText; text: pb.subLabel; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                }
+                DownloadButton { Layout.alignment: Qt.AlignVCenter; mediaId: plId; collectionCheck: true; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(plId) } }
+            }
+            MouseArea { id: pbRowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: toggle() }
+        }
+
+        // --- Expanded rich panel ---
+        Rectangle {
+            width: parent.width
+            visible: expanded
+            height: visible ? pbExpandedCol.height + 24 : 0
+            Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            color: root.surface0
+            border.color: root.border1
+            radius: 10
+            Column {
+                id: pbExpandedCol
+                x: 16; y: 12; width: parent.width - 32; spacing: 12
+                Row {
+                    width: parent.width; spacing: 16
+                    Art { width: 116; height: 116; hoverFx: true; url: art }
+                    Column {
+                        width: parent.width - 132; spacing: 6
+                        Text { text: "PLAYLIST"; color: root.textDim; font.pixelSize: 11 }
+                        Text {
+                            textFormat: Text.PlainText; text: title
+                            color: pbPanelTitleMa.containsMouse ? "#ffffff" : root.textHi
+                            font.pixelSize: 21; font.bold: true; width: parent.width; elide: Text.ElideRight
+                            MouseArea {
+                                id: pbPanelTitleMa
+                                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                width: Math.min(parent.width, parent.implicitWidth)
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openPlaylistPage(plId, title)
+                            }
+                        }
+                        Text { textFormat: Text.PlainText; text: pb.subLabel; color: root.textLo; font.pixelSize: 14; width: parent.width; elide: Text.ElideRight }
+                        Row {
+                            spacing: 10; topPadding: 6
+                            DownloadButton {
+                                mediaId: plId; label: "Download playlist"; collectionCheck: true
+                                onTap: function(){ waves.downloadPlaylist(plId) }
+                            }
+                            Text {
+                                text: "Copy link"; color: root.textLo; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("playlist", plId) }
+                            }
+                        }
+                    }
+                }
+                Text { visible: !root.playlistTrackCache[plId]; text: "Loading tracks…"; color: root.textLo; font.pixelSize: 13 }
+                Column {
+                    width: parent.width; spacing: 0
+                    // Select-all header
+                    RowLayout {
+                        visible: pb.trackList.length > 0
+                        width: parent.width; height: 40; spacing: 12
+                        Check { Layout.alignment: Qt.AlignVCenter; checked: pb.allSelected; onToggled: pb.toggleAll() }
+                        Text { text: "Select all"; color: root.textLo; font.pixelSize: 13 }
+                        Text { textFormat: Text.PlainText; text: "· " + pb.selCount + " of " + pb.trackList.length + " selected"; color: root.textDim; font.pixelSize: 12 }
+                        Item { Layout.fillWidth: true }
+                        Rectangle {
+                            Layout.alignment: Qt.AlignVCenter
+                            opacity: pb.selCount > 0 ? 1 : 0.4
+                            // Sized like DownloadButton so it matches DOWNLOAD PLAYLIST above.
+                            radius: root.btnRad; color: root.accentCont; border.color: root.accentDim; border.width: 1
+                            implicitHeight: pbDsRow.implicitHeight + root.btnPadV * 2; implicitWidth: pbDsRow.implicitWidth + root.btnPadH * 2
+                            Row { id: pbDsRow; anchors.centerIn: parent; spacing: 7
+                                Ico { name: "arrow-down"; color: root.accent; size: 14; bold: 10; anchors.verticalCenter: parent.verticalCenter }
+                                Text { text: "DOWNLOAD SELECTED"; color: root.accent; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
+                            }
+                            MouseArea { anchors.fill: parent; enabled: pb.selCount > 0; cursorShape: pb.selCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: pb.downloadSelected() }
+                        }
+                    }
+                    // Tracks (playlist order; a video entry previews and
+                    // downloads as a video)
+                    Repeater {
+                        model: pb.trackList
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+                            width: parent.width; height: 40; color: "transparent"
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 12
+                                Check { Layout.alignment: Qt.AlignVCenter; checked: pb.sel[index] !== undefined; onToggled: pb.setSel(index, modelData.kind, pb.sel[index] === undefined) }
+                                Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 24; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
+                                TrackPreview { kind: modelData.kind; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
+                                Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text { textFormat: Text.PlainText; text: modelData.artist; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 220 }
+                                PopMeter { value: modelData.popularity; showNum: false }
+                                Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
+                                DownIcon { mediaId: modelData.id; onTap: function(){ if (modelData.kind === "video") waves.downloadVideo(modelData.id); else waves.downloadTrack(modelData.id) } }
                             }
                         }
                     }
@@ -7249,7 +7688,7 @@ ApplicationWindow {
         Timer {
             interval: 5200 + (bt.idx % 7) * 1150
             repeat: true
-            running: root.active && !root.browseMoving && bt.visible && bt.arts.length > bt.artN && bt.artN > 0
+            running: root.onScreen && !root.browseMoving && bt.visible && bt.arts.length > bt.artN && bt.artN > 0
             onTriggered: {
                 var pool = bt.arts.length
                 var n = bt.artN
@@ -8015,12 +8454,24 @@ ApplicationWindow {
             root.navPush()
             root.markRender("search render")
             root.searchSaved = null   // a fresh search replaces the saved drill-in
+            // A fresh search always lands at the top. The page keeps one
+            // scroll position for every section (the sections stack inside
+            // the one results Flickable), so without this the new results
+            // render at the old search's scroll offset. The artist strip
+            // keeps its own horizontal offset, reset alongside.
+            results.contentY = 0
+            artistStrip.contentX = 0
             root.navOrigin = "search"
             root.browseOpen = false
             root.artistOpen = false
             root.libraryOpen = false
             root.trackCache = ({})
             root.expandedAlbums = ({})
+            // Playlist rows expand the same way, and their cache has to go with
+            // them: playlists mutate, so a row left expanded across searches
+            // would show yesterday's tracks with no refetch to correct them.
+            root.playlistTrackCache = ({})
+            root.expandedPlaylists = ({})
             // A section a user expanded stays expanded on the next search
             // (searchArtistsExpanded and the list-section flags are pref-backed),
             // so nothing is reset here.
@@ -8041,6 +8492,7 @@ ApplicationWindow {
         // Assign a NEW object so the `var` property fires a change notification
         // (mutating + reassigning the same reference does not update bindings).
         function onAlbumTracksLoaded(id, tracks) { var c = Object.assign({}, root.trackCache); c[id] = tracks; root.trackCache = c }
+        function onPlaylistTracksLoaded(id, tracks) { var c = Object.assign({}, root.playlistTrackCache); c[id] = tracks; root.playlistTrackCache = c }
         function onArtistMetaLoaded(id, pop) {
             for (var i = 0; i < artistsModel.count; ++i) {
                 if (artistsModel.get(i).id === id) { artistsModel.setProperty(i, "popularity", pop); break }
@@ -8373,6 +8825,16 @@ ApplicationWindow {
                                     // keystroke replaces it. Only fires on the focus transition, so
                                     // clicking again to reposition the caret mid-edit is left alone.
                                     onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { searchField.selectAll() })
+                                    // Returning to the app must re-arm that select-all. The
+                                    // backend filter swallows WindowActivate/Deactivate (the
+                                    // app-switch freeze fix), so the scene keeps its focus item
+                                    // across a switch and the click that brings Waves back never
+                                    // replays the transition above: the term sat unselected until
+                                    // a click away and back. Ride the window's active flag (a
+                                    // QWindow signal the swallow does not touch) to fire the same
+                                    // deferred select-all the swallowed event used to produce.
+                                    readonly property bool appActive: root.active
+                                    onAppActiveChanged: if (appActive && activeFocus) Qt.callLater(function() { searchField.selectAll() })
                                     // A standard paste (a multi-char jump typing can't produce) is
                                     // detected and animated in, without ever reading the clipboard.
                                     onTextChanged: searchDecoder.noteTextChanged()
@@ -9227,22 +9689,18 @@ ApplicationWindow {
                     model: playlistsModel
                     delegate: Loader {
                         visible: root.searchRowVisible("playlists", playlistsModel.count, index, root.searchPlaylistsExpanded)
-                        width: contentCol.width; height: 66
+                        width: contentCol.width
                         asynchronous: root.searchBuilding
                         opacity: root.searchReveal
+                        // Reserve the collapsed row's height while the async
+                        // build runs (same rationale as the artist strip's
+                        // fixed cell): without it the section collapses to
+                        // zero and pops open as each row lands.
+                        height: item ? item.implicitHeight : 64
                         onLoaded: root._searchBuildTick()
-                        sourceComponent: Rectangle {
-                        radius: 10; color: root.surface; border.color: root.border1
-                        RowLayout {
-                            anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 46; height: 46; hoverFx: true; url: model.art }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 2
-                                Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                Text { textFormat: Text.PlainText; text: (model.tracks > 0 ? model.tracks + " tracks" : "Playlist") + (model.creator ? "  ·  " + model.creator : ""); color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
-                            }
-                            DownloadButton { mediaId: model.id; collectionCheck: true; label: "Download playlist"; onTap: function(){ waves.downloadPlaylist(model.id) } }
-                        }
+                        sourceComponent: PlaylistBlock {
+                            plId: model.id; title: model.title; creator: model.creator || ""
+                            art: model.art; trackCount: model.tracks
                         }
                     }
                 }
@@ -9500,6 +9958,20 @@ ApplicationWindow {
                     label: "VIDEOS"; count: artistVideosModel.count
                     collapsible: true; collapsed: root.artistVideosCollapsed
                     onToggled: root.toggleArtistSection("videos")
+                    // Videos-only download-all (chosen in the videos_dl_lab):
+                    // deliberately independent of the "Music videos"
+                    // discography toggle, this button IS the explicit intent.
+                    // The "vids:" media id matches the backend's
+                    // _VIDEOS_GROUP_PREFIX group, so queued / running with
+                    // rollup % / done / failed all come from the shared
+                    // artist-group machinery.
+                    trailing: Component {
+                        DownloadButton {
+                            mediaId: "vids:" + root.artistData.id
+                            label: "All videos"
+                            onTap: function(){ waves.downloadArtistVideos(root.artistData.id) }
+                        }
+                    }
                 }
                 Flow {
                     id: artistVideoGrid
@@ -10275,20 +10747,54 @@ ApplicationWindow {
                 // play caret is drawn larger so it stands at the pause bars' height.
                 Item {
                     anchors.verticalCenter: parent.verticalCenter
-                    // Fixed 20px normally; widens to fit the transient "[buffering]"
-                    // label, then settles back once the stream starts.
-                    width: root.previewLoading ? npGlyph.implicitWidth : 20; height: 20
+                    // Always 20px. The transient "[buffering]" label paints
+                    // outside the box (leftward, over open bar space) so its
+                    // arrival and exit never resize the row: a resize moves the
+                    // right-docked row's x, and with the animated dock the whole
+                    // art + titles visibly slid when the stream became ready
+                    // (livetest: looked like the bar re-animating in).
+                    width: 20; height: 20
                     Text {
                         id: npGlyph
                         anchors.centerIn: parent
                         textFormat: Text.PlainText
-                        text: root.previewLoading ? "[buffering]" : (root.previewPlaying ? "||" : ">")
+                        text: root.previewPlaying ? "||" : ">"
                         color: root.accent; font.family: root.mono; font.bold: true
-                        font.pixelSize: root.previewLoading ? 10 : (root.previewPlaying ? 13 : 18)
+                        font.pixelSize: root.previewPlaying ? 13 : 18
+                        // Steps aside for the buffering label, but only when
+                        // that label is actually showing: in a window too tight
+                        // for it the caret stays, so the box is never blank.
+                        opacity: (root.previewLoading && npBuffer.visible) ? 0 : 1
+                        Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InOutSine } }
+                    }
+                    Text {
+                        id: npBuffer
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right
+                        textFormat: Text.PlainText
+                        text: "[buffering]"
+                        color: root.accent; font.family: root.mono; font.bold: true
+                        font.pixelSize: 10
+                        // It paints leftward, outside the box, into whatever bar
+                        // space is open between the status text and the row. That
+                        // space is not guaranteed: a narrow window with a long
+                        // title leaves less than the label needs, and the label
+                        // would print over the status text. Show it only when it
+                        // fits; the caret takes the box back when it does not.
+                        // Measured against the status text's REAL right edge (39
+                        // is where it starts: margin + busy dot + spacing) and not
+                        // against npInfo.leftGuard, which caps that width at a
+                        // fifth of the bar for its own budgeting.
+                        readonly property bool fits: (nowPlaying.x - 39 - statusText.width - 12) >= implicitWidth
+                        visible: root.previewLoading && fits
                         property real breathe: 1
-                        opacity: root.previewLoading ? breathe : 1
+                        opacity: breathe
                         SequentialAnimation on breathe {
-                            running: root.previewLoading; loops: Animation.Infinite
+                            // Gated on visible, not previewLoading alone: when
+                            // the label does not fit, animating the opacity of
+                            // a hidden item would still dirty the scene every
+                            // frame for the whole buffering period.
+                            running: npBuffer.visible; loops: Animation.Infinite
                             NumberAnimation { from: 1.0; to: 0.3; duration: 520; easing.type: Easing.InOutSine }
                             NumberAnimation { from: 0.3; to: 1.0; duration: 520; easing.type: Easing.InOutSine }
                         }
@@ -10764,36 +11270,48 @@ ApplicationWindow {
                                         text: "Loading tracks…"; color: root.textDim; font.family: root.mono; font.pixelSize: 10
                                     }
                                 Repeater {
-                                    model: qtrackClip.shown ? (root.queueTracks[qrow.model.qid] || []) : []
+                                    // The count, not the array: every live tick
+                                    // (queueTrackState/Pct, 2 a second while an album
+                                    // downloads) reassigns root.queueTracks wholesale,
+                                    // and an array model tears down and rebuilds every
+                                    // row per tick. Each rebuild costs a layout-settle
+                                    // frame, which reads as the open sliver vibrating
+                                    // under the pointer. With the count as the model
+                                    // the rows stay alive and each one's texts
+                                    // re-evaluate in place.
+                                    model: qtrackClip.shown ? (root.queueTracks[qrow.model.qid] || []).length : 0
                                     delegate: RowLayout {
-                                        required property var modelData
+                                        required property int index
+                                        // Depends on root.queueTracks, so each tick
+                                        // refreshes this row's snapshot in place.
+                                        readonly property var td: (root.queueTracks[qrow.model.qid] || [])[index] || ({})
                                         Layout.fillWidth: true; spacing: 8
                                         Text {
                                             textFormat: Text.PlainText
-                                            text: modelData.num
+                                            text: (td.num || "") + ""
                                             color: root.textDim; font.family: root.mono; font.pixelSize: 10
                                             Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight
                                         }
                                         Text {
                                             textFormat: Text.PlainText
-                                            text: modelData.title
-                                            color: modelData.status === "running" ? root.textHi
-                                                 : modelData.status === "done" ? root.textLo
-                                                 : modelData.status === "failed" ? root.textHi : root.textLo
+                                            text: td.title || ""
+                                            color: td.status === "running" ? root.textHi
+                                                 : td.status === "done" ? root.textLo
+                                                 : td.status === "failed" ? root.textHi : root.textLo
                                             font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true
                                         }
                                         Text {
                                             textFormat: Text.PlainText
-                                            text: modelData.status === "done" ? "✓"
-                                                : modelData.status === "running" ? Math.round(modelData.pct) + "%"
-                                                : modelData.status === "failed" ? "✕"
-                                                : modelData.status === "skipped" ? "HAVE"
-                                                : modelData.status === "cancelled" ? "-" : "·"
-                                            color: modelData.status === "done" || modelData.status === "running" ? root.accent
-                                                 : modelData.status === "failed" ? root.red
-                                                 : modelData.status === "skipped" ? root.green : root.textDim
+                                            text: td.status === "done" ? "✓"
+                                                : td.status === "running" ? Math.round(td.pct || 0) + "%"
+                                                : td.status === "failed" ? "✕"
+                                                : td.status === "skipped" ? "HAVE"
+                                                : td.status === "cancelled" ? "-" : "·"
+                                            color: td.status === "done" || td.status === "running" ? root.accent
+                                                 : td.status === "failed" ? root.red
+                                                 : td.status === "skipped" ? root.green : root.textDim
                                             font.family: root.mono; font.pixelSize: 10
-                                            font.bold: modelData.status === "running"
+                                            font.bold: td.status === "running"
                                             Layout.preferredWidth: 34; horizontalAlignment: Text.AlignRight
                                         }
                                     }
@@ -10963,6 +11481,17 @@ ApplicationWindow {
         // Update toast: the version the user last dismissed (✕) or acted on,
         // so that version stops toasting at launch; a NEWER release toasts.
         property string updateToastDismissed: ""
+        // Update opt-in prompt (updateOptInGate): answered = either button was
+        // pressed, the prompt never returns. A click-away answers nothing and
+        // only counts a dismissal; after two of those it stops asking too.
+        property bool updatePromptAnswered: false
+        property int updatePromptDismissals: 0
+        // True when this install went through the first-run terms gate, so
+        // the opt-in prompt keeps its fresh-setup wording across launches.
+        property bool updatePromptFresh: false
+        // Exit warning (exitGate): "Don't warn me again" mutes the
+        // downloads-still-running close prompt permanently.
+        property bool exitWarnMuted: false
     }
     FfmpegManager { id: appFfmpeg; objectName: "appFfmpeg" }
 
@@ -11693,7 +12222,197 @@ ApplicationWindow {
                     label: "ACKNOWLEDGE & AGREE"
                     enabled: ackChk.checked
                     opacity: ackChk.checked ? 1 : 0.4
-                    onClicked: if (ackChk.checked) legalSettings.termsAccepted = true
+                    // freshSetup: the opt-in prompt that follows this gate reads
+                    // differently for a first run than for a user who updated in.
+                    onClicked: if (ackChk.checked) { legalSettings.termsAccepted = true; setupSettings.updatePromptFresh = true }
+                }
+            }
+        }
+    }
+
+    // ====================================================================
+    // Update opt-in prompt, the last step of the first-run chain (login >
+    // FFmpeg > terms > this) and shown once to existing installs that
+    // predate it. Lands directly after the terms gate's privacy promise on
+    // purpose: here is the one optional outbound connection, asked for.
+    // Either button answers it for good; a click-away re-asks next launch,
+    // then stops. Design settled in scratchpad/update_optin_lab.qml.
+    // ====================================================================
+    Rectangle {
+        id: updateOptInGate
+        objectName: "updateOptInGate"
+        anchors.fill: parent
+        // Above the video overlay (999) and the peek card (990): a first-run
+        // prompt must never paint underneath a playing video.
+        z: 1200
+        readonly property bool shouldShow: waves.loggedIn && setupSettings.ffmpegSetupDone && legalSettings.termsAccepted
+            && bootOverlay.done
+            && !ffmpegGate.visible
+            && !setupSettings.updatePromptAnswered
+            && setupSettings.updatePromptDismissals < 2
+            && !sessionDismissed
+            && !autoUpdateOn
+        // Rather than pop: the card slides up from below the frame while this
+        // scrim dims the app behind it, and both reverse on dismissal.
+        visible: opacity > 0
+        opacity: shouldShow ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 520; easing.type: Easing.OutCubic } }
+        color: "#cc06070e"
+        // Read once at startup: while this gate can be on screen the only
+        // in-app write to auto_update is the gate's own accept.
+        readonly property bool autoUpdateOn: waves.wavesPref("auto_update") === true
+        property bool sessionDismissed: false
+        // Set by the terms gate's acknowledge, so the copy can address a
+        // fresh setup instead of a user who updated into this prompt.
+        // Persisted (setupSettings): a click-away re-asks NEXT LAUNCH, and a
+        // session-only flag would greet that same fresh install with the
+        // "you have been running without update checks" veteran copy.
+        readonly property bool freshSetup: setupSettings.updatePromptFresh
+        function answer(enabled) {
+            setupSettings.updatePromptAnswered = true
+            waves.resolveUpdateOptIn(enabled)
+        }
+        MouseArea { anchors.fill: parent; onClicked: { updateOptInGate.sessionDismissed = true; setupSettings.updatePromptDismissals++ } }
+        Rectangle {
+            // 500, not the other gates' 460: sized so the body sets as three
+            // even lines (the terms gate already runs wider at 540).
+            anchors.centerIn: parent; width: 500
+            implicitHeight: uoCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            // The slide itself: parked below the bottom edge until the gate
+            // opens, then rides up to centre as the scrim dims.
+            anchors.verticalCenterOffset: updateOptInGate.shouldShow
+                ? 0 : updateOptInGate.height / 2 + height
+            Behavior on anchors.verticalCenterOffset {
+                NumberAnimation { duration: 520; easing.type: Easing.OutCubic }
+            }
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: uoCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
+                    text: updateOptInGate.freshSetup ? "Stay current with Waves" : "Want to hear about updates?"
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: (updateOptInGate.freshSetup
+                            ? "Waves updates often, and most updates fix problems you would otherwise run into. "
+                            : "Waves never asked before, so you have been running without update checks. ")
+                        + "A once-a-day check tells you when a new version is out. Nothing is downloaded or installed unless you choose it."
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textDim; font.pixelSize: 12; lineHeight: 1.3
+                    text: "You can change this any time in Settings."
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 4; spacing: 12
+                    SpecBtn { primary: true; label: "TURN ON UPDATE CHECKS"; onClicked: updateOptInGate.answer(true) }
+                    SpecBtn { label: "NOT NOW"; onClicked: updateOptInGate.answer(false) }
+                }
+            }
+        }
+    }
+
+    // Exit warning: the window close was vetoed (onClosing) because downloads
+    // are still running. KEEP DOWNLOADING cancels the exit; EXIT ANYWAY
+    // re-closes for real. The checkbox persists on either button; a click
+    // away is treated as keeping the downloads, without persisting it.
+    Rectangle {
+        id: exitGate
+        objectName: "exitGate"
+        anchors.fill: parent
+        // Above the video overlay (999): the close veto opens this gate, and
+        // with a video full-screen a default z would paint it underneath,
+        // leaving the window looking un-closable.
+        z: 1200
+        visible: open
+        property bool open: false
+        // Lets the EXIT ANYWAY re-close pass the onClosing veto. Reset when
+        // the gate opens so a cancelled exit re-arms the warning.
+        property bool confirmed: false
+        onOpenChanged: if (open) { confirmed = false; exitSkip.checked = false }
+        color: "#cc06070e"
+        MouseArea { anchors.fill: parent; onClicked: exitGate.open = false }
+        Rectangle {
+            // 420: narrower than the info-heavy gates, this one is a short
+            // question and the body still sets as two lines.
+            anchors.centerIn: parent; width: 420
+            implicitHeight: exCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: exCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
+                    text: "Exit while downloading?"
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13; font.bold: true; lineHeight: 1.3
+                    // The 0 case is reachable: the last download can finish
+                    // while this gate is up. The copy must not read "0
+                    // downloads are still running." at that moment.
+                    text: root.activeQueueCount === 0
+                        ? "All downloads finished."
+                        : root.activeQueueCount === 1
+                            ? "A download is still running."
+                            : root.activeQueueCount + " downloads are still running."
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    Layout.topMargin: -8   // the pair reads as one statement, not two paragraphs
+                    text: root.activeQueueCount === 0
+                        ? "It is safe to exit now."
+                        : "Exiting now ends " + (root.activeQueueCount === 1 ? "it" : "them")
+                            + ", and unfinished tracks will need to be downloaded again."
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: 4; spacing: 12
+                    SpecBtn {
+                        primary: true; label: "KEEP DOWNLOADING"
+                        onClicked: {
+                            if (exitSkip.checked) setupSettings.exitWarnMuted = true
+                            exitGate.open = false
+                        }
+                    }
+                    SpecBtn {
+                        danger: true; label: "EXIT ANYWAY"
+                        onClicked: {
+                            if (exitSkip.checked) setupSettings.exitWarnMuted = true
+                            exitGate.confirmed = true
+                            exitGate.open = false
+                            root.close()
+                        }
+                    }
+                }
+                Row {
+                    // "Don't warn me again" row: catDlGate grammar, centred to
+                    // match this card's centered text; below the buttons so the
+                    // choice reads first and the escape hatch last.
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: 8
+                    Check {
+                        id: exitSkip
+                        anchors.verticalCenter: parent.verticalCenter
+                        onToggled: checked = !checked
+                    }
+                    Text {
+                        textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                        text: "Don't warn me again"; color: root.textLo; font.pixelSize: 13
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: exitSkip.checked = !exitSkip.checked }
+                    }
                 }
             }
         }
