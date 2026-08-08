@@ -17,6 +17,146 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.16 (2026-08-08)
+
+### ✨ Added
+
+- ✨ Closing Waves while downloads are queued or running now asks first:
+  exiting ends them and unfinished tracks would need downloading again, so
+  a small prompt offers Keep Downloading or Exit Anyway, with a "don't
+  warn me again" checkbox for people who prefer the old instant exit. With
+  an idle queue, closing exits immediately as before.
+
+- ✨ Waves now asks whether it may check for updates. Update checks
+  have always been off by default and nothing ever raised the question, so
+  people stayed on old versions while the problems those versions had were
+  already fixed. New installs meet the question at the end of first-run
+  setup, right after the privacy terms; existing installs meet it on the
+  first launch after updating. Saying yes turns on the once-a-day
+  check and runs one right away; saying no is remembered and the question
+  never returns. Nothing is ever downloaded or installed without you
+  choosing it, and the check can be turned on or off in Settings as
+  before.
+
+- ✨ An artist's videos can now be downloaded in one click: the VIDEOS
+  section on the artist page carries its own All Videos button, with the
+  same live progress and retry states as the discography button. It
+  queues only the videos, and it works whether or not "Music videos"
+  is enabled as a discography source (that setting only governs what a
+  full discography download includes).
+- ✨ Downloaded music videos now carry real metadata: title, artists,
+  release date, explicit rating, an embedded thumbnail, and the
+  media-kind tag that makes players and library managers file them as
+  music videos. Applies to videos converted to MP4 (the default).
+- ✨ Playlist search results now behave like albums: click the row to
+  expand the track list in place (with per-track selection and
+  Download selected), and click the title to open the playlist's page.
+  Every search starts its playlist rows fresh, a track the playlist
+  contains twice gets its own checkbox per appearance, and ticks made
+  while the list refreshes survive the refresh.
+- ✨ While a track buffers, the cover art now spins up like a record,
+  accelerating through the first turn then cruising. The moment the
+  song is ready the disc eases back to rest, a spark pops in at
+  12 o'clock, and the progress ring rises from that exact spot.
+
+### 🔧 Changed
+
+- 🔧 Previews start much faster. The audio pieces of a track are now
+  fetched all at once instead of one after another, so the wait is set
+  by your connection speed rather than by the round trip to the server
+  repeated dozens of times; when that fast path hits a network error it
+  hands over to the slower fallback immediately instead of waiting out
+  every remaining piece. The track title, artist and artwork also
+  appear the moment you press play instead of only when the audio is
+  ready, so there is no longer a blank bar during the load.
+- 🔧 The Video download switch moved from Downloads to Discography &
+  editions, renamed "Music videos", and now actually does something:
+  with it on, Download discography also downloads all of the artist's
+  music videos alongside the albums. Downloading a single video
+  yourself always works, with or without it. Because the old switch was
+  connected to nothing, it starts off for everyone after this update:
+  flip it on in Settings to opt in.
+- 🔧 The buffering snake hunts faster on video loads, with its food
+  spawned just ahead of it, and the word BUFFERING returned to the
+  bottom bar while a preview loads, shown only when there is room
+  for it.
+- 🔧 The "Concurrent downloads" setting is now "Concurrent track
+  downloads": it always governed the parallelism inside one album or
+  playlist, and with the queue now strictly ordered that is its only
+  meaning.
+- 🔧 Videos now save into a folder per artist with the release year
+  leading the file name (Videos/Artist/[2026] Song), so a plain file
+  explorer sorts them chronologically. The folder uses only the primary
+  artist, so collabs land in that artist's folder instead of minting a
+  new "Artist1, Artist2" folder per combination; every credited artist
+  is still written to the file's metadata. A customized video template
+  is never touched; only the old default follows along.
+
+### 🐛 Fixed
+
+- 🐛 Waves runs on macOS 12 Monterey and newer again, and says so
+  ([issue #14](https://github.com/iamprivacy/Waves/issues/14)). The Qt
+  release the app bundled claims to support macOS 13 but secretly ships
+  libraries built only for macOS 15, so on anything older the app just
+  bounced in the Dock and died with no message. Each release now ships
+  two macOS downloads: the regular build (current Qt, macOS 15 and
+  newer) and a legacy build marked `legacy` in the file name (the
+  newest Qt honestly built for macOS 12, for Monterey through Sonoma).
+  The in-app updater and Homebrew both pick the right one for your
+  machine on their own, each app declares its minimum so an unsupported
+  system gets a clear "requires macOS N" dialog instead of a silent
+  bounce, and the release pipeline now verifies the real floor of every
+  file in both bundles on every build.
+- 🐛 The download queue now processes items strictly in the order you
+  queued them, one at a time. Several items used to run side by side,
+  which read as the queue jumping around: a long album crawled while
+  single tracks queued after it finished first, because everything
+  running at once was competing for the same connections. Parallel
+  downloading still happens inside each album or playlist (the
+  "Concurrent track downloads" setting), so this costs little speed and
+  the queue keeps its promise of order.
+- 🐛 A new search now always starts at the top of the results page. It
+  used to keep the previous search's scroll position, so the fresh
+  results could open already scrolled deep into the albums or tracks.
+  Returning to Search from another tab still restores your exact spot.
+- 🐛 The download queue's hover peek (and an expanded album's track
+  list) no longer jitters while that album is downloading; live
+  progress ticks were rebuilding the visible track rows twice a second.
+- 🐛 On video results, a long artist credit line no longer pushes the
+  release date underneath the download button; the date keeps its
+  place and the artist list trims to the room that is left.
+- 🐛 Switching to another app, or back, no longer disturbs the moving
+  water, the pulsing download dots or any other ambient animation. Two
+  separate faults were at work: the animations paused the instant the
+  window lost focus and lurched back to life on return, and the switch
+  itself froze the whole window for a third of a second in each
+  direction. Animations now keep flowing while the window is visible
+  and pause only when it is hidden or minimised, a window that was
+  covered or minimised wakes on the exact frame it went away on
+  instead of jumping ahead, and clicking the search box while Waves is
+  in the background selects the whole term again so the next keystroke
+  replaces it.
+- 🐛 Moving the mouse across a playing disc to pause it no longer
+  flashes the seek-time readout in passing. The readout and its ring
+  marker now appear once the pointer rests over the ring for a moment,
+  both fade in and out gently, and the play/pause glyph over the art
+  eases in and out instead of popping.
+- 🐛 When a preview finishes buffering, the mini player in the bottom
+  bar no longer shifts sideways as the buffering label collapses; the
+  label now simply gives way to the play glyph and the title, artist
+  and artwork stay put.
+- 🐛 An artist's download button no longer spins forever when one
+  member of the discography could not be re-fetched for its download;
+  the failure is now counted and the button settles, showing that
+  something failed instead of running without end.
+- 🐛 Progress bookkeeping no longer does work proportional to the
+  queue's length on every tick, so the window stays responsive while a
+  very large discography (hundreds of albums and videos) is queued.
+- 🐛 The optional "also hide titles and searches" switch on diagnostic
+  exports now also covers the download engine's log lines that name a
+  track, album, artist or video; a handful of engine messages used to
+  escape the hashing.
+
 ## 🗂️ v0.1.15 (2026-08-05)
 
 ### ✨ Added
