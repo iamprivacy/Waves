@@ -94,6 +94,19 @@ issue. A test enforces it.
 
 ### 🐛 Fixed
 
+- 🐛 Turning Dolby Atmos downloads off now really skips Atmos tracks
+  ([issue #15](https://github.com/iamprivacy/Waves/issues/15)). An album's
+  separate Atmos edition has no non-Atmos stream to fall back to, and it
+  used to be downloaded anyway; with the option off it is now skipped with
+  a log line instead.
+- 🐛 Tracks that share a filename are no longer lost
+  ([issue #15](https://github.com/iamprivacy/Waves/issues/15)). Distinct
+  tracks whose names collide (several mixes with one title) used to be
+  skipped after the first one, or overwrite each other. Every download now
+  carries its TIDAL id in a tag, colliding tracks get numbered names, and
+  "skip existing" compares ids instead of trusting the filename, so
+  re-downloading an album completes the set without duplicating it.
+  Untagged files from older releases keep the old skip behavior.
 - 🐛 Waves runs on macOS 12 Monterey and newer again, and says so
   ([issue #14](https://github.com/iamprivacy/Waves/issues/14)). The Qt
   release the app bundled claims to support macOS 13 but secretly ships
