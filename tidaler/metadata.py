@@ -112,6 +112,7 @@ class Metadata:
         bpm: int = 0,
         initial_key: str = "",
         release_type: str = "",
+        is_video: bool = False,
     ):
         self.path_file = path_file
         self.title = title
@@ -142,6 +143,7 @@ class Metadata:
         self.initial_key = initial_key
         self.m: mutagen.FileType = mutagen.File(self.path_file)
         self.release_type = release_type
+        self.is_video = is_video
 
     def _cover(self) -> bool:
         result: bool = False
@@ -179,7 +181,10 @@ class Metadata:
         elif isinstance(self.m, mutagen.mp3.MP3):
             self.set_mp3()
         elif isinstance(self.m, mutagen.mp4.MP4):
-            self.set_mp4()
+            if self.is_video:
+                self.set_mp4_video()
+            else:
+                self.set_mp4()
 
         self._cover()
         self.cleanup_tags()
@@ -284,6 +289,22 @@ class Metadata:
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
                 self.m.tags[f"----:com.apple.iTunes:{key}"] = text.encode("utf-8")
+
+    def set_mp4_video(self):
+        # The music-video subset of set_mp4. A standalone video has no album
+        # structure, lyrics, ISRC, UPC or loudness data, and writing those
+        # atoms zeroed is noise readers take literally ("track 0 of 0"), so
+        # only the fields a video really has are written. "stik" is the
+        # iTunes media-kind atom; 6 means music video, so players and
+        # library managers file it under videos rather than songs.
+        self.m.tags["\xa9nam"] = self.title
+        self.m.tags["\xa9alb"] = self.album
+        self.m.tags["aART"] = self.albumartist
+        self.m.tags["\xa9ART"] = self.artists
+        self.m.tags["\xa9day"] = self.date
+        self.m.tags["\xa9url"] = self.url_share
+        self.m.tags["rtng"] = [1 if self.explicit else 0]
+        self.m.tags["stik"] = [6]
 
     def cleanup_tags(self):
         # Collect keys to delete first to avoid RuntimeError during iteration

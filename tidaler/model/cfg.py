@@ -65,7 +65,15 @@ class Settings:
         "{artist_name}/[{album_year}] {album_title}{album_explicit}/{track_volume_num_optional}"
         "{album_track_num}. {artist_name} - {track_title}{track_explicit}"
     )
-    format_video: str = "Videos/{artist_name} - {track_title}{track_explicit}"
+    # Videos keep their own top-level pool (Plex and friends do not model
+    # music videos inside a music library's artist folders), organized per
+    # artist with the release year leading the file name so a plain file
+    # explorer sorts them chronologically. {video_year_optional} dresses
+    # itself ("[2026] ", or nothing when TIDAL has no release date).
+    # {artist_name_primary} keeps ONE folder per artist: the full join would
+    # mint a fresh "A, B, C" folder for every collab. The full credit list
+    # still lives in the file's metadata (and usually the title's feat.).
+    format_video: str = "Videos/{artist_name_primary}/{video_year_optional}{track_title}{track_explicit}"
     video_convert_mp4: bool = True
     path_binary_ffmpeg: str = ""
     # Read-only diagnostic, written by the app, never edited in the Settings UI:
@@ -208,7 +216,10 @@ class HelpSettings:
     album_track_num_pad_min: str = (
         "Minimum length of the album track count, will be padded with zeroes (0). To disable padding set this to 1."
     )
-    downloads_concurrent_max: str = "Maximum concurrent number of downloads (threads)."
+    downloads_concurrent_max: str = (
+        "How many tracks of an album, playlist or mix download at the same time. "
+        "Queued items themselves always run one after another, in order."
+    )
     symlink_to_track: str = (
         "If enabled the tracks of albums, playlists and mixes will be downloaded to the track directory but symlinked "
         "accordingly."

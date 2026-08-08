@@ -912,7 +912,7 @@ class Download:
                 # Check if media is available not deactivated / removed from TIDAL.
                 if not media.allow_streaming:
                     self.fn_logger.info(
-                        f"This item is not available for listening anymore on TIDAL. Skipping: {name_builder_item(media)}"
+                        f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_item(media))}"
                     )
                     return None
                 elif isinstance(media, Track) and not keep_album:
@@ -925,7 +925,7 @@ class Download:
                 # Check if media is available not deactivated / removed from TIDAL.
                 if not media.allow_streaming:
                     self.fn_logger.info(
-                        f"This item is not available for listening anymore on TIDAL. Skipping: {name_builder_title(media)}"
+                        f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_title(media))}"
                     )
                     return None
             elif not media:
@@ -936,7 +936,7 @@ class Download:
         # If video download is not allowed and this is a video, return None
         if not video_download and isinstance(media, Video):
             self.fn_logger.info(
-                f"Video downloads are deactivated (see settings). Skipping video: {name_builder_item(media)}"
+                f"Video downloads are deactivated (see settings). Skipping video: {log_content(name_builder_item(media))}"
             )
             return None
 
@@ -1190,13 +1190,13 @@ class Download:
 
             except TooManyRequests:
                 self.fn_logger.exception(
-                    f"Too many requests against TIDAL backend. Skipping '{name_builder_item(media)}'. "
+                    f"Too many requests against TIDAL backend. Skipping '{log_content(name_builder_item(media))}'. "
                     f"Consider to activate delay between downloads."
                 )
                 return None, "", False, None
 
             except Exception:
-                self.fn_logger.exception(f"Something went wrong. Skipping '{name_builder_item(media)}'.")
+                self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
                 return None, "", False, None
 
         return stream_manifest, file_extension, do_flac_extract, media_stream
@@ -1357,6 +1357,11 @@ class Download:
             media_stream (Stream | None): Media stream.
         """
         if isinstance(media, Video):
+            # A converted music video carries tags (metadata_write_video); a
+            # raw .ts cannot, MPEG-TS has no tag atoms mutagen can write.
+            # Lyrics and cover sidecars stay track/album concepts either way.
+            if tmp_path_file.suffix == AudioExtensions.MP4:
+                self.metadata_write_video(media, tmp_path_file)
             return
 
         tmp_path_lyrics: pathlib.Path | None = None
@@ -2084,10 +2089,70 @@ class Download:
         except MetadataUnreadable:
             # A truncated/unidentifiable file (e.g. a failed download) can't be tagged.
             # Fail only this item's tagging instead of aborting the whole collection.
-            self.fn_logger.exception(f"Could not write metadata; file is unreadable: {name_builder_item(track)}")
+            self.fn_logger.exception(
+                f"Could not write metadata; file is unreadable: {log_content(name_builder_item(track))}"
+            )
             result = False
 
         return result, path_lyrics, lyrics_suffix, path_cover
+
+    def metadata_write_video(self, video: Video, path_media: pathlib.Path) -> bool:
+        """Tag a music video's MP4 container with everything a video has:
+        title, artists, release date, explicit rating, thumbnail cover, the
+        share URL (when the URL tag is enabled) and the iTunes music-video
+        media kind. Only called for converted MP4s (a raw .ts has no tag
+        atoms); a tagging failure is logged and never fails the download.
+        """
+        release_date: str = video.release_date.strftime("%Y-%m-%d") if getattr(video, "release_date", None) else ""
+        explicit: bool = bool(getattr(video, "explicit", False))
+        title: str = name_builder_title(video)
+        title += METADATA_EXPLICIT if explicit and self.settings.data.mark_explicit else ""
+        artists: list[str] = [a.name for a in getattr(video, "artists", None) or []]
+        primary = getattr(video, "artist", None)
+        albumartist: list[str] = [primary.name] if primary is not None and getattr(primary, "name", "") else artists[:1]
+        # A video's album is usually an unparsed placeholder; only a real
+        # name is worth writing.
+        album_name: str = getattr(getattr(video, "album", None), "name", "") or ""
+
+        cover_data: bytes | None = None
+        if self.settings.data.metadata_cover_embed and getattr(video, "cover", None):
+            try:
+                # 1080x720 is the largest thumbnail TIDAL serves for videos.
+                cover_data = self.cover_data(url=video.image(1080, 720))
+            except Exception:
+                self.fn_logger.debug(f"No usable thumbnail for video {video.id}; tagging without a cover.")
+
+        metadata_target_upc = MetadataTargetUPC(self.settings.data.metadata_target_upc)
+        m: Metadata = Metadata(
+            path_file=path_media,
+            target_upc=METADATA_LOOKUP_UPC[metadata_target_upc],
+            title=title,
+            artists=artists,
+            albumartist=albumartist,
+            album=album_name,
+            date=release_date,
+            cover_data=cover_data,
+            url_share=(
+                video.share_url if getattr(video, "share_url", "") and self.settings.data.metadata_write_url else ""
+            ),
+            replay_gain_write=False,
+            explicit=explicit,
+            is_video=True,
+        )
+
+        try:
+            m.save()
+        except MetadataUnreadable:
+            self.fn_logger.exception(
+                f"Could not write metadata; file is unreadable: {log_content(name_builder_item(video))}"
+            )
+            return False
+        except Exception:
+            # Tagging is strictly best-effort for videos; the file itself is
+            # complete and playable either way.
+            self.fn_logger.exception(f"Could not tag video: {log_content(name_builder_item(video))}")
+            return False
+        return True
 
     def items(
         self,

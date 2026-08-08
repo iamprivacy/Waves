@@ -172,6 +172,12 @@ def path_file_settings() -> str:
     return os.path.join(path_config_base(), "settings.json")
 
 
+# Tokens whose value dresses itself with a trailing separator space when
+# present (and disappears entirely when not); format_path_media preserves
+# that one space through sanitization.
+_SELF_DRESSING_TOKENS = {"video_year_optional"}
+
+
 def format_path_media(
     fmt_template: str,
     media: Track | Album | Playlist | UserPlaylist | Video | Mix,
@@ -224,6 +230,13 @@ def format_path_media(
             value = (
                 sanitize_filename(result_fmt) if result_fmt != FORMAT_TEMPLATE_EXPLICIT else FORMAT_TEMPLATE_EXPLICIT
             )
+            # Self-dressing tokens carry their own separator space
+            # ("[2026] "); sanitize_filename trims edge whitespace, which
+            # would weld the year prefix straight onto the title. Scoped to
+            # the known tokens so an ordinary value that happens to end in a
+            # space keeps today's trimmed behavior.
+            if match.group(1) in _SELF_DRESSING_TOKENS and result_fmt.endswith(" ") and value:
+                value += " "
             result = result.replace(template_str, value)
 
     return _drop_empty_segments(result)
@@ -284,6 +297,7 @@ def format_str_media(
             _format_ids,
             _format_durations,
             _format_dates,
+            _format_video_dates,
             _format_metadata,
             _format_volumes,
         ):
@@ -336,6 +350,16 @@ def _format_artist_names(
             return name_builder_artist(media, delimiter=delimiter_artist)
         elif hasattr(media, "artist"):
             return media.artist.name
+    elif name == "artist_name_primary" and isinstance(media, Track | Video):
+        # Only the first credited artist: keeps one folder per artist where
+        # {artist_name} would mint a new "A, B, C" folder for every collab.
+        # Videos have no usable album artist (their album is a placeholder),
+        # so this is their only route to a stable per-artist folder.
+        primary = getattr(media, "artist", None)
+        if primary is not None and getattr(primary, "name", ""):
+            return primary.name
+        artists = getattr(media, "artists", None) or []
+        return artists[0].name if artists else ""
     elif name == "album_artist":
         return name_builder_album_artist(media, first_only=True)
     elif name == "album_artists":
@@ -548,6 +572,32 @@ def _format_dates(
             return media.release_date.strftime("%Y-%m-%d") if media.release_date else ""
         elif isinstance(media, Track):
             return media.album.release_date.strftime("%Y-%m-%d") if media.album.release_date else ""
+
+    return None
+
+
+def _format_video_dates(
+    name: str, media: Track | Album | Playlist | UserPlaylist | Video | Mix, *_args, **kwargs
+) -> str | None:
+    """Handle the video release-date format strings.
+
+    A video carries its own release_date (no album to borrow one from).
+    All three return "" rather than None on a missing date, the same
+    rationale as album_date: "" substitutes and collapses away, None would
+    leave the literal token in the path.
+    """
+    if not isinstance(media, Video):
+        return None
+    if name == "video_year":
+        return str(media.release_date.year) if media.release_date else ""
+    elif name == "video_date":
+        return media.release_date.strftime("%Y-%m-%d") if media.release_date else ""
+    elif name == "video_year_optional":
+        # Self-dressed like track_volume_num_optional: the default video
+        # template's bracketed year prefix ("[2026] Song"), or nothing at
+        # all when TIDAL has no release date, so a dateless video gets a
+        # clean bare title instead of "[] Song".
+        return f"[{media.release_date.year}] " if media.release_date else ""
 
     return None
 
