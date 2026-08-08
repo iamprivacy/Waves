@@ -180,3 +180,10 @@ scratchpad/
 # Deferred distribution channels (kept local until each venue actually launches)
 packaging/aur/
 packaging/winget/
+
+# Local audit / review reports (working notes, never part of the shipped app).
+# Root-scoped on purpose: the tracked tests/ files that mention "audit" in their
+# names are real source and must stay tracked. release.sh publishes the tree of
+# a ref, so untracked files were already safe from the public repo; this closes
+# the other door, a stray `git add -A` sweeping one into a commit.
+/*audit*.md

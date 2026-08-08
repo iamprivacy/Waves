@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.15"
+version = "0.1.16"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -33,7 +33,17 @@ dataclasses-json = "^0.6.7"
 pathvalidate = "^3.3.1"
 m3u8 = "^6.0.0"
 coloredlogs = "^15.0.1"
-pyside6 = { version = "6.10.0", optional = true }
+# Exact pin. PySide6 6.10.0 through 6.11.1 ship macOS binding libraries built
+# for macOS 15 despite their macosx_13_0 wheel tag, so on macOS this version
+# really requires Sequoia (dyld kills the app on anything older, issue #14).
+# The release handles that with two macOS flavors: the regular build uses this
+# pin (floor 15.0), and CI's legacy macOS legs overlay pyside6==6.9.3 (the
+# newest release whose binaries honor their macOS 12 wheel tag) on top of the
+# locked venv for a "_legacy" bundle with floor 12.0 (see WAVES_MACOS_MIN in
+# the Makefile and the legacy legs in release-or-test-build.yml). CI's "Assert
+# macOS version floor" step enforces each flavor's floor on every macOS build;
+# when a PySide6 release honors its wheel tags again the legacy legs can go.
+pyside6 = { version = "6.11.1", optional = true }
 rich = "^14.2.0"
 toml = "^0.10.2"
 tidalapi = "^0.8.10"
@@ -152,6 +162,7 @@ ignore = [
 "tests/test_playlist_folder_qml.py" = ["S603", "C901"]
 "tests/test_folder_back_navigation.py" = ["S603", "C901"]
 "tests/test_search_results_surface_steal.py" = ["S603", "C901"]
+"tests/test_search_scroll_reset.py" = ["S603", "C901"]
 "tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
 "tests/test_boot_handover_gate.py" = ["S603", "C901"]
 "tests/test_boot_version_drain_order.py" = ["S603", "C901"]
@@ -163,6 +174,9 @@ ignore = [
 "tests/test_browse_console_wayfinding.py" = ["S603", "C901"]
 "tests/test_browse_row_window.py" = ["S603", "C901"]
 "tests/test_video_grid_hover_dwell.py" = ["S603", "C901"]
+"tests/test_video_card_date_no_overlap.py" = ["S603", "C901"]
+"tests/test_search_playlist_block.py" = ["S603", "C901"]
+"tests/test_playlist_selection_and_reset.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
