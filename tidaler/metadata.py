@@ -50,6 +50,43 @@ class MetadataUnreadable(Exception):
         self.path_file = path_file
 
 
+# One tag name across containers so a file can always answer "which TIDAL
+# item is this?": distinct tracks whose sanitized filenames collide (several
+# mixes sharing a title) are told apart by this id, not by their name.
+ITEM_ID_TAG = "WAVES_TIDAL_ID"
+
+
+def read_item_id(path_file: str | pathlib.Path) -> str:
+    """The TIDAL item id a file was downloaded as, or "" when untagged.
+
+    Files from releases before this tag existed (or raw .ts videos, which have
+    no tag atoms) return "": callers must treat that as "identity unknown",
+    never as "different item".
+    """
+    try:
+        m = mutagen.File(path_file)
+    except Exception:
+        return ""
+    if m is None or not m.tags:
+        return ""
+    for key in (ITEM_ID_TAG, f"TXXX:{ITEM_ID_TAG}", f"----:com.apple.iTunes:{ITEM_ID_TAG}"):
+        try:
+            value = m.tags.get(key)
+        except Exception:  # noqa: S112 - a container that can't .get() a key simply has no id
+            continue
+        if not value:
+            continue
+        first = value[0] if isinstance(value, list) else value
+        if hasattr(first, "text"):  # an ID3 TXXX frame
+            first = first.text[0] if first.text else ""
+        if isinstance(first, bytes):
+            first = first.decode("utf-8", "ignore")
+        text = str(first).strip()
+        if text:
+            return text
+    return ""
+
+
 class Metadata:
     path_file: str | pathlib.Path
     title: str
@@ -113,6 +150,7 @@ class Metadata:
         initial_key: str = "",
         release_type: str = "",
         is_video: bool = False,
+        item_id: str = "",
     ):
         self.path_file = path_file
         self.title = title
@@ -144,6 +182,7 @@ class Metadata:
         self.m: mutagen.FileType = mutagen.File(self.path_file)
         self.release_type = release_type
         self.is_video = is_video
+        self.item_id = item_id
 
     def _cover(self) -> bool:
         result: bool = False
@@ -234,6 +273,7 @@ class Metadata:
         self.m.tags["BPM"] = str(self.bpm if self.bpm > 0 else "")
         self.m.tags["INITIALKEY"] = self.initial_key
         self.m.tags["RELEASETYPE"] = self.release_type
+        self.m.tags[ITEM_ID_TAG] = self.item_id
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -258,6 +298,8 @@ class Metadata:
         self.m.tags.add(TBPM(encoding=3, text=str(self.bpm if self.bpm > 0 else "")))
         self.m.tags.add(TKEY(encoding=3, text=self.initial_key))
         self.m.tags.add(TXXX(encoding=3, desc="MusicBrainz Album Type", text=self.release_type))
+        if self.item_id:
+            self.m.tags.add(TXXX(encoding=3, desc=ITEM_ID_TAG, text=self.item_id))
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -285,6 +327,8 @@ class Metadata:
         self.m.tags["----:com.apple.iTunes:initialkey"] = self.initial_key.encode("utf-8")
 
         self.m.tags["----:com.apple.iTunes:MusicBrainz Album Type"] = self.release_type.encode("utf-8")
+        if self.item_id:
+            self.m.tags[f"----:com.apple.iTunes:{ITEM_ID_TAG}"] = self.item_id.encode("utf-8")
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -305,6 +349,8 @@ class Metadata:
         self.m.tags["\xa9url"] = self.url_share
         self.m.tags["rtng"] = [1 if self.explicit else 0]
         self.m.tags["stik"] = [6]
+        if self.item_id:
+            self.m.tags[f"----:com.apple.iTunes:{ITEM_ID_TAG}"] = self.item_id.encode("utf-8")
 
     def cleanup_tags(self):
         # Collect keys to delete first to avoid RuntimeError during iteration

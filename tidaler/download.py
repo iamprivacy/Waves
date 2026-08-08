@@ -53,6 +53,7 @@ from tidaler.constants import (
     PLAYLIST_EXTENSION,
     PLAYLIST_PREFIX,
     REQUESTS_TIMEOUT_SEC,
+    UNIQUIFY_THRESHOLD,
     AudioExtensionsValid,
     CoverDimensions,
     DownsampleTarget,
@@ -78,7 +79,7 @@ from tidaler.helper.tidal import (
     name_builder_title,
 )
 from tidaler.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
-from tidaler.metadata import Metadata, MetadataUnreadable
+from tidaler.metadata import Metadata, MetadataUnreadable, read_item_id
 from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from tidaler.model.gui_data import ProgressBars
 from tidaler.waves_ui.diagnostics import content as log_content
@@ -840,6 +841,21 @@ class Download:
 
         media = validated_media
 
+        # An Atmos-only track IS the Atmos version (albums list it as its own
+        # track id); with Atmos downloads off there is no non-Atmos stream to
+        # fall back to, so honoring the setting means skipping it entirely
+        # instead of downloading an AC-4 file through the normal session.
+        if (
+            isinstance(media, Track)
+            and not self.settings.data.download_dolby_atmos
+            and getattr(media, "audio_modes", None)
+            and all(mode == AudioMode.dolby_atmos.value for mode in media.audio_modes)
+        ):
+            self.fn_logger.info(
+                f"Skipped Dolby Atmos track '{log_content(name_builder_item(media))}': Atmos downloads are off."
+            )
+            return True, ""
+
         # Check for stop signal
         if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
             return False, ""
@@ -949,6 +965,40 @@ class Download:
         """
         raise MediaMissing
 
+    def _existing_is_same_item(self, path_media_dst: pathlib.Path, media: Track | Video) -> bool:
+        """Whether the file(s) already at this destination ARE this item.
+
+        skip_existing used to be filename-keyed, so distinct tracks whose
+        sanitized names collide (an album carrying several mixes with one
+        title) were silently skipped after the first one downloaded (issue
+        #15). Downloads tag each file with the TIDAL item id (read_item_id);
+        when the name is taken, the ids decide:
+
+        - untagged occupant (a pre-id library, or a raw .ts video): identity
+          unknown, keep the historical skip so re-downloading an old library
+          cannot duplicate it wholesale;
+        - occupant has this item's id: already downloaded, skip;
+        - different id: look through the name's uniquify variants (stem_NN)
+          for this id; found means skip, otherwise this is a NEW colliding
+          track and the caller downloads it (the final move uniquifies).
+        """
+        media_id = str(getattr(media, "id", "") or "")
+        if not media_id:
+            return True
+        occupant_id = read_item_id(path_media_dst)
+        if not occupant_id or occupant_id == media_id:
+            return True
+        threshold_zfill = len(str(UNIQUIFY_THRESHOLD))
+        for count in range(1, UNIQUIFY_THRESHOLD + 1):
+            sibling = path_media_dst.parent / (
+                path_media_dst.stem + "_" + str(count).zfill(threshold_zfill) + path_media_dst.suffix
+            )
+            if not sibling.is_file():
+                break
+            if read_item_id(sibling) == media_id:
+                return True
+        return False
+
     def _prepare_file_paths_and_skip_logic(
         self,
         media: Track | Video,
@@ -1001,7 +1051,9 @@ class Download:
         skip_download: bool = False
 
         if self.skip_existing:
-            skip_file: bool = check_file_exists(path_media_dst, extension_ignore=False)
+            skip_file: bool = check_file_exists(path_media_dst, extension_ignore=False) and self._existing_is_same_item(
+                path_media_dst, media
+            )
 
             if self.settings.data.symlink_to_track and not isinstance(media, Video):
                 # Compute symlink tracks path, sanitize and check if file exists
@@ -1097,7 +1149,11 @@ class Download:
         # Re-evaluate skip-existing against the TRUE extension. The step-2 check may have
         # looked for the wrong extension (e.g. .flac while the stream is .m4a) and missed
         # an already-downloaded file.
-        if self.skip_existing and check_file_exists(path_media_dst, extension_ignore=False):
+        if (
+            self.skip_existing
+            and check_file_exists(path_media_dst, extension_ignore=False)
+            and self._existing_is_same_item(path_media_dst, media)
+        ):
             self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_dst}'")
 
             return True, path_media_dst
@@ -2081,6 +2137,7 @@ class Download:
             bpm=track.bpm if track.bpm else 0,
             initial_key=format_initial_key(track.key, track.key_scale, self.settings.data.initial_key_format),
             release_type=release_type,
+            item_id=str(track.id),
         )
 
         try:
@@ -2138,6 +2195,7 @@ class Download:
             replay_gain_write=False,
             explicit=explicit,
             is_video=True,
+            item_id=str(video.id),
         )
 
         try:
