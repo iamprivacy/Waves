@@ -25,7 +25,7 @@ on:
         required: false
         default: ""
       only:
-        description: "Comma-separated OS_ARCH legs to build (e.g. macos-x64,windows-x64,windows-arm64). Blank = all six."
+        description: "Comma-separated OS_ARCH legs to build (e.g. macos-intel,macos-apple-silicon,windows-x64; the legacy macOS legs are macos-intel_legacy / macos-apple-silicon_legacy, and naming one also runs its regular macOS leg because the filter is a substring match). Blank = all eight."
         required: false
         default: ""
 
@@ -43,6 +43,15 @@ env:
   OUT_NAME_FILE: "waves"
   ARCH_MACOS_X64: "macos-intel"
   ARCH_MACOS_ARM64: "macos-apple-silicon"
+  # Legacy macOS flavor (pyside6 6.9.3, floor 12.0) for macOS 12 through 14;
+  # the regular macOS zips require 15 (the locked PySide6's real floor, see
+  # pyproject.toml). Underscore before "legacy" on purpose: pre-dual-build
+  # updaters in the field pick between assets by NAME SORT, and ".zip" sorts
+  # before "_legacy.zip", so every old updater (all of which run on macOS 15+,
+  # no earlier release could launch below that) keeps resolving to the regular
+  # bundle. A hyphen would sort the legacy bundle first and downgrade them.
+  ARCH_MACOS_X64_LEGACY: "macos-intel_legacy"
+  ARCH_MACOS_ARM64_LEGACY: "macos-apple-silicon_legacy"
   ARCH_LINUX_X64: "linux-x64"
   ARCH_LINUX_ARM64: "linux-arm64"
   ARCH_WINDOWS_X64: "windows-x64"
@@ -57,6 +66,8 @@ jobs:
       OUT_NAME_FILE: ${{ env.OUT_NAME_FILE }}
       ARCH_MACOS_X64: ${{ env.ARCH_MACOS_X64 }}
       ARCH_MACOS_ARM64: ${{ env.ARCH_MACOS_ARM64 }}
+      ARCH_MACOS_X64_LEGACY: ${{ env.ARCH_MACOS_X64_LEGACY }}
+      ARCH_MACOS_ARM64_LEGACY: ${{ env.ARCH_MACOS_ARM64_LEGACY }}
       ARCH_LINUX_X64: ${{ env.ARCH_LINUX_X64 }}
       ARCH_LINUX_ARM64: ${{ env.ARCH_LINUX_ARM64 }}
       ARCH_WINDOWS_X64: ${{ env.ARCH_WINDOWS_X64 }}
@@ -68,6 +79,8 @@ jobs:
           echo "OUT_NAME_FILE=${{ env.OUT_NAME_FILE }}" >> $GITHUB_OUTPUT
           echo "ARCH_MACOS_X64=${{ env.ARCH_MACOS_X64 }}" >> $GITHUB_OUTPUT
           echo "ARCH_MACOS_ARM64=${{ env.ARCH_MACOS_ARM64 }}" >> $GITHUB_OUTPUT
+          echo "ARCH_MACOS_X64_LEGACY=${{ env.ARCH_MACOS_X64_LEGACY }}" >> $GITHUB_OUTPUT
+          echo "ARCH_MACOS_ARM64_LEGACY=${{ env.ARCH_MACOS_ARM64_LEGACY }}" >> $GITHUB_OUTPUT
           echo "ARCH_LINUX_X64=${{ env.ARCH_LINUX_X64 }}" >> $GITHUB_OUTPUT
           echo "ARCH_LINUX_ARM64=${{ env.ARCH_LINUX_ARM64 }}" >> $GITHUB_OUTPUT
           echo "ARCH_WINDOWS_X64=${{ env.ARCH_WINDOWS_X64 }}" >> $GITHUB_OUTPUT
@@ -154,7 +167,7 @@ jobs:
     needs: ["compute", "create-release"]
     # create-release is skipped outright on a non-release run (test-build /
     # a dispatch with no release_tag), which is fine; but if it's supposed to
-    # run and fails, don't burn six platforms' worth of build minutes on a
+    # run and fails, don't burn eight legs' worth of build minutes on a
     # release that has nowhere to land. (Hyphenated job id, so bracket syntax:
     # dot notation would parse "create-release" as a subtraction.)
     if: always() && needs.compute.result == 'success' && needs['create-release'].result != 'failure' && needs['create-release'].result != 'cancelled' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/test-build' || github.event_name == 'workflow_dispatch')
@@ -164,9 +177,16 @@ jobs:
         include:
           # macOS legs ship a zip of the trimmed Waves.app: both a manual
           # unzip-and-drag install and the exact shape the in-app updater extracts.
+          # Both legs build on runners NEWER than the oldest macOS we support
+          # (WAVES_MACOS_MIN in the Makefile), so nothing here can ever prove a
+          # bundle runs on that floor. The "Assert macOS version floor" step
+          # below checks it statically instead: every shipped Mach-O must not
+          # demand anything newer (issue #14: PySide6 6.10 wheels smuggled in
+          # macOS 15-only libraries, so older systems got a silent Dock bounce).
           - os: "macos-15-intel"
             TARGET: "macos-15-intel"
             OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_X64}}
+            MACOS_FLOOR: "15.0"
             # Intel Homebrew lives at /usr/local, whose lib dir overlaps Nuitka's
             # macOS dependency-scan paths: it sees both the unversioned
             # /usr/local/lib/libcrypto.dylib symlink AND the openssl@3 keg's real
@@ -187,11 +207,45 @@ jobs:
           - os: "macos-14"
             TARGET: "macos-14 M1"
             OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_ARM64}}
+            MACOS_FLOOR: "15.0"
             CMD_BUILD: >
               source $VENV &&
               poetry run make gui-waves &&
               cd dist &&
               zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              cd ..
+          # Legacy macOS flavor for macOS 12 through 14 (see the env note on the
+          # _LEGACY names): the locked PySide6 is overlaid with 6.9.3, the newest
+          # release whose macOS binaries honor their macOS 12 wheel tag, and the
+          # floor drops to 12.0 (WAVES_MACOS_MIN is ?= in the Makefile, so the
+          # env override reaches Nuitka's MACOSX_DEPLOYMENT_TARGET and the
+          # Info.plist declaration). --force-reinstall --no-deps: exactly these
+          # four wheels swap, everything else stays as the lock resolved it.
+          - os: "macos-15-intel"
+            TARGET: "macos-15-intel legacy"
+            OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_X64_LEGACY}}
+            MACOS_FLOOR: "12.0"
+            CMD_BUILD: >
+              ls -l /usr/local/lib/libcrypto* /usr/local/lib/libssl* || true;
+              rm -f /usr/local/lib/libcrypto*.dylib /usr/local/lib/libssl*.dylib || true;
+              source $VENV &&
+              poetry run pip install --force-reinstall --no-deps
+              pyside6==6.9.3 pyside6-addons==6.9.3 pyside6-essentials==6.9.3 shiboken6==6.9.3 &&
+              WAVES_MACOS_MIN=12.0 poetry run make gui-waves &&
+              cd dist &&
+              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              cd ..
+          - os: "macos-14"
+            TARGET: "macos-14 M1 legacy"
+            OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_ARM64_LEGACY}}
+            MACOS_FLOOR: "12.0"
+            CMD_BUILD: >
+              source $VENV &&
+              poetry run pip install --force-reinstall --no-deps
+              pyside6==6.9.3 pyside6-addons==6.9.3 pyside6-essentials==6.9.3 shiboken6==6.9.3 &&
+              WAVES_MACOS_MIN=12.0 poetry run make gui-waves &&
+              cd dist &&
+              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
           # Linux legs ship BOTH a zip of the standalone tree and a single-file
           # AppImage of the same tree (tools/build_appimage.sh); the in-app
@@ -314,6 +368,52 @@ jobs:
             ok=1
           fi
           [ "$ok" -eq 1 ] || { echo "::error::smoke-launch: $BIN never reached a healthy state"; exit 1; }
+      # The smoke-launch above runs on the build host itself, so it can never
+      # catch a bundle that demands a newer macOS than a user's machine has.
+      # This step checks the version floor statically instead: every file in
+      # the bundle that is a Mach-O (Qt libraries ship flattened WITHOUT an
+      # extension, so scan everything) must not require anything newer than
+      # the leg's MACOS_FLOOR (15.0 regular, 12.0 legacy; the same values the
+      # legs feed WAVES_MACOS_MIN), and Info.plist must declare exactly that
+      # value so an unsupported system shows a clear "requires macOS X" dialog
+      # instead of a Dock bounce. A dependency bump that smuggles in
+      # newer-floor binaries fails here instead of shipping a bundle whose
+      # plist lies (issue #14: PySide6 6.10 wheels are tagged macOS 13 but
+      # contain macOS 15-only libraries).
+      - name: Assert macOS version floor
+        if: ${{ startsWith(matrix.OS_ARCH, 'macos-') && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) }}
+        run: |
+          set -eu
+          MIN="${{ matrix.MACOS_FLOOR }}"
+          [ -n "$MIN" ] || { echo "::error::floor-assert: this macOS leg declares no MACOS_FLOOR in the matrix"; exit 1; }
+          PLIST="dist/waves.app/Contents/Info.plist"
+          DECLARED="$(plutil -extract LSMinimumSystemVersion raw "$PLIST" 2>/dev/null || true)"
+          if [ "$DECLARED" != "$MIN" ]; then
+            echo "::error::floor-assert: Info.plist LSMinimumSystemVersion is '${DECLARED:-missing}', expected '$MIN'"; exit 1
+          fi
+          min_of() {  # print the macOS floor a Mach-O file demands (empty if not Mach-O)
+            # -arch all: a universal file carries one load-command set PER SLICE
+            # and otool defaults to the host slice only; the floor is the most
+            # demanding slice, so collect every version and keep the highest.
+            otool -arch all -l "$1" 2>/dev/null | awk '
+              /LC_BUILD_VERSION/ {b=1; m=0}
+              /LC_VERSION_MIN_MACOSX/ {m=1; b=0}
+              b && /minos/ {print $2; b=0}
+              m && $1 == "version" {print $2; m=0}' | sort -V | tail -1
+          }
+          FAIL=0
+          SCANNED=0
+          while IFS= read -r F; do
+            V="$(min_of "$F")"
+            [ -n "$V" ] || continue
+            SCANNED=$((SCANNED + 1))
+            if [ "$(printf '%s\n%s\n' "$MIN" "$V" | sort -V | tail -1)" != "$MIN" ]; then
+              echo "::error::floor-assert: $F demands macOS $V, above the declared floor $MIN"; FAIL=1
+            fi
+          done < <(find dist/waves.app -type f)
+          [ "$SCANNED" -gt 0 ] || { echo "::error::floor-assert: no Mach-O files found under dist/waves.app"; exit 1; }
+          [ "$FAIL" -eq 0 ] || exit 1
+          echo "floor-assert: all $SCANNED Mach-O files honor the macOS $MIN floor."
       # The AppImage wraps AppRun + the runtime AROUND the already-smoked tree,
       # so launch the finished file itself too (x64 only, same reason as above;
       # --appimage-extract-and-run because runners have no FUSE).
@@ -541,11 +641,11 @@ jobs:
           GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::TAP_PUSH_TOKEN is not set; the Homebrew cask was NOT bumped. Update ${TAP_REPO} Casks/waves.rb to ${RELEASE_TAG} by hand (version + both macOS sha256s from SHA256SUMS)."
+            echo "::warning::TAP_PUSH_TOKEN is not set; the Homebrew cask was NOT bumped. Update ${TAP_REPO} Casks/waves.rb to ${RELEASE_TAG} by hand (version + the macOS sha256s from SHA256SUMS, all four once the dual-flavor cask is live)."
             exit 0
           fi
           VERSION="${RELEASE_TAG#v}"
-          # The cask covers the two macOS zips; their checksum artifacts must
+          # The cask covers the macOS zips; their checksum artifacts must
           # exist or the bump would write garbage, so fail loudly instead.
           ARM_SHA="$(awk '{print $1}' sums/waves_macos-apple-silicon.zip.sha256)"
           INTEL_SHA="$(awk '{print $1}' sums/waves_macos-intel.zip.sha256)"
@@ -554,11 +654,31 @@ jobs:
           esac
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
           cd tap
-          sed -E -i \
-            -e "s/version \"[0-9][0-9.]*\"/version \"${VERSION}\"/" \
-            -e "s/arm:   \"[0-9a-f]{64}\"/arm:   \"${ARM_SHA}\"/" \
-            -e "s/intel: \"[0-9a-f]{64}\"/intel: \"${INTEL_SHA}\"/" \
-            Casks/waves.rb
+          if grep -q "on_sequoia" Casks/waves.rb; then
+            # Dual-flavor cask: an on_sequoia block serves the regular bundles
+            # and an on_sonoma :or_older block the legacy ones, so each sha256
+            # pattern appears twice and every sed is scoped to its block.
+            LEG_ARM_SHA="$(awk '{print $1}' ../sums/waves_macos-apple-silicon_legacy.zip.sha256)"
+            LEG_INTEL_SHA="$(awk '{print $1}' ../sums/waves_macos-intel_legacy.zip.sha256)"
+            case "$LEG_ARM_SHA$LEG_INTEL_SHA" in
+              *[!0-9a-f]*|"") echo "::error::legacy macOS checksums missing or malformed; cask not bumped."; exit 1 ;;
+            esac
+            # Ranges anchor to the block OPENER at its exact indent: a comment
+            # that merely mentions a block name must not start a range, or the
+            # second sed re-covers the first block and both flavors end up
+            # with the same checksums.
+            sed -E -i "s/version \"[0-9][0-9.]*\"/version \"${VERSION}\"/" Casks/waves.rb
+            sed -E -i "/^  on_sequoia /,/^  end$/ { s/arm:   \"[0-9a-f]{64}\"/arm:   \"${ARM_SHA}\"/; s/intel: \"[0-9a-f]{64}\"/intel: \"${INTEL_SHA}\"/; }" Casks/waves.rb
+            sed -E -i "/^  on_sonoma /,/^  end$/ { s/arm:   \"[0-9a-f]{64}\"/arm:   \"${LEG_ARM_SHA}\"/; s/intel: \"[0-9a-f]{64}\"/intel: \"${LEG_INTEL_SHA}\"/; }" Casks/waves.rb
+            grep -q "$LEG_ARM_SHA" Casks/waves.rb || { echo "::error::legacy arm sha256 not updated in cask"; exit 1; }
+            grep -q "$LEG_INTEL_SHA" Casks/waves.rb || { echo "::error::legacy intel sha256 not updated in cask"; exit 1; }
+          else
+            sed -E -i \
+              -e "s/version \"[0-9][0-9.]*\"/version \"${VERSION}\"/" \
+              -e "s/arm:   \"[0-9a-f]{64}\"/arm:   \"${ARM_SHA}\"/" \
+              -e "s/intel: \"[0-9a-f]{64}\"/intel: \"${INTEL_SHA}\"/" \
+              Casks/waves.rb
+          fi
           # Every value must have landed; a silent partial edit would ship a
           # cask whose checksum can never match the download.
           grep -q "version \"${VERSION}\"" Casks/waves.rb || { echo "::error::version not updated in cask"; exit 1; }
