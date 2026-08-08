@@ -21,8 +21,10 @@ mechanism, which ``test_diagnostics_redactor.py`` already covers.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
+from pathlib import Path
 
 from tidaler.waves_ui import diagnostics
 
@@ -31,8 +33,40 @@ from tidaler.waves_ui import diagnostics
 _MARKED_CALL = re.compile(r"(?:diagnostics\.content|log_content)\(")
 
 
+_MARKERS = {"log_content", "diagnostics.content", "content"}
+
+
 def _source_of(func) -> str:
     return inspect.getsource(func)
+
+
+def _dotted(node) -> str:
+    """ "self.fn_logger.info" for an attribute chain, "" for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _is_log_call(node: ast.Call) -> bool:
+    parts = _dotted(node.func).split(".")
+    return len(parts) > 1 and parts[-2] in {"fn_logger", "logger"}
+
+
+def _unmarked_media_names(node, marked: bool = False) -> list[str]:
+    """Every name_builder_* call under ``node`` that no content marker wraps."""
+    found: list[str] = []
+    if isinstance(node, ast.Call):
+        name = _dotted(node.func)
+        if name in _MARKERS:
+            marked = True
+        elif name.split(".")[-1].startswith("name_builder_") and not marked:
+            found.append(name)
+    for child in ast.iter_child_nodes(node):
+        found += _unmarked_media_names(child, marked)
+    return found
 
 
 def test_content_has_production_call_sites():
@@ -69,6 +103,26 @@ def test_engine_media_name_logs_are_marked():
     for fragment in ("Downloaded item", "Finished list"):
         line = next(ln for ln in source.splitlines() if fragment in ln and "fn_logger" in ln)
         assert _MARKED_CALL.search(line), f"unmarked media name reaches the log: {line.strip()}"
+
+
+def test_no_log_line_in_the_engine_builds_a_media_name_bare():
+    """The named-fragment guard above only covers the two lines it names, and
+    the wrap kept getting forgotten on new ones (the music-video tagging
+    failures shipped unwrapped). This one covers every log call that builds a
+    media name, whichever line it lands on. The handler's redactor still
+    catches identity PII, but a track or artist name is content: only the
+    marker decides whether "also hide titles and searches" can hash it.
+    """
+    from tidaler import download
+
+    tree = ast.parse(Path(download.__file__).read_text(encoding="utf-8"))
+    offenders = [
+        f"{download.__name__}:{node.lineno} {name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _is_log_call(node)
+        for name in _unmarked_media_names(node)
+    ]
+    assert not offenders, f"unmarked media names reach the log: {offenders}"
 
 
 def test_a_logged_search_term_is_hashed_in_a_redacted_export():

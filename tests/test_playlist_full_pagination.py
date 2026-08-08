@@ -34,7 +34,8 @@ class _FakePlaylist:
 
 def test_long_playlist_returns_every_track():
     pl = _FakePlaylist(614)
-    items = _all_playlist_items(pl)
+    items, complete = _all_playlist_items(pl)
+    assert complete
     assert len(items) == 614
     assert [t.id for t in items] == list(range(614))
     assert pl.calls == [0, 100, 200, 300, 400, 500, 600]
@@ -42,19 +43,38 @@ def test_long_playlist_returns_every_track():
 
 def test_exact_page_multiple_stops_after_empty_page():
     pl = _FakePlaylist(200)
-    assert len(_all_playlist_items(pl)) == 200
+    items, complete = _all_playlist_items(pl)
+    assert complete
+    assert len(items) == 200
     # One extra call to learn the list ended, then stop.
     assert pl.calls == [0, 100, 200]
 
 
 def test_short_playlist_single_page():
     pl = _FakePlaylist(42)
-    assert len(_all_playlist_items(pl)) == 42
+    items, complete = _all_playlist_items(pl)
+    assert complete
+    assert len(items) == 42
     assert pl.calls == [0]
 
 
 def test_non_media_entries_are_filtered_but_do_not_stop_paging():
     pl = _FakePlaylist(250)
     pl._tracks[5] = object()  # an entry tidalapi could not type
-    items = _all_playlist_items(pl)
+    items, complete = _all_playlist_items(pl)
+    assert complete
     assert len(items) == 249
+
+
+def test_ceiling_hit_reports_incomplete():
+    # A "playlist" that always serves full pages: the loop must stop at the
+    # ceiling AND say so, never report a truncated set as the whole thing.
+    class _Endless(_FakePlaylist):
+        def items(self, limit: int = 100, offset: int = 0):
+            self.calls.append(offset)
+            return [_make_track(offset + i) for i in range(limit)]
+
+    pl = _Endless(0)
+    items, complete = _all_playlist_items(pl)
+    assert not complete
+    assert len(items) == 10000

@@ -145,6 +145,7 @@ class _RetryStub:
     _retry_queue_refetch = WavesBridge._retry_queue_refetch
     _on_queue_retry_refetched = WavesBridge._on_queue_retry_refetched
     _queue_item = WavesBridge._queue_item
+    _reindex_queue = WavesBridge._reindex_queue
 
     def __init__(self, session_track=None):
         self._queue = [
@@ -158,6 +159,7 @@ class _RetryStub:
                 "status": "failed",
             }
         ]
+        self._reindex_queue()
         self._objs = {"track": {}}
         self._refetch_inflight = set()
         self._logged_in = True

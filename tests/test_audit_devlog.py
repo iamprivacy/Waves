@@ -86,21 +86,39 @@ def test_disabled_event_stays_off_disk(monkeypatch, tmp_path):
     monkeypatch.delenv("WAVES_DEBUG", raising=False)
     for name in ("tidaler.waves_ui.devlog", "tidaler.waves_ui.diagnostics"):
         sys.modules.pop(name, None)
+    # diagnostics.install() reconfigures the process-wide "waves" logger
+    # (handlers, level, propagate=False). Snapshot both shared loggers and put
+    # everything back afterwards: without the restore, every later test that
+    # relies on caplog seeing "waves" records via root propagation captures
+    # nothing (pytest < 9.1 caplog depends on propagation).
+    shared = (logging.getLogger("waves"), logging.getLogger())
+    saved = {lg: (list(lg.handlers), lg.propagate, lg.level) for lg in shared}
     # Detach handlers a previous install left on the shared loggers.
-    for lg in (logging.getLogger("waves"), logging.getLogger()):
+    for lg in shared:
         for h in list(lg.handlers):
             lg.removeHandler(h)
-    devlog = importlib.import_module("tidaler.waves_ui.devlog")
-    diagnostics = importlib.import_module("tidaler.waves_ui.diagnostics")
-    log_path = diagnostics.install(str(tmp_path))
-    assert log_path is not None
+    try:
+        devlog = importlib.import_module("tidaler.waves_ui.devlog")
+        diagnostics = importlib.import_module("tidaler.waves_ui.diagnostics")
+        log_path = diagnostics.install(str(tmp_path))
+        assert log_path is not None
 
-    devlog.event("search", "needle=zebra stripes")
-    for h in logging.getLogger("waves").handlers:
-        h.flush()
-    on_disk = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-    assert "zebra stripes" not in on_disk  # never persisted while verbose is off
-    assert any("zebra stripes" in line for line in diagnostics._crumbs.ring)  # but breadcrumbed
+        devlog.event("search", "needle=zebra stripes")
+        for h in logging.getLogger("waves").handlers:
+            h.flush()
+        on_disk = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+        assert "zebra stripes" not in on_disk  # never persisted while verbose is off
+        assert any("zebra stripes" in line for line in diagnostics._crumbs.ring)  # but breadcrumbed
+    finally:
+        for lg, (handlers, propagate, level) in saved.items():
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+                h.close()
+            for h in handlers:
+                lg.addHandler(h)
+            lg.propagate = propagate
+            lg.setLevel(level)
+        sys.modules.pop("tidaler.waves_ui.diagnostics", None)
 
 
 @pytest.fixture(autouse=True)

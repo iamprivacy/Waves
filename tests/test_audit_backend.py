@@ -42,6 +42,7 @@ class _Stub:
 
     def __init__(self):
         self._queue: list[dict] = []
+        self._queue_index: dict[int, dict] = {}
         self._job_aborts: dict[int, Event] = {}
         self._job_signals: dict = {}
         self._job_dls: dict = {}
@@ -88,6 +89,15 @@ class _Stub:
     def _queue_item(self, qid):
         return WavesBridge._queue_item(self, qid)
 
+    def _reindex_queue(self):
+        return WavesBridge._reindex_queue(self)
+
+    def _seed_queue(self, rows):
+        """Tests replace the whole queue; keep the qid index mirrored the way
+        the real mutation sites do."""
+        self._queue = rows
+        self._reindex_queue()
+
     def _emit_queue(self):
         return WavesBridge._emit_queue(self)
 
@@ -107,7 +117,7 @@ def test_cancel_queue_item_keeps_pause_gate_cleared():
     stub = _Stub()
     ev = Event()
     stub._job_aborts[7] = ev
-    stub._queue = [{"qid": 7, "media_id": "m7", "status": "running"}]
+    stub._seed_queue([{"qid": 7, "media_id": "m7", "status": "running"}])
     # Simulate a paused queue: the global run gate is cleared.
     stub._event_run.clear()
     stub._paused = True
@@ -123,7 +133,7 @@ def test_cancel_queue_item_keeps_pause_gate_cleared():
 
 def test_cancel_queue_item_missing_job_still_removes_row():
     stub = _Stub()
-    stub._queue = [{"qid": 3, "media_id": "m3", "status": "queued"}]
+    stub._seed_queue([{"qid": 3, "media_id": "m3", "status": "queued"}])
     _bind(stub, "cancelQueueItem")(3)
     assert stub._queue == []
 
@@ -137,11 +147,13 @@ def test_clear_queue_aborts_removed_queued_items():
     queued = Event()
     done = Event()
     stub._job_aborts = {1: running, 2: queued, 3: done}
-    stub._queue = [
-        {"qid": 1, "status": "running"},
-        {"qid": 2, "status": "queued"},
-        {"qid": 3, "status": "done"},
-    ]
+    stub._seed_queue(
+        [
+            {"qid": 1, "status": "running"},
+            {"qid": 2, "status": "queued"},
+            {"qid": 3, "status": "done"},
+        ]
+    )
 
     _bind(stub, "clearQueue")()
 
@@ -217,17 +229,19 @@ def test_retry_reuses_stashed_merge_plan_for_album():
     stub = _Stub()
     plan = [("t", 1, 1)]
     stub._merge_plans = {"albumX": plan}
-    stub._queue = [
-        {
-            "qid": 9,
-            "status": "failed",
-            "type": "album",
-            "media_id": "albumX",
-            "name": "X",
-            "template": "",
-            "collection": True,
-        }
-    ]
+    stub._seed_queue(
+        [
+            {
+                "qid": 9,
+                "status": "failed",
+                "type": "album",
+                "media_id": "albumX",
+                "name": "X",
+                "template": "",
+                "collection": True,
+            }
+        ]
+    )
     stub._objs = {"album": {"albumX": object()}}
 
     captured = {}
@@ -247,17 +261,19 @@ def test_retry_reuses_stashed_merge_plan_for_album():
 def test_retry_plain_track_passes_no_merge_plan():
     stub = _Stub()
     stub._merge_plans = {}
-    stub._queue = [
-        {
-            "qid": 2,
-            "status": "failed",
-            "type": "track",
-            "media_id": "t1",
-            "name": "Y",
-            "template": "",
-            "collection": False,
-        }
-    ]
+    stub._seed_queue(
+        [
+            {
+                "qid": 2,
+                "status": "failed",
+                "type": "track",
+                "media_id": "t1",
+                "name": "Y",
+                "template": "",
+                "collection": False,
+            }
+        ]
+    )
     stub._objs = {"track": {"t1": object()}}
     captured = {}
     stub._download = lambda *a, merge_plan=None, **k: captured.__setitem__("merge_plan", merge_plan)

@@ -263,11 +263,15 @@ _ASSETS = [
 
 
 def test_select_macos_arm_with_sha():
-    assert u._select_asset(_ASSETS, "macos", "arm64") == ("Waves-macos-arm64.dmg", "mac-arm", "mac-arm-sha")
+    assert u._select_asset(_ASSETS, "macos", "arm64", want_legacy=False) == (
+        "Waves-macos-arm64.dmg",
+        "mac-arm",
+        "mac-arm-sha",
+    )
 
 
 def test_select_prefers_correct_arch():
-    name, url, _ = u._select_asset(_ASSETS, "macos", "amd64")
+    name, url, _ = u._select_asset(_ASSETS, "macos", "amd64", want_legacy=False)
     assert (name, url) == ("Waves-macos-x64.dmg", "mac-x64")
 
 
@@ -311,8 +315,75 @@ def test_select_shipped_macos_names():
         {"name": "waves_linux-x64.zip", "browser_download_url": "lin-x64"},
         {"name": "waves_windows-arm64.zip", "browser_download_url": "win-arm"},
     ]
-    assert u._select_asset(assets, "macos", "arm64") == ("waves_macos-apple-silicon.zip", "mac-as", "mac-as-sha")
-    assert u._select_asset(assets, "macos", "amd64") == ("waves_macos-intel.zip", "mac-intel", "mac-intel-sha")
+    assert u._select_asset(assets, "macos", "arm64", want_legacy=False) == (
+        "waves_macos-apple-silicon.zip",
+        "mac-as",
+        "mac-as-sha",
+    )
+    assert u._select_asset(assets, "macos", "amd64", want_legacy=False) == (
+        "waves_macos-intel.zip",
+        "mac-intel",
+        "mac-intel-sha",
+    )
+
+
+# The four macOS assets a dual-flavor release actually ships. The "_legacy"
+# underscore is load-bearing: pre-dual updaters in the field pick by name sort,
+# and ".zip" < "_legacy.zip" keeps them on the regular bundle.
+_DUAL_MACOS_ASSETS = [
+    {"name": "waves_macos-intel.zip", "browser_download_url": "mac-intel"},
+    {"name": "waves_macos-intel.zip.sha256", "browser_download_url": "mac-intel-sha"},
+    {"name": "waves_macos-intel_legacy.zip", "browser_download_url": "mac-intel-legacy"},
+    {"name": "waves_macos-intel_legacy.zip.sha256", "browser_download_url": "mac-intel-legacy-sha"},
+    {"name": "waves_macos-apple-silicon.zip", "browser_download_url": "mac-as"},
+    {"name": "waves_macos-apple-silicon.zip.sha256", "browser_download_url": "mac-as-sha"},
+    {"name": "waves_macos-apple-silicon_legacy.zip", "browser_download_url": "mac-as-legacy"},
+    {"name": "waves_macos-apple-silicon_legacy.zip.sha256", "browser_download_url": "mac-as-legacy-sha"},
+]
+
+
+def test_select_flavor_follows_the_host():
+    # A macOS 15+ machine gets the regular bundle, a 12-14 machine the legacy
+    # one, on both arches; neither may ever cross over (the regular bundle is
+    # dyld-killed below 15, and a silent downgrade to legacy loses Qt fixes).
+    sel = u._select_asset
+    assert sel(_DUAL_MACOS_ASSETS, "macos", "amd64", want_legacy=False)[0] == "waves_macos-intel.zip"
+    assert sel(_DUAL_MACOS_ASSETS, "macos", "amd64", want_legacy=True) == (
+        "waves_macos-intel_legacy.zip",
+        "mac-intel-legacy",
+        "mac-intel-legacy-sha",
+    )
+    assert sel(_DUAL_MACOS_ASSETS, "macos", "arm64", want_legacy=False)[0] == "waves_macos-apple-silicon.zip"
+    assert sel(_DUAL_MACOS_ASSETS, "macos", "arm64", want_legacy=True)[0] == "waves_macos-apple-silicon_legacy.zip"
+
+
+def test_select_legacy_host_gets_nothing_without_a_legacy_asset():
+    # Fail closed: if a release ships no legacy bundle, a Monterey machine must
+    # see "no build for this platform" rather than a bundle it cannot launch.
+    assets = [a for a in _DUAL_MACOS_ASSETS if "legacy" not in a["name"]]
+    assert u._select_asset(assets, "macos", "amd64", want_legacy=True) == ("", "", None)
+
+
+def test_select_old_updater_name_sort_stays_on_regular():
+    # The exact behavior of ALREADY-SHIPPED updaters (no want_legacy concept):
+    # with both flavors attached, the name sort must keep resolving to the
+    # regular zip, which is what this test pins the asset NAMING for. If the
+    # legacy suffix ever sorts first, every field install silently downgrades.
+    pool = sorted(["waves_macos-intel.zip", "waves_macos-intel_legacy.zip"])
+    assert pool[0] == "waves_macos-intel.zip"
+
+
+def test_macos_wants_legacy_parses_versions(monkeypatch):
+    monkeypatch.setattr(u.platform, "system", lambda: "Darwin")
+    for ver, want in (("15.5", False), ("26.0", False), ("14.7.1", True), ("12.7.6", True), ("10.16", True)):
+        monkeypatch.setattr(u.platform, "mac_ver", lambda v=ver: (v, ("", "", ""), ""))
+        assert u._macos_wants_legacy() is want, ver
+    # Unparseable output fails toward legacy, the flavor that runs everywhere.
+    monkeypatch.setattr(u.platform, "mac_ver", lambda: ("", ("", "", ""), ""))
+    assert u._macos_wants_legacy() is True
+    # Non-macOS never asks for legacy assets.
+    monkeypatch.setattr(u.platform, "system", lambda: "Linux")
+    assert u._macos_wants_legacy() is False
 
 
 def test_select_no_os_match():

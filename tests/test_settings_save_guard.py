@@ -137,20 +137,24 @@ def test_save_settings_restores_both_injections():
 def test_no_bare_settings_save_outside_the_guarded_helper():
     """The audit guard: a newly added bare save silently re-opens this bug.
 
-    Exactly three call sites of ``self.settings.save()`` are allowed: inside
+    Exactly five call sites of ``self.settings.save()`` are allowed: inside
     ``_save_settings`` itself; inside ``applySettings``, which does the restores
     explicitly because it must compute ``ffmpeg_source`` from the restored value
-    before saving; and inside ``_apply_first_run_defaults``, which runs from
-    ``__init__`` before ffmpeg is resolved, so nothing is injected yet.
+    before saving; inside ``_apply_first_run_defaults``, which runs from
+    ``__init__`` before ffmpeg is resolved, so nothing is injected yet; and two
+    more in ``__init__`` under the same nothing-injected-yet reasoning: the
+    video-template migration, and the one-time video_download force-off.
     """
     source = inspect.getsource(WavesBridge)
     bare = len(re.findall(r"self\.settings\.save\(\)", source))
-    assert bare == 3, (
-        f"found {bare} bare self.settings.save() calls, expected 3 "
-        "(_save_settings, applySettings, _apply_first_run_defaults). Route new saves "
-        "through _save_settings, or this writes the transient ffmpeg flags and path to disk."
+    assert bare == 5, (
+        f"found {bare} bare self.settings.save() calls, expected 5 "
+        "(_save_settings, applySettings, _apply_first_run_defaults, and __init__'s "
+        "video-template migration + video_download force-off). Route new saves "
+        "through _save_settings, or this writes the transient ffmpeg flags and "
+        "path to disk."
     )
 
-    for name in ("_save_settings", "applySettings", "_apply_first_run_defaults"):
+    for name in ("_save_settings", "applySettings", "_apply_first_run_defaults", "__init__"):
         method_src = inspect.getsource(getattr(WavesBridge, name))
         assert "self.settings.save()" in method_src, f"{name} no longer saves; update this guard"

@@ -10,7 +10,11 @@ events, pinning the contract:
     for either button,
   * the two buttons never cross-emit each other's signal,
   * other buttons and event types pass through untouched,
-  * the macOS swipe path stays back-only and non-consuming.
+  * the macOS swipe path stays back-only and non-consuming,
+  * a window's activate/deactivate events are swallowed (Qt's per-item
+    active/inactive palette walk over the whole scene blocked the GUI thread
+    for ~0.3-0.5s on every app switch, freezing all animations at once),
+    while the same events for non-window objects pass through.
 """
 
 from __future__ import annotations
@@ -138,3 +142,55 @@ def test_swipe_ignored_off_macos(monkeypatch):
     consumed = _filter(stub, _SwipeEvent())
     assert consumed is False
     assert stub.backRequested.emits == []
+
+
+class _PlainEvent:
+    def __init__(self, etype):
+        self._etype = etype
+
+    def type(self):
+        return self._etype
+
+
+class _Obj:
+    def __init__(self, window):
+        self._window = window
+
+    def isWindowType(self):
+        return self._window
+
+
+def test_window_activate_swallowed_for_windows():
+    stub = _Stub()
+    consumed = WavesBridge.eventFilter(stub, _Obj(True), _PlainEvent(QEvent.Type.WindowActivate))
+    assert consumed is True
+
+
+def test_window_deactivate_swallowed_for_windows():
+    stub = _Stub()
+    consumed = WavesBridge.eventFilter(stub, _Obj(True), _PlainEvent(QEvent.Type.WindowDeactivate))
+    assert consumed is True
+
+
+def test_window_activate_passes_for_non_windows():
+    stub = _Stub()
+    consumed = WavesBridge.eventFilter(stub, _Obj(False), _PlainEvent(QEvent.Type.WindowActivate))
+    assert consumed is False
+
+
+def test_search_select_all_rearms_on_window_activation():
+    """The swallow's known cost: without WindowActivate/Deactivate the scene
+    keeps its focus item across an app switch, so the click that brings Waves
+    back never replays the activeFocus transition that selects the search
+    term (reported from livetesting: the term sat unselected until a click
+    away and back). The field must also ride the window's active flag, a
+    QWindow signal the swallow does not touch."""
+    from pathlib import Path
+
+    main = (Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text(
+        encoding="utf-8"
+    )
+    assert "onAppActiveChanged: if (appActive && activeFocus)" in main
+    assert (
+        main.count("searchField.selectAll()") >= 2
+    ), "the focus-transition select-all and the window-activation re-arm must both exist"

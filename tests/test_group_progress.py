@@ -29,6 +29,7 @@ class _Stub:
 
     def __init__(self, item: dict):
         self._queue = [item]
+        self._queue_index = {item["qid"]: item}
         self.queueItemProgress = _Signal()
         self.reported: list = []
 
