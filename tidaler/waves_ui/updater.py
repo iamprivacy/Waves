@@ -94,6 +94,28 @@ _ARCH_TOKENS = {
 _INSTALL_EXTS = (".zip", ".exe", ".appimage", ".tar.gz", ".tgz")
 _SIDECAR_EXTS = (".sha256", ".sha256sum", ".blockmap", ".yml", ".yaml", ".txt", ".sig", ".asc")
 
+# macOS ships two flavors since the PySide6 wheel-tag lie (issue #14): the
+# regular bundle requires macOS 15, and a "_legacy" bundle (pyside6 6.9.3)
+# covers 12 through 14. Anything at or above this version installs the regular
+# flavor; below it, only assets carrying the "legacy" token are eligible.
+_MACOS_LEGACY_BELOW = 15
+
+
+def _macos_wants_legacy() -> bool:
+    """True when this Mac must run the legacy flavor (macOS below 15).
+
+    Fail-safe direction: an unparseable ``mac_ver`` (or the compat "10.16"
+    some builds report) selects legacy, which runs on every supported macOS;
+    the reverse mistake would hand a Monterey machine a bundle dyld kills.
+    """
+    if platform.system() != "Darwin":
+        return False
+    try:
+        major = int(platform.mac_ver()[0].split(".")[0])
+    except (ValueError, IndexError):
+        return True
+    return major < _MACOS_LEGACY_BELOW
+
 
 class UpdaterError(Exception):
     """A self-update could not be completed."""
@@ -358,7 +380,11 @@ def _running_appimage() -> str:
 
 
 def _select_asset(
-    assets: list[dict], os_key: str, arch: str, prefer_appimage: bool = False
+    assets: list[dict],
+    os_key: str,
+    arch: str,
+    prefer_appimage: bool = False,
+    want_legacy: bool | None = None,
 ) -> tuple[str, str, str | None]:
     """Pick the best release asset for ``os_key``/``arch``.
 
@@ -371,7 +397,19 @@ def _select_asset(
     ``.AppImage`` (a zip's tree can't replace a single file), and a zip install
     must never be switched to an AppImage just because the name sorts first, so
     ``prefer_appimage`` hard-partitions the pool instead of merely ranking.
+
+    Flavor follows the HOST, and also hard-partitions: a Mac below macOS 15
+    can only run the "legacy" bundle (see :data:`_MACOS_LEGACY_BELOW`), so it
+    must never be offered the regular one, and a macOS 15+ machine must never
+    be quietly downgraded to legacy just because the name sorts first. A
+    machine that moves across the boundary (an OS upgrade, or a manually
+    downloaded wrong flavor) self-corrects on its next update.
     """
+    if want_legacy is None:
+        # Legacy is a macOS-only concept: never let an old-mac HOST partition
+        # a selection for some other OS (only tests select cross-OS today,
+        # but the guard keeps this helper honest about what legacy means).
+        want_legacy = os_key == "macos" and _macos_wants_legacy()
     os_tokens = _OS_TOKENS.get(os_key, ())
     arch_tokens = _ARCH_TOKENS.get(arch, ())
     all_arch_tokens = tuple(t for toks in _ARCH_TOKENS.values() for t in toks)
@@ -383,6 +421,8 @@ def _select_asset(
         if low.endswith(_SIDECAR_EXTS) or not any(t in low for t in os_tokens):
             continue
         if low.endswith(".appimage") != prefer_appimage:
+            continue
+        if ("legacy" in low) != want_legacy:
             continue
         if any(t in low for t in arch_tokens):
             arch_match.append(name)
