@@ -11,6 +11,8 @@ import "HeartGib.js" as HeartGib
 Item {
     id: page
     property bool active: false
+    // Nothing on the page leaves it any more (CANCEL discards edits in place),
+    // but the host still listens: kept for a programmatic close.
     signal closed()
     // Advanced-section reset actions. The page only asks; Main.qml shows the
     // confirmation dialog and calls the backend, then (for the settings
@@ -185,13 +187,35 @@ Item {
     // Child toggle value for the cover_scope composite, under its own child_key.
     function valChild(f) { return editMap[f.child_key] !== undefined ? editMap[f.child_key] : f.child_value }
     function setv(key, v) { var e = Object.assign({}, editMap); e[key] = v; editMap = e; dirty = true }
+    // Fields whose value the engine launders before use (the illegal-character
+    // stand-in), by key. Their delegates register themselves here so the save
+    // gate can find them without the page walking the whole schema.
+    property var sanitizeKeys: ({})
+    // True while the field holds something the laundering would strip, which is
+    // what turns its box red.
+    function sanitizeDirty(f) {
+        return f.sanitize === true && String(val(f)) !== waves.sanitizeFilenameReplacement(String(val(f)))
+    }
+    // Any red box blocks SAVE CHANGES. Rewriting the value on save instead
+    // would flash "changes saved" over a silent correction; greying the button
+    // leaves the bad character on screen, red, for the user to fix.
+    // Judges the value on screen, not just what was typed this visit: a config
+    // edited by hand outside the app shows red too, and a red box with a live
+    // Save button would be the page contradicting itself.
+    function hasInvalidEdits() {
+        for (var k in page.sanitizeKeys) {
+            if (sanitizeDirty(page.sanitizeKeys[k])) return true
+        }
+        return false
+    }
     // Within a section, on/off switches render as a tile grid and everything
     // else as labelled rows.
     function boolFields(fields) { return fields.filter(function(f){ return f.type === "bool" && f.embedded !== true }) }
-    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.half !== true }) }
-    // Fields whose value is a character or two (the artist delimiters): a
-    // full-width box for a comma wastes the row, so they pair up two per line.
-    function halfFields(fields) { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.half === true }) }
+    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.third !== true }) }
+    // Fields whose value is a character or two (the delimiters, the illegal
+    // character stand-in): a whole row for a comma is absurd, so three of
+    // them share one line, each a compact box beside its help.
+    function thirdFields(fields) { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.third === true }) }
     // Fields marked `embedded` are rendered inside a section card (the updater
     // card hosts auto_update + update_cadence); look their descriptors up here.
     function fieldByKey(key) {
@@ -250,6 +274,22 @@ Item {
         return cut > 0 ? pathUrl(s.substring(0, cut)) : ""
     }
     function refreshSchema() { groups = waves.settingsSchema(); needsRefresh = false }
+
+    // CANCEL throws away what you typed and leaves you on the page, at the
+    // spot you were reading. It does NOT leave Settings: the nav does that.
+    // The schema is re-pulled because a save earlier in this visit leaves
+    // `groups` holding the pre-save values (applySettings keeps editMap
+    // showing the saved ones), so dropping editMap alone would show stale
+    // text. Arm the scroll restore first: rebuilding every card re-measures
+    // the column, and the restore rides that layout pass instead of letting
+    // the clamp strand the page at the top.
+    function discardEdits() {
+        pendingY = settingsFlick.contentY
+        editMap = ({})
+        dirty = false
+        refreshSchema()
+        _restoreScroll()
+    }
 
     // Line-art glyph (SVG path data, 16-unit box) for each section's leading
     // icon tile, drawn by `SectionIcon` via QtQuick.Shapes. Falls back to the
@@ -521,7 +561,10 @@ Item {
     component SText: Rectangle {
         property alias text: tf.text
         property bool focused: tf.activeFocus
-        radius: 8; color: page.surface2; border.color: tf.activeFocus ? page.accent : page.outline
+        // Red outline while the value carries something the field cannot keep.
+        property bool invalid: false
+        radius: 8; color: invalid ? page.redCont : page.surface2
+        border.color: invalid ? page.red : tf.activeFocus ? page.accent : page.outline
         implicitHeight: 36
         property var onEdited: (function(t){})
         TextField {
@@ -642,18 +685,28 @@ Item {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; spacing: 10
                 Rectangle {
                     width: cancelTxt.width + page.btnPadH * 2; height: cancelTxt.height + page.btnPadV * 2; radius: page.btnRad; color: "transparent"; border.color: "transparent"
+                    // Nothing typed, nothing to throw away: reads as inert
+                    // rather than as a way out of the page.
+                    opacity: page.dirty ? 1 : 0.4
                     Text { id: cancelTxt; anchors.centerIn: parent; text: "CANCEL"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.closed() }
-                }
-                Rectangle {
-                    id: saveBtn
-                    width: saveTxt.width + page.btnPadH * 2; height: saveTxt.height + page.btnPadV * 2; radius: page.btnRad
-                    color: page.accentCont; opacity: page.dirty ? 1 : 0.4
-                    border.color: page.accentDim; border.width: 1
-                    Text { id: saveTxt; anchors.centerIn: parent; text: "SAVE CHANGES"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
                     MouseArea {
                         anchors.fill: parent; enabled: page.dirty
                         cursorShape: page.dirty ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: page.discardEdits()
+                    }
+                }
+                Rectangle {
+                    id: saveBtn
+                    // A red field holds the whole save, so nothing the engine
+                    // would refuse can reach the config in the first place.
+                    readonly property bool canSave: page.dirty && !page.hasInvalidEdits()
+                    width: saveTxt.width + page.btnPadH * 2; height: saveTxt.height + page.btnPadV * 2; radius: page.btnRad
+                    color: page.accentCont; opacity: canSave ? 1 : 0.4
+                    border.color: page.accentDim; border.width: 1
+                    Text { id: saveTxt; anchors.centerIn: parent; text: "SAVE CHANGES"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                    MouseArea {
+                        anchors.fill: parent; enabled: saveBtn.canSave
+                        cursorShape: saveBtn.canSave ? Qt.PointingHandCursor : Qt.ArrowCursor
                         // Keep editMap so the controls keep showing the values
                         // we just saved (clearing it would revert them to the
                         // now-stale schema defaults); it's reset on next open,
@@ -1591,25 +1644,65 @@ Item {
                                 Rectangle {
                                     required property var modelData
                                     visible: page.depOK(modelData)
-                                    // Half fields sit two-up in the paired Flow below.
-                                    width: modelData.half === true ? (inner.width - 10) / 2 : inner.width
+                                    // Third fields sit three-up in the Flow below.
+                                    width: modelData.third === true ? (inner.width - 20) / 3 : inner.width
                                     radius: 10; color: page.surface; border.color: page.border1
-                                    implicitHeight: body.implicitHeight + 20
+                                    // Three-up cards hold a common height whatever their
+                                    // help runs to, so a row of them reads as one band
+                                    // instead of three ragged blocks; their content
+                                    // centres in it rather than hugging the top.
+                                    implicitHeight: modelData.third === true ? 96 : body.implicitHeight + 20
                                     Item {
                                         id: body
-                                        x: 14; y: 10; width: parent.width - 28
-                                        implicitHeight: modelData.type === "str" ? strCol.implicitHeight
+                                        x: 14; width: parent.width - 28
+                                        y: modelData.third === true ? Math.max(10, (parent.height - implicitHeight) / 2) : 10
+                                        implicitHeight: modelData.type === "str" && modelData.inline !== true ? strCol.implicitHeight
                                                       : modelData.type === "cover_sizes" ? coverCol.implicitHeight
                                                       : inlineRow.implicitHeight
 
-                                        // Enum / int / float: label + help on the left, control on the right
+                                        // Enum / int / float / short str: label + help on
+                                        // the left, control on the right. A str field
+                                        // flagged "inline" holds a value of a character or
+                                        // two, so it gets a small box here instead of a
+                                        // full-width one under the help.
                                         RowLayout {
                                             id: inlineRow
-                                            visible: modelData.type !== "str" && modelData.type !== "cover_sizes"
+                                            visible: (modelData.type !== "str" || modelData.inline === true) && modelData.type !== "cover_sizes"
                                             width: parent.width; spacing: 14
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 2
-                                                Text { text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                Row {
+                                                    spacing: 10
+                                                    Text { id: inlineLabel; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                    // Same per-field Restore default link as the
+                                                    // full-width str rows (see strDefaultLink).
+                                                    Text {
+                                                        id: inlineDefaultLink
+                                                        readonly property bool changed: modelData.default_value !== undefined
+                                                                                        && String(page.val(modelData)) !== String(modelData.default_value)
+                                                        visible: modelData.inline === true && modelData.default_value !== undefined
+                                                        anchors.verticalCenter: inlineLabel.verticalCenter
+                                                        textFormat: Text.PlainText
+                                                        text: changed ? "Restore default" : "Default"
+                                                        color: !changed ? page.textDim
+                                                                        : inlineDefaultMa.containsMouse ? page.accent : page.accentDim
+                                                        opacity: changed ? 1 : 0.5
+                                                        font.pixelSize: 12
+                                                        font.underline: changed && inlineDefaultMa.containsMouse
+                                                        MouseArea {
+                                                            id: inlineDefaultMa
+                                                            anchors.fill: parent; anchors.margins: -4
+                                                            enabled: inlineDefaultLink.changed
+                                                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                            // Re-bind rather than write, for the same
+                                                            // binding-preservation reasons as strDefaultMa.
+                                                            onClicked: {
+                                                                page.setv(modelData.key, modelData.default_value)
+                                                                inlineStr.text = Qt.binding(function() { return page.val(modelData) })
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                             }
                                             SCombo {
@@ -1617,6 +1710,18 @@ Item {
                                                 model: modelData.type === "enum" ? modelData.options : []
                                                 currentIndex: modelData.type === "enum" ? page.enumIndex(modelData.options, page.val(modelData)) : 0
                                                 onActivated: page.setv(modelData.key, modelData.options[currentIndex].value)
+                                            }
+                                            SText {
+                                                id: inlineStr
+                                                visible: modelData.type === "str" && modelData.inline === true
+                                                Layout.alignment: Qt.AlignVCenter
+                                                // The stepper's value-box scale, so the short-value
+                                                // rows share one control vocabulary.
+                                                Layout.preferredWidth: 64; Layout.preferredHeight: 32
+                                                text: page.val(modelData)
+                                                invalid: page.sanitizeDirty(modelData)
+                                                Component.onCompleted: if (modelData.sanitize === true) page.sanitizeKeys[modelData.key] = modelData
+                                                onEdited: function(t){ page.setv(modelData.key, t) }
                                             }
                                             SStepper {
                                                 visible: modelData.type === "int" || modelData.type === "float"; Layout.alignment: Qt.AlignVCenter
@@ -1678,7 +1783,7 @@ Item {
                                         // String / path: label + help, then text field (+ browse) below
                                         Column {
                                             id: strCol
-                                            visible: modelData.type === "str"
+                                            visible: modelData.type === "str" && modelData.inline !== true
                                             width: parent.width; spacing: 6
                                             Row {
                                                 width: parent.width; spacing: 10
@@ -1950,14 +2055,12 @@ Item {
                                 delegate: rowFieldComp
                             }
 
-                            // Short-value fields (the two artist delimiters) two
-                            // per line, in the same 2-column rhythm as the switch
-                            // tiles under them.
+                            // Short-value fields three per line.
                             Flow {
-                                visible: page.halfFields(card.modelData.fields).length > 0
+                                visible: page.thirdFields(card.modelData.fields).length > 0
                                 width: parent.width; spacing: 10
                                 Repeater {
-                                    model: page.halfFields(card.modelData.fields)
+                                    model: page.thirdFields(card.modelData.fields)
                                     delegate: rowFieldComp
                                 }
                             }
@@ -1966,6 +2069,10 @@ Item {
                             Flow {
                                 id: flagFlow
                                 readonly property int flagCount: page.boolFields(card.modelData.fields).length
+                                // Three across when they divide evenly that way (a
+                                // trio of switches earns one line, not one and a
+                                // half), otherwise the usual two.
+                                readonly property int cols: flagCount % 3 === 0 ? 3 : 2
                                 visible: flagCount > 0
                                 width: parent.width; spacing: 10
                                 Repeater {
@@ -1973,6 +2080,7 @@ Item {
                                     delegate: Rectangle {
                                         id: flagTile
                                         required property var modelData
+                                        required property int index
                                         // Flags that need FFmpeg are greyed and inert while it's missing.
                                         readonly property bool ffBlocked: modelData.requires_ffmpeg === true && page.ff.stateKey === "missing"
                                         // Flags that only matter while another flag is on (e.g. the
@@ -1990,8 +2098,14 @@ Item {
                                         // tile never grows or shifts its neighbours.
                                         readonly property bool hasChild: modelData.child_key !== undefined
                                         readonly property bool childOn: flagTile.hasChild && !flagTile.blocked && (page.val(flagTile.modelData) === true)
-                                        width: (inner.width - 10) / 2
-                                        height: 92
+                                        // A leftover tile would end the grid beside a
+                                        // hole, so the last one takes the whole row.
+                                        width: (flagFlow.flagCount % flagFlow.cols === 1 && flagTile.index === flagFlow.flagCount - 1)
+                                               ? inner.width
+                                               : (inner.width - 10 * (flagFlow.cols - 1)) / flagFlow.cols
+                                        // A third of the row is narrower, so the same
+                                        // help needs one more line to avoid eliding.
+                                        height: flagFlow.cols === 3 ? 108 : 92
                                         radius: 10; border.color: page.border1
                                         opacity: blocked ? 0.45 : 1
                                         // Ease the tile back to full strength when ffmpeg
@@ -2026,7 +2140,9 @@ Item {
                                                     text: flagTile.modelData.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
                                                     // Trim the helper to two lines while the child checkbox is
                                                     // showing, so both fit the fixed box.
-                                                    wrapMode: Text.WordWrap; maximumLineCount: flagTile.childOn ? 2 : 3; elide: Text.ElideRight; Layout.fillWidth: true
+                                                    wrapMode: Text.WordWrap
+                                                    maximumLineCount: flagTile.childOn ? 2 : (flagFlow.cols === 3 ? 4 : 3)
+                                                    elide: Text.ElideRight; Layout.fillWidth: true
                                                 }
                                                 Text {
                                                     visible: flagTile.ffBlocked
@@ -2072,38 +2188,10 @@ Item {
                                     }
                                 }
 
-                                // An odd tile count would leave a blank half-row.
-                                // Fill the empty slot with a calm, non-interactive
-                                // wave tile (the WaveMark's glyph patterns, static
-                                // and dim) so the grid reads as finished surface,
-                                // not a hole. Placeholder until these sections get
-                                // a fuller redesign.
-                                Rectangle {
-                                    visible: flagFlow.flagCount % 2 === 1
-                                    width: (inner.width - 10) / 2; height: 92
-                                    radius: 10; color: page.surface; border.color: page.border1
-                                    Item {
-                                        anchors.fill: parent; anchors.margins: 3; clip: true
-                                        Repeater {
-                                            model: [
-                                                { yf: 0.10, px: 7,  op: 0.10, pat: "   '    .     *   :   .   " },
-                                                { yf: 0.26, px: 8,  op: 0.13, pat: ".~-~..-~-.~..-~-." },
-                                                { yf: 0.42, px: 8,  op: 0.16, pat: "-.~-..~.-~-..~.-" },
-                                                { yf: 0.58, px: 10, op: 0.20, pat: "_.-~-._.,-~-._.-" },
-                                                { yf: 0.74, px: 11, op: 0.24, pat: ".-~^-._,.~-^._.-~" }
-                                            ]
-                                            delegate: Text {
-                                                required property var modelData
-                                                textFormat: Text.PlainText
-                                                y: Math.round(86 * modelData.yf)
-                                                text: modelData.pat.repeat(24)
-                                                font.family: page.mono; font.pixelSize: modelData.px
-                                                color: page.accent; opacity: modelData.op
-                                                font.letterSpacing: -0.5
-                                            }
-                                        }
-                                    }
-                                }
+                                // An odd tile count simply ends the grid mid-row. A
+                                // decorative wave tile used to fill that slot; it read
+                                // as a dead panel rather than finished surface, so the
+                                // row now just stops.
                             }
 
                             // Reset actions, Advanced section only, at the very

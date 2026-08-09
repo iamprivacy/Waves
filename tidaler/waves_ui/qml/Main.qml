@@ -803,6 +803,24 @@ ApplicationWindow {
     // the launch sequence animates both to their resting values exactly once.
     property real bootScrimLevel: 0.55
     property real bootContentShown: 0
+    // Paint the interface, invisibly, before the reveal needs it. The scene
+    // graph skips a subtree whose opacity is 0 outright, so the first frame
+    // that shows the interface pays for the whole page at once: every texture
+    // upload, every glyph rastered, every material built. That bill landed
+    // halfway through the wordmark zoom (the reveal starts 350ms into a 700ms
+    // scale), which is the stutter that was seen, always at the same point
+    // because the reveal always begins at the same point.
+    //
+    // Warming holds the interface a hair above the skip threshold (0.001)
+    // during the version drain instead: far enough below perception to be
+    // invisible over the scrim, far enough above zero for the renderer to do
+    // the work. The drain is a text readout ticking on its own timer, so a
+    // frame spent there costs nothing anyone can see, and by the time the
+    // zoom starts every one of those caches is already warm.
+    //
+    // NOT wired to bootContentShown: that dial also ungates input, and the
+    // interface must stay inert under the launch screen (issue #13).
+    property bool bootWarming: false
 
     // ---- Ambient wave-loop background -----------------------------------
     // A muted, seamlessly looping ocean video (public-domain loop, re-encoded
@@ -8652,7 +8670,9 @@ ApplicationWindow {
         // Invisible must also mean inert: opacity does not gate input, so
         // without the enabled gate every control is live under the launch
         // screen from the first frame (issue #13).
-        opacity: root.bootContentShown
+        // 0.004 is invisible but rendered; see root.bootWarming for why the
+        // page is painted before the reveal asks for it.
+        opacity: root.bootContentShown > 0 ? root.bootContentShown : (root.bootWarming ? 0.004 : 0)
         enabled: root.bootContentShown > 0
 
         // ---- Header -----------------------------------------------------
@@ -12645,7 +12665,10 @@ ApplicationWindow {
         // busy the GUI thread was during the walk.
         SequentialAnimation {
             id: bootHandover
-            ScriptAction { script: { bootBlk.base = bootVer.text; bootBlk.restart() } }
+            // The drain is also where the interface gets painted for the
+            // first time, invisibly, so the zoom that follows it is not the
+            // frame that pays for it (see root.bootWarming).
+            ScriptAction { script: { root.bootWarming = true; bootBlk.base = bootVer.text; bootBlk.restart() } }
         }
         SequentialAnimation {
             id: bootZoom
