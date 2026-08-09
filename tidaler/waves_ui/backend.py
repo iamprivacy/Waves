@@ -60,7 +60,13 @@ from tidaler.constants import (
 )
 from tidaler.download import Download
 from tidaler.helper.folders import FOLDER_PATH_TOKEN, apply_folder_path, walk_playlist_tree
-from tidaler.helper.path import format_path_media, format_str_media, path_config_base, path_file_sanitize
+from tidaler.helper.path import (
+    format_path_media,
+    format_str_media,
+    path_config_base,
+    path_file_sanitize,
+    safe_filename_replacement,
+)
 from tidaler.helper.tidal import (
     get_tidal_media_id,
     get_tidal_media_type,
@@ -381,9 +387,18 @@ _PATH_FIELDS = [
     "path_binary_ffmpeg",
 ]
 _BROWSE = {"download_base_path": "dir", "path_binary_ffmpeg": "file"}
-# String fields whose value is a character or two: they share a row two-up
-# instead of each taking a full-width box (see SettingsPage's half-field Flow).
-_HALF_WIDTH_FIELDS = {"filename_delimiter_artist", "filename_delimiter_album_artist"}
+# String fields whose value is a character or two: they render as a compact
+# row with a small box on the right (the Track-number padding shape) instead
+# of a full-width text box under the help.
+_INLINE_STR_FIELDS = {
+    "filename_delimiter_artist",
+    "filename_delimiter_album_artist",
+    "filename_illegal_replacement",
+}
+# Fields the engine launders before use: the page warns in red while the typed
+# value would not survive it, and holds the save rather than storing text that
+# would be silently dropped (see sanitizeFilenameReplacement).
+_SANITIZED_FIELDS = {"filename_illegal_replacement"}
 
 
 def _shipped_default(key: str):
@@ -563,6 +578,7 @@ _FIELD_LABELS = {
     "album_track_num_pad_min": "Track-number padding",
     "filename_delimiter_artist": "Artist separator",
     "filename_delimiter_album_artist": "Album-artist separator",
+    "filename_illegal_replacement": "Illegal-character stand-in",
     "use_primary_album_artist": "Primary album artist for folders",
     "symlink_to_track": "Symlink into track folder",
     "playlist_create": "Create .m3u8 playlist",
@@ -924,6 +940,9 @@ class _TrackedDownload(Download):
                 delimiter_artist=self.settings.data.filename_delimiter_artist,
                 delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
                 use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                illegal_replacement=safe_filename_replacement(
+                    getattr(self.settings.data, "filename_illegal_replacement", "")
+                ),
             )
             destination = (pathlib.Path(self.path_base).expanduser() / (relative + ".x")).absolute()
             destination_dir = path_file_sanitize(destination, adapt=True).parent
@@ -8958,10 +8977,13 @@ class WavesBridge(QObject):
             shipped = _shipped_default(key)
             if shipped is not None:
                 extra["default_value"] = shipped
-            if key in _HALF_WIDTH_FIELDS:
-                # A one or two character value does not earn a full-width row;
-                # the page pairs these up into two columns.
-                extra["half"] = True
+            if key in _INLINE_STR_FIELDS:
+                # Compact box beside the help, and a third of the row each, so
+                # the three of them sit side by side on one line.
+                extra["inline"] = True
+                extra["third"] = True
+            if key in _SANITIZED_FIELDS:
+                extra["sanitize"] = True
             return field(key, "str", str(getattr(d, key)), extra)
 
         # Waves-only prefs (stored in waves.json) keep their hand-written labels
@@ -9287,6 +9309,7 @@ class WavesBridge(QObject):
                     "format_video",
                     "format_mix",
                     "album_track_num_pad_min",
+                    "filename_illegal_replacement",
                     "filename_delimiter_artist",
                     "filename_delimiter_album_artist",
                     "use_primary_album_artist",
@@ -9393,6 +9416,18 @@ class WavesBridge(QObject):
             self._tpl_sample = smp
         return smp
 
+    @Slot(str, result=str)
+    def sanitizeFilenameReplacement(self, value: str) -> str:
+        """The stand-in as the engine would actually use it.
+
+        The settings page asks for this on every keystroke so the box can go
+        red on a character a file name cannot hold, and hold the save rather
+        than storing text the engine would silently drop anyway. Same function
+        the download path calls, so the warning can never disagree with the
+        behavior.
+        """
+        return safe_filename_replacement(value)
+
     @Slot(str, str, result=str)
     def previewPathTemplate(self, kind: str, template: str) -> str:
         """Resolve a path template against the canned sample library, exactly
@@ -9409,6 +9444,10 @@ class WavesBridge(QObject):
             "delimiter_artist": d.filename_delimiter_artist,
             "delimiter_album_artist": d.filename_delimiter_album_artist,
             "use_primary_album_artist": bool(d.use_primary_album_artist),
+            # The preview is the user's proof of what the stand-in setting
+            # does before anything downloads, so it launders and applies the
+            # value exactly the way the engine does.
+            "illegal_replacement": safe_filename_replacement(d.filename_illegal_replacement),
         }
         pad = int(d.album_track_num_pad_min)
         try:
