@@ -51,6 +51,7 @@ except Exception:  # pragma: no cover - depends on installed tidalapi version
 import tidaler.download as _tidaler_download
 from tidaler.config import Settings, Tidal
 from tidaler.constants import (
+    DEFAULT_ILLEGAL_MAP,
     CoverDimensions,
     DownsampleTarget,
     InitialKey,
@@ -61,11 +62,13 @@ from tidaler.constants import (
 from tidaler.download import Download
 from tidaler.helper.folders import FOLDER_PATH_TOKEN, apply_folder_path, walk_playlist_tree
 from tidaler.helper.path import (
+    ILLEGAL_FILENAME_CHARS,
     format_path_media,
     format_str_media,
     path_config_base,
     path_file_sanitize,
     safe_filename_replacement,
+    safe_filename_replacement_map,
 )
 from tidaler.helper.tidal import (
     get_tidal_media_id,
@@ -321,7 +324,13 @@ _FIRST_RUN_OVERRIDES = {
     "quality_video": QualityVideo.P720,
     "mark_explicit": True,
     "metadata_write_url": False,
+    # Recommended stand-ins for the rejected characters that carry meaning. Only
+    # a fresh install gets them outright: an existing library is asked first
+    # (_migrate_illegal_map_offer), because its folders already spell those
+    # characters some other way. Copied, never the shared constant.
+    "filename_illegal_map": dict(DEFAULT_ILLEGAL_MAP),
 }
+
 
 # Factory reset deletes ONLY these files: the exact names Waves itself writes
 # into its config directory. The wipe is allowlist-only with no recursive
@@ -330,16 +339,67 @@ _FIRST_RUN_OVERRIDES = {
 # the folder is structurally impossible to touch, let alone anything outside
 # it. install_channel is deliberately absent: the installer owns it and a
 # fresh install of the same channel would have it too.
+def _write_text_atomic(path_file: str, text: str) -> None:
+    """Write a file so a crash mid-write cannot damage what is already there.
+
+    Temp sibling, flushed to stable storage, then os.replace, which is atomic
+    within one directory on POSIX and Windows alike. The fsync is the part that
+    is easy to leave out and the part that matters: without it the rename can
+    reach disk ahead of the bytes, so a power cut leaves an empty or partial
+    file under the real name. These caches all self-heal, but healing means a
+    fresh crawl or a lost set of preferences, which is dear next to one flush.
+    Mirrors BaseConfig.save, which does the same for settings and token.
+
+    The temp file never outlives a failure, so a wedged write cannot leave
+    litter next to the real file.
+
+    Args:
+        path_file (str): The destination file.
+        text (str): The complete contents to write.
+    """
+    path_tmp = path_file + ".tmp"
+
+    try:
+        with open(path_tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(path_tmp, path_file)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.remove(path_tmp)
+
+        raise
+
+
+def _write_json_atomic(path_file: str, payload, indent: int | None = None) -> None:
+    """Serialize and write JSON through :func:`_write_text_atomic`.
+
+    Args:
+        path_file (str): The destination file.
+        payload: Anything json.dump accepts.
+        indent (int | None, optional): Pretty-printing indent. Defaults to None.
+    """
+    _write_text_atomic(path_file, json.dumps(payload, indent=indent))
+
+
 _FACTORY_WIPE_FILES = (
     "settings.json",
     "settings.json.bak",
+    # BaseConfig.save stages through "<name>.tmp" exactly as the caches below
+    # do, so a save interrupted by a crash leaves one of these behind and the
+    # reset has to know it by name (the wipe only ever removes named files).
+    "settings.json.tmp",
     "token.json",
     "token.json.bak",
+    "token.json.tmp",
     "waves.json",
     "waves.json.tmp",
     "page_cache.json",
     "page_cache.json.tmp",
     "browse_tile_art.json",
+    "browse_tile_art.json.tmp",
     "ownership.sqlite3",
     "ownership.sqlite3-wal",
     "ownership.sqlite3-shm",
@@ -397,8 +457,24 @@ _INLINE_STR_FIELDS = {
 }
 # Fields the engine launders before use: the page warns in red while the typed
 # value would not survive it, and holds the save rather than storing text that
-# would be silently dropped (see sanitizeFilenameReplacement).
+# would be silently dropped (see sanitizeFilenameReplacement). The per-
+# character map is laundered the same way, value by value.
 _SANITIZED_FIELDS = {"filename_illegal_replacement"}
+# Fields holding a character -> stand-in table rather than a single value.
+_MAP_FIELDS = {"filename_illegal_map"}
+# How each rejected character is named on the settings page. The glyph alone
+# is the label; the name is what a screen reader (and a puzzled user) gets.
+_ILLEGAL_CHAR_NAMES = {
+    "/": "slash",
+    "\\": "backslash",
+    ":": "colon",
+    "*": "asterisk",
+    "?": "question mark",
+    '"': "quote",
+    "<": "less than",
+    ">": "greater than",
+    "|": "pipe",
+}
 
 
 def _shipped_default(key: str):
@@ -579,6 +655,7 @@ _FIELD_LABELS = {
     "filename_delimiter_artist": "Artist separator",
     "filename_delimiter_album_artist": "Album-artist separator",
     "filename_illegal_replacement": "Illegal-character stand-in",
+    "filename_illegal_map": "Per-character stand-ins",
     "use_primary_album_artist": "Primary album artist for folders",
     "symlink_to_track": "Symlink into track folder",
     "playlist_create": "Create .m3u8 playlist",
@@ -943,6 +1020,7 @@ class _TrackedDownload(Download):
                 illegal_replacement=safe_filename_replacement(
                     getattr(self.settings.data, "filename_illegal_replacement", "")
                 ),
+                illegal_map=safe_filename_replacement_map(getattr(self.settings.data, "filename_illegal_map", None)),
             )
             destination = (pathlib.Path(self.path_base).expanduser() / (relative + ".x")).absolute()
             destination_dir = path_file_sanitize(destination, adapt=True).parent
@@ -1858,6 +1936,9 @@ class WavesBridge(QObject):
     videoHoverPeekChanged = Signal()  # video_hover_peek pref flipped; Main.qml re-reads it
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     downloadProgress = Signal(str, float)
+    # Per-media button state: "" idle, "preparing" (parked behind a metadata
+    # re-fetch, a folder-tree warm or an edition scan; drawn like queued, no
+    # cancel), "queued", "running", "done", "failed".
     downloadState = Signal(str, str)
     # Folder "download all" badge: playlists remaining in the rollup. Emitted
     # on every member completion (and once at start), under the folder id.
@@ -1975,6 +2056,9 @@ class WavesBridge(QObject):
         from tidaler.helper.path import path_file_settings
 
         fresh_install = not os.path.isfile(path_file_settings())
+        # Kept: the waves.json migrations below run much later in __init__ (the
+        # prefs are not loaded yet) and one of them needs to know.
+        self._fresh_install = fresh_install
         self.settings = Settings()
         if fresh_install:
             self._apply_first_run_defaults()
@@ -2328,6 +2412,7 @@ class WavesBridge(QObject):
         self._waves_prefs_path = os.path.join(os.path.dirname(self.settings.file_path), "waves.json")
         self._waves_prefs = self._load_waves_prefs()
         self._migrate_video_flag()
+        self._migrate_illegal_map_offer()
         # Latched by factoryReset: once the config dir is being wiped, every
         # persistence path below must stay silent so nothing (a debounced
         # window-geometry save, a page-cache snapshot) re-creates the files
@@ -2933,12 +3018,11 @@ class WavesBridge(QObject):
                 "library": lib,
                 "home": self._home_cache,
             }
+            # Serialized outside the lock (it is the expensive part), written
+            # inside it.
             serialized = json.dumps(data)
             with self._page_cache_lock:
-                tmp = self._page_cache_path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    fh.write(serialized)
-                os.replace(tmp, self._page_cache_path)
+                _write_text_atomic(self._page_cache_path, serialized)
         except Exception:
             logger.debug("page cache save failed", exc_info=True)
 
@@ -3677,7 +3761,7 @@ class WavesBridge(QObject):
         a still-missing tree would just re-warm, forever (every parked caller
         re-tests ``_current_folder_tree() is None``), so a failed sweep drops
         the callbacks instead, clears the button named by ``media_id`` (the
-        download path lights "running" before parking), and leaves retrying to
+        download path lights "preparing" before parking), and leaves retrying to
         the user's next click.
         """
         if not self._logged_in:
@@ -5015,8 +5099,7 @@ class WavesBridge(QObject):
                 self._tile_art_running = False
                 if fetched and not getattr(self, "_factory_reset", False):
                     try:
-                        with open(self._tile_art_path, "w", encoding="utf-8") as handle:
-                            json.dump(disk, handle, indent=1)
+                        _write_json_atomic(self._tile_art_path, disk, indent=1)
                     except Exception:
                         logger.exception("Could not save the tile-art cache")
 
@@ -5555,6 +5638,41 @@ class WavesBridge(QObject):
         self._waves_prefs["video_flag_migrated"] = True
         self._save_waves_prefs()
 
+    def _migrate_illegal_map_offer(self) -> None:
+        """Decide whether the recommended stand-ins still need offering.
+
+        The per-character table (issue #16) shipped empty, and
+        DEFAULT_ILLEGAL_MAP is what it should have held. Applying that to an
+        existing install would change how future downloads spell albums whose
+        folders are already on disk, so the table is offered on the File
+        organization card instead, and only ever written by the user's own
+        hand. This just settles who never needs asking: a brand-new install
+        (the defaults are already in _FIRST_RUN_OVERRIDES) and anyone who has
+        stand-ins of their own. Everyone else is left unstamped, which is what
+        puts the strip on the card.
+
+        Runs from __init__ right after the prefs load, same as the video flag
+        above; it only touches waves.json, never settings."""
+        if self._waves_prefs.get("illegal_map_offer_done"):
+            return
+        configured = bool(safe_filename_replacement_map(getattr(self.settings.data, "filename_illegal_map", None)))
+        if not (self._fresh_install or configured):
+            return
+        self._waves_prefs["illegal_map_offer_done"] = True
+        self._save_waves_prefs()
+
+    @Slot()
+    def resolveIllegalMapOffer(self) -> None:
+        """The user has answered the recommended-stand-ins offer, so stop
+        showing it. Called when they decline outright; taking the table instead
+        routes through applySettings, which stamps the same key once the values
+        actually land."""
+        if self._waves_prefs.get("illegal_map_offer_done"):
+            return
+        self._waves_prefs["illegal_map_offer_done"] = True
+        self._save_waves_prefs()
+        logger.info("recommended filename stand-ins declined")
+
     def _apply_first_run_defaults(self) -> None:
         """Waves' opinionated defaults for a brand-new install, layered over
         tidaler's stock dataclass defaults and persisted. Only called when no
@@ -5563,7 +5681,9 @@ class WavesBridge(QObject):
         via _FIRST_RUN_OVERRIDES."""
         d = self.settings.data
         for key, value in _FIRST_RUN_OVERRIDES.items():
-            setattr(d, key, value)
+            # Copy the containers: handing the module-level dict itself to the
+            # live settings would make the next edit rewrite the default.
+            setattr(d, key, dict(value) if isinstance(value, dict) else value)
         # Bare save on purpose: this runs from __init__ before ffmpeg is
         # resolved, so there are no transient injections to undo yet and
         # _save_settings' restores would read attributes that do not exist.
@@ -5584,6 +5704,11 @@ class WavesBridge(QObject):
             # stored True from that era must not be honored). Housekeeping,
             # not in settingsSchema.
             "video_flag_migrated": False,
+            # Stamp for the one-time "recommended stand-ins" offer on the File
+            # organization card. False means the card still shows the strip;
+            # set once the user takes it, declines it, or fills the table in
+            # themselves. Housekeeping, not in settingsSchema.
+            "illegal_map_offer_done": False,
             "clean_album_artist": True,
             # Updates: opt-in, off by default (preserves the no-phone-home-by-
             # default promise). update_last_check is housekeeping state, not a
@@ -5665,24 +5790,18 @@ class WavesBridge(QObject):
         return prefs
 
     def _save_waves_prefs(self) -> None:
-        # Atomic write (temp sibling + os.replace). Window geometry saves land
-        # often, a debounced write per drag/resize gesture, so a process death
-        # mid-write must not truncate waves.json and wipe every pref (a partial
-        # file fails json.load and falls back to defaults). os.replace is atomic
-        # within the same directory. tmp is named before the try so the failure
-        # cleanup below can reference it even if makedirs raised.
+        # Window geometry saves land often, a debounced write per drag/resize
+        # gesture, so a process death mid-write must not truncate waves.json and
+        # wipe every pref (a partial file fails json.load and falls back to
+        # defaults). _write_json_atomic stages, flushes and swaps, and clears
+        # its temp sibling on any failure.
         if getattr(self, "_factory_reset", False):
             return
-        tmp = self._waves_prefs_path + ".tmp"
         try:
             os.makedirs(os.path.dirname(self._waves_prefs_path), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(self._waves_prefs, handle, indent=2)
-            os.replace(tmp, self._waves_prefs_path)
+            _write_json_atomic(self._waves_prefs_path, self._waves_prefs, indent=2)
         except Exception:
             logger.exception("Could not save Waves prefs")
-            with contextlib.suppress(OSError):
-                os.remove(tmp)  # don't leave a partial sibling behind
 
     @Slot(str, result="QVariant")
     def wavesPref(self, key: str):
@@ -6510,7 +6629,7 @@ class WavesBridge(QObject):
         held-back downloads. Nothing is queued; they re-initiate after choosing a
         folder. The one-time flag is left unset so an unresolved default is asked
         about again next time. Buttons that left idle before the stash (the
-        refetch path lights "running" as its re-click guard) are returned to
+        refetch path lights "preparing" as its re-click guard) are returned to
         idle here, otherwise they refuse clicks for the rest of the session;
         an idle button ignores the "" emit, so this is safe for the rest."""
         with self._pending_lock:
@@ -6636,7 +6755,7 @@ class WavesBridge(QObject):
         gate = self._download_gate()
         if gate == "block":
             # Nothing set (fresh install): download did not start. Clear the
-            # button too: the refetch path lights "running" before dispatching
+            # button too: the refetch path lights "preparing" before dispatching
             # here, and without this emit that button is dead for the session
             # (idle buttons ignore the "" emit, so it is safe for direct clicks).
             self.downloadState.emit(media_id, "")
@@ -7588,10 +7707,12 @@ class WavesBridge(QObject):
             return
         self._refetch_inflight.add(key)
         gen = self._browse_gen
-        # Immediate button feedback that doubles as a re-click guard: DownIcon
-        # refuses clicks while "running", and _download re-emits "running" when
-        # the real job starts, so the state hands over seamlessly.
-        self.downloadState.emit(media_id, "running")
+        # Immediate button feedback that doubles as a re-click guard. "preparing"
+        # and not "running": nothing is downloading yet, and a progress bar for a
+        # metadata fetch has to be torn down again a moment later when _download
+        # publishes "queued". The button draws preparing exactly like queued, so
+        # that hand-over is the cancel ✕ arriving and nothing else.
+        self.downloadState.emit(media_id, "preparing")
         self._set_status("Fetching item…")
 
         def work() -> None:
@@ -7703,7 +7824,7 @@ class WavesBridge(QObject):
         # the multi-request edition scan like every other async-hop entry
         # point: without it a second click during the scan queues a plain
         # download while the scan still queues the merge, into two directories.
-        self.downloadState.emit(album_id, "running")
+        self.downloadState.emit(album_id, "preparing")
 
         def work() -> None:
             try:
@@ -7752,7 +7873,19 @@ class WavesBridge(QObject):
         it was handed."""
         tree = self._current_folder_tree()
         folder_path = tree.folder_path_of(playlist_id) if tree is not None else ""
-        return apply_folder_path(self.settings.data.format_playlist, folder_path)
+        # The stand-ins travel with it: {folder_path} is resolved ahead of
+        # format_path_media, so it is the one library-bound name the formatter
+        # never spells, and without them a folder called "?" lost its level.
+        return apply_folder_path(
+            self.settings.data.format_playlist,
+            folder_path,
+            safe_filename_replacement(getattr(self.settings.data, "filename_illegal_replacement", "")),
+            safe_filename_replacement_map(getattr(self.settings.data, "filename_illegal_map", None)),
+            # A folder a 0.1.17 library already has on disk keeps its old
+            # spelling: this level is literal text before the engine's own
+            # older-spelling fallbacks run, so the probe happens here or never.
+            base_path=getattr(self.settings.data, "download_base_path", ""),
+        )
 
     def _needs_folder_tree(self) -> bool:
         """Whether a playlist download would resolve {folder_path} blind."""
@@ -7770,7 +7903,8 @@ class WavesBridge(QObject):
         if self._needs_folder_tree() and self._warm_folder_tree(
             lambda: self.downloadPlaylist(playlist_id), playlist_id
         ):
-            self.downloadState.emit(playlist_id, "running")  # button feedback, _download re-emits
+            # Waiting on the sweep, not downloading: see _refetch_for_download.
+            self.downloadState.emit(playlist_id, "preparing")
             return
         self._download(
             obj, "playlist", name_builder_title(obj), self._playlist_template(playlist_id), True, playlist_id
@@ -8020,7 +8154,7 @@ class WavesBridge(QObject):
         if self._needs_folder_tree() and self._warm_folder_tree(
             lambda: self.downloadPlaylistCategory(api_path), f"cat:{api_path}"
         ):
-            self.downloadState.emit(f"cat:{api_path}", "running")
+            self.downloadState.emit(f"cat:{api_path}", "preparing")
             return
         group_id = f"cat:{api_path}"
         keys: list[str] = []
@@ -8970,6 +9104,24 @@ class WavesBridge(QObject):
                 return field(key, "int", int(getattr(d, key)))
             if key in _FLAG_FIELDS:
                 return field(key, "bool", bool(getattr(d, key)))
+            if key in _MAP_FIELDS:
+                # A character -> stand-in table. The page renders one box per
+                # rejected character, so it is handed the character list (with
+                # names) rather than deriving one of its own. "default_value"
+                # is the recommended table, behind the card's Default link;
+                # "offer" additionally puts it on screen as a one-time strip,
+                # for an install that predates it and has no stand-ins of its
+                # own (see _migrate_illegal_map_offer).
+                return field(
+                    key,
+                    "char_map",
+                    safe_filename_replacement_map(getattr(d, key, None)),
+                    {
+                        "chars": [{"char": c, "name": _ILLEGAL_CHAR_NAMES.get(c, c)} for c in ILLEGAL_FILENAME_CHARS],
+                        "default_value": dict(DEFAULT_ILLEGAL_MAP),
+                        "offer": not self._waves_prefs.get("illegal_map_offer_done", False),
+                    },
+                )
             # "default" (when the field has a meaningful shipped value) drives
             # the page's per-field Default link, so a mangled template can be
             # restored without resetting every other setting.
@@ -9088,8 +9240,9 @@ class WavesBridge(QObject):
                     "label": "Hover controls slide in",
                     "help": (
                         "Preview and download controls rise up from the bottom of a cover with a "
-                        "small bounce when you hover it. Turn this off to have them simply fade "
-                        "in and out instead."
+                        "small bounce when you hover it, and roll their contents over when a "
+                        "preview or a download starts. Turn this off to have them simply fade "
+                        "in and out, and change over instantly."
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("hover_control_motion"),
@@ -9310,6 +9463,7 @@ class WavesBridge(QObject):
                     "format_mix",
                     "album_track_num_pad_min",
                     "filename_illegal_replacement",
+                    "filename_illegal_map",
                     "filename_delimiter_artist",
                     "filename_delimiter_album_artist",
                     "use_primary_album_artist",
@@ -9444,10 +9598,11 @@ class WavesBridge(QObject):
             "delimiter_artist": d.filename_delimiter_artist,
             "delimiter_album_artist": d.filename_delimiter_album_artist,
             "use_primary_album_artist": bool(d.use_primary_album_artist),
-            # The preview is the user's proof of what the stand-in setting
-            # does before anything downloads, so it launders and applies the
-            # value exactly the way the engine does.
+            # The preview is the user's proof of what the stand-in settings
+            # do before anything downloads, so it launders and applies the
+            # values exactly the way the engine does.
             "illegal_replacement": safe_filename_replacement(d.filename_illegal_replacement),
+            "illegal_map": safe_filename_replacement_map(getattr(d, "filename_illegal_map", None)),
         }
         pad = int(d.album_track_num_pad_min)
         try:
@@ -9458,7 +9613,9 @@ class WavesBridge(QObject):
             elif kind == "playlist":
                 # {folder_path} is resolved before the formatter (its slashes
                 # must survive); the preview mirrors that with the sample path.
-                template = apply_folder_path(template, _SAMPLE_FOLDER_PATH)
+                template = apply_folder_path(
+                    template, _SAMPLE_FOLDER_PATH, kw["illegal_replacement"], kw["illegal_map"]
+                )
                 out = format_path_media(format_path_media(template, pl, **kw), trk, pad, 4, 23, **kw) + ".flac"
             elif kind == "mix":
                 out = format_path_media(format_path_media(template, mx, **kw), trk, pad, 4, 23, **kw) + ".flac"
@@ -9524,6 +9681,21 @@ class WavesBridge(QObject):
                     setattr(data, key, float(value))
                 elif key in _NUMBER_FIELDS:
                     setattr(data, key, int(value))
+                elif key in _MAP_FIELDS:
+                    # Stored already laundered, so a config file written here
+                    # can never carry an entry the engine would refuse: the
+                    # page holds SAVE CHANGES on a rejected stand-in, and this
+                    # is the second gate behind that.
+                    if hasattr(value, "toVariant"):
+                        value = value.toVariant()
+                    laundered = safe_filename_replacement_map(dict(value or {}))
+                    setattr(data, key, laundered)
+                    # Stand-ins of their own answer the recommended-table offer
+                    # as surely as declining it does, whether they came from the
+                    # strip or from filling the boxes in by hand.
+                    if laundered and not self._waves_prefs.get("illegal_map_offer_done"):
+                        self._waves_prefs["illegal_map_offer_done"] = True
+                        self._save_waves_prefs()
                 elif key in _FLAG_FIELDS:
                     setattr(data, key, bool(value))
                     # Track the user's real preference for ffmpeg-gated toggles
