@@ -17,6 +17,51 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.17 (2026-08-09)
+
+### ✨ Added
+
+- ✨ A new "Illegal-character stand-in" setting (Settings, File
+  organization) chooses what is written where a character a filesystem
+  rejects is removed from a file or folder name: set it to "-" and
+  "AC/DC" is saved as "AC-DC" instead of "ACDC". Left empty, the
+  default, names are written exactly as before. The setting applies to
+  future downloads only, anything already in your library keeps the
+  name and place it has, and the path previews on the Settings page
+  show its effect before anything downloads. Typing a character a file
+  name cannot hold turns the box red and holds Save Changes until it
+  is taken out, so the setting can never be saved as something the
+  download would quietly ignore.
+
+### 🔧 Changed
+
+- 🔧 The File organization settings are laid out more compactly: the
+  short-value boxes (the illegal-character stand-in and the two artist
+  separators) are sized for the character or two they hold and share a
+  single row, the switches beneath them line up three across, and the
+  decorative filler tile that padded out an odd row is gone.
+
+### 🐛 Fixed
+
+- 🐛 The WAVES wordmark no longer hitches partway through its zoom at
+  launch. The interface was being drawn for the very first time in the
+  middle of that animation, which cost one long frame in the same place
+  every time; it is now prepared while the version readout drains, before
+  the zoom starts.
+
+- 🐛 Cancel on the Settings page no longer throws you back to Browse. It
+  now does what it says: puts every setting back the way it is saved and
+  leaves you exactly where you were, at the same spot on the page.
+
+- 🐛 Removing an illegal character from a name no longer leaves its
+  surrounding spaces behind: "The Better Life / Dead Love" now becomes
+  "The Better Life Dead Love" instead of keeping a doubled space
+  ([issue #15](https://github.com/iamprivacy/Waves/issues/15)).
+  Libraries that already hold the old doubled-space names are left
+  untouched: existing folders and files keep receiving downloads under
+  the name they have, so nothing is moved, renamed, or downloaded
+  again.
+
 ## 🗂️ v0.1.16 (2026-08-08)
 
 ### ✨ Added
