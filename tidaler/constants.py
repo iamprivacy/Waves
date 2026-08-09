@@ -18,6 +18,30 @@ FILENAME_LENGTH_MAX: int = 255
 FORMAT_TEMPLATE_EXPLICIT: str = " (Explicit)"
 METADATA_EXPLICIT: str = " 🅴"
 
+# The stand-ins recommended for the rejected characters that actually turn up in
+# release titles, keyed by character (the full rejected set lives in
+# helper.path.ILLEGAL_FILENAME_CHARS; a key outside it is dropped on load).
+# Removing these five reads wrong: a colon separates a subtitle, a slash sits
+# inside a name ("AC/DC"), and a title that is nothing but punctuation ("?")
+# sanitizes away to nothing at all and loses its folder. The four left unnamed
+# (* < > |) are rare in music and read fine simply removed, so they keep
+# following the single general stand-in.
+#
+# Not the dataclass default: an existing library was built under whatever
+# spelling it already uses, so these are offered on the settings page rather
+# than applied (see WavesBridge._migrate_illegal_map_offer), and are the
+# factory value for a brand-new install only.
+DEFAULT_ILLEGAL_MAP: dict[str, str] = {
+    "/": "-",  # AC/DC -> AC-DC
+    "\\": "-",
+    ":": " · ",  # Mercury: Act 1 -> Mercury · Act 1
+    # Fullwidth question mark: the one lookalike here, because every ASCII
+    # stand-in reads wrong where a question mark almost always sits (the end of
+    # a title), and removing it is what leaves the album "?" folderless.
+    "?": "？",
+    '"': "'",  # "Heroes" -> 'Heroes'
+}
+
 # Dolby Atmos API credentials (obfuscated)
 ATMOS_ID_B64 = "N203QX" + "AwSkM5aj" + "FjT00zbg=="
 ATMOS_SECRET_B64 = "dlJBZEEx" + "MDh0bHZrSnB" + "Uc0daUzhyR1" + "o3eFRsYkow" + "cWFaMks5c2F" + "FenNnWT0="

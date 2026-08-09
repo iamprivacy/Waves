@@ -135,6 +135,16 @@ class Settings:
     # and files that already exist under an older spelling (see
     # Download._keep_existing_layout).
     filename_illegal_replacement: str = ""
+    # Per-character stand-ins overriding the one above, {"?": "-", ":": " · "}.
+    # A character named here uses its own text (empty means removed outright);
+    # every other rejected character follows filename_illegal_replacement. Only
+    # characters a file name cannot hold can be named (see
+    # helper.path.safe_filename_replacement_map).
+    # Empty by default on purpose: constants.DEFAULT_ILLEGAL_MAP holds the
+    # recommended table, but an existing library was built under the spelling it
+    # already has, so Waves offers that table on the settings page instead of
+    # applying it. A brand-new install starts with it (_FIRST_RUN_OVERRIDES).
+    filename_illegal_map: dict[str, str] = field(default_factory=dict)
     metadata_target_upc: MetadataTargetUPC = MetadataTargetUPC.UPC
     # Rate limiting for API calls (tweaking variables)
     api_rate_limit_batch_size: int = 20  # Number of albums to process before applying rate limit delay
@@ -242,6 +252,11 @@ class HelpSettings:
     filename_illegal_replacement: str = (
         "Written where an illegal character (/ : ? *) is removed. Empty gives "
         "'ACDC', '-' gives 'AC-DC'. New downloads only."
+    )
+    filename_illegal_map: str = (
+        "Give single characters their own stand-in, overriding the general one: "
+        "' · ' for ':' keeps 'Rarities Edition · Live' readable. Characters left "
+        "alone follow the general stand-in."
     )
     metadata_target_upc: str = (
         "Select the target metadata tag ('UPC', 'BARCODE', 'EAN') where to write the UPC information to. Default: 'UPC'."

@@ -13,13 +13,17 @@ unchanged to any backend layout.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import pathlib
 from dataclasses import dataclass, field
 
 from pathvalidate import sanitize_filename
 from tidalapi import Playlist, Session
 from tidalapi.exceptions import TooManyRequests
 from tidalapi.playlist import Folder
+
+from tidaler.helper.path import sanitize_name_component
 
 logger = logging.getLogger("waves.folders")
 
@@ -181,18 +185,33 @@ def walk_playlist_tree(session: Session, root_folders: list[Folder] | None = Non
     return tree
 
 
-def sanitize_folder_path(folder_path: str) -> str:
+def sanitize_folder_path(
+    folder_path: str,
+    illegal_replacement: str = "",
+    illegal_map: dict[str, str] | None = None,
+) -> str:
     """Per-segment sanitization of a folder display path.
 
-    Each segment goes through the same sanitize_filename used for every other
-    template token, so illegal characters and Windows reserved names are
-    handled per directory. Separators arriving inside the raw value split into
-    segments here and can never change depth later; "." and ".." segments and
-    empties are dropped, so a hostile payload cannot escape the base path.
+    Each segment goes through the same sanitizer as every other template token,
+    stand-ins included, so illegal characters and Windows reserved names are
+    handled per directory and a folder is spelled the way the rest of the
+    library is. Separators arriving inside the raw value split into segments
+    here and can never change depth later; "." and ".." segments and empties are
+    dropped, so a hostile payload cannot escape the base path.
+
+    Args:
+        folder_path (str): The folder's display path, separators included.
+        illegal_replacement (str, optional): Text written where a rejected
+            character is removed. Defaults to "", plain removal.
+        illegal_map (dict[str, str] | None, optional): Per-character stand-ins,
+            applied before the general one. Defaults to None.
+
+    Returns:
+        str: The sanitized path, "/" separated, possibly empty.
     """
     segments = []
     for raw in folder_path.replace("\\", "/").split("/"):
-        cleaned = sanitize_filename(raw).strip()
+        cleaned = sanitize_name_component(raw, illegal_replacement, illegal_map)
         if not cleaned or cleaned in (".", ".."):
             continue
         # Braces become parentheses. This value is spliced into the template
@@ -208,7 +227,59 @@ def sanitize_folder_path(folder_path: str) -> str:
     return "/".join(segments)
 
 
-def apply_folder_path(template: str, folder_path: str) -> str:
+def _legacy_folder_path(folder_path: str) -> str:
+    """The spelling 0.1.17 gave a folder path: bare sanitize_filename plus a
+    strip per segment, no stand-ins and no spacing tidy. Kept only so a
+    library built by that release can be recognized on disk and its folders
+    reused (see _prefer_existing_folder_spelling); never used for a new
+    folder."""
+    segments = []
+    for raw in folder_path.replace("\\", "/").split("/"):
+        cleaned = sanitize_filename(raw).strip()
+        if not cleaned or cleaned in (".", ".."):
+            continue
+        segments.append(cleaned.replace("{", "(").replace("}", ")"))
+    return "/".join(segments)
+
+
+def _prefer_existing_folder_spelling(template: str, folder_path: str, value: str, base_path) -> str:
+    """An existing library keeps the folder spelling it already has.
+
+    The {folder_path} level is baked into the template before the download
+    engine runs, so the older-spelling fallback every other directory level
+    gets (_keep_existing_layout) can never see it: by the time an item is
+    formatted the folder is literal text. Without this, the stand-ins and the
+    spacing tidy respelled a folder a 0.1.17 library already uses, and the
+    next download of any playlist inside it wrote a complete second copy under
+    the new spelling, invisible to skip_existing.
+
+    The probe only runs when it can be answered honestly: a known base path, a
+    literal (token-free) template prefix, and a legacy spelling of the same
+    depth (a folder whose old spelling dropped a segment entirely points at an
+    ancestor, which exists whether or not anything was downloaded, the same
+    non-evidence _keep_existing_collection_layout refuses).
+    """
+    if not base_path or not value:
+        return value
+    legacy = _legacy_folder_path(folder_path)
+    if not legacy or legacy == value or legacy.count("/") != value.count("/"):
+        return value
+    prefix = template.split(FOLDER_PATH_TOKEN, 1)[0]
+    if "{" in prefix:
+        return value
+    with contextlib.suppress(OSError):
+        if (pathlib.Path(str(base_path)).expanduser() / prefix / legacy).is_dir():
+            return legacy
+    return value
+
+
+def apply_folder_path(
+    template: str,
+    folder_path: str,
+    illegal_replacement: str = "",
+    illegal_map: dict[str, str] | None = None,
+    base_path=None,
+) -> str:
     """Substitute {folder_path} in a path template before formatting.
 
     This runs in the bridge, ahead of format_path_media, because that
@@ -226,10 +297,26 @@ def apply_folder_path(template: str, folder_path: str) -> str:
     at the filesystem root instead of in the download folder. Strip it, unless
     the template itself was written absolute (the user's own business, and
     already the behaviour before {folder_path} existed).
+
+    Args:
+        template (str): The path template, possibly holding {folder_path}.
+        folder_path (str): The folder's display path.
+        illegal_replacement (str, optional): Text written where a rejected
+            character is removed. Defaults to "", plain removal.
+        illegal_map (dict[str, str] | None, optional): Per-character stand-ins.
+            Defaults to None.
+        base_path (optional): The download base directory. When given, a folder
+            a 0.1.17 library already spelled differently on disk keeps that
+            spelling (see _prefer_existing_folder_spelling). Defaults to None,
+            no disk probe (the settings preview shows the preferred spelling).
+
+    Returns:
+        str: The template with {folder_path} substituted.
     """
     if FOLDER_PATH_TOKEN not in template:
         return template
-    value = sanitize_folder_path(folder_path)
+    value = sanitize_folder_path(folder_path, illegal_replacement, illegal_map)
+    value = _prefer_existing_folder_spelling(template, folder_path, value, base_path)
     if value:
         value += "/"
     out = template.replace(FOLDER_PATH_TOKEN, value)
