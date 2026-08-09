@@ -324,6 +324,7 @@ class _GateSettingsData:
     album_track_num_pad_min = 0
     filename_delimiter_artist = ", "
     filename_delimiter_album_artist = ", "
+    filename_illegal_replacement = ""
     use_primary_album_artist = False
 
 
