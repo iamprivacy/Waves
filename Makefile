@@ -73,6 +73,10 @@ help:
 
 .PHONY: gui-waves
 gui-waves: ## Build the Waves QML app (standalone). On macOS this yields dist/waves.app
+	@# Qt 6.11 ships Qt.labs.assetdownloader as a static library only, which
+	@# Nuitka cannot process (see tools/prune_static_qml_plugins.py). Prune it
+	@# from the build virtualenv first; a no-op on Qt versions without it.
+	@poetry run python tools/prune_static_qml_plugins.py
 	@# MACOSX_DEPLOYMENT_TARGET: without it, everything Nuitka compiles inherits
 	@# the build host's own macOS version as its floor, and CI's "Assert macOS
 	@# version floor" step rejects the bundle. Harmless on Linux/Windows.

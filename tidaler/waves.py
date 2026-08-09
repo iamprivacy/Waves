@@ -53,6 +53,11 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # under plugins/multimedia) so QML MediaPlayer/AudioOutput have a working engine
 # for the in-app track/artist preview.
 # nuitka-project: --include-qt-plugins=qml,multimedia
+# Qt 6.11 added a Qt.labs.assetdownloader QML module that ships ONLY as a
+# static library, which Nuitka cannot process. It arrives through the qml
+# plugin scan rather than the DLL list, so --noinclude-dlls does not reach
+# it; the Makefile prunes it from the build virtualenv beforehand instead
+# (tools/prune_static_qml_plugins.sh).
 # Drop the heavy Qt modules Waves never loads, it is a QtQuick app that only
 # imports QtQuick(.Controls.Basic/.Layouts/.Effects/.Shapes/.Dialogs) + QtCore.
 # NOTE: on a macOS standalone build Nuitka names the Qt libraries without the
