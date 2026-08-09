@@ -1,4 +1,5 @@
 import pathlib
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,10 @@ def download_instance() -> Download:
     downloader._FILE_OPERATION_RETRIES = 2
     downloader._FILE_OPERATION_RETRY_DELAY_SEC = 0
     downloader._dirs_ensured = set()
+    # The in-flight name claims every destination now goes through, whether or
+    # not skipping is on (see _perform_actual_download).
+    downloader._names_reserved = set()
+    downloader._names_reserved_lock = Lock()
 
     return downloader
 

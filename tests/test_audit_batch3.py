@@ -79,7 +79,7 @@ class _BlockGateStub:
 
 def test_the_block_gate_returns_the_button_to_idle():
     stub = _BlockGateStub()
-    # The refetch path emits "running" before dispatching here; the block
+    # The refetch path emits "preparing" before dispatching here; the block
     # branch must hand back "" or that button is dead for the session.
     stub._download(object(), "album", "X", "tpl", True, "alb-1")
     assert stub.downloadState.emits == [("alb-1", "")]

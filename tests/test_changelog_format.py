@@ -9,6 +9,11 @@ An issue a bullet closes must be written as a full link ("[issue #11](url)")
 rather than a bare "(#11)": these notes are lifted verbatim into the Release
 body and read well outside the repo, where a bare number links to nothing
 and does not even say what it refers to.
+
+A bullet also lives on a single line, however long. GitHub renders a Release
+body with every newline turned into a line break, so a bullet wrapped across
+source lines reaches the Releases page as one ragged fragment per source line
+instead of a paragraph.
 """
 
 from __future__ import annotations
@@ -56,6 +61,30 @@ def test_subheadings_follow_canonical_order():
             f"{heading!r} lists subheadings as {subs}; "
             f"they must follow Added > Changed > Fixed > Removed ({expected})"
         )
+
+
+def test_bullets_are_never_wrapped_across_lines():
+    """One bullet, one line: a source newline becomes a break in the Release."""
+    lines = CHANGELOG.read_text(encoding="utf-8").splitlines()
+    wrapped = []
+    in_release = False
+    in_fence = False
+    for lineno, line in enumerate(lines, 1):
+        if line.startswith("## "):
+            in_release = True
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        previous = lines[lineno - 2] if lineno > 1 else ""
+        if not in_release or in_fence or not line.strip() or not previous.strip():
+            continue
+        # A bullet may carry an indented block (a command, a follow-up
+        # paragraph) below it, but only after a blank line: what is banned is
+        # text hanging directly off the line above, which is a wrap.
+        if line.startswith(("#", "- ", "<")) or previous.lstrip().startswith("<"):
+            continue
+        wrapped.append(f"line {lineno}: {line.strip()[:60]}")
+    assert not wrapped, "write each bullet on one line, unwrapped:\n" + "\n".join(wrapped)
 
 
 def test_issue_references_are_labelled_links():

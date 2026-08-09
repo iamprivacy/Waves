@@ -346,7 +346,7 @@ def test_category_download_warms_the_tree_under_the_rollup_id():
     stub.downloadPlaylistCategory("pages/mood/chill")
 
     assert stub.warm_calls == ["cat:pages/mood/chill"], "the failed-sweep clear must target the cat: button"
-    assert stub.downloadState.emits == [("cat:pages/mood/chill", "running")]
+    assert stub.downloadState.emits == [("cat:pages/mood/chill", "preparing")]
     assert stub._folder_groups == {}, "no rollup state is published before the tree is warm"
 
 
@@ -391,12 +391,12 @@ def test_best_of_both_guards_the_button_before_the_scan():
     ):
         stub.downloadAlbumBestOfBoth("a1")
 
-    assert stub.downloadState.emits[0] == ("a1", "running"), "published before the multi-request scan"
+    assert stub.downloadState.emits[0] == ("a1", "preparing"), "published before the multi-request scan"
     assert ("a1", "") in stub.downloadState.emits, "the clicked button is handed back on the identity handoff"
     assert stub._albumsQueued.emits == [(["a2"],)]
 
 
-def test_best_of_both_same_identity_keeps_the_button_running():
+def test_best_of_both_same_identity_keeps_the_button_waiting():
     stub = _BestOfBothStub()
     with patch(
         "tidaler.waves_ui.backend._build_merge_plan",
@@ -404,7 +404,7 @@ def test_best_of_both_same_identity_keeps_the_button_running():
     ):
         stub.downloadAlbumBestOfBoth("a1")
 
-    assert stub.downloadState.emits == [("a1", "running")], "the merge downloads under the clicked id"
+    assert stub.downloadState.emits == [("a1", "preparing")], "the merge downloads under the clicked id"
     assert stub._albumsQueued.emits == [(["a1"],)]
 
 
@@ -412,7 +412,7 @@ def test_a_failed_edition_scan_marks_the_button_failed():
     stub = _BestOfBothStub(scan_raises=True)
     stub.downloadAlbumBestOfBoth("a1")
 
-    assert stub.downloadState.emits == [("a1", "running"), ("a1", "failed")]
+    assert stub.downloadState.emits == [("a1", "preparing"), ("a1", "failed")]
     assert stub._albumsQueued.emits == []
 
 

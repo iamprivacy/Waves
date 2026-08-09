@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from tidaler.model.cfg import HelpSettings
 from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import WavesBridge, _shipped_default
+from tidaler.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge, _shipped_default
 
 # Every string field the page lets you customize, and whether restoring a
 # shipped default makes sense for it.
@@ -71,11 +71,17 @@ def test_templates_carry_the_shipped_default():
 
 
 def test_the_default_is_what_a_fresh_install_gets():
+    # A fresh install is tidaler's dataclass with Waves' first-run overrides on
+    # top, which is also what "reset all settings" restores. Both halves matter:
+    # the illegal-character table's shipped value lives in the overrides only
+    # (the dataclass default stays empty so an upgrade changes nothing until
+    # the user says so), and the link must still offer the real fresh value.
     fresh = CfgSettings()
+    for key, value in _FIRST_RUN_OVERRIDES.items():
+        setattr(fresh, key, value)
     for key, field in _fields_by_key().items():
         if "default_value" not in field:
             continue
-        # Read off the dataclass, so it can never drift from a new install.
         assert field["default_value"] == getattr(fresh, key)
 
 

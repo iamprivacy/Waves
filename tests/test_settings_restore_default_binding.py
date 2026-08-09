@@ -65,7 +65,7 @@ def test_restore_default_rebinds_rather_than_overwrites():
     """Pin the shape of the handler itself, so the pair cannot drift apart."""
     src = _source()
     handler = re.search(
-        r"onClicked:\s*\{[^}]*default_value[^}]*\}",
+        r"onClicked:\s*\{[^}]*default_value[^}]*strField\.text[^}]*\}",
         src,
         re.DOTALL,
     )
@@ -73,3 +73,20 @@ def test_restore_default_rebinds_rather_than_overwrites():
     body = handler.group(0)
     assert "page.setv(" in body
     assert "Qt.binding(" in body, "Restore default must re-establish the binding, not overwrite the text"
+
+
+def test_the_character_table_restores_through_the_same_care():
+    """The per-character table has many boxes, so its Restore default cannot
+    re-bind one field inline. It stages the whole table through ``mapStage``,
+    which emits ``mapRestaged``; each box re-binds on that signal. Different
+    mechanism, same rule: no bare write to a box's text.
+    """
+    src = _source()
+    assert "signal mapRestaged(string key)" in src
+    stage = re.search(r"function mapStage\(f, m\)\s*\{.*?\n    \}", src, re.DOTALL)
+    assert stage is not None, "mapStage moved or was renamed"
+    assert "setv(f.key, copy)" in stage.group(0), "the staged table must reach editMap"
+    assert "mapRestaged(f.key)" in stage.group(0), "the boxes never hear about it otherwise"
+    listener = re.search(r"function onMapRestaged\(key\)\s*\{.*?\n\s*\}", src, re.DOTALL)
+    assert listener is not None, "no box listens for a staged table"
+    assert "Qt.binding(" in listener.group(0)

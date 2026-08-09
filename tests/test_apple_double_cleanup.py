@@ -8,6 +8,7 @@ hook and the dotfile filter in playlist generation.
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,11 @@ def download_instance() -> Download:
     downloader._FILE_OPERATION_RETRIES = 2
     downloader._FILE_OPERATION_RETRY_DELAY_SEC = 0
     downloader._dirs_ensured = set()
+    # The playlist name goes through the illegal-character stand-ins now, the
+    # same ones every other name in the library follows.
+    downloader.settings = SimpleNamespace(
+        data=SimpleNamespace(filename_illegal_replacement="", filename_illegal_map=None)
+    )
 
     return downloader
 
