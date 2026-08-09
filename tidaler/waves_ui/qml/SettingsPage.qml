@@ -192,9 +192,75 @@ Item {
     // gate can find them without the page walking the whole schema.
     property var sanitizeKeys: ({})
     // True while the field holds something the laundering would strip, which is
-    // what turns its box red.
+    // what turns its box red. A per-character table is red while ANY of its
+    // stand-ins is, so one bad row still holds the save.
     function sanitizeDirty(f) {
+        if (f.type === "char_map") {
+            var m = mapVal(f)
+            for (var ch in m) if (mapCharDirty(f, ch)) return true
+            return false
+        }
         return f.sanitize === true && String(val(f)) !== waves.sanitizeFilenameReplacement(String(val(f)))
+    }
+    // The per-character stand-ins, as a plain {character: stand-in} object.
+    // A character absent from it follows the general stand-in; present with an
+    // empty value means removed outright, which is why the two are distinct.
+    function mapVal(f) {
+        var v = editMap[f.key] !== undefined ? editMap[f.key] : f.value
+        return v ? v : ({})
+    }
+    function mapHas(f, ch) { return mapVal(f)[ch] !== undefined }
+    function mapText(f, ch) { var v = mapVal(f)[ch]; return v === undefined ? "" : String(v) }
+    function mapCharDirty(f, ch) {
+        var v = mapText(f, ch)
+        return v !== waves.sanitizeFilenameReplacement(v)
+    }
+    function mapSet(f, ch, t) {
+        var m = {}, cur = mapVal(f)
+        for (var k in cur) m[k] = cur[k]
+        m[ch] = t
+        setv(f.key, m)
+    }
+    function mapClear(f, ch) {
+        var m = {}, cur = mapVal(f)
+        for (var k in cur) if (k !== ch) m[k] = cur[k]
+        setv(f.key, m)
+    }
+    // Stage a whole table at once (the recommended set, from the offer strip or
+    // the Restore default link). Emitted so the boxes can re-bind their text:
+    // the same precaution the single-value Restore default takes, since an
+    // imperative write to a TextField's text would kill the binding for good.
+    signal mapRestaged(string key)
+    function mapStage(f, m) {
+        var copy = {}
+        for (var k in m) copy[k] = m[k]
+        setv(f.key, copy)
+        mapRestaged(f.key)
+    }
+    // Whether the table on screen already is the recommended one, entry for
+    // entry (an extra override, or one missing, counts as different).
+    function mapIsDefault(f) {
+        var d = f.default_value
+        if (d === undefined) return true
+        var cur = mapVal(f)
+        for (var k in d) if (cur[k] === undefined || String(cur[k]) !== String(d[k])) return false
+        for (var c in cur) if (d[c] === undefined) return false
+        return true
+    }
+    // The recommended stand-ins in the order the table lists them, so the offer
+    // strip and the boxes under it read the same way round.
+    function mapDefaultChars(f) {
+        var d = f.default_value ? f.default_value : ({})
+        var chars = f.chars ? f.chars : []
+        var out = []
+        for (var i = 0; i < chars.length; i++) if (d[chars[i].char] !== undefined) out.push(chars[i].char)
+        return out
+    }
+    // What an unnamed character falls back to, read live so the placeholders
+    // follow the general stand-in box as it is typed in, before any save.
+    function generalStandIn() {
+        var f = fieldByKey("filename_illegal_replacement")
+        return f ? String(val(f)) : ""
     }
     // Any red box blocks SAVE CHANGES. Rewriting the value on save instead
     // would flash "changes saved" over a silent correction; greying the button
@@ -211,7 +277,10 @@ Item {
     // Within a section, on/off switches render as a tile grid and everything
     // else as labelled rows.
     function boolFields(fields) { return fields.filter(function(f){ return f.type === "bool" && f.embedded !== true }) }
-    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.third !== true }) }
+    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.third !== true && f.type !== "char_map" }) }
+    // The per-character stand-in table renders under the short-value row it
+    // extends, so it is pulled out of the ordinary rows above them.
+    function mapFields(fields)  { return fields.filter(function(f){ return f.type === "char_map" }) }
     // Fields whose value is a character or two (the delimiters, the illegal
     // character stand-in): a whole row for a comma is absurd, so three of
     // them share one line, each a compact box beside its help.
@@ -560,6 +629,9 @@ Item {
 
     component SText: Rectangle {
         property alias text: tf.text
+        // What an empty box stands for, greyed (the per-character stand-ins
+        // show the value the character falls back to).
+        property alias placeholderText: tf.placeholderText
         property bool focused: tf.activeFocus
         // Red outline while the value carries something the field cannot keep.
         property bool invalid: false
@@ -572,6 +644,7 @@ Item {
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
             verticalAlignment: TextInput.AlignVCenter
             color: page.textHi; font.family: page.mono; font.pixelSize: 13
+            placeholderTextColor: page.textDim
             background: Rectangle { color: "transparent" }
             onTextEdited: parent.onEdited(text)
             // A long path template otherwise renders scrolled to its END (the cursor
@@ -1633,6 +1706,333 @@ Item {
                                 sourceComponent: diagCardComp
                             }
 
+                            // The per-character stand-in table: one box for each
+                            // character a file name cannot hold. A box left empty
+                            // follows the general stand-in (shown greyed inside
+                            // it), so the table costs nothing until a character
+                            // is actually given something of its own. Folded away
+                            // unless it holds an override, since almost nobody
+                            // needs more than the one general stand-in.
+                            Component {
+                                id: charMapComp
+                                Rectangle {
+                                    id: mapCard
+                                    required property var modelData
+                                    // Set by the one-time offer's own buttons; the strip also
+                                    // goes once the table holds anything, so filling a box in
+                                    // by hand answers it too.
+                                    property bool offerAnswered: false
+                                    width: inner.width
+                                    radius: 10; color: page.surface; border.color: page.border1
+                                    implicitHeight: mapCol.implicitHeight + 20
+                                    Column {
+                                        id: mapCol
+                                        x: 14; y: 10; width: parent.width - 28; spacing: 6
+                                        // Open on arrival when the user has overrides
+                                        // saved, so their own settings are never hidden
+                                        // behind a fold they have to remember. Decided
+                                        // once, not bound: clearing the last override
+                                        // would otherwise fold the table away under the
+                                        // hand that just cleared it.
+                                        property bool expanded: false
+                                        Component.onCompleted: expanded = Object.keys(page.mapVal(mapCard.modelData)).length > 0
+                                        Row {
+                                            width: parent.width; spacing: 10
+                                            Text {
+                                                id: mapLabel
+                                                text: mapCard.modelData.label; color: page.textHi
+                                                font.pixelSize: 14; font.weight: Font.Medium
+                                            }
+                                            // Same per-field Restore default as the value rows,
+                                            // and the permanent way back to the recommended table
+                                            // once the one-time strip below has been answered.
+                                            Text {
+                                                id: mapDefaultLink
+                                                readonly property bool changed: !page.mapIsDefault(mapCard.modelData)
+                                                visible: mapCard.modelData.default_value !== undefined
+                                                anchors.verticalCenter: mapLabel.verticalCenter
+                                                textFormat: Text.PlainText
+                                                text: changed ? "Use recommended" : "Recommended"
+                                                color: !changed ? page.textDim
+                                                                : mapDefaultMa.containsMouse ? page.accent : page.accentDim
+                                                opacity: changed ? 1 : 0.5
+                                                font.pixelSize: 12
+                                                font.underline: changed && mapDefaultMa.containsMouse
+                                                MouseArea {
+                                                    id: mapDefaultMa
+                                                    anchors.fill: parent; anchors.margins: -4
+                                                    enabled: mapDefaultLink.changed
+                                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        page.mapStage(mapCard.modelData, mapCard.modelData.default_value)
+                                                        mapCol.expanded = true
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            visible: modelData.help !== ""
+                                            width: parent.width
+                                            text: modelData.help; color: page.textDim; font.pixelSize: 12
+                                            wrapMode: Text.WordWrap
+                                        }
+
+                                        // Shown once, to an install that predates the table and
+                                        // has no stand-ins of its own: the recommended set is
+                                        // never applied behind the user's back, because their
+                                        // folders are already spelled the old way. Answering it
+                                        // any of the three ways takes it away for good; the
+                                        // Recommended link above stays as the way back.
+                                        Rectangle {
+                                            id: offerStrip
+                                            visible: mapCard.modelData.offer === true
+                                                     && !mapCard.offerAnswered
+                                                     && Object.keys(page.mapVal(mapCard.modelData)).length === 0
+                                            width: parent.width
+                                            implicitHeight: offerCol.implicitHeight + 20
+                                            radius: 8
+                                            color: page.accentCont; border.color: page.accentDim
+                                            Column {
+                                                id: offerCol
+                                                x: 12; y: 10; width: parent.width - 24; spacing: 6
+                                                Text {
+                                                    textFormat: Text.PlainText
+                                                    text: "New: recommended stand-ins"
+                                                    color: page.accent; font.pixelSize: 13; font.weight: Font.Medium
+                                                }
+                                                Text {
+                                                    width: parent.width; wrapMode: Text.WordWrap
+                                                    textFormat: Text.PlainText
+                                                    text: "Waves can write these five characters instead of removing them. "
+                                                          + "Folders already on disk keep the names they have; this applies to new downloads."
+                                                    color: page.textDim; font.pixelSize: 12
+                                                }
+                                                // One pill per proposal. Run as bare text they blur
+                                                // into each other (" / → - \ → - : → · "), and the
+                                                // pill also makes the spaces around " · " visible,
+                                                // which are half of what that stand-in is.
+                                                Flow {
+                                                    width: parent.width; spacing: 8; topPadding: 2
+                                                    Repeater {
+                                                        model: page.mapDefaultChars(mapCard.modelData)
+                                                        delegate: Rectangle {
+                                                            required property string modelData
+                                                            implicitWidth: chipRow.width + 20
+                                                            implicitHeight: 26
+                                                            radius: 6
+                                                            color: page.surface2; border.color: page.outline
+                                                            Row {
+                                                                id: chipRow
+                                                                anchors.centerIn: parent; spacing: 6
+                                                                Text {
+                                                                    anchors.verticalCenter: parent.verticalCenter
+                                                                    textFormat: Text.PlainText
+                                                                    text: parent.parent.modelData
+                                                                    color: page.textHi
+                                                                    font.family: page.mono; font.pixelSize: 12
+                                                                }
+                                                                Text {
+                                                                    anchors.verticalCenter: parent.verticalCenter
+                                                                    textFormat: Text.PlainText
+                                                                    text: "→"; color: page.accent; font.pixelSize: 11
+                                                                }
+                                                                Text {
+                                                                    anchors.verticalCenter: parent.verticalCenter
+                                                                    textFormat: Text.PlainText
+                                                                    text: mapCard.modelData.default_value[parent.parent.modelData]
+                                                                    color: page.textHi
+                                                                    font.family: page.mono; font.pixelSize: 12
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    width: parent.width; elide: Text.ElideRight
+                                                    topPadding: 2
+                                                    textFormat: Text.PlainText
+                                                    text: "Mercury: Act 1  →  Mercury · Act 1"
+                                                    color: page.textDim; font.family: page.mono; font.pixelSize: 11
+                                                }
+                                                Row {
+                                                    topPadding: 2; spacing: 8
+                                                    // Staged, not saved: the values land in the boxes
+                                                    // below and SAVE CHANGES lights up, so the table can
+                                                    // still be tweaked (or cancelled) before it is real.
+                                                    Rectangle {
+                                                        implicitWidth: offUseTxt.implicitWidth + page.btnPadH * 2
+                                                        implicitHeight: offUseTxt.implicitHeight + page.btnPadV * 2
+                                                        radius: page.btnRad
+                                                        color: page.accentCont; border.color: page.accentDim
+                                                        Text {
+                                                            id: offUseTxt; anchors.centerIn: parent; text: "USE THESE"
+                                                            color: page.accent; font.pixelSize: 13; font.family: page.uiFont
+                                                            font.bold: true; font.letterSpacing: page.btnTrack
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: {
+                                                                page.mapStage(mapCard.modelData, mapCard.modelData.default_value)
+                                                                mapCol.expanded = true
+                                                            }
+                                                        }
+                                                    }
+                                                    Rectangle {
+                                                        implicitWidth: offKeepTxt.implicitWidth + page.btnPadH * 2
+                                                        implicitHeight: offKeepTxt.implicitHeight + page.btnPadV * 2
+                                                        radius: page.btnRad
+                                                        color: "transparent"; border.color: page.outline
+                                                        Text {
+                                                            id: offKeepTxt; anchors.centerIn: parent; text: "KEEP REMOVING THEM"
+                                                            color: page.textDim; font.pixelSize: 13; font.family: page.uiFont
+                                                            font.bold: true; font.letterSpacing: page.btnTrack
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            // The only one of the three that decides
+                                                            // anything on its own, so it is the only one
+                                                            // that writes the "asked already" stamp.
+                                                            onClicked: {
+                                                                waves.resolveIllegalMapOffer()
+                                                                mapCard.offerAnswered = true
+                                                            }
+                                                        }
+                                                    }
+                                                    Rectangle {
+                                                        implicitWidth: offOwnTxt.implicitWidth + page.btnPadH * 2
+                                                        implicitHeight: offOwnTxt.implicitHeight + page.btnPadV * 2
+                                                        radius: page.btnRad
+                                                        color: "transparent"; border.color: page.outline
+                                                        Text {
+                                                            id: offOwnTxt; anchors.centerIn: parent; text: "SET MY OWN"
+                                                            color: page.textDim; font.pixelSize: 13; font.family: page.uiFont
+                                                            font.bold: true; font.letterSpacing: page.btnTrack
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            // Opens the table and steps out of the way.
+                                                            // No stamp: leaving without typing anything
+                                                            // has decided nothing, so it asks again.
+                                                            onClicked: {
+                                                                mapCol.expanded = true
+                                                                mapCard.offerAnswered = true
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            topPadding: 2
+                                            text: (mapCol.expanded ? "▾  " : "▸  ") + "Set one per character"
+                                            color: page.accent; font.pixelSize: 12
+                                            MouseArea {
+                                                anchors.fill: parent; anchors.margins: -4
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: mapCol.expanded = !mapCol.expanded
+                                            }
+                                        }
+                                        Grid {
+                                            id: mapGrid
+                                            visible: mapCol.expanded
+                                            width: parent.width
+                                            // As many per line as fit, so nine short rows
+                                            // stay two lines on a normal window instead of
+                                            // three lines of mostly gap.
+                                            columns: Math.max(3, Math.min(5, Math.floor(width / 200)))
+                                            columnSpacing: 10; rowSpacing: 8
+                                            topPadding: 4
+                                            Repeater {
+                                                model: modelData.chars ? modelData.chars : []
+                                                delegate: Row {
+                                                    id: charRow
+                                                    required property var modelData
+                                                    readonly property var fieldData: mapCard.modelData
+                                                    readonly property string ch: charRow.modelData.char
+                                                    readonly property bool overridden: page.mapHas(charRow.fieldData, charRow.ch)
+                                                    width: (mapGrid.width - mapGrid.columnSpacing * (mapGrid.columns - 1)) / mapGrid.columns
+                                                    spacing: 8
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: 14
+                                                        textFormat: Text.PlainText
+                                                        text: charRow.ch; color: page.textHi
+                                                        font.family: page.mono; font.pixelSize: 13
+                                                    }
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        textFormat: Text.PlainText
+                                                        text: "→"
+                                                        // Accent marks the characters carrying a
+                                                        // stand-in of their own; the rest read as
+                                                        // the plumbing they are.
+                                                        color: charRow.overridden ? page.accent : page.textDim
+                                                        font.pixelSize: 12
+                                                    }
+                                                    SText {
+                                                        id: charBox
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        // The stand-in row's box, a shade wider: this
+                                                        // one may hold spaces around its character
+                                                        // (" · "), which want to be visible.
+                                                        width: 88; height: 32
+                                                        text: page.mapText(charRow.fieldData, charRow.ch)
+                                                        // An empty box says what the character
+                                                        // becomes anyway: the general stand-in, or
+                                                        // nothing at all when there is none.
+                                                        placeholderText: charRow.overridden
+                                                                         ? "none"
+                                                                         : (page.generalStandIn() === "" ? "none" : page.generalStandIn())
+                                                        invalid: page.mapCharDirty(charRow.fieldData, charRow.ch)
+                                                        onEdited: function(t){ page.mapSet(charRow.fieldData, charRow.ch, t) }
+                                                        // A whole table staged at once (the offer strip,
+                                                        // the Recommended link) has to reach the boxes
+                                                        // the same way the clear button does.
+                                                        Connections {
+                                                            target: page
+                                                            function onMapRestaged(key) {
+                                                                if (key !== charRow.fieldData.key)
+                                                                    return
+                                                                charBox.text = Qt.binding(function() {
+                                                                    return page.mapText(charRow.fieldData, charRow.ch)
+                                                                })
+                                                            }
+                                                        }
+                                                    }
+                                                    Item {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: 16; height: 16
+                                                        visible: charRow.overridden
+                                                        Ico {
+                                                            anchors.centerIn: parent
+                                                            name: "close"; size: 11
+                                                            color: clearMa.containsMouse ? page.textHi : page.textDim
+                                                        }
+                                                        MouseArea {
+                                                            id: clearMa
+                                                            anchors.fill: parent; anchors.margins: -3
+                                                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                            // Back to following the general stand-in.
+                                                            // Clearing the box cannot mean this: an
+                                                            // empty stand-in is itself a choice
+                                                            // (remove the character outright).
+                                                            onClicked: {
+                                                                page.mapClear(charRow.fieldData, charRow.ch)
+                                                                charBox.text = Qt.binding(function() {
+                                                                    return page.mapText(charRow.fieldData, charRow.ch)
+                                                                })
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Component.onCompleted: page.sanitizeKeys[modelData.key] = modelData
+                                }
+                            }
+
                             // Value-bearing settings (str / enum / int / float) as
                             // labelled rows. One shared delegate feeds two Repeaters:
                             // the File organization card renders its path-template
@@ -2063,6 +2463,13 @@ Item {
                                     model: page.thirdFields(card.modelData.fields)
                                     delegate: rowFieldComp
                                 }
+                            }
+
+                            // The per-character stand-in table, directly under
+                            // the general stand-in it overrides.
+                            Repeater {
+                                model: page.mapFields(card.modelData.fields)
+                                delegate: charMapComp
                             }
 
                             // On/off switches as a 2-column tile grid (keeps the look).

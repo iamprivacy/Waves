@@ -50,6 +50,32 @@ ApplicationWindow {
     property string artFxVariant: root.artHoverTilt ? "tilt" : "none"
     property real artFxTilt: 8
     property real artFxLift: 1.032
+    // Whether the tilt springs or eases. OutBack overshoots at the end of
+    // every move, which on the way back reads as the cover bouncing as it
+    // lands flat; OutCubic settles straight into place. One knob, so the
+    // covers and the track discs always move the same way.
+    property int artFxEase: Easing.OutCubic
+    // ---- Artwork depth: hover shadow, and a resting raise while playing --
+    // Every cover that answers the pointer casts a shadow while it is
+    // hovered, and artwork whose own preview is running stops answering the
+    // pointer and settles slightly raised over that same shadow, so "what is
+    // playing" reads from across the page without a badge or a colour
+    // change. One shadow language for both states: a cover that starts
+    // playing under the pointer deepens what is already there instead of
+    // growing one out of nothing.
+    // Held for the whole session on that cover, not just while sound is
+    // coming out: a pause keeps the card up and sets the shadow breathing
+    // (artPlayBreath) rather than dimming it, so a held cover reads as
+    // resting, not as switched off.
+    // Raise and shadow are deliberately small; this is a hierarchy cue, not
+    // an animation. Values chosen in scratchpad/playing_raise_lab against
+    // the real Browse page.
+    property real artPlayLift: 1.02          // resting swell while it plays
+    property real artPlayShadowY: 10         // shadow drop while raised, px
+    property real artPlayShadowBlur: 0.75    // MultiEffect blur, 0..1
+    property real artPlayShadowA: 0.55       // shadow alpha at full depth
+    property real artPlayBreath: 0.22        // paused: how far the breath relaxes
+    property int  artPlayBreathMs: 2400      // paused: one half-breath
 
     // ---- Console palette (phosphor-green CRT, dark only) ----------------
     // Legacy names kept (values repointed) so every existing binding recolours
@@ -527,11 +553,24 @@ ApplicationWindow {
         else { v = artistEpsCollapsed = !artistEpsCollapsed }
         waves.setWavesPref("artist_sec_" + which + "_collapsed", v)
     }
-    // Top tracks show only the first 5; SHOW ALL reveals the rest for this
-    // page visit only (deliberately not persisted).
-    property bool topTracksExpanded: false
-    // Same first-5 rule for the artist page's video grid.
-    property bool artistVideosExpanded: false
+    // Every artist-page section shows its first 5 (videos: whole rows) with a
+    // SHOW ALL beneath it, exactly like the search page's mixed view, and a
+    // section the user expands is remembered (prefs) across artists and
+    // launches, per section, alongside the fold state the headers already
+    // persist. These used to be per-visit only for tracks/videos and absent
+    // for albums/EPs.
+    property bool topTracksExpanded: waves.wavesPref("artist_sec_tracks_expanded") === true
+    property bool artistAlbumsExpanded: waves.wavesPref("artist_sec_albums_expanded") === true
+    property bool artistEpsExpanded: waves.wavesPref("artist_sec_eps_expanded") === true
+    property bool artistVideosExpanded: waves.wavesPref("artist_sec_videos_expanded") === true
+    function toggleArtistExpand(which) {
+        var v
+        if (which === "tracks") v = topTracksExpanded = !topTracksExpanded
+        else if (which === "albums") v = artistAlbumsExpanded = !artistAlbumsExpanded
+        else if (which === "eps") v = artistEpsExpanded = !artistEpsExpanded
+        else v = artistVideosExpanded = !artistVideosExpanded
+        waves.setWavesPref("artist_sec_" + which + "_expanded", v)
+    }
     // The search page (mixed All view) shows each section's first 5 results with
     // a SHOW ALL beneath it, so the page reads as a quick overview instead of a
     // wall. A section the user expands is remembered (prefs) and stays expanded
@@ -1139,6 +1178,22 @@ ApplicationWindow {
     }
     function dlPct(id) { var h = dlHolders[id]; return h !== undefined ? h.pct : -1 }
     function dlSt(id) { var h = dlHolders[id]; return h !== undefined ? h.st : "" }
+    // The queue row a media id is waiting in, so a download button can cancel
+    // its own wait without the queue drawer being opened. Walked on the click,
+    // never bound: a queue of any size costs nothing until someone presses the
+    // X. -1 = nothing of that id is waiting (it already started, or it is gone).
+    function queuedQid(id) {
+        if (!id) return -1
+        for (var i = 0; i < queueModel.count; ++i) {
+            var row = queueModel.get(i)
+            if (row.media_id === id && row.status === "queued") return row.qid
+        }
+        return -1
+    }
+    function cancelQueuedMedia(id) {
+        var qid = queuedQid(id)
+        if (qid >= 0) waves.cancelQueueItem(qid)
+    }
 
     // Flat list of every track/video id across a browse page's sections
     // (multi-disc albums split into one "tracks" section per disc). Feeds
@@ -1500,7 +1555,7 @@ ApplicationWindow {
     property bool _navRestoring: false
     // Armed by navBack when the target artist must be re-loaded: onArtistLoaded
     // resets the expansion state on every full load, so a Back re-applies the
-    // snapshot's state ({id, ex, bio, tops}) from here instead. The matching
+    // snapshot's state ({id, ex, bio}) from here instead. The matching
     // scroll restore is armed on artistView (pendingRestoreKey/Y), pre-paint.
     property var _artistRestoreState: null
     // Which top-level section the user is "in" for the nav tabs: drilling into
@@ -1516,8 +1571,7 @@ ApplicationWindow {
         if (artistOpen) return { v: "artist", id: artistData ? "" + artistData.id : "",
                                  label: artistData ? (artistData.name || "Artist") : "Artist",
                                  scrollY: artistView.contentY, ex: expandedAlbums,
-                                 bio: bioExpanded, tops: topTracksExpanded,
-                                 vids: artistVideosExpanded }
+                                 bio: bioExpanded }
         if (browseOpen) return { v: "browse", key: browsePageKey, page: browsePage,
                                  stack: browseStack.slice(), hi: browseHighlightId,
                                  scrollY: browsePageKey === "" ? browseLanding.contentY : browseDrill.contentY,
@@ -1594,8 +1648,9 @@ ApplicationWindow {
                 // becomes visible this frame, same rule as openSearch).
                 expandedAlbums = s.ex || ({})
                 bioExpanded = !!s.bio
-                topTracksExpanded = !!s.tops
-                artistVideosExpanded = !!s.vids
+                // Section expansion is a persisted per-section pref now (like
+                // the search sections), so snapshots neither carry nor restore
+                // it: the pref would just be overwritten with stale state.
                 if (s.scrollY !== undefined)
                     artistView.contentY = Math.min(s.scrollY, Math.max(0, artistView.contentHeight - artistView.height))
             } else if (s.id) {
@@ -1604,7 +1659,7 @@ ApplicationWindow {
                 // and stash the expansion state for onArtistLoaded to re-apply.
                 artistView.pendingRestoreKey = s.id
                 artistView.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
-                _artistRestoreState = { id: s.id, ex: s.ex, bio: s.bio, tops: s.tops, vids: s.vids }
+                _artistRestoreState = { id: s.id, ex: s.ex, bio: s.bio }
                 waves.loadArtist(s.id); return   // flag cleared in onArtistLoaded
             }
         } else if (s.v === "browse") {
@@ -1840,7 +1895,7 @@ ApplicationWindow {
         if (navOrigin !== "search" || settingsOpen) return
         searchSaved = (artistOpen && artistData && artistData.id)
             ? { artistData: artistData, expandedAlbums: expandedAlbums,
-                bio: bioExpanded, tops: topTracksExpanded, vids: artistVideosExpanded,
+                bio: bioExpanded,
                 artistY: artistView.contentY, resultsY: results.contentY }
             : { resultsY: results.contentY }
     }
@@ -1860,8 +1915,6 @@ ApplicationWindow {
                     artistData = s.artistData
                     expandedAlbums = s.expandedAlbums || ({})
                     bioExpanded = !!s.bio
-                    topTracksExpanded = !!s.tops
-                    artistVideosExpanded = !!s.vids
                     artistOpen = true
                     browseOpen = false; libraryOpen = false; settingsOpen = false
                     // Same-frame restore: the pane becomes visible this frame,
@@ -2931,7 +2984,38 @@ ApplicationWindow {
         property real fxLift: 1.0
         property real fxGlossX: width / 2
         property real fxGlossY: height / 2
-        readonly property bool fxOn: hoverFx && fxVariant !== "none"
+        // What this cover IS, so the resting raise can follow the shared
+        // player. The call site declares it; sites that leave fxId empty keep
+        // exactly the old behaviour, every binding below folds away.
+        // Matching is literal (this cover's own preview), the same rule
+        // pvActive already applies everywhere else: a cover that lifts without
+        // being asked reads as a glitch, and one album can sit on three
+        // shelves at once.
+        property string fxKind: ""
+        property string fxId: ""
+        // Gated on the same Settings switch as the tilt: "Cover art tilts on
+        // hover" is the app's only "artwork moves" control, and someone who
+        // turned motion off should not be handed new motion.
+        readonly property string fxPlaySt: (hoverFx && fxVariant !== "none" && fxId !== "")
+                                           ? root.pvSt(fxKind, fxId) : ""
+        // Same three live states PreviewArt calls "active"; "error" is a
+        // transient flash, not something to raise the cover for.
+        readonly property bool fxPlayRaised: fxPlaySt === "playing" || fxPlaySt === "paused"
+                                             || fxPlaySt === "loading"
+        // A preview usually ends with the pointer still on the cover, on the
+        // very button that stopped it. Dropping there is wrong twice over: the
+        // cover is still being pointed at, so it has no business lying flat,
+        // and the hover tilt would take it straight back up, which reads as
+        // the drop bouncing. So it stays up, and comes down when the pointer
+        // leaves: one movement, and the pointer is gone before it starts.
+        property bool fxHoldRaise: false
+        onFxPlayRaisedChanged: fxHoldRaise = fxPlayRaised ? false : fxHover.hovered
+        readonly property bool fxRaised: fxPlayRaised || fxHoldRaise
+        readonly property bool fxPaused: fxPlaySt === "paused"
+        // `&& !fxRaised` is the whole "stop tilting" half of this: the
+        // onFxOnChanged handler below already lays a mid-tilt cover flat when
+        // this goes false, which is exactly the hand-off from tilt to raise.
+        readonly property bool fxOn: hoverFx && fxVariant !== "none" && !fxRaised
         // The effect waits for the pointer to REST on the cover. A scrolling
         // list slides its rows under a stationary cursor, and every row that
         // passed under it used to arm the tilt on the way through: dozens of
@@ -2955,37 +3039,84 @@ ApplicationWindow {
             // Take the lift AND the current aim on arming: a cursor that
             // lands and holds still must tilt without needing a nudge.
             onTriggered: {
-                if (!fxHover.hovered) return
+                if (!fxHover.hovered || !artRoot.fxOn) return
                 artRoot.fxArmed = true
                 artRoot.fxLift = root.artFxLift
                 artRoot._fxAim(fxHover.point.position)
             }
         }
-        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
         // Turning the effect off in Settings while a cover is mid-tilt must
         // lay it flat, not freeze it there (the same guard the track discs
         // carry for a preview starting under an armed tilt).
         onFxOnChanged: if (!fxOn) { fxArm.stop(); fxArmed = false; fxRx = 0; fxRy = 0; fxLift = 1.0 }
+        // ONE dial for "raised", 0 to 1. The resting swell and the shadow's
+        // shape both read it, so they cannot drift apart mid-transition: the
+        // card rises and its shadow settles under it on the same curve, in
+        // the same 260 ms. Its own value, never the hover lift's, which snaps
+        // back to 1.0 on every pointer exit. Eases, never springs: OutBack
+        // overshoots, and a cover meant to settle and stay must not bounce.
+        property real fxRaiseT: fxRaised ? 1 : 0
+        Behavior on fxRaiseT { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        readonly property real fxRaiseScale: 1 + (root.artPlayLift - 1) * fxRaiseT
+        // How present the shadow is, 0 to 1. Hovering casts one too, so a
+        // cover that starts playing under the pointer deepens a shadow that
+        // is already there. Animated rather than switched, and layer.enabled
+        // follows it, so the layer comes up while the shadow is still
+        // invisible and goes away only after it has faded out.
+        property real fxShadow: (fxRaised || fxHovering) ? 1 : 0
+        Behavior on fxShadow { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        // Paused: a slow, shallow breath, not a dimmed shadow. 0 = full depth,
+        // 1 = the bottom of the exhale.
+        property real fxBreath: 0
+        SequentialAnimation {
+            running: artRoot.fxPaused
+            loops: Animation.Infinite
+            NumberAnimation { target: artRoot; property: "fxBreath"; to: 1
+                              duration: root.artPlayBreathMs; easing.type: Easing.InOutSine }
+            NumberAnimation { target: artRoot; property: "fxBreath"; to: 0
+                              duration: root.artPlayBreathMs; easing.type: Easing.InOutSine }
+        }
+        // Resuming stops the loop wherever it happens to be; the amplitude is
+        // shallow enough that settling back to full depth is not a visible step.
+        onFxPausedChanged: if (!fxPaused) fxBreath = 0
+        readonly property real fxBreathK: 1 - root.artPlayBreath * fxBreath
+        readonly property real fxShadowDepth: fxShadow * fxBreathK
+        // A raised cover sits above its neighbours, so neither the swell nor
+        // the shadow is sliced by the next sibling's background.
+        // Held for the whole descent, not just while raised: dropping back
+        // behind the next sibling's background at the instant the preview ends
+        // clips the last of the swell and the shadow, which reads as a snap.
+        // Keyed on shadow depth, not on the raise: a merely hovered cover
+        // casts a shadow too, and at z 0 the next sibling's background paints
+        // over it, so the hover shadow never showed until preview raised the
+        // card.
+        z: (fxRaiseT > 0.001 || fxShadowDepth > 0.004) ? 1 : 0
         transform: [
             Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(1, 0, 0); angle: artRoot.fxRx },
             Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(0, 1, 0); angle: artRoot.fxRy },
-            Scale    { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; xScale: artRoot.fxLift; yScale: artRoot.fxLift }
+            Scale    { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; xScale: artRoot.fxLift; yScale: artRoot.fxLift },
+            Scale    { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; xScale: artRoot.fxRaiseScale; yScale: artRoot.fxRaiseScale }
         ]
         // HoverHandler, not a MouseArea: call sites' own MouseAreas (open
         // the page, hover controls) keep every click and hover.
         HoverHandler {
             id: fxHover
-            enabled: artRoot.fxOn
+            // Stays enabled through the raise, where the tilt is off: something
+            // has to know the pointer is still on the cover when the preview
+            // ends. fxOn gates the movement instead, below.
+            enabled: artRoot.hoverFx && artRoot.fxVariant !== "none"
             onHoveredChanged: {
                 if (hovered) fxArm.restart()
                 else {
                     fxArm.stop(); artRoot.fxArmed = false
+                    artRoot.fxHoldRaise = false
                     artRoot.fxRx = 0; artRoot.fxRy = 0; artRoot.fxLift = 1.0
                 }
             }
-            // fxArmed implies hovered (leaving clears it), so this is the
+            // fxArmed implies hovered and fxOn (both clear it), so this is the
             // whole guard: an unarmed pass-through moves nothing.
             onPointChanged: if (artRoot.fxArmed) artRoot._fxAim(point.position)
         }
@@ -3130,15 +3261,22 @@ ApplicationWindow {
                 }
             }
         }
-        // Offset depth shadow (BGT tilt_shadow: sx=-px*14, sy=-py*14+6),
-        // hover-only so idle covers never pay the layer.
-        layer.enabled: artRoot.hoverFx && artRoot.fxVariant === "tilt_shadow" && artRoot.fxHovering
+        // Offset depth shadow (BGT tilt_shadow: sx=-px*14, sy=-py*14+6). While
+        // hovered it leans away from the tilt; while raised it sits straight
+        // down at artPlayShadowY, and fxRaiseT crosses between the two, so the
+        // shadow never jumps as a hovered cover becomes a playing one. Gated
+        // on fxShadowDepth, not on a state boolean: the layer exists slightly
+        // before and after the shadow is visible, which is what makes the fade
+        // seamless. Idle covers still never pay the layer FBO, and the 90 ms
+        // rest-arming means a scrolling list cannot mint one per row.
+        layer.enabled: artRoot.fxShadowDepth > 0.004
         layer.effect: MultiEffect {
             shadowEnabled: true
-            shadowColor: "#80000000"
-            shadowBlur: 0.9
-            shadowHorizontalOffset: -(artRoot.fxRy / root.artFxTilt) * 14
-            shadowVerticalOffset:    (artRoot.fxRx / root.artFxTilt) * 14 + 6
+            shadowColor: Qt.rgba(0, 0, 0, root.artPlayShadowA * artRoot.fxShadowDepth)
+            shadowBlur: root.artPlayShadowBlur
+            shadowHorizontalOffset: -(artRoot.fxRy / root.artFxTilt) * 14 * (1 - artRoot.fxRaiseT)
+            shadowVerticalOffset: ((artRoot.fxRx / root.artFxTilt) * 14 + 6) * (1 - artRoot.fxRaiseT)
+                                  + root.artPlayShadowY * artRoot.fxRaiseT * artRoot.fxBreathK
         }
     }
 
@@ -3468,22 +3606,25 @@ ApplicationWindow {
             color: root.textHi; font.family: root.mono; font.pixelSize: 9; font.bold: true
             style: Text.Outline; styleColor: root.bg
         }
+        // "preparing" (parked behind a re-fetch or a folder-tree warm) reads as
+        // queued here too: see DownloadButton.waiting.
+        readonly property bool waiting: di.st === "queued" || di.st === "preparing"
         Ico {
-            anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed" && di.st !== "queued"
+            anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed" && !di.waiting
             name: di.st === "done" ? "check" : "arrow-down"
             color: di.st === "done" ? root.green : root.accent
             size: 15; bold: di.st === "done" ? 0 : 10
         }
         // Queued: click acknowledged, waiting for a download slot; the stack
         // glyph, your item is the bottom bar.
-        QueueStack { visible: di.st === "queued"; barW: 13; anchors.centerIn: parent }
+        QueueStack { visible: di.waiting; barW: 13; anchors.centerIn: parent }
         RetryMark { anchors.centerIn: parent; visible: di.st === "failed"; color: root.red; box: 15 }
         MouseArea {
             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: di.scale = 0.85
             onReleased: di.scale = 1.0
             onCanceled: di.scale = 1.0
-            onClicked: { if (di.st === "running" || di.st === "done" || di.st === "queued") return; di.onTap() }
+            onClicked: { if (di.st === "running" || di.st === "done" || di.waiting) return; di.onTap() }
         }
     }
 
@@ -3548,9 +3689,9 @@ ApplicationWindow {
         // A preview starting under an armed tilt (click) must not leave the
         // disc frozen mid-tilt while the ring takes over.
         onFxOnChanged: if (!fxOn) { paFxArm.stop(); fxArmed = false; fxRx = 0; fxRy = 0; fxLift = 1.0 }
-        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
         transform: [
             Rotation { origin.x: pa.width / 2; origin.y: pa.height / 2; axis: Qt.vector3d(1, 0, 0); angle: pa.fxRx },
             Rotation { origin.x: pa.width / 2; origin.y: pa.height / 2; axis: Qt.vector3d(0, 1, 0); angle: pa.fxRy },
@@ -4045,13 +4186,17 @@ ApplicationWindow {
         readonly property string st: pbar.pid !== "" ? root.pvSt(pbar.kind, pbar.pid) : ""
         readonly property bool live: st === "playing" || st === "paused"
         readonly property real frac: root.pvFrac(pbar.kind, pbar.pid)
+        // Inside a RollSwap the outline is the wrapper's pill, and drawing a
+        // second one here would double every edge. The fill stays: it is what
+        // makes the control read over artwork.
+        property bool bare: false
         width: 140; height: 30; radius: root.btnRad; clip: true
         // natural (content) size per the shared button rules, callers may
         // still set explicit width/height (the artist page's fixed bar does)
         implicitWidth: pbIdleRow.implicitWidth + root.btnPadH * 2
         implicitHeight: pbIdleRow.implicitHeight + root.btnPadV * 2
         color: st === "error" ? root.redCont : "transparent"
-        border.width: root.btnBorderW
+        border.width: bare ? 0 : root.btnBorderW
         border.color: st === "error" ? root.red : root.accentDim
         // consume clicks so the card-wide open-artist MouseArea (z:-1) never fires
         MouseArea { anchors.fill: parent; onPressed: function(m){ m.accepted = true } }
@@ -4266,11 +4411,19 @@ ApplicationWindow {
         readonly property real pct: root.dlPct(mediaId)
         readonly property string liveSt: root.dlSt(mediaId)
         readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
+        // "preparing" = the click is parked behind a prerequisite (a metadata
+        // re-fetch, a folder-tree warm, an edition scan) and has not reached the
+        // queue yet. It draws exactly like queued, so the hand-over to a real
+        // queue row is the cancel ✕ fading in and nothing else moving. It used
+        // to draw as "running", which flashed a progress bar for a download that
+        // had not started and then snapped to the queued pill.
+        readonly property bool waiting: st === "queued" || st === "preparing"
         implicitHeight: dbRow.implicitHeight + root.btnPadV * 2
         // Width is pinned to the idle label ("⭳ DOWNLOAD …") so the button
         // doesn't shrink when the state text changes to DONE/RETRY, keeps
         // row columns aligned and avoids layout jumps mid-download.
-        implicitWidth: Math.max(dbRow.implicitWidth, dbMetric.implicitWidth, dbMetricDone.implicitWidth) + root.btnPadH * 2
+        implicitWidth: Math.max(dbRow.implicitWidth, dbMetric.implicitWidth,
+                                dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth) + root.btnPadH * 2
         Row {
             id: dbMetric
             visible: false; spacing: 7
@@ -4283,11 +4436,27 @@ ApplicationWindow {
             Ico { name: "check"; color: root.accent; size: 14 }
             Text { textFormat: Text.PlainText; text: "DOWNLOADED"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
+        // Queued measures too, now that it carries a cancel X: without it the
+        // button grew the moment a click was queued, and in a track list every
+        // row's button is aligned against its neighbours'. Boxes, not the real
+        // glyphs: a QueueStack and an Ico per idle row would be three bars and
+        // a vector path built for a state the row is almost never in.
+        Row {
+            id: dbMetricQueued
+            visible: false; spacing: 7
+            Item { width: 12; height: 12 }      // QueueStack, default barW
+            Text { textFormat: Text.PlainText; text: db.queuedLabel; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+            Item { width: 13; height: 13 }      // the cancel X
+        }
         radius: root.btnRad
+        // Inside a RollSwap the outline is the wrapper's; see PreviewBar.bare.
+        property bool bare: false
         // Filled like DOWNLOAD SELECTED so every download button reads primary.
-        color: st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
-        border.width: root.btnBorderW
-        border.color: st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
+        readonly property color fill: st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
+        readonly property color edge: st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
+        color: fill
+        border.width: bare ? 0 : root.btnBorderW
+        border.color: edge
         clip: true
         scale: 1
         Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
@@ -4329,8 +4498,12 @@ ApplicationWindow {
         Row {
             id: dbRow; anchors.centerIn: parent; spacing: 7
             visible: db.st !== "running"
+            // Above the button-wide MouseArea declared below, which would
+            // otherwise swallow every press aimed at the cancel X. Nothing
+            // else in here takes input, so raising the row costs no clicks.
+            z: 1
             Ico {
-                visible: db.st !== "failed" && db.st !== "queued"
+                visible: db.st !== "failed" && !db.waiting
                 name: db.st === "done" ? "check" : "arrow-down"
                 color: root.accent
                 size: 14; bold: db.st === "done" ? 0 : 10; anchors.verticalCenter: parent.verticalCenter
@@ -4342,7 +4515,7 @@ ApplicationWindow {
             // still spaces around a zero-width one, so an inactive Loader left
             // visible would pad the idle button by two gaps.
             Loader {
-                active: db.st === "queued"; visible: active
+                active: db.waiting; visible: active
                 anchors.verticalCenter: parent.verticalCenter
                 sourceComponent: QueueStack {}
             }
@@ -4353,10 +4526,37 @@ ApplicationWindow {
             }
             Text {
                 textFormat: Text.PlainText  // db.label carries a remote artist name
-                text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.st === "queued" ? db.queuedLabel : db.label.toUpperCase()
-                color: db.st === "done" ? root.accent : db.st === "failed" ? root.red : db.st === "queued" ? root.accentDim : root.accent
+                text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.waiting ? db.queuedLabel : db.label.toUpperCase()
+                color: db.st === "done" ? root.accent : db.st === "failed" ? root.red : db.waiting ? root.accentDim : root.accent
                 font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
                 anchors.verticalCenter: parent.verticalCenter
+            }
+            // Queued only: give up the wait right here, instead of opening the
+            // queue drawer to find the same row. Its own click zone, because
+            // the button around it is deliberately inert while queued.
+            // Loaded for "preparing" too, holding its space blank and inert:
+            // there is no queue row to cancel yet, and reserving the width means
+            // the label doesn't shift sideways when the row lands and the ✕
+            // fades in.
+            Loader {
+                active: db.waiting; visible: active
+                anchors.verticalCenter: parent.verticalCenter
+                sourceComponent: Ico {
+                    // Red at rest, brighter on hover: the same read as the
+                    // player's stop glyph, and the only way out of a queued
+                    // click should not have to be hunted for.
+                    name: "close"; size: 13; bold: 8
+                    color: dbCancelMa.containsMouse ? "#ff7d76" : root.red
+                    opacity: db.st === "queued" ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                    MouseArea {
+                        id: dbCancelMa
+                        anchors.fill: parent; anchors.margins: -5
+                        enabled: db.st === "queued"
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: function(m) { m.accepted = true; root.cancelQueuedMedia(db.mediaId) }
+                    }
+                }
             }
         }
         MouseArea {
@@ -4364,7 +4564,7 @@ ApplicationWindow {
             onPressed: db.scale = 0.96
             onReleased: db.scale = 1.0
             onCanceled: db.scale = 1.0
-            onClicked: { if (db.st === "running" || db.st === "done" || db.st === "queued") return; db.onTap() }
+            onClicked: { if (db.st === "running" || db.st === "done" || db.waiting) return; db.onTap() }
         }
         // Idle only: running/queued/done are not clickable, and failed keeps
         // its red frame instead of a green breath.
@@ -4455,7 +4655,7 @@ ApplicationWindow {
             // Timer only arms for "done"). The total is what RETRY re-queues.
             var m = root.folderRemainMap
             var known = m[folderId] !== undefined
-            if (st === "" || st === "queued" || st === "failed")
+            if (st === "" || st === "queued" || st === "preparing" || st === "failed")
                 return total > 0 ? "" + total : (known ? "" + m[folderId] : "")
             var r = known ? m[folderId] : total
             // A count nobody has published yet is not zero. The Browse category
@@ -4496,7 +4696,11 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent; anchors.margins: 10; spacing: 13
             FolderTile { visible: plRow.isFolder }
-            Art { visible: !plRow.isFolder; width: 44; height: 44; hoverFx: true; url: plRow.isFolder ? "" : model.art }
+            Art {
+                visible: !plRow.isFolder; width: 44; height: 44; hoverFx: true
+                fxKind: "playlist"; fxId: plRow.isFolder ? "" : ("" + (model.id || ""))
+                url: plRow.isFolder ? "" : model.art
+            }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 2
                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -5734,7 +5938,7 @@ ApplicationWindow {
                     Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
                     Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
-                Art { width: 46; height: 46; hoverFx: true; url: art }
+                Art { width: 46; height: 46; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
                     Text {
@@ -5787,7 +5991,7 @@ ApplicationWindow {
                 x: 16; y: 12; width: parent.width - 32; spacing: 12
                 Row {
                     width: parent.width; spacing: 16
-                    Art { width: 116; height: 116; hoverFx: true; url: art }
+                    Art { width: 116; height: 116; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
                     Column {
                         width: parent.width - 132 - abPanelMeta.width - 16; spacing: 6
                         Text { text: "ALBUM"; color: root.textDim; font.pixelSize: 11 }
@@ -5966,7 +6170,7 @@ ApplicationWindow {
                     Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
                     Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
-                Art { width: 46; height: 46; hoverFx: true; url: art }
+                Art { width: 46; height: 46; hoverFx: true; fxKind: "playlist"; fxId: plId; url: art }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
                     Text {
@@ -6004,7 +6208,7 @@ ApplicationWindow {
                 x: 16; y: 12; width: parent.width - 32; spacing: 12
                 Row {
                     width: parent.width; spacing: 16
-                    Art { width: 116; height: 116; hoverFx: true; url: art }
+                    Art { width: 116; height: 116; hoverFx: true; fxKind: "playlist"; fxId: plId; url: art }
                     Column {
                         width: parent.width - 132; spacing: 6
                         Text { text: "PLAYLIST"; color: root.textDim; font.pixelSize: 11 }
@@ -6508,7 +6712,12 @@ ApplicationWindow {
             anchors.fill: parent; anchors.margins: 8; spacing: 8
             Item {
                 width: parent.width; height: parent.width
-                Art { anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width; hoverFx: true; url: aArt }
+                Art {
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width, parent.height); height: width
+                    hoverFx: true; fxKind: "artist"; fxId: aId
+                    url: aArt
+                }
             }
             Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
             PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: aPop }
@@ -6546,7 +6755,12 @@ ApplicationWindow {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
             anchors.margins: 8; spacing: 5
             Art {
-                width: parent.width; height: parent.width; hoverFx: true; url: bc.card.art || ""
+                width: parent.width; height: parent.width; hoverFx: true
+                // previewable mirrors the strip's own gate, so a video card
+                // (no audio preview path) can never claim the raise.
+                fxKind: bc.previewable ? bc.kind : ""
+                fxId: bc.previewable ? ("" + (bc.card.id || "")) : ""
+                url: bc.card.art || ""
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: bc.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -6645,13 +6859,16 @@ ApplicationWindow {
             }
             // ---- download: DOWNLOAD -> dot bar + fixed-width % -> ✓ DONE ----
             Item {
+                id: bcDlBox
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 width: Math.max(bcDlIdle.implicitWidth, bcDlRun.implicitWidth, bcDlQueued.implicitWidth); height: 16
+                // "preparing" reads as queued here too: see DownloadButton.waiting.
+                readonly property bool waiting: bc.dlSt === "queued" || bc.dlSt === "preparing"
                 Text {
                     id: bcDlIdle
                     textFormat: Text.PlainText
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    visible: bc.dlSt !== "running" && bc.dlSt !== "queued"
+                    visible: bc.dlSt !== "running" && !bcDlBox.waiting
                     text: bc.dlSt === "done" ? "DONE" : bc.dlSt === "failed" ? "RETRY" : "DOWNLOAD"
                     color: bc.dlSt === "done" ? root.green : bc.dlSt === "failed" ? root.red : root.accent
                     font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
@@ -6661,7 +6878,7 @@ ApplicationWindow {
                 Row {
                     id: bcDlQueued
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    visible: bc.dlSt === "queued"; spacing: 5
+                    visible: bcDlBox.waiting; spacing: 5
                     QueueStack { barW: 9; anchors.verticalCenter: parent.verticalCenter }
                     Text {
                         textFormat: Text.PlainText
@@ -6689,7 +6906,7 @@ ApplicationWindow {
                 }
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: { if (bc.dlSt === "running" || bc.dlSt === "done" || bc.dlSt === "queued") return; root.browseCardDownload(bc.card) }
+                    onClicked: { if (bc.dlSt === "running" || bc.dlSt === "done" || bcDlBox.waiting) return; root.browseCardDownload(bc.card) }
                 }
             }
         }
@@ -6741,6 +6958,98 @@ ApplicationWindow {
                 NumberAnimation { property: "opacity"; duration: riser.motion ? 150 : 160; easing.type: Easing.InQuad }
             }
         ]
+    }
+
+    // The hover controls' idle-to-live swap: one pill whose contents ride a
+    // short belt. The outgoing set leaves through the top exactly as the
+    // incoming arrives from the bottom, while the pill itself stretches
+    // between their two natural sizes and its fill and outline cross to the
+    // arriving control's. Replaces what used to be a bare `visible:` flip in
+    // both directions.
+    // Shape picked in scratchpad/pv_swap_lab.qml round 2 ("ROLL snap"): a
+    // 16px belt over 230ms with NO overlap, so the swap reads as a flip
+    // rather than a dissolve.
+    // The pill belongs to this wrapper, not to the two controls, which is why
+    // both load `bare`: mid-belt a control is half out of frame, and only a
+    // visible outline makes that read as sliding behind an edge instead of as
+    // something being clipped off.
+    // Gated on hoverMotion like RiseIn: with motion off the swap is instant.
+    component RollSwap: Item {
+        id: rsw
+        property bool live: false
+        // Assigned inline by the call site; reparented into the pill so each
+        // side can keep its own bindings and its own natural size.
+        property Item idleItem: null
+        property Item liveItem: null
+        property color idleColor: "#d90d0f12"
+        property color idleBorder: root.accentDim
+        property color liveColor: idleColor
+        property color liveBorder: idleBorder
+        readonly property bool motion: root.hoverMotion
+        readonly property real travel: 16
+        // Centred horizontally by anchor, placed vertically by the belt below:
+        // centerIn would own y and fight it.
+        onIdleItemChanged: if (idleItem) {
+            idleItem.parent = rswPill
+            idleItem.anchors.horizontalCenter = rswPill.horizontalCenter
+        }
+        onLiveItemChanged: if (liveItem) {
+            liveItem.parent = rswPill
+            liveItem.anchors.horizontalCenter = rswPill.horizontalCenter
+        }
+
+        property real t: live ? 1 : 0
+        Behavior on t { NumberAnimation { duration: rsw.motion ? 230 : 0; easing.type: Easing.OutCubic } }
+        // 0.44 is both the end of the exit and the start of the entry: no
+        // overlap, so the two are never on screen together.
+        readonly property real outFrac: 1 - Math.min(1, t / 0.44)
+        readonly property real inFrac: Math.max(0, (t - 0.44) / 0.56)
+        function _mix(a, b, k) {
+            return Qt.rgba(a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k,
+                           a.b + (b.b - a.b) * k, a.a + (b.a - a.a) * k)
+        }
+
+        readonly property real wIdle: idleItem ? idleItem.width : 0
+        readonly property real hIdle: idleItem ? idleItem.height : 0
+        // The live side's size is LATCHED, not read raw. The state that ends
+        // the live side usually also empties it in the same binding pass (a
+        // stopped preview hides the scrubber, and its Column relayouts to 0
+        // before t has moved), so reading the raw height collapsed the pill to
+        // nothing in one frame instead of rolling the outgoing control away.
+        // Holding the last real size keeps the roll on screen; a size change
+        // WHILE live (a download joining a preview) eases instead of snapping.
+        readonly property real _wLiveRaw: liveItem ? liveItem.width : 0
+        readonly property real _hLiveRaw: liveItem ? liveItem.height : 0
+        property real wLive: 0
+        property real hLive: 0
+        on_WLiveRawChanged: if (live || _wLiveRaw > 0) wLive = _wLiveRaw
+        on_HLiveRawChanged: if (live || _hLiveRaw > 0) hLive = _hLiveRaw
+        Behavior on wLive { enabled: rsw.live; NumberAnimation { duration: rsw.motion ? 180 : 0; easing.type: Easing.OutCubic } }
+        Behavior on hLive { enabled: rsw.live; NumberAnimation { duration: rsw.motion ? 180 : 0; easing.type: Easing.OutCubic } }
+        implicitWidth: wIdle + (wLive - wIdle) * t
+        implicitHeight: hIdle + (hLive - hIdle) * t
+        width: implicitWidth
+        height: implicitHeight
+
+        Rectangle {
+            id: rswPill
+            anchors.fill: parent
+            radius: root.btnRad
+            color: rsw._mix(rsw.idleColor, rsw.liveColor, rsw.t)
+            border.width: root.btnBorderW
+            border.color: rsw._mix(rsw.idleBorder, rsw.liveBorder, rsw.t)
+            clip: true
+            // The two contents are reparented in above; their belt offset and
+            // presence are driven from here so neither call site repeats it.
+            Binding { target: rsw.idleItem; property: "opacity"; value: rsw.outFrac }
+            Binding { target: rsw.idleItem; property: "visible"; value: rsw.outFrac > 0.004 }
+            Binding { target: rsw.idleItem; property: "y"
+                      value: (rswPill.height - rsw.hIdle) / 2 - rsw.travel * (1 - rsw.outFrac) }
+            Binding { target: rsw.liveItem; property: "opacity"; value: rsw.inFrac }
+            Binding { target: rsw.liveItem; property: "visible"; value: rsw.inFrac > 0.004 }
+            Binding { target: rsw.liveItem; property: "y"
+                      value: (rswPill.height - rsw.hLive) / 2 + rsw.travel * (1 - rsw.inFrac) }
+        }
     }
 
     // The app-wide breadcrumb trail (folder-strip pills over navHistory +
@@ -6939,6 +7248,9 @@ ApplicationWindow {
             // (reported from livetesting). The on-art caption and scrim are
             // children of the art, so they ride the same tilt.
             hoverFx: true
+            // Videos have no audio-preview path, so they never take the raise.
+            fxKind: ac.kind === "video" ? "" : ac.kind
+            fxId: ac.kind === "video" ? "" : ("" + (ac.card.id || ""))
             url: ac.card.art || ""
             // Declared first so the hover controls' own MouseAreas sit above it:
             // the artwork opens the page, the buttons keep their clicks.
@@ -6985,47 +7297,63 @@ ApplicationWindow {
                                                    || root.dlSt(ac.card.id || "") !== "" || root.pvSt(ac.kind, ac.card.id || "") !== "")
             HoverHandler { id: acWrapHover }
             RiseIn {
+                id: acRiser
                 on: acArt.controlsOn
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
                 anchors.margins: 10
-                height: acControls.implicitHeight
-            Column {
-                id: acControls
-                width: parent.width; spacing: 6
+                height: acSwap.implicitHeight
                 readonly property string acPvSt: root.pvSt(ac.kind, ac.card.id || "")
                 readonly property string acDlSt: root.dlSt(ac.card.id || "")
-                // Live preview: the full scrubber bar (same one as everywhere else)
-                PreviewBar {
-                    visible: parent.acPvSt !== ""
-                    width: parent.width; height: implicitHeight
-                    kind: ac.kind; pid: ac.card.id || ""
-                    label: "Preview " + acArt.kindLabel
-                    // opaque backing so the controls read over any artwork
-                    Rectangle { anchors.fill: parent; z: -1; radius: root.btnRad; color: "#d90d0f12" }
-                }
-                // Live download: the full dot-matrix progress bar / done / retry
-                DownloadButton {
-                    id: acDl
-                    visible: parent.acDlSt !== ""
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: st === "running" ? parent.width : implicitWidth
-                    mediaId: ac.card.id || ""
-                    // No ownership rollup here: this button is visible only
-                    // while a LIVE download state exists, and live state always
-                    // outranks the owned rollup, so the rollup's result could
-                    // never render. Computing it per card was pure cost.
-                    collectionCheck: false
-                    label: "Download " + acArt.kindLabel
-                    onTap: function() { root.browseCardDownload(ac.card) }
-                    Rectangle { anchors.fill: parent; z: -1; radius: root.btnRad; color: "#d90d0f12" }
+            // Idle strip and live controls are the same pill: it rolls its
+            // contents over and stretches to the arriving side's size, in both
+            // directions, for a preview and for a download alike.
+            RollSwap {
+                id: acSwap
+                anchors.horizontalCenter: parent.horizontalCenter
+                live: acRiser.acPvSt !== "" || acRiser.acDlSt !== ""
+                // The live side carries its own fill (a download button is a
+                // filled control); only the outline is the pill's, so it takes
+                // the arriving control's edge colour with it.
+                liveBorder: acLive.dlOn ? acDl.edge
+                                        : (acRiser.acPvSt === "error" ? root.red : root.accentDim)
+                liveItem: Column {
+                    id: acLive
+                    spacing: 6
+                    readonly property bool pvOn: acRiser.acPvSt !== ""
+                    readonly property bool dlOn: acRiser.acDlSt !== ""
+                    // Full width while a full-width row is showing; a finished
+                    // or failed download goes back to hugging its label, the
+                    // way inline buttons do everywhere else.
+                    width: (pvOn || acDl.st === "running") ? acRiser.width : acDl.implicitWidth
+                    // Live preview: the full scrubber bar (same one as everywhere else)
+                    PreviewBar {
+                        visible: acLive.pvOn
+                        bare: true
+                        width: parent.width; height: implicitHeight
+                        kind: ac.kind; pid: ac.card.id || ""
+                        label: "Preview " + acArt.kindLabel
+                    }
+                    // Live download: the full dot-matrix progress bar / done / retry
+                    DownloadButton {
+                        id: acDl
+                        visible: acLive.dlOn
+                        bare: true
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: st === "running" ? parent.width : implicitWidth
+                        mediaId: ac.card.id || ""
+                        // No ownership rollup here: this button is visible only
+                        // while a LIVE download state exists, and live state always
+                        // outranks the owned rollup, so the rollup's result could
+                        // never render. Computing it per card was pure cost.
+                        collectionCheck: false
+                        label: "Download " + acArt.kindLabel
+                        onTap: function() { root.browseCardDownload(ac.card) }
+                    }
                 }
                 // Idle: the slim strip, ▶ PREVIEW | ⭳ DOWNLOAD in one thin pill
-                Rectangle {
+                idleItem: Item {
                     id: acStrip
-                    visible: parent.acPvSt === "" && parent.acDlSt === ""
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: acStripRow.implicitWidth; height: 30; radius: root.btnRad
-                    color: "#d90d0f12"; border.width: root.btnBorderW; border.color: root.accentDim
+                    width: acStripRow.implicitWidth; height: 30
                     // Hover swell: one handler split by x (the halves' own
                     // MouseAreas would steal the hover), so crossing the
                     // divider hands the light over without a gap. Where PREVIEW
@@ -7797,16 +8125,20 @@ ApplicationWindow {
             anchors.left: parent.left; anchors.right: parent.right
             anchors.bottom: parent.bottom; anchors.bottomMargin: 10
             height: 34
-        Rectangle {
+        // Same roll as the album cards: the strip and the live rollup button
+        // are one pill that changes its contents, not two that blink.
+        RollSwap {
+            id: catSwap
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.verticalCenter: parent.verticalCenter
+            live: bt.catSt !== ""
+            liveBorder: catBtn.edge
+            idleItem: Item {
             // Same pill as the album-card strip, one notch smaller: at the
             // card sizes the natural width overflows the 200px tile, so the
             // labels drop to 9px and the segment padding tightens to fit.
             id: catStrip
-            visible: bt.catSt === ""
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.verticalCenter: parent.verticalCenter
-            width: catStripRow.implicitWidth; height: 30; radius: root.btnRad
-            color: "#d90d0f12"; border.width: root.btnBorderW; border.color: root.accentDim
+            width: catStripRow.implicitWidth; height: 30
             // Hover swell, same wiring as the album cards' strip (see there
             // for why one handler and why PREVIEW overshoots the divider).
             HoverHandler { id: catStripHover }
@@ -7855,26 +8187,32 @@ ApplicationWindow {
                     }
                 }
             }
-        }
-        Item {
-            visible: bt.catSt !== ""
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.verticalCenter: parent.verticalCenter
-            implicitWidth: catBtn.implicitWidth; implicitHeight: catBtn.implicitHeight
-            DownloadButton {
+            }
+            liveItem: DownloadButton {
                 id: catBtn
+                bare: true
                 mediaId: bt.catId
                 label: "Download all"
                 // Retry after a failed rollup re-queues from the cached list.
                 onTap: function(){ waves.downloadPlaylistCategory(bt.path) }
-                Rectangle { anchors.fill: parent; z: -1; radius: root.btnRad; color: "#d90d0f12" }
             }
-            FolderBadge {
-                anchors.right: catBtn.right; anchors.rightMargin: -8
-                anchors.top: catBtn.top; anchors.topMargin: -9
-                folderId: bt.catId
-                st: catBtn.st
-            }
+        }
+        // The count badge deliberately overhangs the button's corner, so it
+        // cannot ride inside the pill's clipping window. It sits alongside and
+        // arrives with the button instead.
+        FolderBadge {
+            anchors.right: catSwap.right; anchors.rightMargin: -8
+            anchors.top: catSwap.top; anchors.topMargin: -9
+            folderId: bt.catId
+            st: catBtn.st
+            // Ride the swap AND keep the component's own reasons to hide: an
+            // override replaces the whole binding, so `catSwap.inFrac` alone
+            // pinned the badge opaque through its `gone` dismissal (a shrunken
+            // ✓ parked on the corner for the life of the tile) and the plain
+            // `opacity > 0.004` dropped the empty-value guard, showing a bare
+            // pill with no digit for the whole folder-tree warm.
+            opacity: catSwap.inFrac * (gone ? 0 : 1)
+            visible: opacity > 0.004 && value !== ""
         }
         }
     }
@@ -8556,12 +8894,8 @@ ApplicationWindow {
             if (pr && pr.id === ("" + p.id)) {
                 root.expandedAlbums = pr.ex || ({})
                 root.bioExpanded = !!pr.bio
-                root.topTracksExpanded = !!pr.tops
-                root.artistVideosExpanded = !!pr.vids
             } else {
                 root.bioExpanded = false
-                root.topTracksExpanded = false
-                root.artistVideosExpanded = false
                 root.expandedAlbums = ({})
             }
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
@@ -9317,6 +9651,8 @@ ApplicationWindow {
                             Art {
                                 width: 180; height: 180; radius: 12
                                 hoverFx: true
+                                fxKind: browseItemHeader.hd ? ("" + (browseItemHeader.hd.kind || "")) : ""
+                                fxId: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
                                 anchors.verticalCenter: parent.verticalCenter
                                 url: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
                             }
@@ -9740,7 +10076,11 @@ ApplicationWindow {
                         radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
                             anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 46; height: 46; hoverFx: true; url: model.art }
+                            Art {
+                                width: 46; height: 46; hoverFx: true
+                                fxKind: "mix"; fxId: "" + (model.id || "")
+                                url: model.art
+                            }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -9840,7 +10180,12 @@ ApplicationWindow {
                     width: parent.width; spacing: 20
                     Column {
                         spacing: 10
-                        Art { id: artistArt; width: 150; height: 150; hoverFx: true; url: root.artistData.art || "" }
+                        Art {
+                            id: artistArt
+                            width: 150; height: 150; hoverFx: true
+                            fxKind: "artist"; fxId: "" + (root.artistData.id || "")
+                            url: root.artistData.art || ""
+                        }
                         // No idle Preview button on the artist's own page, but if a
                         // preview is already playing (e.g. started from a card), the
                         // scrubber still surfaces here so it stays controllable.
@@ -9901,8 +10246,8 @@ ApplicationWindow {
                     color: root.textLo; font.pixelSize: 13; width: parent.width; wrapMode: Text.WordWrap; lineHeight: 1.3
                 }
 
-                // Top tracks: first 5 only, SHOW ALL reveals the rest for this
-                // visit. Collapsed state persists across artist pages (prefs).
+                // Top tracks: first 5 only, SHOW ALL reveals the rest. Both
+                // the fold and the expansion persist across artists (prefs).
                 SectionHeader {
                     id: topTracksHead
                     visible: artistTracksModel.count > 0
@@ -9929,11 +10274,13 @@ ApplicationWindow {
                     sectionTop: topTracksHead
                     expanded: root.topTracksExpanded
                     count: artistTracksModel.count
-                    onToggled: root.topTracksExpanded = !root.topTracksExpanded
+                    onToggled: root.toggleArtistExpand("tracks")
                 }
 
-                // Albums (expand inline)
+                // Albums (expand inline): first 5, SHOW ALL for the rest, the
+                // expansion remembered across artists like every section here.
                 SectionHeader {
+                    id: artistAlbumsHead
                     visible: artistAlbumsModel.count > 0
                     label: "ALBUMS"; count: artistAlbumsModel.count
                     collapsible: true; collapsed: root.artistAlbumsCollapsed
@@ -9943,14 +10290,24 @@ ApplicationWindow {
                     model: root.artistAlbumsCollapsed ? null : artistAlbumsModel
                     delegate: AlbumBlock {
                         required property var model
+                        required property int index
+                        visible: index < 5 || root.artistAlbumsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
                     }
                 }
+                ShowAllLabel {
+                    visible: !root.artistAlbumsCollapsed && artistAlbumsModel.count > 5
+                    sectionTop: artistAlbumsHead
+                    expanded: root.artistAlbumsExpanded
+                    count: artistAlbumsModel.count
+                    onToggled: root.toggleArtistExpand("albums")
+                }
 
-                // EPs & singles
+                // EPs & singles: same first-5 overview.
                 SectionHeader {
+                    id: artistEpsHead
                     visible: artistEpModel.count > 0
                     label: "EPS & SINGLES"; count: artistEpModel.count
                     collapsible: true; collapsed: root.artistEpsCollapsed
@@ -9960,10 +10317,19 @@ ApplicationWindow {
                     model: root.artistEpsCollapsed ? null : artistEpModel
                     delegate: AlbumBlock {
                         required property var model
+                        required property int index
+                        visible: index < 5 || root.artistEpsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
                     }
+                }
+                ShowAllLabel {
+                    visible: !root.artistEpsCollapsed && artistEpModel.count > 5
+                    sectionTop: artistEpsHead
+                    expanded: root.artistEpsExpanded
+                    count: artistEpModel.count
+                    onToggled: root.toggleArtistExpand("eps")
                 }
 
                 // Videos: the same art-first grid as the search results, at
@@ -10021,7 +10387,7 @@ ApplicationWindow {
                     sectionTop: artistVideosHead
                     expanded: root.artistVideosExpanded
                     count: artistVideosModel.count
-                    onToggled: root.artistVideosExpanded = !root.artistVideosExpanded
+                    onToggled: root.toggleArtistExpand("videos")
                 }
             }
             }
@@ -10231,7 +10597,12 @@ ApplicationWindow {
                                 anchors.fill: parent; anchors.margins: 8; spacing: 6
                                 Item {
                                     width: parent.width; height: width
-                                    Art { anchors.centerIn: parent; width: parent.width; height: width; hoverFx: true; url: model.art }
+                                    Art {
+                                        anchors.centerIn: parent
+                                        width: parent.width; height: width; hoverFx: true
+                                        fxKind: "artist"; fxId: "" + (model.id || "")
+                                        url: model.art
+                                    }
                                 }
                                 Text {
                                     textFormat: Text.PlainText; text: model.name
@@ -10501,7 +10872,11 @@ ApplicationWindow {
                         width: ListView.view.width; height: 64; radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
                             anchors.fill: parent; anchors.margins: 10; spacing: 13
-                            Art { width: 44; height: 44; hoverFx: true; url: model.art }
+                            Art {
+                                width: 44; height: 44; hoverFx: true
+                                fxKind: "mix"; fxId: "" + (model.id || "")
+                                url: model.art
+                            }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { textFormat: Text.PlainText; text: model.title; color: root.textHi; font.pixelSize: 15; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
