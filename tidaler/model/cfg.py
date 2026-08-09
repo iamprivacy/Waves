@@ -129,6 +129,12 @@ class Settings:
     window_h: int = 800
     filename_delimiter_artist: str = ", "
     filename_delimiter_album_artist: str = ", "
+    # What to write where a character a filesystem rejects (/, :, ?, ...) is
+    # removed from a name. "" (the default) removes it and tidies the spacing.
+    # Applies to future downloads only: the engine keeps writing into folders
+    # and files that already exist under an older spelling (see
+    # Download._keep_existing_layout).
+    filename_illegal_replacement: str = ""
     metadata_target_upc: MetadataTargetUPC = MetadataTargetUPC.UPC
     # Rate limiting for API calls (tweaking variables)
     api_rate_limit_batch_size: int = 20  # Number of albums to process before applying rate limit delay
@@ -233,6 +239,10 @@ class HelpSettings:
     window_h: str = "Height of saved window size."
     filename_delimiter_artist: str = "Filename delimiter for multiple artists. Default: ', '"
     filename_delimiter_album_artist: str = "Filename delimiter for multiple album artists. Default: ', '"
+    filename_illegal_replacement: str = (
+        "Written where an illegal character (/ : ? *) is removed. Empty gives "
+        "'ACDC', '-' gives 'AC-DC'. New downloads only."
+    )
     metadata_target_upc: str = (
         "Select the target metadata tag ('UPC', 'BARCODE', 'EAN') where to write the UPC information to. Default: 'UPC'."
     )

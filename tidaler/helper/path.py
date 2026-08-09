@@ -178,6 +178,48 @@ def path_file_settings() -> str:
 _SELF_DRESSING_TOKENS = {"video_year_optional"}
 
 
+# A replacement is decoration, not content: a couple of characters at most,
+# so a pasted paragraph cannot become part of every file name.
+_REPLACEMENT_MAX_LEN = 3
+
+
+def safe_filename_replacement(value: str) -> str:
+    """A user-chosen illegal-character replacement, reduced to what is safe.
+
+    The Settings box accepts anything, so the value is laundered here, at the
+    point of use, rather than trusted from disk: only characters that are
+    themselves legal in a file name survive (probed one at a time between
+    letters, so edge-trimming rules cannot hide an illegal one), and the
+    result is capped at a few characters. Anything else, including a non
+    string smuggled in by hand-editing the config file, collapses toward "",
+    which is the shipped behavior of simply removing the character.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    kept = []
+    for ch in value[:_REPLACEMENT_MAX_LEN]:
+        probe = f"a{ch}a"
+        if ch == " " or sanitize_filename(probe) == probe:
+            kept.append(ch)
+    return "".join(kept)
+
+
+def _tidy_spacing(value: str) -> str:
+    """Collapse the whitespace a stripped illegal character leaves behind.
+
+    ``pathvalidate`` deletes characters a filesystem rejects but keeps what
+    surrounded them, so an album called ``The Better Life / Dead Love`` came
+    out as ``The Better Life  Dead Love``, with a double space where the
+    slash used to be (reported in issue #15). Runs of whitespace collapse to
+    a single space and the edges are trimmed, which also tidies names whose
+    illegal character sat at the start or end.
+
+    Applied to a token's value only, never to the assembled template, so a
+    separator the template itself spells out is untouched.
+    """
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def format_path_media(
     fmt_template: str,
     media: Track | Album | Playlist | UserPlaylist | Video | Mix,
@@ -187,6 +229,8 @@ def format_path_media(
     delimiter_artist: str = ", ",
     delimiter_album_artist: str = ", ",
     use_primary_album_artist: bool = False,
+    tidy_spacing: bool = True,
+    illegal_replacement: str = "",
 ) -> str:
     """Formats a media path string using a template and media attributes.
 
@@ -201,6 +245,16 @@ def format_path_media(
         delimiter_artist (str, optional): Delimiter for artist names. Defaults to ", ".
         delimiter_album_artist (str, optional): Delimiter for album artist names. Defaults to ", ".
         use_primary_album_artist (bool, optional): If True, uses first album artist for folder paths. Defaults to False.
+        tidy_spacing (bool, optional): Collapse the whitespace a stripped illegal
+            character leaves behind. Defaults to True. Pass False to reproduce the
+            names releases before 0.1.17 produced, which is how the download engine
+            recognises a library built under the old spelling and keeps writing
+            into it instead of renaming anything.
+        illegal_replacement (str, optional): Text written where an illegal
+            character is removed ("AC/DC" with "-" becomes "AC-DC"). Defaults to
+            "", plain removal. Callers pass values through
+            safe_filename_replacement first; the engine always passes "" when
+            reproducing an older spelling, since the setting postdates them.
 
     Returns:
         str: The formatted and sanitized media path string.
@@ -227,9 +281,12 @@ def format_path_media(
         if result_fmt != match.group(1):
             # Sanitize here, in case of the filename has slashes or something, which will be recognized later as a directory separator.
             # Do not sanitize if value is the FORMAT_TEMPLATE_EXPLICIT placeholder, since it has a leading whitespace which otherwise gets removed.
-            value = (
-                sanitize_filename(result_fmt) if result_fmt != FORMAT_TEMPLATE_EXPLICIT else FORMAT_TEMPLATE_EXPLICIT
-            )
+            if result_fmt == FORMAT_TEMPLATE_EXPLICIT:
+                value = FORMAT_TEMPLATE_EXPLICIT
+            else:
+                value = sanitize_filename(result_fmt, replacement_text=illegal_replacement)
+                if tidy_spacing:
+                    value = _tidy_spacing(value)
             # Self-dressing tokens carry their own separator space
             # ("[2026] "); sanitize_filename trims edge whitespace, which
             # would weld the year prefix straight onto the title. Scoped to

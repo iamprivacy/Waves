@@ -68,6 +68,7 @@ from tidaler.helper.path import (
     check_file_exists,
     format_path_media,
     path_file_sanitize,
+    safe_filename_replacement,
     strip_apple_double,
     url_to_filename,
 )
@@ -965,6 +966,60 @@ class Download:
         """
         raise MediaMissing
 
+    def _illegal_replacement(self) -> str:
+        """The user's illegal-character replacement, laundered for use.
+
+        Read from settings on every call (the app runs for weeks; a settings
+        change must take effect on the next download, not the next restart)
+        and passed through safe_filename_replacement so nothing typed into the
+        box can put an illegal character back into a name.
+        """
+        return safe_filename_replacement(getattr(self.settings.data, "filename_illegal_replacement", ""))
+
+    def _collection_dir(self, relative_template: str) -> pathlib.Path:
+        """The folder a partially formatted collection template points at.
+
+        The string still carries the per-track tokens, so the folder is
+        everything above them; a dummy suffix lets the normal sanitizer run
+        over the same shape a real destination takes.
+        """
+        candidate = (pathlib.Path(self.path_base).expanduser() / (relative_template + ".x")).absolute()
+        return pathlib.Path(path_file_sanitize(candidate, adapt=True)).parent
+
+    def _keep_existing_layout(self, tidied: pathlib.Path, *older: pathlib.Path) -> pathlib.Path:
+        """Prefer an older spelling wherever a library already uses it.
+
+        0.1.17 stopped leaving a doubled space where an illegal character was
+        stripped, so a folder saved as "The Better Life  Dead Love" would
+        otherwise be superseded by "The Better Life Dead Love": the album
+        would look missing, download again, and the user would own two
+        folders for one album. Nothing already on disk may move or be
+        duplicated, so an old spelling wins wherever it exists.
+
+        ``older`` lists the spellings previous behavior produced, most recent
+        first: with the illegal-character replacement setting on, that is the
+        plain-removal spelling and then the pre-0.1.17 one, so switching the
+        setting never restructures a library built before it either.
+
+        Folder and file are decided separately, so an existing album keeps its
+        folder while a track never downloaded before still gets the preferred
+        name inside it. A library with no spelling present (the common case,
+        and every new download) simply gets the preferred name.
+        """
+        candidates = [path for path in older if path != tidied]
+        if not candidates:
+            return tidied
+
+        directory = tidied.parent
+        for old in candidates:
+            if old.parent != tidied.parent and old.parent.is_dir():
+                directory = old.parent
+                break
+        for old in candidates:
+            if old.name != tidied.name and check_file_exists(directory / old.name, extension_ignore=True):
+                return directory / old.name
+        return directory / tidied.name
+
     def _existing_is_same_item(self, path_media_dst: pathlib.Path, media: Track | Video) -> bool:
         """Whether the file(s) already at this destination ARE this item.
 
@@ -1029,23 +1084,28 @@ class Download:
             is_video=isinstance(media, Video),
         )
 
-        file_name_relative: str = format_path_media(
-            file_template,
-            media,
-            self.settings.data.album_track_num_pad_min,
-            list_position,
-            list_total,
-            delimiter_artist=self.settings.data.filename_delimiter_artist,
-            delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
-            use_primary_album_artist=self.settings.data.use_primary_album_artist,
+        def build(tidy: bool, replacement: str = "") -> pathlib.Path:
+            relative = format_path_media(
+                file_template,
+                media,
+                self.settings.data.album_track_num_pad_min,
+                list_position,
+                list_total,
+                delimiter_artist=self.settings.data.filename_delimiter_artist,
+                delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
+                use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                tidy_spacing=tidy,
+                illegal_replacement=replacement,
+            )
+            candidate = (pathlib.Path(self.path_base).expanduser() / (relative + file_extension_dummy)).absolute()
+            # Sanitize final path_file to fit into OS boundaries.
+            return pathlib.Path(path_file_sanitize(candidate, adapt=True))
+
+        # Older spellings always build with replacement "": the setting
+        # postdates them, so they must reproduce history exactly.
+        path_media_dst: pathlib.Path = self._keep_existing_layout(
+            build(True, self._illegal_replacement()), build(True), build(False)
         )
-
-        path_media_dst: pathlib.Path = (
-            pathlib.Path(self.path_base).expanduser() / (file_name_relative + file_extension_dummy)
-        ).absolute()
-
-        # Sanitize final path_file to fit into OS boundaries.
-        path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
 
         # Compute if and how downloads need to be skipped.
         skip_download: bool = False
@@ -1063,6 +1123,7 @@ class Download:
                     delimiter_artist=self.settings.data.filename_delimiter_artist,
                     delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
                     use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                    illegal_replacement=self._illegal_replacement(),
                 )
                 path_media_track_dir: pathlib.Path = (
                     pathlib.Path(self.path_base).expanduser() / (file_name_track_dir_relative + file_extension_dummy)
@@ -1509,12 +1570,16 @@ class Download:
             pathlib.Path: Destination path.
         """
         # Compute tracks path, sanitize and ensure path exists
+        # Same spelling as the existence check in
+        # _prepare_file_paths_and_skip_logic's symlink branch: the two must
+        # agree or a track could be checked in one folder and moved to another.
         file_name_relative: str = format_path_media(
             self.settings.data.format_track,
             media,
             delimiter_artist=self.settings.data.filename_delimiter_artist,
             delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
             use_primary_album_artist=self.settings.data.use_primary_album_artist,
+            illegal_replacement=self._illegal_replacement(),
         )
         path_media_dst: pathlib.Path = (
             pathlib.Path(self.path_base).expanduser() / (file_name_relative + file_extension)
@@ -2296,14 +2361,31 @@ class Download:
         Returns:
             tuple[str, str, str, list, bool]: (file_name_relative, list_media_name, list_media_name_short, items, progress_stdout)
         """
-        # Create file name and path
-        file_name_relative: str = format_path_media(
-            file_template,
-            media,
-            delimiter_artist=self.settings.data.filename_delimiter_artist,
-            delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
-            use_primary_album_artist=self.settings.data.use_primary_album_artist,
-        )
+
+        # Create file name and path. The collection's own folder is baked into
+        # the template here, before any item is queued, so the pre-0.1.17
+        # spelling has to be preferred at THIS level too: by the time an item
+        # is formatted the folder is literal text and the old name could no
+        # longer be recovered (see _keep_existing_layout).
+        def build_collection(tidy: bool, replacement: str = "") -> str:
+            return format_path_media(
+                file_template,
+                media,
+                delimiter_artist=self.settings.data.filename_delimiter_artist,
+                delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
+                use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                tidy_spacing=tidy,
+                illegal_replacement=replacement,
+            )
+
+        # Older spellings (most recent first) win when their folder exists,
+        # exactly as in _keep_existing_layout; the replacement setting only
+        # names folders that do not exist yet.
+        file_name_relative: str = build_collection(True, self._illegal_replacement())
+        for older_relative in (build_collection(True), build_collection(False)):
+            if older_relative != file_name_relative and self._collection_dir(older_relative).is_dir():
+                file_name_relative = older_relative
+                break
 
         # Get the name of the list and check, if videos should be included.
         list_media_name: str = name_builder_title(media)
