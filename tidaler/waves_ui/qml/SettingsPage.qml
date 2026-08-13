@@ -19,7 +19,7 @@ Item {
     // reset) tells the page to re-read the freshly-defaulted schema.
     signal resetSettingsRequested()
     signal factoryResetRequested()
-    function externalReset() { editMap = ({}); dirty = false; refreshSchema() }
+    function externalReset() { editMap = ({}); dirty = false; refreshSchema(); syncLibraryMirrors() }
 
     // Waves palette (kept local so this file is self-contained)
     readonly property color accent:       "#3dff6e"
@@ -79,6 +79,81 @@ Item {
     property bool ffEverMissing: false
     function ffSyncEverMissing() { if (page.ff && page.ff.stateKey === "missing") page.ffEverMissing = true }
     Connections { target: page.ff; function onStateKeyChanged() { page.ffSyncEverMissing() } }
+
+    // ---- Ownership-badge scan status ----
+    // Mirrored from the bridge so the "Music library" card can explain a blank
+    // badge: "unreadable" means the folder exists but the OS won't let Waves
+    // list it (a network/external drive without permission), which otherwise
+    // looks identical to an empty library. See backend.libraryScanStatus().
+    property string libraryScanStatus: waves.libraryScanStatus()
+    property var libraryScanProgress: waves.libraryScanProgress()
+    // SAVED library state, mirrored for the composite "library" card: the master
+    // switch, the chosen source, the separate folder path, and the download
+    // folder (scanned when the source follows it). The card's controls stage
+    // into editMap like every other field and SAVE CHANGES commits them, so
+    // these mirrors are only the fallback a control shows when it holds no
+    // staged edit, and what the Rescan button is gated on (a staged edit has
+    // not taken effect yet). Re-synced from the backend on every open, after a
+    // save/reset, and on every librarySourceChanged.
+    property bool libraryEnabledLive: waves.wavesPref("library_enabled") === true
+    property bool libraryBulkSkipLive: waves.wavesPref("library_bulk_skip") !== false
+    property bool libraryMbArbiterLive: waves.wavesPref("library_mb_arbiter") === true
+    property string librarySourceLive: waves.librarySource()
+    property string libraryFolderLive: waves.wavesPref("library_folder") || ""
+    property string downloadFolderLive: waves.libraryDownloadFolder()
+    // Pull every library mirror back from the backend. Called on open AND after a
+    // settings reset: the reset clears library_folder through applySettings, but
+    // it rebuilds the page in place rather than reopening it, so without this the
+    // card kept showing (as its staged-edit fallback) the folder just cleared.
+    function syncLibraryMirrors() {
+        libraryScanStatus = waves.libraryScanStatus()
+        libraryScanProgress = waves.libraryScanProgress()
+        libraryEnabledLive = waves.wavesPref("library_enabled") === true
+        libraryBulkSkipLive = waves.wavesPref("library_bulk_skip") !== false
+        libraryMbArbiterLive = waves.wavesPref("library_mb_arbiter") === true
+        librarySourceLive = waves.librarySource()
+        libraryFolderLive = waves.wavesPref("library_folder") || ""
+        downloadFolderLive = waves.libraryDownloadFolder()
+    }
+    Connections {
+        target: waves
+        function onLibraryScanStatusChanged() {
+            page.libraryScanStatus = waves.libraryScanStatus()
+            page.libraryScanProgress = waves.libraryScanProgress()
+            page.downloadFolderLive = waves.libraryDownloadFolder()
+        }
+        function onLibrarySourceChanged() {
+            // Fired for the master switch and the source alike (any committed
+            // library edit); pull the folder too so a reset lands everywhere.
+            page.libraryEnabledLive = waves.wavesPref("library_enabled") === true
+            page.libraryBulkSkipLive = waves.wavesPref("library_bulk_skip") !== false
+            page.libraryMbArbiterLive = waves.wavesPref("library_mb_arbiter") === true
+            page.librarySourceLive = waves.librarySource()
+            page.libraryFolderLive = waves.wavesPref("library_folder") || ""
+        }
+    }
+    // The scanning note's text: real progress, not a bare spinner. During the
+    // folder walk it counts discoveries live; once reads start it shows
+    // done/total, what remains, and an ETA computed from the observed read rate.
+    function libScanNote() {
+        // Compact on purpose: the read-phase note shares one line with the
+        // album being read, so every dropped word is room for a long title.
+        var p = page.libraryScanProgress || {}
+        if (p.phase === "read" && p.total > 0) {
+            var s = "Reading albums: " + p.done + " of " + p.total
+            if (p.eta_secs !== undefined && p.eta_secs >= 0)
+                s += p.eta_secs < 90 ? " · about a minute left" : " · about " + Math.round(p.eta_secs / 60) + " minutes left"
+            return s
+        }
+        if (p.phase === "walk" && (p.checked > 0 || p.found > 0))
+            return "Finding your albums: checked " + p.checked + " folders · " + p.found + " found…"
+        return "Scanning your music library…"
+    }
+    // True while the read phase is running with a known size: gates the LED
+    // progress bar and the "now reading" artist line under the folder field.
+    readonly property bool libScanReading: libraryScanStatus === "scanning"
+                                           && (libraryScanProgress || {}).phase === "read"
+                                           && (libraryScanProgress || {}).total > 0
 
     // ---- In-app updater state ----
     property var appUp: ({})             // last waves.appUpdateStatus()
@@ -370,6 +445,9 @@ Item {
         case "metadata":    return "M8.6 2.6H3.1V8L9 13.9L14.4 8.5Z M5.7 4.9A0.55 0.55 0 1 1 4.6 4.9A0.55 0.55 0 1 1 5.7 4.9Z"
         case "processing":  return "M5.2 5.2H10.8V10.8H5.2Z M6.7 5.2V3.6 M9.3 5.2V3.6 M6.7 10.8V12.4 M9.3 10.8V12.4 M5.2 6.7H3.6 M5.2 9.3H3.6 M10.8 6.7H12.4 M10.8 9.3H12.4"
         case "discography": return "M2.6 8A5.4 5.4 0 1 0 13.4 8A5.4 5.4 0 1 0 2.6 8Z M6.9 8A1.1 1.1 0 1 0 9.1 8A1.1 1.1 0 1 0 6.9 8Z"
+        // Book spines on a shelf, one leaning: the section never had its own
+        // glyph and fell through to the generic sliders.
+        case "library":     return "M2.8 12.6H13.2 M4.4 4V12.6 M7 4V12.6 M9.4 4.6L11.8 12.6"
         case "updates":     return "M8 3V12.4 M4.6 6.4L8 3L11.4 6.4"
         // Pulse/heartbeat trace: diagnostics watch the app's vitals.
         case "diagnostics": return "M2.6 8H5.4L6.8 4.6L9.2 11.4L10.6 8H13.4"
@@ -396,6 +474,9 @@ Item {
             if (page.ff) page.ff.refresh()
             ffSyncEverMissing()
             auRefresh()
+            // Re-sync the library card's live mirrors (its state applies
+            // outside the Save flow, so nothing else refreshes them on open).
+            syncLibraryMirrors()
         }
     }
 
@@ -458,6 +539,48 @@ Item {
             Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             Behavior on width { NumberAnimation { duration: 140 } }
             Behavior on color { ColorAnimation { duration: 160 } }
+        }
+    }
+
+    // The flag grid's bordered on/off tile, factored out so a composite card
+    // can carry switches of its own that look like every other switch on the
+    // page (the Library card's two options). Same box, same hover, same whole
+    // tile click target; `keyName` stages into the edit map, so it commits with
+    // SAVE CHANGES like the grid's tiles do. Disabling an ancestor greys and
+    // deadens it, since `enabled` propagates to the MouseArea.
+    component FlagTile: Rectangle {
+        id: ftile
+        property string keyName: ""
+        property string label: ""
+        property string help: ""
+        property bool checked: false
+        height: 92
+        radius: 10; border.color: page.border1
+        color: (ftMouse.containsMouse && ftile.enabled) ? page.surface2 : page.surface
+        MouseArea {
+            id: ftMouse
+            anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: page.setv(ftile.keyName, !ftile.checked)
+        }
+        RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
+            SToggle { Layout.alignment: Qt.AlignVCenter; checked: ftile.checked }
+            ColumnLayout {
+                Layout.fillWidth: true; spacing: 3
+                Text {
+                    textFormat: Text.PlainText
+                    text: ftile.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium
+                    elide: Text.ElideRight; Layout.fillWidth: true
+                }
+                Text {
+                    visible: ftile.help !== ""
+                    textFormat: Text.PlainText
+                    text: ftile.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                    wrapMode: Text.WordWrap; maximumLineCount: 3
+                    elide: Text.ElideRight; Layout.fillWidth: true
+                }
+            }
         }
     }
 
@@ -2058,6 +2181,7 @@ Item {
                                         y: modelData.third === true ? Math.max(10, (parent.height - implicitHeight) / 2) : 10
                                         implicitHeight: modelData.type === "str" && modelData.inline !== true ? strCol.implicitHeight
                                                       : modelData.type === "cover_sizes" ? coverCol.implicitHeight
+                                                      : modelData.type === "library" ? libraryLoader.implicitHeight
                                                       : inlineRow.implicitHeight
 
                                         // Enum / int / float / short str: label + help on
@@ -2067,7 +2191,8 @@ Item {
                                         // full-width one under the help.
                                         RowLayout {
                                             id: inlineRow
-                                            visible: (modelData.type !== "str" || modelData.inline === true) && modelData.type !== "cover_sizes"
+                                            visible: (modelData.type !== "str" || modelData.inline === true)
+                                                     && modelData.type !== "cover_sizes" && modelData.type !== "library"
                                             width: parent.width; spacing: 14
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 2
@@ -2177,6 +2302,356 @@ Item {
                                                     currentIndex: page.enumIndex(modelData.file_options, page.val2(modelData))
                                                     onActivated: page.setv(modelData.file_key, modelData.file_options[currentIndex].value)
                                                 }
+                                            }
+                                        }
+
+                                        // Music library: the ownership-badge scan's composite card. A
+                                        // master switch (off by default) heads it and greys the rest out;
+                                        // switch, source and folder all stage into editMap like every
+                                        // other field, and SAVE CHANGES commits them together AND starts
+                                        // the first scan (applySettings). Only Rescan acts immediately,
+                                        // and only on the saved configuration, so nothing the card shows
+                                        // takes effect before a save.
+                                        //
+                                        // LOADED, not merely hidden like the smaller composites above. This
+                                        // row component is instantiated once per settings field, so a plain
+                                        // "visible:" card was built ~26 times over: its progress bar sizes
+                                        // its cell Repeater off a width that is non-zero while hidden, so
+                                        // each invisible copy built a couple of hundred rectangles, and each
+                                        // carried its own FolderDialog. That tripled the whole page's item
+                                        // count, on the very page whose comment at the top of this file
+                                        // explains that control-tree instantiation cost is what made
+                                        // switching to Settings feel laggy.
+                                        Loader {
+                                            id: libraryLoader
+                                            active: modelData.type === "library"
+                                            visible: active
+                                            width: parent.width
+                                            sourceComponent: Column {
+                                            id: libraryCol
+                                            width: parent.width; spacing: 10
+                                            // Staged-first reads: each control shows its editMap value when
+                                            // one exists and the saved mirror otherwise, so CANCEL falls
+                                            // back on its own when the editMap clears. (After a save the
+                                            // editMap deliberately keeps its keys, so these also equal the
+                                            // just-saved state then.)
+                                            readonly property bool enabledE: page.editMap["library_enabled"] !== undefined ? page.editMap["library_enabled"] : page.libraryEnabledLive
+                                            readonly property bool bulkE: page.editMap["library_bulk_skip"] !== undefined ? page.editMap["library_bulk_skip"] : page.libraryBulkSkipLive
+                                            readonly property bool mbE: page.editMap["library_mb_arbiter"] !== undefined ? page.editMap["library_mb_arbiter"] : page.libraryMbArbiterLive
+                                            readonly property string sourceE: page.editMap["library_source"] !== undefined ? page.editMap["library_source"] : page.librarySourceLive
+                                            readonly property string folderE: page.editMap["library_folder"] !== undefined ? page.editMap["library_folder"] : page.libraryFolderLive
+                                            readonly property bool separate: sourceE !== "download"
+                                            // The folder the STAGED source would scan (drives the field and
+                                            // the hint), and the saved-state twin that gates Rescan: a
+                                            // staged edit has not taken effect, so rescanning acts only on
+                                            // the saved configuration.
+                                            readonly property string root: separate ? folderE : page.downloadFolderLive
+                                            readonly property string savedRoot: page.librarySourceLive !== "download" ? page.libraryFolderLive : page.downloadFolderLive
+                                            readonly property bool libDirty: enabledE !== page.libraryEnabledLive || bulkE !== page.libraryBulkSkipLive || mbE !== page.libraryMbArbiterLive || sourceE !== page.librarySourceLive || folderE !== page.libraryFolderLive
+                                            readonly property bool scanning: page.libraryScanStatus === "scanning"
+                                            readonly property bool scannable: page.libraryEnabledLive && !libDirty && libraryCol.savedRoot !== "" && !libraryCol.scanning
+
+                                            // Header: the master switch at the left, the card's honest
+                                            // "still new" mark as a chip at the right. The mark used to
+                                            // be a three-line red paragraph ABOVE the switch, which read
+                                            // as a crash warning and pushed the control it warned about
+                                            // down the card. As the page's existing gold chip (the same
+                                            // box the FFmpeg row wears) it admits the same thing in the
+                                            // vocabulary the rest of the app already uses, and the
+                                            // detail moves to the quiet line below. Gold, not red: red
+                                            // here says broken, gold says be aware.
+                                            //
+                                            // The switch is the card's only always-active control: off
+                                            // (the default) greys everything below it out and, once
+                                            // saved, no folder resolves and nothing is ever scanned.
+                                            // Deliberately NOT a bordered tile like the flag grid's:
+                                            // those tile up in a multi-column flow and need their own
+                                            // edges to read as separate cells, while this is the one
+                                            // switch that governs the card that already frames it. It
+                                            // hugs its content instead, and the click target is exactly
+                                            // the switch and its label.
+                                            Item {
+                                                width: parent.width
+                                                height: Math.max(libTglRow.height, 20)
+                                                Row {
+                                                    id: libTglRow
+                                                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                                    spacing: 10
+                                                    SToggle { anchors.verticalCenter: parent.verticalCenter; checked: libraryCol.enabledE }
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: "Scan a music library"
+                                                        color: libTglMouse.containsMouse ? page.textHi : page.textLo
+                                                        font.pixelSize: 14; font.weight: Font.Medium
+                                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                                    }
+                                                    // The off-state reassurance rides the same line rather
+                                                    // than a second row: it is the one fact worth stating
+                                                    // next to the switch, and only while it is off.
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        visible: !libraryCol.enabledE
+                                                        text: "no folder is scanned and no badges show"
+                                                        color: page.textDim; font.pixelSize: 12
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    id: libTglMouse
+                                                    // Sized to the switch + label, not the card: a full-width
+                                                    // hit area would arm the pointer over empty space.
+                                                    width: libTglRow.width; height: libTglRow.height
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: page.setv("library_enabled", !libraryCol.enabledE)
+                                                }
+                                                Rectangle {
+                                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                    radius: 5; color: page.goldCont; border.color: page.gold
+                                                    implicitWidth: expTxt.implicitWidth + 14; implicitHeight: 19
+                                                    width: implicitWidth; height: implicitHeight
+                                                    Text {
+                                                        id: expTxt; anchors.centerIn: parent
+                                                        textFormat: Text.PlainText
+                                                        text: "EXPERIMENTAL"
+                                                        color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true
+                                                    }
+                                                }
+                                            }
+
+                                            // The card's own help, then what the chip is short for. The
+                                            // reassurance is scoped to the files the user already has:
+                                            // scanning only ever READS them (a test pins the scanner's
+                                            // import closure away from the download engine), so the worst
+                                            // a bug here can do is mislabel a badge. Deliberately not
+                                            // phrased as "Waves never writes files", which would be a
+                                            // promise the app cannot keep: downloading writes new files,
+                                            // and replacing a copy is what a re-download with
+                                            // skip-existing off is FOR.
+                                            Text {
+                                                visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap
+                                                opacity: libraryCol.enabledE ? 1 : 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 160 } }
+                                            }
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                text: "Matching is new, so a badge can still be wrong. A future version will support upgrading what you already have."
+                                                color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap
+                                                opacity: libraryCol.enabledE ? 1 : 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 160 } }
+                                            }
+
+                                            // The card's folder picker; stages into editMap like the field.
+                                            FolderDialog {
+                                                id: libFolderDlg
+                                                onAccepted: page.setv("library_folder", page.urlToPath(selectedFolder))
+                                            }
+
+                                            // One dense row: source toggle + (separate) folder field + Browse +
+                                            // Rescan. In download mode the field and Browse drop out and a
+                                            // spacer keeps Rescan hard right, so that mode is a single row
+                                            // with no empty gap. Greyed and inert while the master switch is
+                                            // (staged) off: `enabled: false` on the row disables every child
+                                            // MouseArea and the field in one place.
+                                            RowLayout {
+                                                width: parent.width; spacing: 8
+                                                enabled: libraryCol.enabledE
+                                                opacity: libraryCol.enabledE ? 1 : 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 160 } }
+                                                Rectangle {
+                                                    Layout.preferredHeight: 36; implicitWidth: segDl.width + 26; radius: 8
+                                                    color: !libraryCol.separate ? page.accentCont : page.surface2
+                                                    border.color: !libraryCol.separate ? page.accent : page.border1
+                                                    Text { id: segDl; anchors.centerIn: parent; text: "My download folder"; color: !libraryCol.separate ? page.accent : page.textLo; font.pixelSize: 13; font.weight: !libraryCol.separate ? Font.DemiBold : Font.Normal }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "download") }
+                                                }
+                                                Rectangle {
+                                                    Layout.preferredHeight: 36; implicitWidth: segSep.width + 26; radius: 8
+                                                    color: libraryCol.separate ? page.accentCont : page.surface2
+                                                    border.color: libraryCol.separate ? page.accent : page.border1
+                                                    Text { id: segSep; anchors.centerIn: parent; text: "A separate folder"; color: libraryCol.separate ? page.accent : page.textLo; font.pixelSize: 13; font.weight: libraryCol.separate ? Font.DemiBold : Font.Normal }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "separate") }
+                                                }
+                                                SText {
+                                                    visible: libraryCol.separate
+                                                    Layout.fillWidth: true
+                                                    text: libraryCol.folderE
+                                                    onEdited: function(t){ page.setv("library_folder", t) }
+                                                }
+                                                Rectangle {
+                                                    visible: libraryCol.separate
+                                                    Layout.preferredHeight: 36; implicitWidth: brwTxt.width + 28; radius: 8; color: page.surface2; border.color: page.border1
+                                                    Text { id: brwTxt; anchors.centerIn: parent; text: "Browse…"; color: page.textLo; font.pixelSize: 13 }
+                                                    MouseArea {
+                                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                        onClicked: {
+                                                            var du = page.pathUrl(libraryCol.folderE)
+                                                            if (du !== "") libFolderDlg.currentFolder = du
+                                                            libFolderDlg.open()
+                                                        }
+                                                    }
+                                                }
+                                                // Download mode has no field/Browse: this spacer keeps Rescan
+                                                // pinned right instead of leaving a gap.
+                                                Item { visible: !libraryCol.separate; Layout.fillWidth: true }
+                                                Rectangle {
+                                                    Layout.preferredHeight: 36; implicitWidth: startTxt.width + 28; radius: 8
+                                                    color: libraryCol.scannable ? page.accentCont : page.surface2
+                                                    border.color: libraryCol.scannable ? page.accent : page.border1
+                                                    opacity: libraryCol.scannable ? 1 : 0.55
+                                                    Text {
+                                                        id: startTxt; anchors.centerIn: parent
+                                                        text: libraryCol.scanning ? "Scanning…" : "Rescan"
+                                                        color: libraryCol.scannable ? page.accent : page.textLo; font.pixelSize: 13; font.weight: Font.DemiBold
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        enabled: libraryCol.scannable
+                                                        visible: libraryCol.scannable
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        // Acts on the SAVED configuration only (scannable gates
+                                                        // on no staged library edits); the first scan of a new
+                                                        // configuration belongs to SAVE CHANGES.
+                                                        onClicked: waves.rescanLibrary()
+                                                    }
+                                                }
+                                            }
+
+                                            // Greyed-button hint while Rescan cannot act: staged edits wait
+                                            // for SAVE CHANGES (which also starts their scan); otherwise a
+                                            // folder is still missing. Hidden with the switch off, the grey
+                                            // row already says the feature is off.
+                                            Text {
+                                                visible: libraryCol.enabledE && !libraryCol.scannable && !libraryCol.scanning
+                                                width: parent.width; wrapMode: Text.WordWrap
+                                                text: libraryCol.libDirty && libraryCol.root !== ""
+                                                      ? "SAVE CHANGES applies this and starts the scan."
+                                                      : (libraryCol.separate ? "Choose a folder, then SAVE CHANGES." : "Set a download folder in Downloads, then SAVE CHANGES.")
+                                                // Near-white, not the dim grey the card's static help uses:
+                                                // this line is the one telling you the card is waiting on
+                                                // YOU, so it has to out-read the prose above it.
+                                                color: page.textHi; font.pixelSize: 12
+                                            }
+                                            // Live scan state: progress while a (possibly minutes-long, NAS)
+                                            // scan runs, or why a badge is blank (folder unreadable or offline).
+                                            // Only visible while scanning or on an error, so no space is wasted.
+                                            // Walk-phase note and the error explanations. Once the read
+                                            // phase starts, the note moves into the bar's own header row
+                                            // below (left of the bar, with the reading line at its right).
+                                            Text {
+                                                visible: (libraryCol.scanning && !page.libScanReading)
+                                                         || page.libraryScanStatus === "unreadable"
+                                                         || (page.libraryScanStatus === "missing" && libraryCol.root !== "")
+                                                width: parent.width; wrapMode: Text.WordWrap
+                                                textFormat: Text.PlainText
+                                                font.pixelSize: 13; font.weight: Font.Medium
+                                                color: page.gold
+                                                text: libraryCol.scanning
+                                                      ? page.libScanNote()
+                                                      : page.libraryScanStatus === "unreadable"
+                                                      ? (Qt.platform.os === "osx"
+                                                         ? "Waves doesn't have permission to read this folder. It is likely on a network share or external drive that macOS protects. Allow access when macOS asks, or if you already declined, turn Waves on under System Settings, Privacy & Security, then reopen Settings."
+                                                         : "Waves doesn't have permission to read this folder. Check the folder's permissions (and, on a network share, that the mount allows this user to read it), then reopen Settings.")
+                                                      : "This folder isn't available right now. If it lives on an external drive or NAS, connect it and reopen Settings."
+                                            }
+                                            // The download buttons' dot matrix in the download buttons'
+                                            // clothes: the same green-filled, green-edged pill a running
+                                            // download wears (see DownloadButton's running state), with
+                                            // the matrix filling it and the percentage pinned right.
+                                            // Not a button, just dressed like one. Centered with a width
+                                            // cap so resizing the window (an ultrawide) widens the card,
+                                            // not the bar; the notes above and below centre with it.
+                                            Column {
+                                                visible: page.libScanReading
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                width: Math.min(parent.width, 760)
+                                                spacing: 6
+                                                // Header row on the bar's own width: progress note at the
+                                                // left edge, the album being read at the right edge.
+                                                Item {
+                                                    width: parent.width
+                                                    height: scanNote.implicitHeight
+                                                    Text {
+                                                        id: scanNote
+                                                        textFormat: Text.PlainText
+                                                        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                                        font.pixelSize: 13; font.weight: Font.Medium
+                                                        color: page.gold
+                                                        text: page.libScanNote()
+                                                    }
+                                                    Text {
+                                                        visible: (page.libraryScanProgress.artist || "") !== "" || (page.libraryScanProgress.album || "") !== ""
+                                                        textFormat: Text.PlainText
+                                                        anchors.left: scanNote.right; anchors.leftMargin: 16
+                                                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                        horizontalAlignment: Text.AlignRight
+                                                        // Middle elide as the last resort: a too-long title
+                                                        // keeps its artist AND its ending.
+                                                        elide: Text.ElideMiddle; maximumLineCount: 1
+                                                        font.pixelSize: 12; font.family: page.mono
+                                                        color: page.textLo
+                                                        text: (page.libraryScanProgress.artist || "?")
+                                                              + ((page.libraryScanProgress.album || "") !== "" ? " · " + page.libraryScanProgress.album : "")
+                                                    }
+                                                }
+                                                // The bar itself, in the running download button's clothes.
+                                                Rectangle {
+                                                    width: parent.width
+                                                    height: 30; radius: page.btnRad
+                                                    color: page.accentCont
+                                                    border.width: 1; border.color: page.accentDim
+                                                    Text {
+                                                        id: scanDotsPct
+                                                        textFormat: Text.PlainText
+                                                        text: page.libScanReading
+                                                              ? Math.floor(100 * page.libraryScanProgress.done / Math.max(1, page.libraryScanProgress.total)) + "%" : ""
+                                                        color: page.accent; font.family: page.mono; font.pixelSize: 11; font.bold: true
+                                                        anchors.right: parent.right; anchors.rightMargin: 12
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                    }
+                                                    DotBar {
+                                                        id: scanDots
+                                                        anchors.left: parent.left; anchors.leftMargin: 12
+                                                        anchors.right: scanDotsPct.left; anchors.rightMargin: 8
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        onColor: page.accent
+                                                        pct: page.libScanReading
+                                                             ? 100 * page.libraryScanProgress.done / Math.max(1, page.libraryScanProgress.total) : 0
+                                                    }
+                                                }
+                                            }
+
+                                            // The card's two options, as the same bordered tiles the flag
+                                            // grid uses everywhere else on this page (they were loose
+                                            // switches stacked under the folder row, which read as
+                                            // leftovers rather than as settings). Two across, one row.
+                                            // Left: the bulk claim gate, on by default, so a discography
+                                            // or an album leaves out what the scan already claims.
+                                            // Right: MusicBrainz arbitration, off by default, and its
+                                            // help says exactly what leaves the machine when it is on.
+                                            // Both grey and go inert with the master switch, since
+                                            // neither means anything while no library is scanned, and
+                                            // both stage into editMap and commit on SAVE CHANGES.
+                                            Flow {
+                                                id: libFlagFlow
+                                                width: parent.width; spacing: 10
+                                                enabled: libraryCol.enabledE
+                                                opacity: libraryCol.enabledE ? 1 : 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 160 } }
+                                                FlagTile {
+                                                    width: (libFlagFlow.width - 10) / 2
+                                                    keyName: "library_bulk_skip"
+                                                    checked: libraryCol.bulkE
+                                                    label: "Bulk downloads skip what you have"
+                                                    help: "Discographies, albums and playlists leave out the copies the scan matched."
+                                                }
+                                                FlagTile {
+                                                    width: (libFlagFlow.width - 10) / 2
+                                                    keyName: "library_mb_arbiter"
+                                                    checked: libraryCol.mbE
+                                                    label: "Confirm uncertain matches with MusicBrainz"
+                                                    help: "Sends artist and album titles to musicbrainz.org for matches the scan cannot prove on its own."
+                                                }
+                                            }
                                             }
                                         }
 
@@ -2651,6 +3126,22 @@ Item {
                     var p = heartCv.mapToItem(page, 0, 0)
                     gibOverlay.explode(p.x, p.y, footer.heartModel, footer.heartPx)
                     footer.heartGibbed = true
+                    gibRetire.restart()
+                }
+                // Put the credit back the way a fresh scroll into view would: type
+                // it out again from nothing. Called when the falling copy has left
+                // the bottom of the viewport. The scroll-away path got its retype
+                // for free (inView flipped false and back), but a credit that
+                // retires while still on screen never changes inView, so without
+                // this the line would come back empty and stay empty.
+                function rearmCredit() {
+                    footer.n = 0
+                    footer.cursorPresent = false
+                    if (!footer.inView) return
+                    footer.cursorPresent = true
+                    fTypeFwd.from = 0
+                    fTypeFwd.duration = footer.total * 52
+                    fTypeFwd.restart()
                 }
                 function recomputeInView() {
                     var p = footer.mapToItem(settingsFlick, 0, footer.height / 2)
@@ -2661,6 +3152,28 @@ Item {
                     if (!footer.heartGibbed || footer.creditHidden) return
                     var tb = fCredit.mapToItem(page, 0, fCredit.height / 2 + 6).y
                     if (tb >= gibOverlay.groundY) {
+                        gibRetire.stop()
+                        footer.heartGibbed = false
+                        gibOverlay.releaseWithText(fCredit)
+                    }
+                }
+                // The burst's own lifetime. Clearing the mess used to be the
+                // user's job: scroll the credit down into the splats, or scroll
+                // the footer out of view. A window too short to do either (the
+                // page bottoms out before the footer leaves) could never clear
+                // it, so the heart stayed "[love]" for the rest of the session.
+                // It now retires on the same schedule the drip sim already winds
+                // down on (see gibOverlay.step's bleedTime cutoff): the credit
+                // drops off the bottom exactly as scrolling away sends it, and
+                // types itself back in with a whole heart.
+                Timer {
+                    id: gibRetire
+                    // 15s, not 9: the burst is worth watching, and the credit
+                    // typing itself back in cut the mess short. Kept in step
+                    // with the sim's own bleedTime cutoff below.
+                    interval: 15000; repeat: false
+                    onTriggered: {
+                        if (!footer.heartGibbed || footer.creditHidden) return
                         footer.heartGibbed = false
                         gibOverlay.releaseWithText(fCredit)
                     }
@@ -2685,6 +3198,7 @@ Item {
                             // already handed off to the falling overlay, leave it
                         } else if (footer.heartGibbed) {
                             fTypeBack.stop()
+                            gibRetire.stop()
                             footer.heartGibbed = false
                             gibOverlay.releaseWithText(fCredit)
                         } else {
@@ -2924,10 +3438,15 @@ Item {
                 if (fallText.y > H) {
                     fallText.active = false; fallText.visible = false
                     footer.creditHidden = false
-                    footer.n = 0; footer.cursorPresent = false
+                    // Retypes when the footer is still on screen (the retire
+                    // timer's case); otherwise it just resets and the next
+                    // scroll into view types it, as it always did.
+                    footer.rearmCredit()
                 }
             }
-            if (gibs.length === 0 && drips.length === 0 && !fallText.active && (releasing || bleedTime > 9)) running = false
+            // 15s matches gibRetire: the sim must still be bleeding when the
+            // credit is sent back down, or the last seconds sit there dry.
+            if (gibs.length === 0 && drips.length === 0 && !fallText.active && (releasing || bleedTime > 15)) running = false
         }
         onPaint: {
             var ctx = getContext('2d'); ctx.clearRect(0, 0, width, height)

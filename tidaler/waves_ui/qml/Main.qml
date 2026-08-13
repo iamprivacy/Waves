@@ -37,8 +37,16 @@ ApplicationWindow {
     // pointing at a thumbnail no longer grows the sound-on preview card; a
     // click still plays the video in full. An open peek closes on the flip.
     property bool videoHoverPeek: waves.wavesPref("video_hover_peek") !== false
+    // Whether the library scan is on (saved state). The green done-state
+    // button reads IN LIBRARY instead of DOWNLOADED while it is: with a
+    // library in the picture "you have this" is the claim that matters, and
+    // DOWNLOADED is just how the app happens to know it.
+    property bool libraryOn: waves.wavesPref("library_enabled") === true
     Connections {
         target: waves
+        function onLibrarySourceChanged() {
+            root.libraryOn = waves.wavesPref("library_enabled") === true
+        }
         function onArtHoverTiltChanged() {
             root.artHoverTilt = waves.wavesPref("art_hover_tilt") !== false
         }
@@ -107,10 +115,20 @@ ApplicationWindow {
     readonly property color greenDim:     "#2aa862"
     readonly property color greenCont:    "#08230f"
     readonly property color greenContTx:  "#8bf0b8"
+    // "In your library" ownership badge: amber, deliberately distinct from the
+    // green on-disk owned tag so the two ownership signals never blur.
+    readonly property color libAccent:   "#e5a00d"
+    readonly property color libDim:      "#9c6e0a"
+    readonly property color libCont:     "#241a05"
+    readonly property color libContTx:   "#f2c766"
     readonly property color cyan:         "#56c8d8"   // HIGH tier + queued
     readonly property color cyanDim:      "#3a8d99"
+    readonly property color cyanCont:     "#07232b"   // healthy-lossy pill container
+    readonly property color cyanContTx:   "#a6e7f1"
     readonly property color red:          "#ff5a52"   // failed / peak / heart
     readonly property color redCont:      "#2a0e0c"
+    readonly property color redDim:       "#b23f3a"   // small-lossy pill border
+    readonly property color redContTx:    "#ff9d97"
     readonly property string mono:        monoFont    // bundled JetBrains Mono (see app.py)
     // ---- Console button spec (chosen in the Button Lab, 2026-07-02) -----
     // One voice for every button/tab label: the native system sans, Bold,
@@ -656,6 +674,9 @@ ApplicationWindow {
     // compBump ticks on each promotion so the Completed header count can pulse.
     property bool completedCollapsed: true
     property int completedCount: 0
+    // Failed rows get their own section (between Completed and Downloading)
+    // whose header carries RETRY ALL; the count drives both.
+    property int failedCount: 0
     property int downloadingCount: 0
     // Finished rows still lingering before their move to Completed; arms the
     // root lingerClock so the fold happens with the queue drawer closed too.
@@ -770,17 +791,52 @@ ApplicationWindow {
     property int _searchBuildTotal: 0
     property int _searchBuildReady: 0
     property bool searchBuilding: false
+    // The library has not answered yet, so the badges the finished cards will
+    // wear are not knowable and every pill would resolve to "not present".
+    // Revealing here is what made a search during the first scan render bare
+    // and then light every badge at once one frame later; the veil is already
+    // up, so waiting costs nothing but the wait, and searchBuildGuard is still
+    // the ceiling that ends it whatever the library is doing.
+    property bool _searchAwaitingLibrary: false
     function _searchBuildStart(n) {
         _searchBuildTotal = n; _searchBuildReady = 0
+        _searchAwaitingLibrary = n > 0 && !waves.libraryIndexReady()
         searchBuilding = n > 0
+        // A pending release from the PREVIOUS build would clear this one's wait
+        // a pass after it started, revealing the new page unanswered.
+        searchLibraryReveal.stop()
         if (searchBuilding) searchBuildGuard.restart(); else searchBuildGuard.stop()
     }
     function _searchBuildTick() {
         if (!searchBuilding) return
-        if (++_searchBuildReady >= _searchBuildTotal) { searchBuilding = false; searchBuildGuard.stop() }
+        searchBuildGuard.restart()   // progress: the guard watches for a STALL
+        if (++_searchBuildReady >= _searchBuildTotal) _searchBuildMaybeReveal()
     }
-    // A loader that errors (or a miscount) must never pin the veil.
-    Timer { id: searchBuildGuard; interval: 800; onTriggered: root.searchBuilding = false }
+    // Both conditions, from either side: the last card can finish before the
+    // index publishes or after it, and whichever lands second drops the veil.
+    function _searchBuildMaybeReveal() {
+        if (!searchBuilding) return
+        if (_searchBuildReady < _searchBuildTotal || _searchAwaitingLibrary) return
+        searchBuilding = false
+        searchBuildGuard.stop()
+    }
+    // A loader that errors (or a miscount) must never pin the veil, and neither
+    // must a library that never answers. Re-armed by every loader that reports,
+    // so this is an inactivity timeout rather than a budget for the whole
+    // build: a full result set is well over a hundred async Loaders and used to
+    // blow through a fixed 800ms, dropping the veil mid-incubation so the rest
+    // of the page (its badges included) was watched arriving card by card.
+    Timer {
+        id: searchBuildGuard; interval: 800
+        onTriggered: { root._searchAwaitingLibrary = false; root.searchBuilding = false }
+    }
+    // One event-loop pass between the library answering and the veil dropping,
+    // so every badge on the page has re-resolved first (see the presence
+    // handler for why the order is not free).
+    Timer {
+        id: searchLibraryReveal; interval: 0
+        onTriggered: { root._searchAwaitingLibrary = false; root._searchBuildMaybeReveal() }
+    }
     // The veil's visual: every veiled element binds its opacity to this one
     // animated value instead of the raw building flag, so when the veil drops
     // the whole page fades in quickly (over the ambient water, which stays
@@ -809,6 +865,23 @@ ApplicationWindow {
     property string browsePageKey: ""      // "" = the Browse landing page
     property bool browsePageLoading: false
     property bool browsePageError: false
+    // "Is this album already in my local library?" for the album page on
+    // screen, resolved synchronously from the scan index (null = no match or
+    // index not built, badge hidden). Re-resolved whenever the page changes
+    // and whenever the library scan publishes (onLibraryPresenceChanged).
+    property var libraryPresence: null
+    // browsePage is assigned from a dozen places (a fresh load, Back, forward,
+    // a tab restore, a revalidate). Resolving presence only where the page is
+    // LOADED left Back and tab-restore showing the previous album's badge on
+    // this album, pointing at the wrong folder, so hang it off the property
+    // itself: every assignment re-resolves, and nothing has to remember to.
+    onBrowsePageChanged: root._resolveLibraryPresence()
+    function _resolveLibraryPresence() {
+        var ph = (root.browsePage && root.browsePage.header) ? root.browsePage.header : null
+        root.libraryPresence = (ph && ph.kind === "album")
+            ? waves.libraryAlbumPresence(ph.artist || "", ph.title || "", "" + (ph.year || ""), ph.num_tracks || 0, ph.duration_sec || 0)
+            : null
+    }
     property var browseStack: []           // pages beneath the current one (Back pops)
     property string browseHighlightId: ""  // track to highlight + scroll to on an album page
     // Opening an album by clicking one of its tracks scrolls the page down to that
@@ -842,6 +915,15 @@ ApplicationWindow {
     // the launch sequence animates both to their resting values exactly once.
     property real bootScrimLevel: 0.55
     property real bootContentShown: 0
+    // What the reveal actually paints. The dial above is the launch sequence's
+    // own progress; this is the interface's share of it, and a pending terms
+    // gate takes the whole frame instead: nothing of the app is painted or
+    // reachable until the agreement is answered. Revealing the interface first
+    // and dropping the card on top of it left the app fully readable, and
+    // usable, by someone who had agreed to nothing (reported from
+    // livetesting). The gate rides the same dial, so the wordmark's zoom fades
+    // straight into the card.
+    readonly property real uiShown: termsGate.wanted ? 0 : bootContentShown
     // Paint the interface, invisibly, before the reveal needs it. The scene
     // graph skips a subtree whose opacity is 0 outright, so the first frame
     // that shows the interface pays for the whole page at once: every texture
@@ -3384,6 +3466,431 @@ ApplicationWindow {
         }
     }
 
+    // The "in your library" presence pill: amber identity, compact and STATIC.
+    // The pill is color-coded by the QUALITY of the local copy (gold hi-res,
+    // green lossless, cyan healthy lossy, red small lossy, amber when unknown),
+    // and that colour is the whole quality story: no hover reveal, nothing
+    // resizes. It reports presence (a partial copy spells out N OF M); the
+    // prevention lives in the DownloadButton itself, which renders a full
+    // local copy as the inert DOWNLOADED state (see its lib* properties). A
+    // click opens the matched local album folder.
+    component LibraryTag: Rectangle {
+        id: pxt
+        property int have: 0
+        property int total: 0
+        property string albumId: ""        // the matched album's folder path
+        property string qclass: ""         // quality class (presence local_class)
+        // Any copy short of the full count spells out N OF M. The strict bar
+        // for the inert DOWNLOADED claim is local >= total with no slack
+        // (matching.decide_presence), and this must agree with it: an earlier
+        // "total - 1" here let a 9-of-10 copy wear an unqualified IN LIBRARY
+        // pill beside a still-live DOWNLOAD button.
+        // What the LOCAL release says it holds, which is not always what the
+        // album on screen holds. N OF M counts against whichever total the copy
+        // falls short of: normally the album being viewed, but a folder holding
+        // 14 files of a 63-track set beside a 14-track edition is short by its
+        // OWN reckoning, and that is the number explaining the still-live
+        // download button. Reading a flat IN LIBRARY over it is the one thing
+        // the pill must not do.
+        property int declared: 0
+        readonly property int want: pxt.declared > pxt.have ? pxt.declared : pxt.total
+        readonly property bool partial: pxt.have > 0 && pxt.want > 0 && pxt.have < pxt.want
+        // True when the match's IDENTITY is proven (exact edition title, both
+        // years agreeing): the "?" is reserved for matches the matcher could
+        // not prove are the same album. Coverage is a separate axis, already
+        // spelled out as N OF M.
+        property bool proven: false
+        // A badge the page was BUILT with is simply there; a badge the scan
+        // finds while you are already looking ARRIVES. News in this app fades
+        // in, over the same 180ms the reveal itself uses, instead of snapping
+        // into place a second after you started reading.
+        //
+        // The build flags cannot tell those apart on their own: they only cover
+        // a fresh search or Browse build, so navigating BACK to a page, or a
+        // row recycling under a scroll, animated pills that were never news and
+        // left the page assembling itself in front of the reader. _settled is
+        // the real question. It flips one event-loop pass after this pill is
+        // created, which is late enough that the pill's first state is already
+        // decided and early enough to catch anything the scan publishes after.
+        // A Timer rather than Component.onCompleted, because call sites declare
+        // their own onCompleted and would silently replace it.
+        // Gated on visible, not replacing it: an invisible pill must still take
+        // no layout width, which opacity alone would not do.
+        //
+        // Creation is only half of it. These pills outlive the thing they
+        // describe: a list delegate is RECYCLED onto the next album as you
+        // scroll, and the album header's single pill is rebound on every page
+        // you open. Neither is news, and a latch that only ever flipped once
+        // faded both. settleKey is whatever this pill is currently about, so
+        // changing it re-arms the latch and the next answer is simply there.
+        property string settleKey: ""
+        property bool _settled: false
+        onSettleKeyChanged: { pxt._settled = false; pxtSettle.restart() }
+        Timer { id: pxtSettle; interval: 0; running: true; onTriggered: pxt._settled = true }
+        opacity: pxt.visible ? 1 : 0
+        Behavior on opacity {
+            enabled: pxt._settled && !root.searchBuilding && !root.browseBuilding
+            NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
+        }
+        radius: 4; color: root.pillClassCont(pxt.qclass)
+        border.color: root.pillClassDim(pxt.qclass); border.width: 1
+        implicitHeight: 18
+        implicitWidth: (pxt.proven ? 14 : 24) + pxBase.implicitWidth
+        // A question mark, not the quality dot it replaces: every one of these
+        // pills is a TAG MATCH, an inference from what the files say about
+        // themselves, and nothing here was watched being downloaded. The mark
+        // says so at a glance and costs no width, sitting exactly where the eye
+        // already lands. Quality is still the whole colour story (the mark
+        // takes the same class colour the dot did); this only separates
+        // "recognised on disk" from the app's own records, which never wear it.
+        Text {
+            id: pxMark
+            textFormat: Text.PlainText
+            x: 7; anchors.verticalCenter: parent.verticalCenter
+            width: 5; horizontalAlignment: Text.AlignHCenter
+            visible: !pxt.proven
+            text: "?"
+            color: root.pillClassFg(pxt.qclass)
+            font.family: root.mono; font.pixelSize: 10; font.bold: true
+        }
+        Text {
+            id: pxBase
+            textFormat: Text.PlainText
+            x: pxt.proven ? 7 : 17; anchors.verticalCenter: parent.verticalCenter
+            text: pxt.partial ? (pxt.have + " OF " + pxt.want + " IN LIBRARY") : "IN LIBRARY"
+            color: root.pillClassTx(pxt.qclass); font.family: root.mono; font.pixelSize: 9; font.bold: true
+        }
+        MouseArea {
+            anchors.fill: parent
+            // Gated by VISIBILITY, not enabled: a disabled MouseArea still
+            // owns its cursorShape in Qt, so an explicit ArrowCursor here sat
+            // on top of whatever cursor the row underneath was showing. An
+            // invisible one claims nothing.
+            visible: pxt.albumId !== ""
+            cursorShape: Qt.PointingHandCursor
+            onClicked: waves.revealLibraryAlbum(pxt.albumId)  // open the album folder
+        }
+    }
+    // The library pill is color-coded by the QUALITY you hold, so low, middle
+    // and high read at a glance: gold = hi-res, green = lossless, cyan =
+    // healthy lossy, red = small lossy. "" (quality unknown) keeps the amber
+    // "in library" identity. The class comes from the backend (local_class),
+    // one source of truth shared with the download engine.
+    // Open the library claim gate: explain the match, name the matched folder,
+    // and leave DOWNLOAD ANYWAY one click away. One definition, because every
+    // surface that can show a claim (the full download button, a track row's
+    // button, the browse card's hover strip) has to open the SAME conversation.
+    // `kind` is "album" (the default) or "track", and only picks the wording
+    // and which download the ANYWAY click makes.
+    function openLibraryClaim(albumId, albumTitle, folder, kind) {
+        libraryClaimGate.albumId = albumId
+        libraryClaimGate.albumTitle = albumTitle
+        libraryClaimGate.folder = folder
+        libraryClaimGate.kind = kind === "track" ? "track" : "album"
+        libraryClaimGate.shown = true
+    }
+    function pillClassFg(c) {
+        return c === "hires" ? root.gold : c === "lossless" ? root.green
+             : c === "high" ? root.cyan : c === "low" ? root.red : root.libAccent
+    }
+    function pillClassDim(c) {
+        return c === "hires" ? root.goldDim : c === "lossless" ? root.greenDim
+             : c === "high" ? root.cyanDim : c === "low" ? root.redDim : root.libDim
+    }
+    function pillClassCont(c) {
+        return c === "hires" ? root.goldCont : c === "lossless" ? root.greenCont
+             : c === "high" ? root.cyanCont : c === "low" ? root.redCont : root.libCont
+    }
+    function pillClassTx(c) {
+        return c === "hires" ? root.goldContTx : c === "lossless" ? root.greenContTx
+             : c === "high" ? root.cyanContTx : c === "low" ? root.redContTx : root.libContTx
+    }
+
+    // The album presence pill, self-resolving against the local scan index,
+    // placed right beside the album title. Static IN LIBRARY (or N OF M) with
+    // a quality-coded dot; the colour class is the whole quality story.
+    component AlbumPresencePill: LibraryTag {
+        id: appl
+        // The album's identity as ONE object ({artist, title, year, tracks}),
+        // not four properties. Each property carried its own change handler, so
+        // filling them in cost one QML->Python presence call each plus a fifth
+        // from onCompleted: measured at 15 calls per album row and 750 for a
+        // 50-row page, 22us apiece, ~16ms of GUI thread per page build. One
+        // property is one binding evaluation and one call. Null (or no title)
+        // means no album to ask about, and the pill stays hidden.
+        property var album: null
+        property var presence: null
+        readonly property string albumTitle: (album && album.title) ? ("" + album.title) : ""
+        // A recycled row is a new album, not news about this one.
+        settleKey: appl.albumTitle
+        property bool _resolved: false
+        function _resolvePresence() {
+            _resolved = true
+            var a = appl.album
+            presence = (a && a.title)
+                ? waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                             "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
+                : null
+        }
+        onAlbumChanged: _resolvePresence()
+        // Only if the binding above has not already answered: an unconditional
+        // resolve here is the fifth call this component exists to avoid.
+        Component.onCompleted: if (!_resolved) _resolvePresence()
+        Connections {
+            target: waves
+            function onLibraryPresenceChanged() { appl._resolvePresence() }
+        }
+        visible: !!(presence && presence.present)
+        have: presence ? (presence.local_tracks || 0) : 0
+        total: (album && album.tracks) ? album.tracks : 0
+        declared: presence ? (presence.local_declared || 0) : 0
+        albumId: presence ? (presence.local_album_id || "") : ""
+        qclass: presence ? (presence.local_class || "") : ""
+        // The identity axis alone ("sure"): the "?" asks "is this really the
+        // same album", so a proven match drops it even when the copy is short
+        // on tracks (coverage is already spelled out as N OF M). Track pills
+        // and the artist rollup have no identity proofs and keep theirs.
+        proven: !!(presence && presence.present && presence.sure === true)
+    }
+
+    // The track twin of AlbumPresencePill: the same LibraryTag, resolved
+    // against the per-track index, so a track row can say the exact song is on
+    // disk (an incomplete album's tracks included). One identity object for
+    // the same one-call-per-row economy as the album pill. Never shown for
+    // videos: the library scan only ever holds audio.
+    component TrackPresencePill: LibraryTag {
+        id: tppl
+        // {artist, title, album, year}; null (or no title) means nothing to ask
+        // about. album/year name the release this track belongs to: they are
+        // what the match can be PROVEN against, since a track carries no year
+        // of its own and its title matches every edition that shares it. A row
+        // that cannot name its album still gets a pill, it just keeps the "?".
+        property var track: null
+        property var presence: null
+        // A recycled row is a new track, not news about this one.
+        settleKey: (tppl.track && tppl.track.title) ? ("" + tppl.track.title) : ""
+        property bool _resolved: false
+        function _resolvePresence() {
+            _resolved = true
+            var t = tppl.track
+            presence = (t && t.title)
+                ? waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                                             "" + (t.album || ""), "" + (t.year || ""), t.duration_sec || 0)
+                : null
+        }
+        onTrackChanged: _resolvePresence()
+        Component.onCompleted: if (!_resolved) _resolvePresence()
+        Connections {
+            target: waves
+            function onLibraryPresenceChanged() { tppl._resolvePresence() }
+        }
+        visible: !!(presence && presence.present)
+        albumId: presence ? (presence.local_album_id || "") : ""
+        qclass: presence ? (presence.local_class || "") : ""
+        // The same identity axis the album pill reads, inherited from the
+        // folder the copy was found in: a track sitting in an album this
+        // library can prove is the release drops the "?" with it.
+        proven: !!(presence && presence.present && presence.sure === true)
+    }
+
+    // The artist badge: what this artist holds in your library, fed by the
+    // artist-level rollup. On artwork it is a full-width STRIP across the
+    // cover's lower edge rather than a chip in a corner, so it never sits on
+    // top of a face, and it is drawn on the same gradient the hero card
+    // already uses to carry a caption over a photograph rather than on a new
+    // material invented for it.
+    //
+    // Two voices only: "IN LIBRARY" in the owned green says what this is, and
+    // the counts in plain text say how much. No "?" anywhere. The mark belongs
+    // on an album pill, where it separates a proven identity from a name match;
+    // a rollup is a count, and a count has nothing to doubt.
+    //
+    // Green and not a quality class on purpose: the green is the one the
+    // download button and the browse card already turn when a release is in the
+    // library, so one page never says "owned" in two colours. Quality colour is
+    // the album pill's story, and an artist spanning FLAC and MP3 has no single
+    // class to tell anyway.
+    component ArtistBadges: Item {
+        id: arb
+        property string artistName: ""
+        property var presence: null
+        // Draw as the strip on artwork. The caller sets the width and parents
+        // it inside the Art, which clips, so the strip takes the cover's tilt
+        // and rounded corners with it. The page form sizes itself to its text.
+        property bool bar: false
+        // Two lines, the shape the hero card's caption already uses over
+        // artwork: a spaced cap line over counts set big enough to survive a
+        // photograph, which one rail-height line could never give them.
+        //
+        // Sized to the cover it is on, not to one cover. A search card's is
+        // 184px and a browse card's 200, but the followed-artists grid packs
+        // its covers to about 116, where a 12px count line runs 150px wide and
+        // an Art that clips simply sliced the ends off both numbers. The type
+        // is mono, so the width is arithmetic rather than a guess: 0.6em per
+        // character plus the two gaps, floored at 8px so it stops shrinking
+        // before it stops being readable.
+        readonly property int countChars: arb.albumLine.length + arb.songLine.length + 1
+        readonly property real barCountPx:
+            Math.max(8, Math.min(12, (arb.width - 12 - 14) / Math.max(1, arb.countChars) / 0.6))
+        readonly property real barLabelPx: Math.max(8, Math.min(10, arb.barCountPx))
+        // The words' own band, plus the room the smaller type gives back.
+        readonly property real barHeight: Math.max(24, Math.min(34, arb.barCountPx * 2.8))
+        implicitWidth: arb.bar ? 0 : abPlate.implicitWidth
+        implicitHeight: arb.bar ? arb.barHeight : abPlate.implicitHeight
+        width: implicitWidth
+        height: implicitHeight
+        // The album pill's economy, for the same reason: this now rides every
+        // artist card on a search page, and an unconditional resolve here
+        // would be a second QML->Python call per card on top of the binding's.
+        property bool _resolved: false
+        // False until this badge has answered for the name it currently shows.
+        // The fade below reads it, so the badge a page is BUILT with (or a
+        // recycled row rebound to a new artist) is simply there, and only a
+        // badge the running scan turns up while you are looking at it animates.
+        property bool _settled: false
+        function _resolvePresence() {
+            _resolved = true
+            presence = artistName !== "" ? waves.artistLibraryPresence(artistName) : null
+            _settled = true   // after the answer, never before: see the Behavior
+        }
+        onArtistNameChanged: { _settled = false; _resolvePresence() }
+        Component.onCompleted: if (!_resolved) _resolvePresence()
+        Connections {
+            target: waves
+            // A browse shelf builds this strip on every card and names only the
+            // artists, so the ones that will never show must not run a handler
+            // per card per committed batch of a running scan.
+            enabled: arb.artistName !== ""
+            function onLibraryPresenceChanged() { arb._resolvePresence() }
+        }
+        visible: !!(presence && presence.present)
+        // The badge hides at the top, so nothing inside it ever sees a
+        // visibility change of its own.
+        opacity: arb.visible ? 1 : 0
+        // Arriving is animated; being there is not. The build flags alone were
+        // not enough: they only cover a fresh search or Browse build, so coming
+        // BACK to a page (or a row recycling under a scroll) faded every badge
+        // in a beat behind its artwork, which read as the page assembling
+        // itself in front of you. _settled is the real question, and it is
+        // false for exactly as long as this badge has not yet answered for the
+        // artist it is showing.
+        Behavior on opacity {
+            enabled: arb._settled && !root.searchBuilding && !root.browseBuilding
+            NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
+        }
+        readonly property int albums: presence ? (presence.albums || 0) : 0
+        readonly property int tracks: presence ? (presence.tracks || 0) : 0
+        readonly property string albumLine: arb.albums + (arb.albums === 1 ? " ALBUM" : " ALBUMS")
+        readonly property string songLine: arb.tracks + (arb.tracks === 1 ? " SONG" : " SONGS")
+
+        // THE STRIP. It sits ON the cover's lower edge over the same gradient
+        // the hero card already uses to carry a caption over artwork, so the
+        // words have a floor without the photograph gaining an edge: nothing to
+        // align, it melts into whatever is behind it.
+        Item {
+            visible: arb.bar
+            anchors.fill: parent
+
+            Rectangle {
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                // Taller than the words it carries, and by a lot: a scrim the
+                // height of its own text is a dark bar with soft edges, not a
+                // fade. The overflow is drawn inside the Art, which clips, so
+                // it can reach as far up the cover as it needs to.
+                height: parent.height * 2.1
+                // Weighted so the words' own band is already dark and only the
+                // reach above it is doing the fading: a linear ramp puts its
+                // midpoint under the text, which is where a bright cover wins.
+                gradient: Gradient {
+                    GradientStop { position: 0; color: "transparent" }
+                    GradientStop { position: 0.42; color: "#8f0b0d10" }
+                    GradientStop { position: 0.62; color: "#e00b0d10" }
+                    GradientStop { position: 1; color: "#fa0b0d10" }
+                }
+            }
+
+            // THE STRIP'S WORDS. Every one of them carries a one-pixel black
+            // outline: not a shadow and not a plate, it costs no space and
+            // changes no colour, and it is the difference between text that
+            // survives a blown-out white studio cover and text that has to be
+            // hunted for. Centred, because a strip that spans the cover has no
+            // side to favour.
+            Column {
+                anchors.centerIn: parent
+                spacing: 2
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    textFormat: Text.PlainText; text: "IN LIBRARY"
+                    color: root.green
+                    style: Text.Outline; styleColor: "#000000"
+                    font.family: root.mono; font.pixelSize: arb.barLabelPx
+                    font.bold: true; font.letterSpacing: 1.4
+                }
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 7
+                    Text {
+                        textFormat: Text.PlainText; text: arb.albumLine
+                        color: root.textHi
+                        style: Text.Outline; styleColor: "#000000"
+                        font.family: root.mono; font.pixelSize: arb.barCountPx; font.bold: true
+                    }
+                    Text {
+                        textFormat: Text.PlainText; text: "\u00b7"
+                        color: root.textLo
+                        style: Text.Outline; styleColor: "#000000"
+                        font.family: root.mono; font.pixelSize: arb.barCountPx
+                    }
+                    Text {
+                        textFormat: Text.PlainText; text: arb.songLine
+                        color: root.textHi
+                        style: Text.Outline; styleColor: "#000000"
+                        font.family: root.mono; font.pixelSize: arb.barCountPx; font.bold: true
+                    }
+                }
+            }
+        }
+
+        // THE PAGE FORM. The artist page header has no cover for a strip to sit
+        // on, and nothing there should be riding the photograph anyway. So it
+        // is the strip's own typography with the strip taken away: the spaced
+        // green label over the counts, left aligned, standing on the page.
+        // No plate, no border, no fill, and no outline either: on a page the
+        // background is known, so there is nothing for the words to survive.
+        //
+        // It sits under the artist name and above the button that would add to
+        // what it counts.
+        Column {
+            id: abPlate
+            visible: !arb.bar
+            spacing: 3
+            Text {
+                textFormat: Text.PlainText; text: "IN LIBRARY"
+                color: root.green
+                font.family: root.mono; font.pixelSize: 10
+                font.bold: true; font.letterSpacing: 1.4
+            }
+            Row {
+                spacing: 8
+                Text {
+                    textFormat: Text.PlainText; text: arb.albumLine
+                    color: root.textHi
+                    font.family: root.mono; font.pixelSize: 15; font.bold: true
+                }
+                Text {
+                    textFormat: Text.PlainText; text: "\u00b7"
+                    color: root.textDim; font.family: root.mono; font.pixelSize: 15
+                }
+                Text {
+                    textFormat: Text.PlainText; text: arb.songLine
+                    color: root.textHi
+                    font.family: root.mono; font.pixelSize: 15; font.bold: true
+                }
+            }
+        }
+    }
+
     // Popularity (0-100) shown as a thin meter + number
     // Popularity as a 2-row LED matrix (pop lab option 5): one fixed-width
     // block in the download-bar language, no trailing number, so stacked
@@ -4315,9 +4822,10 @@ ApplicationWindow {
         property real radL: root.btnRad     // 0 on the side that meets a divider
         property real radR: root.btnRad
         property real pulse: 0              // 0..1, the slow breath
+        property color tone: root.accent    // the frame colour family (gold on the library claim)
         color: "transparent"
         border.width: root.btnBorderW
-        border.color: Qt.lighter(root.accent, 1.04 + 0.14 * pulse)
+        border.color: Qt.lighter(hs.tone, 1.04 + 0.14 * pulse)
         topLeftRadius: radL; bottomLeftRadius: radL
         topRightRadius: radR; bottomRightRadius: radR
         // In fast and flat, out slow and eased, so crossing the PREVIEW |
@@ -4350,6 +4858,25 @@ ApplicationWindow {
         id: db
         property string mediaId: ""
         property string label: "Download"
+        // The media word the resolved label leads with ("TRACK IN LIBRARY",
+        // "ALBUM DOWNLOADED"), so a done button says what it is talking about
+        // instead of a bare IN LIBRARY. Derived from the idle label's own
+        // noun; set `noun` where the label is generic ("Download" on a video
+        // cell). Empty means the plain label, for buttons like "Download all"
+        // whose scope has no one-word name.
+        property string noun: ""
+        readonly property string doneNoun: {
+            if (noun !== "") return noun.toUpperCase()
+            var l = label.toLowerCase()
+            if (l.indexOf("videos") !== -1) return "VIDEOS"
+            if (l.indexOf("video") !== -1) return "VIDEO"
+            if (l.indexOf("track") !== -1) return "TRACK"
+            if (l.indexOf("album") !== -1) return "ALBUM"
+            if (l.indexOf("playlist") !== -1) return "PLAYLIST"
+            if (l.indexOf("mix") !== -1) return "MIX"
+            if (l.indexOf("artist") !== -1 || l.indexOf("discography") !== -1) return "DISCOGRAPHY"
+            return ""
+        }
         property var onTap: (function(){})
         // Opt-in for track-scoped buttons only: the ownership store is keyed by
         // exact track id, so a plain album/playlist/artist mediaId must not be
@@ -4371,6 +4898,107 @@ ApplicationWindow {
         // cache, not a live query, so it can never require a network call.
         property bool collectionCheck: false
         property bool owned: false
+        // Optional album-level library check: when the caller supplies the
+        // album's identity facts, a FULL local copy renders this button in the
+        // same inert DOWNLOADED state the ownership rollup uses, so an album
+        // you already have is prevented at the button itself. A PARTIAL copy
+        // keeps a live Download (completing an album is not a duplicate), and
+        // no facts or no scan index means no check. Display and this button's
+        // own state are the ONLY consumers of the answer: the engine never
+        // sees it, and every claim, album or track, keeps its click routed to
+        // the gate, so a wrong tag match is always one click from downloading
+        // anyway.
+        //
+        // The album's identity arrives as ONE object ({artist, title, year,
+        // tracks}), not four properties. Four properties meant four change
+        // handlers and so four QML->Python presence calls to fill one button
+        // in, plus a fifth from onCompleted: measured at 15 calls per album
+        // row, 750 for a 50-row page at 22us apiece, ~16ms of GUI thread spent
+        // asking the same question. One property is one binding evaluation and
+        // one call.
+        property var libAlbum: null
+        // The track twin of libAlbum ({artist, title, album, year}), for buttons
+        // that download ONE song. Same economy, same one object per button.
+        //
+        // A track has no coverage axis: it is on disk or it is not, so a match
+        // is always the done shape and libPartial can never be true here. What
+        // it keeps from the album side is the part that matters, the click
+        // still opens the gate, because a track match is the most brittle
+        // guess this app makes (the key is the exact normalised title and
+        // artist, edition qualifiers included) and a guess must never be the
+        // end of the conversation. Never set for a video: the scan only ever
+        // holds audio.
+        property var libTrack: null
+        // Kept as a derived read for the Connections guard below (and so a test
+        // can find a button by the album or track it is showing).
+        readonly property string libTitle: {
+            if (libAlbum && libAlbum.title) return "" + libAlbum.title
+            if (libTrack && libTrack.title) return "" + libTrack.title
+            return ""
+        }
+        property bool libPresent: false
+        // The scan matched this album but not all of it (some tracks are on
+        // disk, some are not): the button stays an action, in cyan, and a
+        // click downloads normally, which with the bulk claim gate on fetches
+        // only the missing tracks.
+        property bool libPartial: false
+        // The identity axis of the verdict (presence "sure"): the match was
+        // proven by year and edition title, not just the key. A sure claim
+        // wears the same green IN LIBRARY as the fact tier (the state is the
+        // colour); gold MAYBE is reserved for unproven matches. What green
+        // claim keeps that owned green lacks: the click still opens the gate.
+        property bool libSure: false
+        // The matched local folder, carried so the click-through can name it
+        // and reveal it (see libraryClaimGate).
+        property string libPath: ""
+        property bool _libResolved: false
+        function refreshLibPresent() {
+            _libResolved = true
+            var a = db.libAlbum
+            if (!a || !a.title) {
+                var t = db.libTrack
+                if (!t || !t.title) { libPresent = false; libPartial = false; libSure = false; libPath = ""; return }
+                var tp = waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                                                    "" + (t.album || ""), "" + (t.year || ""),
+                                                    t.duration_sec || 0)
+                // No completeness bar to apply: presence alone is the done
+                // shape, and identity alone picks green from gold.
+                libPresent = !!(tp && tp.present === true)
+                libPartial = false
+                libSure = !!(tp && tp.sure === true)
+                libPath = libPresent ? ("" + (tp.local_album_id || "")) : ""
+                return
+            }
+            var p = waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                               "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
+            // Coverage picks the shape (gold claim vs cyan partial), identity
+            // picks the gold wording: an apparently complete but unproven
+            // match is exactly what MAYBE is for, while a copy short on
+            // tracks is partial no matter how proven.
+            libPresent = !!(p && p.present === true && p.full === true)
+            libPartial = !!(p && p.present === true && p.full !== true)
+            libSure = !!(p && p.sure === true)
+            libPath = libPresent ? ("" + (p.local_album_id || "")) : ""
+        }
+        // DOWNLOADED purely because the library scan matched something on disk:
+        // a GUESS from tags, not a record of a download Waves made. Ownership
+        // (`owned`) is a fact and stays inert; this one keeps a way through,
+        // because a wrong match must never be the end of the conversation.
+        readonly property bool libClaim: liveSt === "" && !owned && libPresent
+        // The gold face of a claim: only the UNPROVEN ones. A sure claim falls
+        // through to the green done styling below (state is the colour) while
+        // libClaim keeps routing its click to the gate.
+        readonly property bool libGuess: libClaim && !libSure
+        // The partial twin: informative colour on a still-live button. Never
+        // true alongside libClaim (present is either full or partial).
+        readonly property bool libPartialClaim: liveSt === "" && !owned && libPartial
+        // The click-through itself: explain the claim, show where the copy is,
+        // and leave DOWNLOAD ANYWAY one click away. A function rather than
+        // inline in the MouseArea so the scenario test can drive it.
+        function openLibraryClaim() {
+            root.openLibraryClaim(db.mediaId, db.libTitle, db.libPath,
+                                  db.libAlbum ? "album" : "track")
+        }
         function _rollup(ids) {
             if (!ids || ids.length === 0) return false
             var n = 0
@@ -4386,11 +5014,21 @@ ApplicationWindow {
             var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
-        Component.onCompleted: refreshOwned()
-        onMediaIdChanged: refreshOwned()
+        // Only if the libAlbum binding has not already answered: an
+        // unconditional resolve here is exactly the extra call this shape
+        // exists to avoid.
+        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent(); syncGhost(); rollReady = true }
+        onMediaIdChanged: { if (rollReady) { rollReady = false; dbSettle.restart() } refreshOwned() }
         onOwnedCheckChanged: refreshOwned()
         onCollectionIdsChanged: refreshOwned()
         onCollectionCheckChanged: refreshOwned()
+        onLibAlbumChanged: refreshLibPresent()
+        onLibTrackChanged: refreshLibPresent()
+        Connections {
+            target: waves
+            enabled: db.libTitle !== ""
+            function onLibraryPresenceChanged() { db.refreshLibPresent() }
+        }
         Connections {
             target: waves
             enabled: db.ownedCheck || db.collectionIds !== null || db.collectionCheck
@@ -4410,7 +5048,7 @@ ApplicationWindow {
         }
         readonly property real pct: root.dlPct(mediaId)
         readonly property string liveSt: root.dlSt(mediaId)
-        readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
+        readonly property string st: liveSt !== "" ? liveSt : ((owned || libPresent) ? "done" : "")
         // "preparing" = the click is parked behind a prerequisite (a metadata
         // re-fetch, a folder-tree warm, an edition scan) and has not reached the
         // queue yet. It draws exactly like queued, so the hand-over to a real
@@ -4423,7 +5061,9 @@ ApplicationWindow {
         // doesn't shrink when the state text changes to DONE/RETRY, keeps
         // row columns aligned and avoids layout jumps mid-download.
         implicitWidth: Math.max(dbRow.implicitWidth, dbMetric.implicitWidth,
-                                dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth) + root.btnPadH * 2
+                                dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth,
+                                db.libAlbum ? dbMetricLib.implicitWidth
+                                            : db.libTrack ? dbMetricLibTrack.implicitWidth : 0) + root.btnPadH * 2
         Row {
             id: dbMetric
             visible: false; spacing: 7
@@ -4434,7 +5074,32 @@ ApplicationWindow {
             id: dbMetricDone
             visible: false; spacing: 7
             Ico { name: "check"; color: root.accent; size: 14 }
-            Text { textFormat: Text.PlainText; text: "DOWNLOADED"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+        }
+        // The longest library-claim label ("PARTIALLY IN LIBRARY" beats "MAYBE
+        // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
+        // width must not move when a claim resolves, or one matched album in a
+        // list would shunt its own row's button out of line with every
+        // neighbour. Counted ONLY for album-capable buttons (libAlbum set),
+        // since a track button can never reach either state and must not
+        // reserve width for them.
+        Row {
+            id: dbMetricLib
+            visible: false; spacing: 7
+            Ico { name: "check"; color: root.accent; size: 14 }
+            Text { textFormat: Text.PlainText; text: "PARTIALLY IN LIBRARY"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+        }
+        // The track twin. A track can reach only two claim faces, MAYBE IN
+        // LIBRARY and the done label, and the done label is already measured
+        // above (dbMetricDone spells the noun out), so the hedge is the one
+        // width left to reserve. Kept separate from dbMetricLib because
+        // PARTIALLY is a word a track button can never say, and reserving for
+        // it would pad every track row in the app.
+        Row {
+            id: dbMetricLibTrack
+            visible: false; spacing: 7
+            Ico { name: "check"; color: root.accent; size: 14 }
+            Text { textFormat: Text.PlainText; text: "MAYBE IN LIBRARY"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // Queued measures too, now that it carries a cancel X: without it the
         // button grew the moment a click was queued, and in a track list every
@@ -4452,11 +5117,25 @@ ApplicationWindow {
         // Inside a RollSwap the outline is the wrapper's; see PreviewBar.bare.
         property bool bare: false
         // Filled like DOWNLOAD SELECTED so every download button reads primary.
-        readonly property color fill: st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
-        readonly property color edge: st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
+        // A library claim wears gold, not green: green DOWNLOADED is a fact
+        // (Waves wrote that exact file), gold IN LIBRARY is a tag match, a
+        // guess that stays clickable to explain itself.
+        // A partial claim wears cyan: still a live download button (a click
+        // fetches what's missing), coloured to say part of this is on disk.
+        readonly property color fill: libGuess ? root.goldCont : libPartialClaim ? root.cyanCont : st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
+        readonly property color edge: libGuess ? root.goldDim : libPartialClaim ? root.cyanDim : st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
         color: fill
         border.width: bare ? 0 : root.btnBorderW
         border.color: edge
+        // State changes FADE between colours instead of snapping: queued ->
+        // running -> done reads as one button changing its mind, not three
+        // buttons taking turns. 420ms InOutQuad, paced to land just after
+        // the 340ms state roll below so the hue settles as the new face
+        // does; symmetric easing because OutCubic spends its travel in the
+        // first frames and reads as a snap on these near-black fills.
+        // Instant with motion off, same gate as the other control animation.
+        Behavior on color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
+        Behavior on border.color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
         clip: true
         scale: 1
         Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
@@ -4469,8 +5148,21 @@ ApplicationWindow {
         // items a TrackRow creates, measured. The Loader has a size, so the
         // loaded Item is sized to it (no anchors needed inside).
         Loader {
-            active: db.st === "running"
+            // The matrix rides the same state roll as the label faces: it
+            // arrives from below when a run starts (while the queued face
+            // exits above) and leaves through the top when the run ends.
+            // Kept active until its own exit lands, or the end of a run would
+            // unload 92 bright dots in a single frame.
+            active: db.st === "running" || opacity > 0
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+            // The exit belt is taken ONLY when this roll is the matrix's own
+            // exit (matrixRollOut, set when the state leaves "running"). Every
+            // other roll is a label swap between two text faces, and riding
+            // rollOut unconditionally put a progress matrix on the way out of
+            // rolls that never ran: a click from idle to queued flashed one,
+            // and so did every button whose library claim resolved late.
+            opacity: db.st === "running" ? db.rollIn : (db.matrixRollOut ? db.rollOut : 0)
+            transform: Translate { y: db.st === "running" ? 10 * (1 - db.rollIn) : -10 * (1 - db.rollOut) }
             sourceComponent: Item {
                 Text {
                     textFormat: Text.PlainText
@@ -4495,17 +5187,102 @@ ApplicationWindow {
         // it up yet; the stack glyph's walking highlight says the wait is
         // alive, and the label keeps the media noun ("QUEUED ALBUM").
         readonly property string queuedLabel: "QUEUED" + label.toUpperCase().replace("DOWNLOAD", "")
+        // --- The state roll: RollSwap's belt, transplanted onto the button's
+        // own face changes. When the label text changes (the one reliable
+        // tell that the face did), the OLD face rides out the top while the
+        // new one arrives from the bottom, on RollSwap's no-overlap curve
+        // (exit ends at 0.44, entry starts there). The ghost row shows the
+        // last COMMITTED face (icon + label snapshot, resynced when the roll
+        // lands), so mid-roll both faces are real pixels, not a text pop.
+        property real rollT: 1
+        readonly property real rollOut: 1 - Math.min(1, rollT / 0.44)
+        readonly property real rollIn: Math.max(0, (rollT - 0.44) / 0.56)
+        property string ghostIco: ""
+        property color ghostIcoColor: root.accent
+        property string ghostText: ""
+        property color ghostTextColor: root.accent
+        property bool rollReady: false
+        // Rebinding is not news: a recycled list delegate (reuseItems) hands
+        // this button the next row's identity, and the face swap that follows
+        // must land settled, not ride the belt, exactly the pills' settleKey
+        // rule (see LibraryTag). mediaId is what the button is currently
+        // about, so its change drops the latch; the 0-interval re-arm
+        // restores it once the rebind's own property changes have landed.
+        Timer { id: dbSettle; interval: 0; onTriggered: db.rollReady = true }
+        // Whether THIS roll is the matrix's own exit (a run just ended). It
+        // picks which of the two outgoing faces rides the belt: the matrix
+        // takes it and the ghost sits out, since two things leaving through
+        // the top would double up. False for every label-only swap, or an
+        // idle button would flash a progress matrix it never earned.
+        property bool matrixRollOut: false
+        property string _prevSt: ""
+        onStChanged: {
+            var was = _prevSt
+            _prevSt = st
+            if (!rollReady) return
+            if (st === "running") { matrixRollOut = false; startRoll() }
+            else { matrixRollOut = (was === "running"); if (matrixRollOut) startRoll() }
+        }
+        function syncGhost() {
+            ghostIco = (db.st !== "failed" && !db.waiting && db.st !== "running") ? dbFaceIco.name : ""
+            ghostIcoColor = dbFaceIco.color
+            ghostText = dbFaceText.text
+            ghostTextColor = dbFaceText.color
+        }
+        function startRoll() {
+            rollAnim.stop()
+            rollT = 0
+            rollAnim.start()
+        }
+        NumberAnimation {
+            id: rollAnim
+            target: db; property: "rollT"; to: 1
+            duration: root.hoverMotion ? 340 : 0
+            easing.type: Easing.OutCubic
+            onStopped: db.syncGhost()
+        }
+        // The outgoing face. No input, no loaders: a still image of what the
+        // button just stopped saying, on its way out through the top.
+        Row {
+            id: dbGhost; spacing: 7
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: -10 * (1 - db.rollOut)
+            opacity: db.rollOut
+            // The matrix takes the exit belt itself both into and out of a
+            // run; the ghost would ride alongside showing a stale face.
+            visible: opacity > 0 && db.st !== "running" && !db.matrixRollOut
+            z: 1
+            Ico {
+                visible: db.ghostIco !== ""
+                name: db.ghostIco || "arrow-down"; color: db.ghostIcoColor
+                size: 14; bold: db.ghostIco === "check" ? 0 : 10
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                textFormat: Text.PlainText
+                text: db.ghostText; color: db.ghostTextColor
+                font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
         Row {
             id: dbRow; anchors.centerIn: parent; spacing: 7
-            visible: db.st !== "running"
+            // Normally the incoming face (from below, as the ghost leaves
+            // above). While a run starts it swaps roles: the frozen queued
+            // face is the OUTGOING one, exiting above as the matrix arrives.
+            anchors.verticalCenterOffset: db.st === "running" ? -10 * (1 - db.rollOut) : 10 * (1 - db.rollIn)
+            opacity: db.st === "running" ? db.rollOut : db.rollIn
+            visible: opacity > 0
             // Above the button-wide MouseArea declared below, which would
             // otherwise swallow every press aimed at the cancel X. Nothing
             // else in here takes input, so raising the row costs no clicks.
             z: 1
             Ico {
-                visible: db.st !== "failed" && !db.waiting
+                id: dbFaceIco
+                visible: db.st !== "failed" && !db.waiting && db.st !== "running"
                 name: db.st === "done" ? "check" : "arrow-down"
-                color: root.accent
+                color: db.libGuess ? root.gold : db.libPartialClaim ? root.cyan : root.accent
+                Behavior on color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
                 size: 14; bold: db.st === "done" ? 0 : 10; anchors.verticalCenter: parent.verticalCenter
             }
             // Both draw through a Canvas, and both belong to a state a row is
@@ -4515,7 +5292,10 @@ ApplicationWindow {
             // still spaces around a zero-width one, so an inactive Loader left
             // visible would pad the idle button by two gaps.
             Loader {
-                active: db.waiting; visible: active
+                // Held through "running" too: the queued face rides the exit
+                // belt as the matrix arrives, and unloading the stack glyph at
+                // the waiting flip would snap it out one frame into that roll.
+                active: db.waiting || db.st === "running"; visible: active
                 anchors.verticalCenter: parent.verticalCenter
                 sourceComponent: QueueStack {}
             }
@@ -4525,9 +5305,41 @@ ApplicationWindow {
                 sourceComponent: RetryMark { color: root.red; box: 16 }
             }
             Text {
+                id: dbFaceText
+                // Named so the scenario test can read the WORDS the user sees,
+                // not just the properties that are supposed to pick them.
+                objectName: "dbFaceText"
+                // The face's one reliable change tell: every state lands with
+                // its own words, so a text change IS a face change, and the
+                // roll rides it. Guarded until the first commit so creation
+                // does not roll.
+                //
+                // Skipped while a roll is already running, because then the
+                // state handler started it and owns matrixRollOut: without the
+                // guard, a state change that also changes the words (every run
+                // ending) restarted its own roll here and cancelled the
+                // matrix's exit. When no roll is in flight the change is a
+                // label-only swap, which clears the flag rather than inheriting
+                // whatever the last state change left in it.
+                onTextChanged: if (db.rollReady && !rollAnim.running) { db.matrixRollOut = false; db.startRoll() }
                 textFormat: Text.PlainText  // db.label carries a remote artist name
-                text: db.st === "done" ? "DOWNLOADED" : db.st === "failed" ? "RETRY" : db.waiting ? db.queuedLabel : db.label.toUpperCase()
-                color: db.st === "done" ? root.accent : db.st === "failed" ? root.red : db.waiting ? root.accentDim : root.accent
+                // The claim says what it knows, never what the fact-state says
+                // ("DOWNLOADED"): the scan matched tags on disk, it did not
+                // watch Waves write the file. It says MAYBE out loud, because
+                // this button is where a guess PREVENTS an action, and the
+                // hedge is the difference between "we recorded this" and "we
+                // recognised this". The gold stays: colour separates it from
+                // green DOWNLOADED, the word explains why they differ.
+                // With the library scan on, the done state reads IN LIBRARY
+                // instead of DOWNLOADED: "you have this" is the claim that
+                // matters then, and green still marks it as a recorded fact
+                // (gold MAYBE and cyan PARTIALLY are the guesses).
+                // "running" keeps the queued face frozen: the row is riding the
+                // exit belt as the matrix arrives, and letting the text fall
+                // through to the idle label would restart the roll mid-exit.
+                text: db.libGuess ? "MAYBE IN LIBRARY" : db.st === "done" ? ((db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn ? "IN LIBRARY" : "DOWNLOADED")) : db.st === "failed" ? "RETRY" : (db.waiting || db.st === "running") ? db.queuedLabel : db.libPartialClaim ? "PARTIALLY IN LIBRARY" : db.label.toUpperCase()
+                color: db.libGuess ? root.gold : db.st === "done" ? root.accent : db.st === "failed" ? root.red : (db.waiting || db.st === "running") ? root.accentDim : db.libPartialClaim ? root.cyan : root.accent
+                Behavior on color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
                 font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -4539,7 +5351,10 @@ ApplicationWindow {
             // the label doesn't shift sideways when the row lands and the ✕
             // fades in.
             Loader {
-                active: db.waiting; visible: active
+                // Same hold as the stack glyph: alive through the queued face's
+                // exit under the matrix (the X itself already fades via its
+                // own opacity the moment st leaves "queued").
+                active: db.waiting || db.st === "running"; visible: active
                 anchors.verticalCenter: parent.verticalCenter
                 sourceComponent: Ico {
                     // Red at rest, brighter on hover: the same read as the
@@ -4560,18 +5375,34 @@ ApplicationWindow {
             }
         }
         MouseArea {
+            // Named so the scenario test can drive the REAL tap area rather
+            // than the functions behind it (the wiring is the thing at risk).
+            objectName: "dbTapArea"
             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: db.scale = 0.96
             onReleased: db.scale = 1.0
             onCanceled: db.scale = 1.0
-            onClicked: { if (db.st === "running" || db.st === "done" || db.waiting) return; db.onTap() }
+            onClicked: {
+                // A library claim is a guess, so it answers instead of ignoring.
+                if (db.libClaim) { db.openLibraryClaim(); return }
+                if (db.st === "running" || db.st === "done" || db.waiting) return
+                db.onTap()
+            }
         }
-        // Idle only: running/queued/done are not clickable, and failed keeps
-        // its red frame instead of a green breath.
-        HoverHandler { id: dbHover; enabled: db.st === "" }
+        // Always enabled: a HoverHandler whose enabled flips false UNDER the
+        // pointer can latch hovered true (and its cursor claim) until the
+        // pointer re-enters, so the state gating lives where the value is
+        // consumed instead. Idle, plus the library claim, is what swells:
+        // running/queued and a real DOWNLOADED are not clickable, and failed
+        // keeps its red frame instead of a green breath.
+        HoverHandler { id: dbHover }
         HoverSwell {
             anchors.fill: parent
-            on: dbHover.hovered && db.st === ""
+            // The claim's swell is GOLD like its label and check: the green
+            // breath is the download-action language, and this button is
+            // currently declining to be one.
+            tone: db.libGuess ? root.gold : db.libPartialClaim ? root.cyan : root.accent
+            on: dbHover.hovered && (db.st === "" || db.libClaim)
         }
     }
 
@@ -5029,19 +5860,37 @@ ApplicationWindow {
         // GateAction's red recipe (red on redCont, translucent red border) on
         // the hugging shape, for the destructive half of a button pair.
         property bool danger: false
+        // The same recipe in the palette's gold, for an action that interrupts
+        // without discarding anything (pausing the queue). Not danger: nothing
+        // is lost, and not primary: it is not the way forward either.
+        property bool warn: false
+        // Chip scale, for a button riding a section header or another dense
+        // row: same fill/border/hover recipe, mono caps at the label size those
+        // headers already use, so it reads as part of the header rather than a
+        // dialog button that wandered in.
+        property bool compact: false
         signal clicked()
-        readonly property color bg: danger ? root.redCont : (primary ? root.accentCont : "transparent")
-        implicitWidth: sbTxt.implicitWidth + root.btnPadH * 2
-        implicitHeight: sbTxt.implicitHeight + root.btnPadV * 2
-        radius: root.btnRad
-        color: (sbMa.containsMouse && (sb.primary || sb.danger)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
-        border.width: 1; border.color: danger ? Qt.alpha(root.red, 0.55) : (primary ? root.accentDim : root.border1)
+        readonly property color bg: danger ? root.redCont
+                                  : warn ? root.goldCont
+                                  : (primary ? root.accentCont : "transparent")
+        implicitWidth: sbTxt.implicitWidth + (compact ? 9 : root.btnPadH) * 2
+        implicitHeight: sbTxt.implicitHeight + (compact ? 3 : root.btnPadV) * 2
+        radius: compact ? 5 : root.btnRad
+        color: (sbMa.containsMouse && (sb.primary || sb.danger || sb.warn)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
+        border.width: 1
+        border.color: danger ? Qt.alpha(root.red, 0.55)
+                    : warn ? Qt.alpha(root.gold, 0.55)
+                    : (primary ? root.accentDim : root.border1)
+        Behavior on color { ColorAnimation { duration: 110 } }
         Text {
             id: sbTxt; anchors.centerIn: parent
             textFormat: Text.PlainText; text: sb.label
-            color: sb.danger ? root.red : (sb.primary ? root.accent : (sbMa.containsMouse ? root.textHi : root.textLo))
-            font.family: root.uiFont; font.pixelSize: 13; font.bold: true
-            font.letterSpacing: root.btnTrack
+            color: sb.danger ? root.red
+                 : sb.warn ? root.gold
+                 : (sb.primary ? root.accent : (sbMa.containsMouse ? root.textHi : root.textLo))
+            font.family: sb.compact ? root.mono : root.uiFont
+            font.pixelSize: sb.compact ? 10 : 13; font.bold: true
+            font.letterSpacing: sb.compact ? 1.4 : root.btnTrack
         }
         MouseArea {
             id: sbMa; anchors.fill: parent; hoverEnabled: true
@@ -5594,6 +6443,39 @@ ApplicationWindow {
         z: bvtHover.hovered ? 4 : 0
         Art { anchors.fill: parent; radius: 8; url: bvt.urlBig !== "" ? bvt.urlBig : bvt.url }
         PlayBadge { radius: 8; lit: bvtHover.hovered }
+        // "You already downloaded this" rides the top-LEFT corner, across from
+        // the resolution badge: same plate, same size, green (the on-disk
+        // owned colour). Videos never appear in the library scan (it only
+        // walks audio), so the one truthful signal here is Waves' own
+        // ownership record for this exact video id.
+        property bool owned: false
+        function _refreshOwned() {
+            var o = bvt.videoId !== "" ? waves.ownershipOf(bvt.videoId) : ({})
+            owned = o.owned === true
+        }
+        onVideoIdChanged: _refreshOwned()
+        Component.onCompleted: _refreshOwned()
+        Connections {
+            target: waves
+            // Empty id = broadcast (the quality setting changed).
+            function onOwnershipChanged(tid) { if (tid === bvt.videoId || tid === "") bvt._refreshOwned() }
+        }
+        Rectangle {
+            visible: bvt.owned
+            anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 6
+            radius: 4; color: "#cc06090c"
+            implicitHeight: 18; implicitWidth: bvtOwn.implicitWidth + 10
+            Text {
+                id: bvtOwn
+                anchors.centerIn: parent
+                // The same wording rule as the cell's own DownloadButton done
+                // face (whose noun is "video"): one cell must never say
+                // DOWNLOADED on the art and VIDEO IN LIBRARY on the button
+                // for the same ownership record. Both read off root.libraryOn.
+                textFormat: Text.PlainText; text: root.libraryOn ? "IN LIBRARY" : "DOWNLOADED"
+                color: root.green; font.family: root.mono; font.pixelSize: 10
+            }
+        }
         // Resolution rides the thumbnail's top-right corner (gold, the video
         // tier's colour), same plate as the duration below it. On a 16:9
         // thumbnail "video" goes without saying, so the badge is the spec
@@ -5767,7 +6649,7 @@ ApplicationWindow {
             }
             DownloadButton {
                 id: vDl
-                mediaId: vcell.vid; ownedCheck: true; label: "Download"
+                mediaId: vcell.vid; ownedCheck: true; label: "Download"; noun: "video"
                 anchors.right: parent.right
                 anchors.verticalCenter: vMetaCol.verticalCenter
                 onTap: function(){ waves.downloadVideo(vcell.vid) }
@@ -5879,6 +6761,7 @@ ApplicationWindow {
         property string year: ""
         property string releaseDate: ""
         property int trackCount: 0
+        property int durationSec: 0      // raw seconds, the presence matcher's duration witness
         property string quality: ""
         property int popularity: 0
         // Expand state is held globally (keyed by album id) so it survives
@@ -5941,10 +6824,16 @@ ApplicationWindow {
                 Art { width: 46; height: 46; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
+                    // Title with the presence pill floating right beside the
+                    // rendered text (static, quality told by its colour class).
+                    // The pill lives INSIDE the full-width Text so the title
+                    // keeps its layout size and elides only for real overflow.
                     Text {
+                        id: abRowTitle
                         textFormat: Text.PlainText; text: title
                         color: abRowTitleMa.containsMouse ? "#ffffff" : root.textHi
                         font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true
+                        rightPadding: abRowPill.visible ? abRowPill.width + 8 : 0
                         // Title -> the album's dedicated page (row click still expands)
                         MouseArea {
                             id: abRowTitleMa
@@ -5954,6 +6843,14 @@ ApplicationWindow {
                             hoverEnabled: enabled
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: root.openAlbumPage(albumId, "", title)
+                        }
+                        AlbumPresencePill {
+                            id: abRowPill
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: Math.min(abRowTitle.contentWidth + 8, abRowTitle.width - width)
+                            album: ({ artist: ab.artistName, title: ab.title,
+                                      year: ab.year, tracks: ab.trackCount,
+                                      duration_sec: ab.durationSec })
                         }
                     }
                     ArtistLinks {
@@ -5972,7 +6869,11 @@ ApplicationWindow {
                     Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
                     QualTag { id: abQt; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; q: quality; mix: qualMix }
                 }
-                DownloadButton { Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"; onTap: function(){ waves.downloadAlbum(albumId) } }
+                DownloadButton {
+                    Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"
+                    libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec })
+                    onTap: function(){ waves.downloadAlbum(albumId) }
+                }
             }
             MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: toggle() }
         }
@@ -6023,6 +6924,7 @@ ApplicationWindow {
                             DownloadButton {
                                 mediaId: albumId; label: "Download album"
                                 collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : []
+                                libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec })
                                 onTap: function(){ waves.downloadAlbum(albumId) }
                             }
                             Text {
@@ -6493,6 +7395,7 @@ ApplicationWindow {
         property string year: ""
         property string date: ""
         property string duration: ""
+        property int durationSec: 0      // raw seconds, the presence matcher's duration witness
         property string quality: ""
         property int popularity: 0
         property bool hi: false          // "you came here for this track" marker
@@ -6573,6 +7476,11 @@ ApplicationWindow {
                         // to outshine it).
                         font.pixelSize: 14; font.weight: Font.Medium
                         elide: Text.ElideRight; Layout.fillWidth: true
+                        // The presence pill floats beside the rendered text,
+                        // inside the full-width Text, exactly like the album
+                        // row's pill: the title keeps its layout size and
+                        // elides only for real overflow.
+                        rightPadding: trPill.visible ? trPill.width + 8 : 0
                         // Title -> the track's album page (highlighting this track);
                         // for a video row it opens the in-app video player instead.
                         MouseArea {
@@ -6584,6 +7492,17 @@ ApplicationWindow {
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: trow.kind === "video" ? root.openVideo(trow.tId, trow.title, trow.artistName)
                                                              : root.openAlbumPage(albumId, tId, trow.album)
+                        }
+                        // Declared after the title's MouseArea so the pill sits
+                        // on top of it and takes its own click (reveal folder).
+                        TrackPresencePill {
+                            id: trPill
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: Math.min(trTitle.contentWidth + 8, trTitle.width - width)
+                            track: trow.kind === "video" ? null
+                                   : ({ artist: trow.artistName, title: trow.title,
+                                        album: trow.album, year: trow.year,
+                                        duration_sec: trow.durationSec })
                         }
                     }
                     ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[tId] || []; suffix: album; albumId: trow.albumId }
@@ -6603,6 +7522,14 @@ ApplicationWindow {
                 DownloadButton {
                     Layout.alignment: Qt.AlignVCenter; mediaId: tId; ownedCheck: true
                     label: trow.kind === "video" ? "Download video" : "Download track"
+                    // The same identity the pill beside the title resolves, so
+                    // the row says one thing in two places: the pill answers at
+                    // a glance, the button answers what a click will do. Videos
+                    // pass null, the scan holds no video.
+                    libTrack: trow.kind === "video" ? null
+                              : ({ artist: trow.artistName, title: trow.title,
+                                   album: trow.album, year: trow.year,
+                                   duration_sec: trow.durationSec })
                     onTap: function(){ trow.kind === "video" ? waves.downloadVideo(tId) : waves.downloadTrack(tId) }
                 }
             }
@@ -6710,13 +7637,21 @@ ApplicationWindow {
         Column {
             id: cardCol
             anchors.fill: parent; anchors.margins: 8; spacing: 8
-            Item {
+            Art {
                 width: parent.width; height: parent.width
-                Art {
-                    anchors.centerIn: parent
-                    width: Math.min(parent.width, parent.height); height: width
-                    hoverFx: true; fxKind: "artist"; fxId: aId
-                    url: aArt
+                hoverFx: true; fxKind: "artist"; fxId: aId
+                url: aArt
+                // What you already hold by this artist, said as a strip across
+                // the cover's lower edge rather than a chip dropped in a
+                // corner: the one row of a search page that stayed silent about
+                // the library now answers, and no face is covered to say it. A
+                // child of the Art, so it takes the cover's tilt, hover lift
+                // and rounded clip for free.
+                ArtistBadges {
+                    bar: true
+                    width: parent.width
+                    anchors.bottom: parent.bottom
+                    artistName: aName
                 }
             }
             Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
@@ -7239,6 +8174,43 @@ ApplicationWindow {
         width: artSize
         height: hero ? artSize : artSize + 46
         readonly property bool openable: ac.kind !== "track" || !!ac.card.artist_id
+        // The library verdict this card carries, resolved ONCE per card. The
+        // hover strip needs it to colour its download half and the pill needs
+        // it to say what is held, and asking twice would be two QML->Python
+        // calls per card on a shelf of them (the economy AlbumPresencePill's
+        // single-object property exists for). Albums only: a playlist or a mix
+        // has no album identity to ask about, and must never wear one's badge.
+        property var libPresence: null
+        property bool _libResolved: false
+        function resolveLibPresence() {
+            _libResolved = true
+            var c = ac.card
+            libPresence = (ac.kind === "album" && c && c.title)
+                ? waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
+                                             "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
+                : null
+        }
+        onCardChanged: resolveLibPresence()
+        Component.onCompleted: if (!_libResolved) resolveLibPresence()
+        Connections {
+            target: waves
+            enabled: ac.kind === "album"
+            function onLibraryPresenceChanged() { ac.resolveLibPresence() }
+        }
+        readonly property bool libPresent: !!(ac.libPresence && ac.libPresence.present === true)
+        readonly property bool libFull: !!(ac.libPresence && ac.libPresence.full === true)
+        readonly property bool libSure: !!(ac.libPresence && ac.libPresence.sure === true)
+        // The three states the strip's download half can wear, exactly the
+        // ones DownloadButton names: a proven complete copy, an unproven one,
+        // and a partial copy (which stays a plain live download, since
+        // completing an album is not a duplicate).
+        readonly property string libState: !ac.libPresent ? ""
+                                           : !ac.libFull ? "partial"
+                                           : ac.libSure ? "proven" : "maybe"
+        // A FULL claim gates its click the way the full button does: explain
+        // the match, name the folder, leave Download anyway one click away. A
+        // tag match must never be the end of the conversation.
+        readonly property bool libClaim: ac.libState === "proven" || ac.libState === "maybe"
         Art {
             id: acArt
             width: ac.artSize; height: ac.artSize
@@ -7287,6 +8259,42 @@ ApplicationWindow {
                 }
                 CardCaption { card: ac.card; px: 12; metaColor: "#f2f4f7"; width: parent.width }
             }
+            // The library pill, top-left over the art: the one corner no
+            // caption or hover control uses. Unlike the strip it does NOT wait
+            // for a hover, which is the whole reason it is here: a shelf of
+            // cards has to answer "what do I already have" at a glance, and
+            // the strip only appears under the cursor. Fed from the card's own
+            // resolved verdict rather than AlbumPresencePill, which would ask
+            // the same question a second time per card.
+            LibraryTag {
+                visible: ac.libPresent
+                settleKey: "" + (ac.card.id || "")
+                x: 10; y: 10
+                have: ac.libPresence ? (ac.libPresence.local_tracks || 0) : 0
+                total: ac.card.tracks || 0
+                declared: ac.libPresence ? (ac.libPresence.local_declared || 0) : 0
+                albumId: ac.libPresence ? (ac.libPresence.local_album_id || "") : ""
+                qclass: ac.libPresence ? (ac.libPresence.local_class || "") : ""
+                proven: ac.libSure
+            }
+            // The artist answer to the pill above, for the same reason: a shelf
+            // of artists has to say "what do I already have" at a glance. It
+            // resolves itself off the rollup rather than the album verdict,
+            // which is null for every non-album card, and it takes the cover's
+            // lower edge rather than the pill's corner because a rollup is two
+            // lines and a face is usually in the middle.
+            ArtistBadges {
+                bar: true
+                width: parent.width
+                anchors.bottom: parent.bottom
+                // Gated by the NAME, never by an outer visible binding: the
+                // badge hides itself when the rollup says nothing, and
+                // overriding `visible` here would replace that with an
+                // always-shown strip. A hero card carries its own caption on
+                // this exact edge, so it stands down rather than stack on it.
+                artistName: (ac.kind === "artist" && !ac.hero)
+                            ? ("" + (ac.card.name || ac.card.title || "")) : ""
+            }
             // Hover controls. Collections (album / playlist / mix) get the
             // full stacked pair on the art, Preview (a random track for
             // playlists/mixes) over Download; other kinds keep the corner icon.
@@ -7316,6 +8324,10 @@ ApplicationWindow {
                 // the arriving control's edge colour with it.
                 liveBorder: acLive.dlOn ? acDl.edge
                                         : (acRiser.acPvSt === "error" ? root.red : root.accentDim)
+                // The idle pill's outline comes with the verdict too, so the
+                // two halves read as one control in one mood rather than a
+                // coloured half bolted into an accent frame.
+                idleBorder: acStrip.stEdge
                 liveItem: Column {
                     id: acLive
                     spacing: 6
@@ -7354,6 +8366,40 @@ ApplicationWindow {
                 idleItem: Item {
                     id: acStrip
                     width: acStripRow.implicitWidth; height: 30
+                    // The verdict, in the tier colours the library pill uses,
+                    // so the two things a card now says (the pill's what you
+                    // have, the half's what a click will do) never disagree
+                    // about what a colour means. Unlike the full download
+                    // button this half stays UNFILLED: the strip is a thin
+                    // outlined control riding on artwork, and filling one half
+                    // of it made a solid block of a shape whose whole job is to
+                    // stay out of the way of the cover. So the lettering
+                    // carries it, which is why proven reads in the pill's
+                    // lossless green rather than the filled button's accent:
+                    // the accent is already on PREVIEW, one divider away.
+                    readonly property color stInk: ac.libState === "proven" ? root.green
+                                                   : ac.libState === "maybe" ? root.gold
+                                                   : ac.libState === "partial" ? root.cyan : root.accent
+                    readonly property color stEdge: ac.libState === "proven" ? root.greenDim
+                                                    : ac.libState === "maybe" ? root.goldDim
+                                                    : ac.libState === "partial" ? root.cyanDim : root.accentDim
+                    // Ninety pixels of half, so the full button's wording
+                    // ("PARTIALLY IN LIBRARY") cannot ride here. These are the
+                    // shortest forms that still say which of the three is true,
+                    // and a partial copy spends them on the count itself, which
+                    // is the thing worth knowing.
+                    readonly property string stWord: {
+                        if (ac.libState === "proven") return "IN LIBRARY"
+                        if (ac.libState === "maybe") return "MAYBE"
+                        if (ac.libState === "partial") {
+                            var p = ac.libPresence
+                            var held = p.local_tracks || 0
+                            var declared = p.local_declared || 0
+                            var want = declared > held ? declared : (ac.card.tracks || 0)
+                            if (want > held) return held + " OF " + want
+                        }
+                        return "DOWNLOAD"
+                    }
                     // Hover swell: one handler split by x (the halves' own
                     // MouseAreas would steal the hover), so crossing the
                     // divider hands the light over without a gap. Where PREVIEW
@@ -7373,6 +8419,10 @@ ApplicationWindow {
                         z: 1
                         x: acStrip.dividerX; width: acStrip.width - acStrip.dividerX; height: acStrip.height
                         radL: 0
+                        // The lit edge takes the verdict's own colour, so
+                        // hovering a claimed half does not flash accent green
+                        // over a gold or cyan control.
+                        tone: acStrip.stInk
                         on: acStripHover.hovered && acStrip.hoverX > acStrip.dividerX
                     }
                     Row {
@@ -7391,18 +8441,25 @@ ApplicationWindow {
                                 onClicked: root.togglePreview(ac.kind, ac.card.id || "", 0)
                             }
                         }
-                        Rectangle { width: root.btnBorderW; height: 30; color: root.accentDim; anchors.verticalCenter: parent.verticalCenter }
+                        Rectangle { width: root.btnBorderW; height: 30; color: acStrip.stEdge; anchors.verticalCenter: parent.verticalCenter }
                         Item {
                             implicitWidth: acStripDl.implicitWidth + 20; implicitHeight: 30
                             Row {
                                 id: acStripDl
                                 anchors.centerIn: parent; spacing: 6
-                                Ico { name: "arrow-down"; color: root.accent; size: 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
-                                Text { textFormat: Text.PlainText; text: "DOWNLOAD"; color: root.accent; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
+                                Ico { name: ac.libClaim ? "check" : "arrow-down"; color: acStrip.stInk; size: ac.libClaim ? 14 : 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
+                                Text { textFormat: Text.PlainText; text: acStrip.stWord; color: acStrip.stInk; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: root.browseCardDownload(ac.card)
+                                // A full claim opens the gate instead of
+                                // downloading, the same click the full button
+                                // gives it. A partial copy downloads: with the
+                                // bulk skip gate on, that fetches the rest.
+                                onClicked: ac.libClaim
+                                           ? root.openLibraryClaim(ac.card.id || "", "" + (ac.card.title || ""),
+                                                                   "" + (ac.libPresence.local_album_id || ""))
+                                           : root.browseCardDownload(ac.card)
                             }
                         }
                     }
@@ -7861,7 +8918,7 @@ ApplicationWindow {
                         tId: btrLd.modelData.id; kind: btrLd.modelData.kind || "track"
                         title: btrLd.modelData.title; artistName: btrLd.modelData.artist || ""; artistId: btrLd.modelData.artist_id || ""
                         album: btrLd.modelData.album || ""; art: btrLd.modelData.art || ""; year: "" + (btrLd.modelData.year || ""); date: btrLd.modelData.date || ""
-                        duration: btrLd.modelData.duration || ""; quality: btrLd.modelData.quality || ""; popularity: btrLd.modelData.popularity || 0
+                        duration: btrLd.modelData.duration || ""; durationSec: btrLd.modelData.duration_sec || 0; quality: btrLd.modelData.quality || ""; popularity: btrLd.modelData.popularity || 0
                         // Numbers only on item pages, where they're ordered
                         // (album track #s / playlist positions), editorial
                         // track shelves would all read "1".
@@ -8368,15 +9425,18 @@ ApplicationWindow {
                 if (row.artist !== it.artist) m.setProperty(idx, "artist", it.artist || "")
                 if (row.tracks !== it.tracks) m.setProperty(idx, "tracks", it.tracks || 0)
                 // Keep a row that has already moved to Completed there; otherwise
-                // group by status (queued vs everything-in-progress).
-                var grp = row.moved ? "completed" : (it.status === "queued" ? "queued" : "downloading")
+                // group by status: failed rows get their own section (with the
+                // RETRY ALL header), queued rows theirs, the rest ride Downloading.
+                var grp = row.moved ? "completed"
+                        : it.status === "failed" ? "failed"
+                        : it.status === "queued" ? "queued" : "downloading"
                 if (row.uiGroup !== grp) m.setProperty(idx, "uiGroup", grp)
             } else {
                 m.append({ qid: it.qid, name: it.name, type: it.type, status: it.status,
                            progress: it.progress, media_id: it.media_id, template: it.template,
                            collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
                            art: it.art || "",
-                           uiGroup: (it.status === "queued" ? "queued" : "downloading"), moved: false,
+                           uiGroup: (it.status === "failed" ? "failed" : it.status === "queued" ? "queued" : "downloading"), moved: false,
                            doneAt: (it.status === "done" ? Date.now() : 0), leaving: false })
             }
         }
@@ -8385,11 +9445,13 @@ ApplicationWindow {
         updateQueueCounts()
     }
 
-    // Stable-partition the queue model into [completed, downloading, queued],
-    // preserving each group's internal order. Only emits move()s when something
-    // is out of place (so a steady queue animates nothing).
+    // Stable-partition the queue model into [completed, failed, downloading,
+    // queued], preserving each group's internal order. Only emits move()s when
+    // something is out of place (so a steady queue animates nothing). Failed
+    // sits above the active groups so retries are in reach, below Completed so
+    // the drawer still opens on the familiar collapsed header.
     function queuePartition() {
-        var m = queueModel, w = 0, order = ["completed", "downloading", "queued"]
+        var m = queueModel, w = 0, order = ["completed", "failed", "downloading", "queued"]
         for (var g = 0; g < order.length; ++g) {
             for (var i = w; i < m.count; ++i) {
                 if (m.get(i).uiGroup === order[g]) { if (i !== w) m.move(i, w, 1); w++ }
@@ -8398,16 +9460,17 @@ ApplicationWindow {
     }
 
     function updateQueueCounts() {
-        var m = queueModel, c = 0, d = 0, q = 0, l = 0
+        var m = queueModel, c = 0, f = 0, d = 0, q = 0, l = 0
         for (var i = 0; i < m.count; ++i) {
             var row = m.get(i)
             var grp = row.uiGroup
             if (grp === "completed") c++
+            else if (grp === "failed") f++
             else if (grp === "downloading") d++
             else q++
             if (row.status === "done" && !row.moved) l++
         }
-        root.completedCount = c; root.downloadingCount = d; root.queuedCount = q
+        root.completedCount = c; root.failedCount = f; root.downloadingCount = d; root.queuedCount = q
         root.lingerCount = l
     }
 
@@ -8721,6 +9784,26 @@ ApplicationWindow {
             // place; hold the user's spot across the rebuild (see holdScroll).
             if (root.browsePage && !p.error) browseDrill.holdScroll()
             root.browsePage = p.error ? null : p
+            // Whether this TIDAL album is already in the user's local library is
+            // resolved by onBrowsePageChanged above, which covers every way a
+            // page can arrive. Re-resolve here too for the one case that is not
+            // a change: a revalidate re-emitting the SAME page object.
+            root._resolveLibraryPresence()
+        }
+        // The local library-presence index (re)built: re-query for the album on
+        // screen so the badge appears/updates with no reload.
+        function onLibraryPresenceChanged() {
+            root._resolveLibraryPresence()
+            // A search page waiting behind the veil for its badges can have
+            // them now. Handed to a zero-interval timer rather than revealed
+            // here: this handler belongs to a Connections created when the
+            // engine loaded, and every badge's own Connections was created
+            // later, inside a delegate. Qt delivers in connection order, so
+            // revealing on this line dropped the veil BEFORE a single pill had
+            // re-resolved, and the badges then faded in over the page they had
+            // just been held back for. One event-loop pass puts the whole page
+            // behind the reveal, which is the point of waiting at all.
+            if (root._searchAwaitingLibrary) searchLibraryReveal.restart()
         }
         function onBrowseSectionMore(p) {
             root.browseGrew(p)
@@ -9006,8 +10089,11 @@ ApplicationWindow {
         // screen from the first frame (issue #13).
         // 0.004 is invisible but rendered; see root.bootWarming for why the
         // page is painted before the reveal asks for it.
-        opacity: root.bootContentShown > 0 ? root.bootContentShown : (root.bootWarming ? 0.004 : 0)
-        enabled: root.bootContentShown > 0
+        // root.uiShown, not the raw dial: a pending terms gate holds the whole
+        // interface at nothing, painted and inert, however far the launch
+        // sequence has run.
+        opacity: root.uiShown > 0 ? root.uiShown : (root.bootWarming ? 0.004 : 0)
+        enabled: root.uiShown > 0
 
         // ---- Header -----------------------------------------------------
         // The top bar and the search controls share one surface: the panel
@@ -9142,7 +10228,10 @@ ApplicationWindow {
                                 if (!path.length) return false                    // need something to resolve
                                 return host === "tidal.com" || /\.tidal\.com$/.test(host)
                             }
-                            // Matrix-decrypt paste-in; a pasted TIDAL link auto-searches once settled.
+                            // Matrix-decrypt paste-in; a pasted TIDAL link auto-searches once
+                            // settled. A paste-glyph click arms the same auto-search for plain
+                            // text too (issue #18): the button means "search this", while a
+                            // bare Ctrl+V still only fills the field so a term can be edited.
                             DecodeController {
                                 id: searchDecoder; field: searchField; glyph: pasteGlyph
                                 // The decode runs ~0.6s, long enough to click an
@@ -9152,9 +10241,21 @@ ApplicationWindow {
                                 // onSearchResults, and same artistOpen allowance:
                                 // the search box is live on artist pages).
                                 property int seqAtPaste: -1
-                                onBegun: seqAtPaste = root._navSeq
+                                // One-shot: set by the paste glyph's click, latched by the
+                                // decode that click's paste starts, cleared by any other
+                                // text change (see the field's onTextChanged) so a stale
+                                // arm never fires on a later unrelated paste.
+                                property bool submitPending: false
+                                property bool submitArmed: false
+                                onBegun: {
+                                    seqAtPaste = root._navSeq
+                                    submitArmed = submitPending
+                                    submitPending = false
+                                }
                                 onDecoded: function(text) {
-                                    if (!searchBox.isTidalUrl(text)) return
+                                    var armed = submitArmed
+                                    submitArmed = false
+                                    if (!searchBox.isTidalUrl(text) && !armed) return
                                     if (seqAtPaste !== root._navSeq
                                         || root.browseOpen || root.libraryOpen || root.settingsOpen) return
                                     root._searchSeq = root._navSeq
@@ -9191,14 +10292,36 @@ ApplicationWindow {
                                     onAppActiveChanged: if (appActive && activeFocus) Qt.callLater(function() { searchField.selectAll() })
                                     // A standard paste (a multi-char jump typing can't produce) is
                                     // detected and animated in, without ever reading the clipboard.
-                                    onTextChanged: searchDecoder.noteTextChanged()
+                                    onTextChanged: {
+                                        var wasDecoding = searchDecoder.decoding
+                                        searchDecoder.noteTextChanged()
+                                        // Any change that is not part of a decode (typing, a clear,
+                                        // a too-short paste) disarms a pending glyph auto-search.
+                                        if (!wasDecoding && !searchDecoder.decoding) searchDecoder.submitPending = false
+                                    }
                                 }
                                 PasteGlyph {
                                     id: pasteGlyph
                                     Layout.alignment: Qt.AlignVCenter
                                     // standard OS paste into the field; the field's onTextChanged
                                     // animates it. The app itself never reads the clipboard.
-                                    onClicked: { searchField.forceActiveFocus(); searchField.clear(); searchField.paste() }
+                                    // submitPending is set AFTER clear() (whose own text change
+                                    // would disarm it) so the pasted text auto-searches once the
+                                    // decode settles.
+                                    onClicked: {
+                                        searchField.forceActiveFocus()
+                                        searchField.clear()
+                                        searchDecoder.submitPending = true
+                                        searchField.paste()
+                                        // paste() inserts synchronously, so any decode this click
+                                        // could start has already begun and latched the arm. An arm
+                                        // still pending here had nothing to latch it (an empty
+                                        // clipboard pastes no text) and must not wait around: a
+                                        // LATER bare Ctrl+V starts its own decode, whose onBegun
+                                        // reads the flag before the field's disarm can run, and a
+                                        // paste the user meant to edit would search itself.
+                                        searchDecoder.submitPending = false
+                                    }
                                 }
                             }
                         }
@@ -9669,11 +10792,38 @@ ApplicationWindow {
                                     color: root.textDim; font.pixelSize: 11; font.family: root.uiFont
                                     font.bold: true; font.letterSpacing: 1.5
                                 }
-                                Text {
-                                    textFormat: Text.PlainText
-                                    text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : ""
-                                    color: root.textHi; font.pixelSize: 26; font.bold: true
-                                    width: parent.width; elide: Text.ElideRight
+                                // Title + the presence pill right beside it.
+                                Row {
+                                    width: parent.width
+                                    spacing: 10
+                                    Text {
+                                        id: bihTitle
+                                        textFormat: Text.PlainText
+                                        text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : ""
+                                        color: root.textHi; font.pixelSize: 26; font.bold: true
+                                        width: Math.min(implicitWidth,
+                                                        parent.width - (bihPill.visible ? bihPill.width + 10 : 0))
+                                        elide: Text.ElideRight
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    LibraryTag {
+                                        id: bihPill
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        // One pill for every album page you open, so the
+                                        // page you open next must not read as news.
+                                        settleKey: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
+                                        visible: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
+                                                    && root.libraryPresence && root.libraryPresence.present)
+                                        have: root.libraryPresence ? (root.libraryPresence.local_tracks || 0) : 0
+                                        total: browseItemHeader.hd ? (browseItemHeader.hd.num_tracks || 0) : 0
+                                        declared: root.libraryPresence ? (root.libraryPresence.local_declared || 0) : 0
+                                        albumId: root.libraryPresence ? (root.libraryPresence.local_album_id || "") : ""
+                                        qclass: root.libraryPresence ? (root.libraryPresence.local_class || "") : ""
+                                        // Same identity axis as the search-row pills: a proven
+                                        // match drops the "?" here too.
+                                        proven: !!(root.libraryPresence && root.libraryPresence.present
+                                                   && root.libraryPresence.sure === true)
+                                    }
                                 }
                                 Text {
                                     id: bihSubtitle
@@ -9713,6 +10863,13 @@ ApplicationWindow {
                                               : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
                                            : ""
                                     collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
+                                    // Album pages only (the header's artist/year facts are "" elsewhere,
+                                    // and a playlist must never wear an album's library state).
+                                    libAlbum: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
+                                              ? ({ artist: browseItemHeader.hd.artist || "", title: browseItemHeader.hd.title || "",
+                                                   year: "" + (browseItemHeader.hd.year || ""), tracks: browseItemHeader.hd.num_tracks || 0,
+                                                   duration_sec: browseItemHeader.hd.duration_sec || 0 })
+                                              : null
                                     onTap: function() {
                                         if (browseItemHeader.hd)
                                             root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
@@ -9979,7 +11136,7 @@ ApplicationWindow {
                         onLoaded: root._searchBuildTick()
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                            art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
+                            art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                         }
                     }
                 }
@@ -9997,7 +11154,7 @@ ApplicationWindow {
                         onLoaded: root._searchBuildTick()
                         sourceComponent: TrackRow {
                             tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                            album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; quality: model.quality; popularity: model.popularity
+                            album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                             albumId: model.album_id || ""
                         }
                     }
@@ -10197,7 +11354,19 @@ ApplicationWindow {
                     Column {
                         width: parent.width - 170; spacing: 8
                         Text { text: "ARTIST"; color: root.accent; font.pixelSize: 12; font.bold: true; font.letterSpacing: 1.9; topPadding: 8 }
-                        Text { textFormat: Text.PlainText; text: root.artistData.name || ""; color: root.textHi; font.pixelSize: 30; font.bold: true; width: parent.width; elide: Text.ElideRight }
+                        Text {
+                            textFormat: Text.PlainText; text: root.artistData.name || ""
+                            color: root.textHi; font.pixelSize: 30; font.bold: true
+                            width: parent.width
+                            elide: Text.ElideRight
+                        }
+                        // What you already hold by this artist, between the
+                        // name and the button that would add to it: the cards'
+                        // two voices standing on the page rather than on the
+                        // photograph.
+                        ArtistBadges {
+                            artistName: root.artistData.name || ""
+                        }
                         Row {
                             spacing: 12
                             DownloadButton {
@@ -10265,7 +11434,7 @@ ApplicationWindow {
                         visible: index < 5 || root.topTracksExpanded
                         width: artistCol.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; quality: model.quality; popularity: model.popularity
+                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                         albumId: model.album_id || ""
                     }
                 }
@@ -10294,7 +11463,7 @@ ApplicationWindow {
                         visible: index < 5 || root.artistAlbumsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 ShowAllLabel {
@@ -10321,7 +11490,7 @@ ApplicationWindow {
                         visible: index < 5 || root.artistEpsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 ShowAllLabel {
@@ -10541,7 +11710,7 @@ ApplicationWindow {
                         required property var model
                         width: ListView.view.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 LibList {
@@ -10551,7 +11720,7 @@ ApplicationWindow {
                         required property var model
                         width: ListView.view.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; quality: model.quality; popularity: model.popularity
+                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                         albumId: model.album_id || ""
                     }
                 }
@@ -10602,6 +11771,17 @@ ApplicationWindow {
                                         width: parent.width; height: width; hoverFx: true
                                         fxKind: "artist"; fxId: "" + (model.id || "")
                                         url: model.art
+                                        // The one place you browse artists you
+                                        // follow should not be the one place that
+                                        // cannot say what you already hold. A
+                                        // child of the Art, so it takes the tilt
+                                        // and the rounded clip with it.
+                                        ArtistBadges {
+                                            bar: true
+                                            width: parent.width
+                                            anchors.bottom: parent.bottom
+                                            artistName: "" + (model.name || "")
+                                        }
                                     }
                                 }
                                 Text {
@@ -10768,7 +11948,7 @@ ApplicationWindow {
                                             tId: modelData.id; kind: modelData.kind || "track"
                                             title: modelData.title; artistName: modelData.artist || ""; artistId: modelData.artist_id || ""
                                             album: modelData.album || ""; art: modelData.art || ""; year: "" + (modelData.year || ""); date: modelData.date || ""
-                                            duration: modelData.duration || ""; quality: modelData.quality || ""; popularity: modelData.popularity || 0
+                                            duration: modelData.duration || ""; durationSec: modelData.duration_sec || 0; quality: modelData.quality || ""; popularity: modelData.popularity || 0
                                             albumId: modelData.album_id || ""
                                         }
                                     }
@@ -11403,21 +12583,22 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Text { text: "Download queue"; color: root.textHi; font.pixelSize: 16; font.bold: true }
                 Item { Layout.fillWidth: true }
-                // Pause / resume all
-                Rectangle {
+                // Pause / resume all. Gold while running (pausing interrupts but
+                // loses nothing), green once paused, where RESUME is the way
+                // forward. Both are SpecBtn, so the fill, the border and the
+                // hover lift are the exit prompt's, not a local imitation.
+                SpecBtn {
                     visible: queueModel.count > 0
-                    implicitHeight: prLbl.implicitHeight + root.btnPadV * 2; implicitWidth: prLbl.implicitWidth + root.btnPadH * 2; radius: root.btnRad
-                    color: waves.paused ? root.accentCont : "transparent"; border.color: waves.paused ? root.accent : root.border1
-                    Text { textFormat: Text.PlainText; id: prLbl; anchors.centerIn: parent; text: waves.paused ? "RESUME" : "PAUSE"; color: waves.paused ? root.accent : root.textLo; font.pixelSize: 12; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.paused ? waves.resumeQueue() : waves.pauseQueue() }
+                    warn: !waves.paused
+                    primary: waves.paused
+                    label: waves.paused ? "RESUME" : "PAUSE"
+                    onClicked: waves.paused ? waves.resumeQueue() : waves.pauseQueue()
                 }
                 // Stop everything, abort running downloads + clear the queue
-                Rectangle {
+                SpecBtn {
                     visible: root.activeQueueCount > 0
-                    implicitHeight: stopLbl.implicitHeight + root.btnPadV * 2; implicitWidth: stopLbl.implicitWidth + root.btnPadH * 2; radius: root.btnRad
-                    color: "transparent"; border.color: root.red
-                    Text { id: stopLbl; anchors.centerIn: parent; text: "STOP"; color: root.red; font.pixelSize: 12; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.stopAll() }
+                    danger: true; label: "STOP"
+                    onClicked: waves.stopAll()
                 }
             }
             Text { textFormat: Text.PlainText; text: queueModel.count + " items"; color: root.textLo; font.family: root.mono; font.pixelSize: 12 }
@@ -11433,22 +12614,67 @@ ApplicationWindow {
                     id: secItem
                     required property string section
                     width: ListView.view.width
-                    implicitHeight: 32
+                    // Two extra pixels of headroom so the header's chips are not
+                    // squeezed against the rows above and below them.
+                    implicitHeight: 34
                     RowLayout {
-                        anchors.fill: parent; anchors.topMargin: 9; anchors.bottomMargin: 4
+                        anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 4
                         anchors.leftMargin: 2; anchors.rightMargin: 2; spacing: 8
+                        // Above the header-wide collapse MouseArea below, so the
+                        // per-section CLEAR gets the click. Plain Text does not
+                        // consume events, so collapsing still works everywhere else.
+                        z: 3
                         Ico { visible: secItem.section === "completed"; name: "check"; color: root.accent; size: 13; Layout.alignment: Qt.AlignVCenter }
                         Text {
                             textFormat: Text.PlainText
                             id: secLbl
                             text: secItem.section === "completed" ? "COMPLETED · " + root.completedCount
+                                : secItem.section === "failed" ? "FAILED · " + root.failedCount
                                 : secItem.section === "downloading" ? "DOWNLOADING · " + root.downloadingCount
                                 : "QUEUED · " + root.queuedCount
-                            color: secItem.section === "completed" ? root.accentContTx : root.textDim
+                            // Brightness tracks how live the section is: the work
+                            // happening right now reads near-white, what is only
+                            // waiting stays dim, so the eye lands on Downloading
+                            // first when the drawer opens.
+                            color: secItem.section === "completed" ? root.accentContTx
+                                 : secItem.section === "failed" ? root.red
+                                 : secItem.section === "downloading" ? root.textHi : root.textDim
                             font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.4
                             Layout.alignment: Qt.AlignVCenter
                         }
                         Rectangle { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; height: 1; color: root.divider }
+                        // One-click retry of every failed row, riding the Failed
+                        // header itself so it appears exactly when it applies
+                        // and takes no room anywhere else (issue #18).
+                        SpecBtn {
+                            compact: true; primary: true; label: "RETRY ALL"
+                            visible: secItem.section === "failed"
+                            Layout.alignment: Qt.AlignVCenter
+                            onClicked: waves.retryAllFailed()
+                        }
+                        // Every section clears itself. Riding the header means
+                        // the scope needs no spelling out (it takes the section
+                        // it sits on), so the control stays one short word in
+                        // that section's own colour instead of a grey footer
+                        // button that has to name what it sweeps. Downloading
+                        // has none: stopping a live transfer is the row's own
+                        // control, never a bulk one.
+                        SpecBtn {
+                            compact: true
+                            // Completed is tidy-up, so it takes the green
+                            // recipe; the other two discard work you asked for,
+                            // which is the danger red the exit prompt uses.
+                            primary: secItem.section === "completed"
+                            danger: secItem.section !== "completed"
+                            label: "CLEAR"
+                            visible: secItem.section !== "downloading"
+                            Layout.alignment: Qt.AlignVCenter
+                            onClicked: {
+                                if (secItem.section === "completed") waves.clearFinished()
+                                else if (secItem.section === "failed") waves.clearFailed()
+                                else waves.clearQueued()
+                            }
+                        }
                         Text { textFormat: Text.PlainText; visible: secItem.section === "completed"; text: root.completedCollapsed ? "▸" : "▾"; color: root.accent; font.pixelSize: 11; Layout.alignment: Qt.AlignVCenter }
                     }
                     MouseArea { anchors.fill: parent; enabled: secItem.section === "completed"; cursorShape: Qt.PointingHandCursor
@@ -11735,15 +12961,19 @@ ApplicationWindow {
             }
             RowLayout {
                 Layout.fillWidth: true; spacing: 8
-                Rectangle {
-                    Layout.fillWidth: true; implicitHeight: 32; radius: root.btnRad; color: root.surface; border.color: root.border1
-                    Text { anchors.centerIn: parent; text: "CLEAR FINISHED"; color: root.textLo; font.pixelSize: 13; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.clearFinished() }
-                }
-                Rectangle {
-                    Layout.fillWidth: true; implicitHeight: 32; radius: root.btnRad; color: root.surface; border.color: root.border1
-                    Text { anchors.centerIn: parent; text: "CLEAR ALL"; color: root.textLo; font.pixelSize: 13; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.clearQueue() }
+                // One button, not two: the per-section CLEARs above handle the
+                // targeted cases, so all this one owes the user is "empty the
+                // list". It never touches a transfer already writing bytes,
+                // which the row's own stop control is for.
+                // Pushes the button to the trailing edge, under the section
+                // headers' own controls, so the three CLEARs line up vertically.
+                Item { Layout.fillWidth: true }
+                // The exit prompt's own danger button, hugging its label: full
+                // width is for modal CTAs, an inline button that stretches is
+                // just a wide empty box.
+                SpecBtn {
+                    danger: true; label: "CLEAR ALL"
+                    onClicked: waves.clearQueue()
                 }
             }
         }
@@ -11760,7 +12990,8 @@ ApplicationWindow {
         // it lives outside the main column, so without this it painted its
         // edge fades over the opening water at full strength (the landing is
         // scrollable from the first frame, so the bottom fade was always on).
-        opacity: root.bootContentShown
+        // uiShown, so a pending terms gate keeps it down too.
+        opacity: root.uiShown
         flick: root.artistOpen ? artistView
              : root.libraryOpen ? (root.libraryCategory === "home" ? homePane
                  : root.libraryCategory === "artists" ? libArtistsGrid
@@ -12141,11 +13372,12 @@ ApplicationWindow {
         anchors.fill: parent
         // First-run step (before terms) OR a returning user whose ffmpeg is now
         // missing (after terms, this session, not yet snoozed). The two branches
-        // are mutually exclusive on termsAccepted, so this never stacks with
-        // termsGate.
+        // are mutually exclusive on termsCurrentAccepted (the same test the
+        // terms gate shows on, version included), so this never stacks with
+        // termsGate, a terms-revision re-prompt included.
         visible: waves.loggedIn && (
-            (!setupSettings.ffmpegSetupDone && !legalSettings.termsAccepted)
-            || (setupSettings.ffmpegSetupDone && legalSettings.termsAccepted
+            (!setupSettings.ffmpegSetupDone && !root.termsCurrentAccepted)
+            || (setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
                 && appFfmpeg.stateKey === "missing" && !ffmpegGate.sessionSnoozed
                 && !setupSettings.ffmpegPromptDismissed)
         )
@@ -12551,12 +13783,43 @@ ApplicationWindow {
     // signed in. The only way past it is to acknowledge; the acceptance is
     // persisted (QSettings) so it appears once, not on every launch.
     // ====================================================================
-    Settings { id: legalSettings; category: "legal"; property bool termsAccepted: false }
+    // termsVersion is the identity of the text below. It is stored with the
+    // acceptance so a later revision can re-prompt only the users who agreed
+    // to something older, and so the accepted wording is knowable after the
+    // fact. Local only: nothing about the acceptance is ever reported.
+    readonly property string termsVersion: "1.0"
+    readonly property string termsVersionStamp: "Terms v1.0 (10 August 2026)"
+
+    Settings {
+        id: legalSettings; category: "legal"
+        property bool termsAccepted: false
+        property string termsAcceptedVersion: ""
+        property string termsAcceptedDate: ""
+    }
+
+    // The stored version is READ, not just written: an acceptance of an older
+    // revision is not an acceptance of this one, so bumping termsVersion
+    // re-prompts exactly the users whose stamp is older (or absent, the
+    // pre-stamp acceptances). String compare on purpose: any difference from
+    // the current version means "not these terms".
+    readonly property bool termsCurrentAccepted: legalSettings.termsAccepted
+        && legalSettings.termsAcceptedVersion === termsVersion
 
     Rectangle {
         id: termsGate
         anchors.fill: parent
-        visible: waves.loggedIn && setupSettings.ffmpegSetupDone && !legalSettings.termsAccepted
+        // Above the launch overlay (z 100000). Nothing outranks a gate that
+        // has to be read and agreed to: at default z the launch wordmark was
+        // painted straight across the terms card for the whole handover.
+        z: 100001
+        // ...and it is what the launch sequence reveals, riding the same dial
+        // the interface normally rides (root.bootContentShown): the wordmark's
+        // zoom fades directly into this card, with the app itself still
+        // unpainted behind it. Agreement first, interface second.
+        readonly property bool wanted: waves.loggedIn && setupSettings.ffmpegSetupDone
+            && !root.termsCurrentAccepted
+        visible: wanted && root.bootContentShown > 0
+        opacity: root.bootContentShown
         color: "#f406070e"
         // Eat every click so nothing behind the gate is reachable; with no close
         // control and no outside-click handler, the gate cannot be dismissed.
@@ -12564,26 +13827,55 @@ ApplicationWindow {
 
         Rectangle {
             anchors.centerIn: parent; width: 540
-            implicitHeight: termsCol.implicitHeight + 40
+            // Never taller than the window: on a short window the card stops
+            // growing and the terms body scrolls inside it instead of the
+            // buttons being pushed off screen.
+            implicitHeight: Math.min(termsCol.implicitHeight + 40, termsGate.height - 32)
             radius: 14; color: root.surface2; border.color: root.outline
 
             ColumnLayout {
-                id: termsCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 13
+                id: termsCol; anchors.centerIn: parent; width: parent.width - 40
+                height: Math.min(implicitHeight, parent.height - 40)
+                spacing: 13
 
                 Text {
                     Layout.fillWidth: true
                     text: "Before you continue"; color: root.textHi; font.pixelSize: 18; font.bold: true
                 }
-                Text {
-                    textFormat: Text.PlainText
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
-                    text: "Waves is a personal, educational tool for accessing your own TIDAL account. By continuing, you agree that:\n\n"
-                        + "•  You will use Waves only for lawful, personal, non-commercial purposes, and only with content you are authorized to access.\n"
-                        + "•  You will not use Waves to infringe copyright or to reproduce, distribute, or pirate any content. Respect the rights of artists and rights-holders.\n"
-                        + "•  You are solely responsible for your use of Waves and for complying with TIDAL's Terms of Service and all laws that apply to you.\n"
-                        + "•  Waves is provided \"as is\", without warranty of any kind. Its developers and contributors accept no liability for how it is used.\n\n"
-                        + "Waves is not affiliated with, endorsed by, or sponsored by TIDAL."
+                Flickable {
+                    id: termsBodyFlick
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.preferredHeight: termsBody.implicitHeight
+                    Layout.minimumHeight: 60
+                    contentHeight: termsBody.implicitHeight
+                    clip: true; boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar {
+                        // Tolerance, not a bare >: layout rounding leaves the
+                        // content a hair taller than the view and armed the
+                        // bar on a window with room to spare.
+                        policy: termsBodyFlick.contentHeight - termsBodyFlick.height > 1
+                            ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                    }
+                    Text {
+                        id: termsBody
+                        textFormat: Text.PlainText
+                        // The gutter is reserved whether or not the bar is up:
+                        // sizing it off the bar's own visibility would feed the
+                        // wrap back into the height that decides it.
+                        width: termsBodyFlick.width - 14; wrapMode: Text.WordWrap
+                        // lineHeight leading is not counted into implicitHeight
+                        // for the last line, which clipped it (and armed the
+                        // scrollbar) even with the whole card to spare.
+                        bottomPadding: 6
+                        color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                        text: "Waves is a personal, non-commercial tool for accessing your own TIDAL account. By continuing, you agree that:\n\n"
+                            + "•  You will use Waves only for lawful, personal, non-commercial purposes, and only with content you are authorized to access.\n"
+                            + "•  You will not use Waves to infringe copyright or to reproduce, distribute, or pirate any content. Respect the rights of artists and rights-holders.\n"
+                            + "•  Your use of Waves may violate TIDAL's Terms of Service. You accept that risk and any consequences to your account, and you are responsible for complying with all laws that apply to you.\n"
+                            + "•  Waves is provided \"as is\", without warranty of any kind, and to the fullest extent permitted by law its developers and contributors accept no liability for any damages arising from it. See sections 15 and 16 of the AGPL-3.0.\n"
+                            + "•  You will indemnify and hold harmless the developers and contributors of Waves against any claim, loss or demand arising from your use of it or your breach of these terms.\n\n"
+                            + "Waves is not affiliated with, endorsed by, or sponsored by TIDAL. TIDAL is a trademark of its owner, used here only to identify the service Waves works with."
+                    }
                 }
                 // Privacy promise, emphasized, the closing note of the preamble.
                 Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.border1 }
@@ -12619,7 +13911,142 @@ ApplicationWindow {
                     opacity: ackChk.checked ? 1 : 0.4
                     // freshSetup: the opt-in prompt that follows this gate reads
                     // differently for a first run than for a user who updated in.
-                    onClicked: if (ackChk.checked) { legalSettings.termsAccepted = true; setupSettings.updatePromptFresh = true }
+                    onClicked: if (ackChk.checked) {
+                        // Record WHICH terms were agreed to, not just that some
+                        // were: a future revision re-prompts only the users
+                        // whose stored version is older.
+                        legalSettings.termsAcceptedVersion = root.termsVersion
+                        legalSettings.termsAcceptedDate = new Date().toISOString().slice(0, 10)
+                        legalSettings.termsAccepted = true
+                        setupSettings.updatePromptFresh = true
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
+                    text: root.termsVersionStamp
+                    color: root.textDim; font.pixelSize: 11
+                }
+            }
+        }
+    }
+
+    // ====================================================================
+    // The library claim, opened up. A Download button reading DOWNLOADED
+    // because the LIBRARY SCAN matched a folder (not because Waves has a
+    // record of downloading it) stays clickable, and lands here.
+    //
+    // WHY THIS EXISTS: the match is inferred from tags, so it can be wrong,
+    // and a wrong one used to be silent and terminal: a button that says
+    // DOWNLOADED, does nothing, and explains nothing. This says what was
+    // matched, shows where it is so the user can judge for themselves, and
+    // keeps DOWNLOAD ANYWAY one click away. Nothing is remembered, because
+    // DOWNLOAD ANYWAY is one-shot: the click starts the download, and from
+    // there the live queue state drives the button.
+    //
+    // Detection must never prevent a download the user could otherwise make;
+    // this is the escape hatch that keeps that true, for an album and for a
+    // single track alike. The two differ only in wording and in which download
+    // ANYWAY makes: an album needs a claim override so the bulk gate does not
+    // then skip every track it contains, a track was never gated to begin with.
+    // ====================================================================
+    Rectangle {
+        id: libraryClaimGate
+        objectName: "libraryClaimGate"
+        // Same reason as exitGate: a Drawer paints in the window's overlay
+        // layer, so a gate parented to the page sits under it whatever its z.
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1200
+        property bool shown: false
+        property string albumId: ""
+        property string albumTitle: ""
+        property string folder: ""
+        // "album" or "track". Picks the wording and the download the ANYWAY
+        // click makes; everything else about the conversation is the same.
+        property string kind: "album"
+        readonly property bool isTrack: kind === "track"
+        visible: opacity > 0
+        opacity: shown ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        color: "#cc06070e"
+        function proceed() {
+            var aid = libraryClaimGate.albumId
+            var wasTrack = libraryClaimGate.isTrack
+            libraryClaimGate.shown = false
+            if (aid === "") return
+            // A single track needs no override: the bulk claim gate rides only
+            // on collection jobs, so one track asked for by name has never been
+            // skippable and downloadTrack really downloads.
+            if (wasTrack) { waves.downloadTrack(aid); return }
+            // "Anyway" registers a claim override first: with the bulk claim
+            // gate on, a plain downloadAlbum of a fully-claimed album would
+            // skip every track it contains and report done having fetched
+            // nothing, which is exactly what this click just declined.
+            waves.downloadAlbumAnyway(aid)
+        }
+        function reveal() {
+            var p = libraryClaimGate.folder
+            libraryClaimGate.shown = false
+            if (p !== "") waves.revealLibraryAlbum(p)
+        }
+        MouseArea { anchors.fill: parent; onClicked: libraryClaimGate.shown = false }
+        Rectangle {
+            anchors.centerIn: parent; width: 480
+            implicitHeight: lcgCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: lcgCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
+                    text: "This looks like it is already in your library"
+                }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    // A track match names a file, not a folder, and the folder
+                    // line below is then the album it was found sitting in,
+                    // which is also the evidence the identity was proven from.
+                    text: (libraryClaimGate.isTrack
+                            ? (libraryClaimGate.albumTitle !== ""
+                                ? "A file in your music library matches “" + libraryClaimGate.albumTitle + "”."
+                                : "A file in your music library matches this track.")
+                            : (libraryClaimGate.albumTitle !== ""
+                                ? "A folder in your music library matches “" + libraryClaimGate.albumTitle + "”."
+                                : "A folder in your music library matches this album."))
+                        + " The match is made from tags, so it can be wrong. Downloading again makes a"
+                        + " second copy; your existing files are never touched either way."
+                }
+                // The evidence, so the user can judge the match rather than
+                // take the button's word for it.
+                Text {
+                    visible: libraryClaimGate.folder !== ""
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideMiddle
+                    color: root.textDim; font.family: root.mono; font.pixelSize: 12
+                    text: libraryClaimGate.folder
+                }
+                // This gate is the only one with no explicit dismiss button
+                // (three CTAs crowd the row), so the way out is spelled out.
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textDim; font.pixelSize: 12
+                    text: "Click away to leave it alone."
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 4; spacing: 12
+                    SpecBtn {
+                        primary: true; label: "SHOW IN FOLDER"
+                        visible: libraryClaimGate.folder !== ""
+                        onClicked: libraryClaimGate.reveal()
+                    }
+                    SpecBtn { label: "DOWNLOAD ANYWAY"; onClicked: libraryClaimGate.proceed() }
                 }
             }
         }
@@ -12636,11 +14063,16 @@ ApplicationWindow {
     Rectangle {
         id: updateOptInGate
         objectName: "updateOptInGate"
+        // Same reason as exitGate: a Drawer paints in the window's overlay
+        // layer, so a gate parented to the page sits under it whatever its z.
+        parent: Overlay.overlay
         anchors.fill: parent
         // Above the video overlay (999) and the peek card (990): a first-run
         // prompt must never paint underneath a playing video.
         z: 1200
-        readonly property bool shouldShow: waves.loggedIn && setupSettings.ffmpegSetupDone && legalSettings.termsAccepted
+        // termsCurrentAccepted, not the bare boolean: during a terms-revision
+        // re-prompt this card must wait behind the terms gate, never beside it.
+        readonly property bool shouldShow: waves.loggedIn && setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
             && bootOverlay.done
             && !ffmpegGate.visible
             && !setupSettings.updatePromptAnswered
@@ -12721,6 +14153,12 @@ ApplicationWindow {
     Rectangle {
         id: exitGate
         objectName: "exitGate"
+        // A Drawer (the queue) lives in the window's OVERLAY layer, which
+        // paints over ordinary content whatever z that content carries, so a
+        // gate parented to the page was masked by the drawer's dim while the
+        // queue was open. Joining the same layer is what actually puts it on
+        // top; the z below then orders it inside that layer.
+        parent: Overlay.overlay
         anchors.fill: parent
         // Above the video overlay (999): the close veto opens this gate, and
         // with a video full-screen a default z would paint it underneath,
