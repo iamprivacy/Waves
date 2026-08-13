@@ -14,7 +14,8 @@ Ten minutes here saves an afternoon of reverse-engineering.
 │        │ calls slots on `waves`             │ signals (queued,          │
 │        ▼ (context property)                 │ GUI-thread delivery)      │
 │  backend.py ── WavesBridge(QObject): every slot QML can call,           │
-│        │       every signal QML listens to                              │
+│        │       every signal QML listens to (the library half lives      │
+│        │       in the bridge_library.py mixin)                          │
 │        │                                                                │
 │        ├── threadpool (QThreadPool): search, artist pages, metadata     │
 │        └── dl_pool   (QThreadPool): downloads, sized by the             │

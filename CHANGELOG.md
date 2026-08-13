@@ -22,6 +22,47 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.19 (2026-08-13)
+
+### ✨ Added
+
+- 📚 New, experimental: point Waves at your music library (Settings, Library) and albums, artists and tracks you already own wear an IN LIBRARY pill wherever they appear, colour-coded by the quality you hold and one click from the matching folder. The feature is off by default (nothing is scanned until you turn it on and save), and the files you already have are only ever read, never modified, moved or renamed. Clicking the pill opens that album's folder in Finder or Explorer, so a downloaded album is one click from the file manager ([issue #23](https://github.com/iamprivacy/Waves/issues/23)).
+- 🏷️ The scan identifies your albums by their tags, so it recognises a library Waves did not create, whatever your folders are called. A multi-disc set counts as one album, edition names match by meaning ("Deluxe Edition" and "Deluxe Version" are one edition, "(2011 Remaster)" matches "(Remastered 2011)") while a live or acoustic release never matches the studio cut, and a folder short a track is never called complete. Real-world tag noise is absorbed too: accents match plain spellings (a library tagged Bjork finds Björk), "&" and "and" are one word, "The Beatles" and "Beatles" are one artist, featuring credits match however they were written, and one mis-tagged stray file no longer hides a whole album. Rescans re-read only what changed, and every folder you have scanned keeps its own saved index.
+- ⏱️ Play length is part of the match: an undated copy whose track count and total seconds agree with the release is confirmed instead of being left as an unproven "?", a same-count copy minutes apart is recognised as a different recording, and a single track is confirmed by its own seconds. Seconds outrank the year tag, so a remaster tagged with the original album's year still matches.
+- 🔎 An optional MusicBrainz check (Settings, Library, off by default) confirms matches the scan cannot settle on its own. It sends artist and album titles to musicbrainz.org, one request per second, and caches the answers locally.
+- 🟡 Download buttons say what the scan found: green ALBUM IN LIBRARY for a complete copy it can confirm, gold MAYBE IN LIBRARY for one it cannot, cyan PARTIALLY IN LIBRARY for a copy you hold part of (a click fetches the rest). Single tracks say the same in their own words. Every one of them stays clickable, naming the matched folder with Download anyway behind it, because a tag match is a recognition, not a receipt.
+- 🖼️ Browse cards carry the same verdict on the artwork, without waiting for a hover, and clicking a claimed one explains the match exactly as the full button does.
+- ⏭️ Bulk downloads skip what your library already has (on by default while the scan is on, its own toggle on the Library card): a discography leaves out matched albums, an album or playlist skips its matched tracks, and the status line counts what was left out. A single track click always downloads, and best of both merges stay complete.
+- 🟢 Done labels now name what they are about: ALBUM IN LIBRARY, TRACK DOWNLOADED, VIDEO IN LIBRARY.
+- 🎬 A video you have downloaded shows a DOWNLOADED mark on its thumbnail.
+- 🎤 Artists say what you hold of theirs: an artist in your library wears IN LIBRARY across the lower edge of their picture, with how many albums and songs you own, on search results, browse shelves and your followed artists alike. The artist's own page says the same under their name, above Download discography.
+- 🔁 Skip songs you already have (Settings, Downloads, off by default): a song is skipped when the same recording already sits in another album's folder under that artist, so a deluxe edition downloaded after the standard one fetches only what you are missing. Matching uses the recording's ISRC code, so a live take, an alternate version or a re-recording is never mistaken for the same song. Best of both merges ignore the setting, since their job is one complete album ([issue #18](https://github.com/iamprivacy/Waves/issues/18)).
+- 🔁 Failed downloads gather in their own Failed section of the queue drawer, and its header offers RETRY ALL: one click retries every failed row instead of hunting each one down ([issue #18](https://github.com/iamprivacy/Waves/issues/18)).
+
+### 🔧 Changed
+
+- 🧹 Each queue section clears itself: a CLEAR chip rides the Completed, Failed and Queued headers, and the footer keeps a single CLEAR ALL. Clearing never interrupts a download that is already running, and failed rows are only ever cleared from their own header ([issue #18](https://github.com/iamprivacy/Waves/issues/18)).
+- ⏸️ The queue's PAUSE button turns gold while downloads run and becomes a green RESUME once paused.
+- 🎞️ Download buttons roll between states instead of snapping, on the same belt browse uses for its live swaps. Turning off "Hover controls slide in" in Settings stills it.
+- 📋 The search bar's paste button now runs the search too, instead of leaving the term in the box waiting for Enter. Ctrl+V (Cmd+V on Mac) still only fills the box, so a term can be edited before searching ([issue #18](https://github.com/iamprivacy/Waves/issues/18)).
+- 📜 The first-run terms are clearer about what Waves is and what you take on by using it: a personal, non-commercial tool (the word "educational" is gone), your use may breach TIDAL's own Terms of Service and you accept that risk, liability is limited as the AGPL-3.0 sets out, and you agree to indemnify the project. They now carry a version stamp, so a later revision can ask only the people who saw an older one.
+- 📏 The first-run terms card scrolls inside itself, so the checkbox and button stay reachable at the smallest window Waves allows.
+
+### 🐛 Fixed
+
+- 🎶 A downloaded playlist's file now lists its songs in the order TIDAL plays them, instead of the order the file names happened to sort, so a media server like Jellyfin plays it back as it was made. It is also written as .m3u8, the name the setting always promised; an existing .m3u file keeps its name and keeps receiving updates ([issue #22](https://github.com/iamprivacy/Waves/issues/22)).
+- 🌐 A library folder on a NAS is scanned by a small crew of threads instead of sixteen at once, so a first scan can no longer stall a struggling SMB mount. A library on a local disk scans at full speed as before.
+- 🔌 The library gets its share back on its own: macOS quietly ejects idle network volumes, and a library folder on one read as missing until you navigated to the share in Finder by hand. Every scan now asks macOS to mount it back first, the same way the download folder already reconnects, so a launch, the hourly re-check or one press of RESCAN restores the library without a trip to Finder.
+- 🎼 An album whose songs all share one title keeps every one of them when Waves is allowed to replace files ("Skip download if file already exists" off, or a re-download upgrading quality). Songs downloading at the same moment could aim at one file name, so a six-track album downloaded three at a time ended up as four files, a different four every run ([issue #19](https://github.com/iamprivacy/Waves/issues/19)).
+- 🪟 The "Exit while downloading?" prompt is no longer hidden behind the queue drawer, which used to leave the window looking stuck.
+- ⏳ Library badges arrive with the page they belong to instead of a second later: your saved library index is now read before the scan starts rather than behind it, and a search waits for that first answer. A badge the running scan turns up while you are looking at the page still appears, now fading in rather than snapping on.
+- 🖼️ A page of search results finishes building before it is shown, so the last rows no longer land after the page has already appeared.
+- 📜 The terms you have to agree to are the first thing you see: the launch animation now fades straight into the agreement, and the rest of Waves is neither shown nor usable until you accept it.
+
+### 🗑️ Removed
+
+- ✂️ The unused audio decryption path is gone: TIDAL serves standard MPEG-DASH streams for every quality Waves requests, so it had no job to do. A stream that somehow arrives encrypted now stops with a clear error instead of leaving an unplayable file in your library.
+
 ## 🗂️ v0.1.18 (2026-08-09)
 
 ### ✨ Added
