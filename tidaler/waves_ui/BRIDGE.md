@@ -63,6 +63,69 @@ feature.
 | `ffmpegMissingBlocked`                                             | A download would come out degraded without FFmpeg; a blocking choice is shown    |
 | `editionMergeChanged`                                              | The "best of both" edition-merge opt-in flipped                                  |
 
+## Local library presence (the "in your library" badge)
+
+The scan family lives in `bridge_library.py` (`LibraryMixin`, mixed into
+`WavesBridge`); `tidaler/library_index.py` walks the configured folder and
+`tidaler/matching.py` decides what counts as the same album.
+
+`decide_presence` answers at two strengths and the difference matters. `present`
+lights the pill and is generous. Beyond it the verdict splits into two
+independent axes: `sure` is IDENTITY (a year on both sides agreeing within one,
+and the title matching with its edition qualifiers intact), rendered as the
+badge's "?" (dropped when proven) and the choice between a green in-library
+button and the gold MAYBE; `full` is COVERAGE (a known source track count the
+local copy meets), rendered as N OF M and the cyan PARTIALLY button. `full`
+alone picks the button's shape (a complete copy replaces Download, however
+hedged its words; a short one keeps a live button), and every claim stays
+clickable and opens the gate, so a wrong match never dead-ends. `partial` False
+remains the strict both-axes bar for the consumers where being wrong costs a
+download outright: the bulk skip claims. The download engine never sees any of
+it (pinned by `test_presence_never_reaches_the_download_engine`).
+
+| Signal                     | Fires when                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| `libraryPresenceChanged`   | The presence index (re)built or was cleared; QML re-queries `libraryAlbumPresence` |
+| `libraryScanStatusChanged` | The scan's status or live progress moved; Settings re-reads `libraryScanStatus()`  |
+| `librarySourceChanged`     | A library pref committed (switch, source or folder); the Settings card re-reads    |
+
+Synchronous slots (answered from the in-memory index, no disk I/O):
+`libraryAlbumPresence(artist, title, year, tracks[, duration])` (duration is
+TIDAL's total seconds, the play-length identity witness),
+`libraryTrackPresence(artist, title[, album, album_year[, duration]])` (the
+exact-song answer behind a track's pill and its download button's claim face;
+the album pair and the track's seconds are what the identity can be proven
+against, and callers that omit them get `sure` False),
+`artistLibraryPresence(name)`, `libraryScanStatus()`, `libraryScanProgress()`,
+`librarySource()`, `libraryDownloadFolder()`,
+`rescanLibrary()` (forces a full re-list) and `revealLibraryAlbum(path)`
+(opens the matched folder in the file manager, resolved on a worker).
+
+With the opt-in `library_mb_arbiter` pref on (off by default: it sends artist
+and album-title search terms to musicbrainz.org), `libraryAlbumPresence` may
+also overlay a MusicBrainz verdict onto an unproven answer: the lookup runs on
+a worker behind a 1 req/s gate, the badge shows the unproven verdict
+immediately, and `libraryPresenceChanged` re-announces when a proof lands. The
+overlay can only ever upgrade `sure`; the bulk claim gate never reads it.
+
+The whole family is gated on the `library_enabled` pref, off by default: while
+it is off `_library_root()` resolves nothing and no folder is ever scanned. The
+Settings card stages `library_enabled` / `library_bulk_skip` /
+`library_source` / `library_folder` into the page's edit map, and SAVE CHANGES
+commits them through `applySettings`, which also starts the first scan of an
+enabled, configured library. `rescanLibrary()` acts only on the saved
+configuration.
+
+Bulk claim gate (`library_bulk_skip`, on by default, inert while the master
+switch is off): bulk downloads leave out what the scan claims. A discography
+drops fully claimed albums and guest tracks before queueing
+(`_library_claims_album` / `_library_claims_track`); a collection job gets a
+`library_claim` callable injected into the engine, consulted per track only
+after the exact-id ownership gate declines and never for a merge-plan member
+(`_claim_verdict`). Single-item jobs never get the callable, and
+`downloadAlbumAnyway(album_id)` (the claim dialog's DOWNLOAD ANYWAY) registers
+a per-album override so that click really downloads.
+
 ## Preview and video playback
 
 | Signal                          | Fires when                                                       |

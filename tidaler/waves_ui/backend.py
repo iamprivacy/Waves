@@ -82,17 +82,33 @@ from tidaler.helper.tidal import (
     search_results_all,
     user_media_lists,
 )
+from tidaler.library_index import (
+    POLL_GAUGE,
+    READ_GAUGE,
+    WALK_GAUGE,
+    LibraryIndex,
+    cache_file_for_root,
+    root_comparison_key,
+)
 from tidaler.model.cfg import HelpSettings
 from tidaler.model.cfg import Settings as CfgSettings
 from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.gui_data import ProgressBars
 from tidaler.ownership import OwnershipStore, quality_rank
+from tidaler.recording_scan import RecordingScan
 from tidaler.waves_ui import proc
 from tidaler.waves_ui.session import WavesTidal
 from tidaler.worker import Worker
 
 from . import __version__ as _WAVES_VERSION
 from . import devlog, diagnostics, netmount
+from .bridge_library import (
+    _LIBRARY_DEEP_SWEEP_MS,
+    _LIBRARY_DL_DEBOUNCE_MS,
+    _LIBRARY_POLL_MS,
+    _LIBRARY_WATCH_DEBOUNCE_MS,
+    LibraryMixin,
+)
 from .ffmpeg_manager import FfmpegCancelled, FfmpegManager
 from .updater import AppUpdater, UpdateCancelled
 
@@ -285,6 +301,7 @@ _FLAG_FIELDS = [
     # than as its own tile; listed here so applySettings persists it as a bool.
     "cover_single_track_file",
     "skip_existing",
+    "skip_duplicate_recordings",
     "confirm_category_download",
     "symlink_to_track",
     "playlist_create",
@@ -403,6 +420,16 @@ _FACTORY_WIPE_FILES = (
     "ownership.sqlite3",
     "ownership.sqlite3-wal",
     "ownership.sqlite3-shm",
+    "library.sqlite3",
+    "library.sqlite3-wal",
+    "library.sqlite3-shm",
+    # The MusicBrainz response cache: request URLs and response bodies derived
+    # from artist and album titles the user browsed, exactly the activity
+    # trace a factory reset promises to remove. The reset code closes it and
+    # swaps in a :memory: stand-in expressly so this wipe can take the file.
+    "mbarbiter.sqlite3",
+    "mbarbiter.sqlite3-wal",
+    "mbarbiter.sqlite3-shm",
     "app.log",
     "crash.log",
     "waves_dev.log",
@@ -415,6 +442,10 @@ _FACTORY_WIPE_FILES = (
 _FACTORY_WIPE_LOG_PATTERNS = (
     re.compile(r"crash\.log\.\d+\Z"),
     re.compile(r"waves_dev\.log\.\d+\Z"),
+    # Per-root library caches (library-<12 hex>.sqlite3 and sqlite's sidecars,
+    # see cache_file_for_root); the anchored digest shape only ever matches a
+    # file Waves named.
+    re.compile(r"library-[0-9a-f]{12}\.sqlite3(-wal|-shm)?\Z"),
     re.compile(r"waves-diagnostics-\d{8}-\d{6}-\d{3}\.txt\Z"),
 )
 # Waves-created subdirectories and the exact files Waves puts in them,
@@ -643,6 +674,7 @@ _FIELD_LABELS = {
     "downloads_concurrent_max": "Concurrent track downloads",
     "download_dolby_atmos": "Download Dolby Atmos",
     "confirm_category_download": "Confirm bulk downloads",
+    "skip_duplicate_recordings": "Skip songs you already have",
     # Discography & editions (a source toggle like the disco_* prefs)
     "video_download": "Music videos",
     # File organization
@@ -857,6 +889,9 @@ class _TrackedDownload(Download):
         track_signals: _ProgressSignals | None = None,
         ownership_of=None,
         target_rank: int = -1,
+        recording_scan=None,
+        skip_duplicate_recordings: bool = False,
+        library_claim=None,
         **kwargs,
     ) -> None:
         # Per-thread override for skip_existing, set up BEFORE super().__init__,
@@ -875,6 +910,22 @@ class _TrackedDownload(Download):
         # raising the quality setting re-fetches, a plain re-click does not.
         self._ownership_of = ownership_of
         self._target_rank = int(target_rank)
+        # "Skip songs you already have": an ISRC lookup over the artist folder
+        # this job writes into, for the same recording filed under another
+        # album (see tidaler/recording_scan.py). Off unless the user asked for
+        # it, and never applied to a merge plan, whose whole purpose is
+        # assembling one complete folder.
+        self._recording_scan = recording_scan
+        self._skip_duplicate_recordings = bool(skip_duplicate_recordings)
+        # The library scan's bulk claim gate (library_bulk_skip): a callable
+        # answering "does the user's library already claim this track?" from
+        # the tag-matched presence index, or None when the gate is off or this
+        # job is a single explicit item. Injected by the bridge so the engine
+        # stays import-isolated from tidaler.matching; consulted only after
+        # the exact-id ownership gate says "not owned", and never for a
+        # merge-plan member (a merge assembles ONE complete folder, and a
+        # claim points at the library, not this job's destination).
+        self._library_claim = library_claim
         # Per-track outcome tallies. The engine returns ok=False WITHOUT raising
         # when a stream URL can't be fetched (e.g. an unentitled free account
         # whose playback requests are rejected), so the job worker cannot tell
@@ -991,7 +1042,11 @@ class _TrackedDownload(Download):
             logger.debug("Ownership lookup failed; not gating", exc_info=True)
             return None
         if not rec:
-            return None
+            # Not owned under THIS track's id. The same recording may still sit
+            # under another edition's id (a shared song on a standard and a
+            # deluxe release have two different TIDAL ids), which only an ISRC
+            # match can see. Opt-in, and never for a merge member.
+            return "skip" if identity_id is None and self._duplicate_recording_owned(media, file_template) else None
         if identity_id is not None and not self._owned_at_destination(rec, media, file_template):
             return None
         # Rank -1 means no quality concept (a video's tier-less record): nothing
@@ -999,16 +1054,56 @@ class _TrackedDownload(Download):
         rank = int(rec.get("quality_rank", -1))
         return "skip" if rank < 0 or rank >= self._target_rank else "force"
 
-    def _owned_at_destination(self, rec: dict, media, file_template: str | None) -> bool:
-        """Whether an ownership record's file sits in the folder THIS job writes
-        into. Compares directories only (the extension depends on the delivered
-        codec) through the same template + sanitize pipeline item() uses, so a
-        sanitized album folder name compares equal to what was recorded. On any
-        doubt returns False: for a merge member, downloading again into the right
-        folder beats skipping and leaving the album incomplete."""
-        rec_path = str(rec.get("path") or "")
-        if not rec_path or not file_template:
+    def _duplicate_recording_owned(self, media, file_template: str | None) -> bool:
+        """Whether this recording already exists elsewhere under the artist
+        folder this job writes into, matched by ISRC.
+
+        The scan root is the PARENT of the destination album folder, i.e. the
+        artist folder under every default template, so a sibling edition is in
+        scope and the rest of the library is not. A template that puts albums
+        straight under the download root would make the root itself the scan
+        scope, which is why the root is never allowed as a scan target.
+
+        Any doubt (no ISRC, no template, an unresolvable destination) returns
+        False: downloading a second copy costs disk, a wrong skip costs a song.
+        """
+        if not self._skip_duplicate_recordings or self._recording_scan is None or media is None:
             return False
+        isrc = _track_isrc(media)
+        if not isrc:
+            return False
+        destination_dir = self._destination_dir(media, file_template)
+        if destination_dir is None:
+            return False
+        scan_root = destination_dir.parent
+        base = pathlib.Path(self.path_base).expanduser().absolute()
+        try:
+            # Refuse to scan the download root (or above it): that is the whole
+            # library, which this is deliberately not.
+            if os.path.normcase(str(scan_root)) == os.path.normcase(str(base)) or base not in scan_root.parents:
+                return False
+        except Exception:
+            return False
+        try:
+            found = self._recording_scan.path_for(str(scan_root), isrc)
+        except Exception:
+            # A dead mount, a permissions wall: never let a lookup failure
+            # reach the download path, and never let it become a skip.
+            logger.debug("Recording lookup failed; not gating", exc_info=True)
+            return False
+        if not found:
+            return False
+        # A copy inside the destination folder itself is skip-existing's job and
+        # is reported by the normal path; only a copy filed ELSEWHERE is this
+        # gate's business, so the two never both claim the same skip.
+        return os.path.normcase(str(pathlib.Path(found).parent)) != os.path.normcase(str(destination_dir))
+
+    def _destination_dir(self, media, file_template: str | None) -> pathlib.Path | None:
+        """The folder this job would write ``media`` into, through the same
+        template + sanitize pipeline item() uses, or None if it can't be
+        resolved."""
+        if not file_template:
+            return None
         try:
             relative = format_path_media(
                 file_template,
@@ -1023,11 +1118,44 @@ class _TrackedDownload(Download):
                 illegal_map=safe_filename_replacement_map(getattr(self.settings.data, "filename_illegal_map", None)),
             )
             destination = (pathlib.Path(self.path_base).expanduser() / (relative + ".x")).absolute()
-            destination_dir = path_file_sanitize(destination, adapt=True).parent
-            return os.path.normcase(str(pathlib.Path(rec_path).parent)) == os.path.normcase(str(destination_dir))
+            return path_file_sanitize(destination, adapt=True).parent
         except Exception:
-            logger.debug("Could not resolve a merge member's destination; not gating", exc_info=True)
+            logger.debug("Could not resolve a download destination folder", exc_info=True)
+            return None
+
+    def _owned_at_destination(self, rec: dict, media, file_template: str | None) -> bool:
+        """Whether an ownership record's file sits in the folder THIS job writes
+        into. Compares directories only (the extension depends on the delivered
+        codec) through the same template + sanitize pipeline item() uses, so a
+        sanitized album folder name compares equal to what was recorded. On any
+        doubt returns False: for a merge member, downloading again into the right
+        folder beats skipping and leaving the album incomplete."""
+        rec_path = str(rec.get("path") or "")
+        if not rec_path:
             return False
+        destination_dir = self._destination_dir(media, file_template)
+        if destination_dir is None:
+            return False
+        return os.path.normcase(str(pathlib.Path(rec_path).parent)) == os.path.normcase(str(destination_dir))
+
+    def _claim_verdict(self, media, file_template: str | None = None) -> str | None:
+        """The whole pre-fetch gate for one item: the exact-id ownership
+        verdict first, and only when ownership declines ("not owned"), the
+        library scan's bulk claim (library_claim, injected for collection jobs
+        with the bulk-skip pref on). Ownership's 'force' always wins: an
+        upgrade run must overwrite, and a tag guess must never talk it out of
+        that. A merge-plan member (waves_identity_id set) never consults the
+        claim: a merge assembles ONE complete folder, and the claim points at
+        the library, not this job's destination. A claim lookup failure never
+        gates: downloading twice beats not downloading at all."""
+        verdict = self._ownership_verdict(media, file_template)
+        if verdict is None and self._library_claim is not None and getattr(media, "waves_identity_id", None) is None:
+            try:
+                if self._library_claim(media):
+                    return "skip"
+            except Exception:
+                logger.debug("Library claim lookup failed; not gating", exc_info=True)
+        return verdict
 
     def _emit_skip(self, media):
         """Report a track skipped because its earlier download is still on disk:
@@ -1061,7 +1189,7 @@ class _TrackedDownload(Download):
         # equal-or-better quality is skipped without a network round-trip; an
         # upgrade run forces the path skip off so the engine overwrites the old
         # copy in place.
-        verdict = self._ownership_verdict(media, kwargs.get("file_template"))
+        verdict = self._claim_verdict(media, kwargs.get("file_template"))
         if verdict == "skip":
             return self._emit_skip(media)
         force = self._force_download() if verdict == "force" else contextlib.nullcontext()
@@ -1856,7 +1984,7 @@ def _scrub_browse_payload(payload: dict) -> dict:
     return payload
 
 
-class WavesBridge(QObject):
+class WavesBridge(LibraryMixin, QObject):
     """The single object exposed to QML as the ``waves`` context property.
 
     State model at a glance (each field is documented where it is created in
@@ -2115,6 +2243,14 @@ class WavesBridge(QObject):
         diagnostics.register_pool("ui", self.threadpool)
         diagnostics.register_pool("scan", self._scan_pool)
         diagnostics.register_pool("dl", self.dl_pool)
+        # The library scanner's three executors, via gauges: they are
+        # ThreadPoolExecutors built and torn down per scan, so what is registered
+        # is a stable in-flight counter rather than the pool itself. A cold scan
+        # of a big NAS library is the longest background job Waves runs, and its
+        # saturation is the first thing worth seeing in a verbose report.
+        diagnostics.register_pool("libwalk", WALK_GAUGE)
+        diagnostics.register_pool("libread", READ_GAUGE)
+        diagnostics.register_pool("libpoll", POLL_GAUGE)
         # Aggregate progress for "download discography": artist_id -> {keys, done,
         # failed, prog} so the artist button shows a bar averaged over its albums.
         self._artist_groups: dict[str, dict] = {}
@@ -2401,6 +2537,10 @@ class WavesBridge(QObject):
         # Album ids already run through (or exempt from) the automatic
         # best-of-both scan, so downloadAlbum never scans the same id twice.
         self._merge_scanned: set[str] = set()
+        # Album ids whose library claim the user overruled via DOWNLOAD
+        # ANYWAY: their jobs bypass the bulk claim gate for the session (a
+        # retry of an overridden album must not silently re-gate).
+        self._library_claim_overrides: set[str] = set()
         # When set, _emit_queue() coalesces, used while enqueueing a batch so
         # QML receives a single queueChanged for the whole discography.
         self._queue_emit_suspended = False
@@ -2423,6 +2563,11 @@ class WavesBridge(QObject):
         # and every query re-checks the filesystem, so the account has no bearing
         # on correctness.
         self._ownership = OwnershipStore(os.path.join(os.path.dirname(self.settings.file_path), "ownership.sqlite3"))
+        # ISRC lookups for "Skip songs you already have": no database and no
+        # background scan, just a per-folder cache built on demand (see
+        # tidaler/recording_scan.py). Cleared whenever a download lands so the
+        # next lookup sees the new file.
+        self._recording_scan = RecordingScan()
         # GUI-facing ownership answers come from this cache, refreshed on a tiny
         # dedicated pool: ownership_of stats the recorded file, and a stat on a
         # dropped network mount can block for many seconds, so it must never run
@@ -2435,11 +2580,165 @@ class WavesBridge(QObject):
         self._own_pool = QtCore.QThreadPool()
         self._own_pool.setMaxThreadCount(2)
         diagnostics.register_pool("ownership", self._own_pool)
+        # ---- Local music-library scan (the "in your library" badge) ----------
+        # See tidaler.library_index + bridge_library.LibraryMixin: scans the
+        # configured library folder for albums the user already has, downloaded
+        # by Waves or not. Kept across logout: it describes files on THIS disk.
+        # Local library-presence index: matching.presence_key -> [ {year, tracks,
+        # id, codec, bitrate, bits, rate}, ... ] built by scanning the user's
+        # music folder (see _rebuild_library_index). None means not built yet, so
+        # the badge stays hidden until a build lands. _library_gen bumps when the
+        # library folder changes so an in-flight scan of the old folder is
+        # discarded.
+        self._library_index = None
+        # The track-level twin: matching.track_key -> [ {id, codec, bitrate,
+        # bits, rate}, ... ], built in the same pass and published at the same
+        # moments, so the album pill and the track pill can never disagree
+        # about which scan they describe.
+        self._library_track_index = None
+        # Artist rollup ("how many albums / tracks by this artist are in my
+        # library"), lazily derived from _library_index and cached until that
+        # index object is swapped for a fresh one (see artistLibraryPresence).
+        self._library_artist_index: dict = {}
+        self._library_artist_index_src = None
+        self._library_index_building = False
+        self._library_index_pending = False
+        # Guards the check-then-set of the flags above. _rebuild_library_index is
+        # entered from the GUI thread (the timers, the watcher, Rescan) AND from a
+        # pool thread (a finishing scan's own trailing rebuild), so "if not
+        # building: building = True" is two bytecodes with a thread switch
+        # available in between: both callers pass the check and two scans then walk
+        # the same sqlite cache at once. Measured, not theoretical (a 60-album
+        # index publishing as 0 albums).
+        self._library_index_lock = Lock()
+        # Set when a coalesced trailing rebuild should force a FULL re-list (a
+        # manual Rescan collapsed into a running incremental scan must still do
+        # the full pass the user asked for, not inherit the cheap sweep).
+        self._library_force_full_pending = False
+        self._library_gen = 0
+        # Background library-watch state (all mutated on the GUI thread only).
+        # _library_poll_in_flight guards against overlapping container polls;
+        # _library_watcher is a QFileSystemWatcher attached only when the root is
+        # a local disk; _watched_paths is the authoritative set of the EXACT
+        # strings passed to addPaths (never watcher.directories(), whose
+        # normalised forms will not compare equal to the native paths dirs
+        # stores). The watcher and every library timer are created below on the
+        # GUI thread, so their slots have a running event loop.
+        self._library_poll_in_flight = False
+        self._library_watcher = None
+        self._watched_paths: set[str] = set()
+        self._library_watch_pending_add: list[str] = []
+        self._library_watch_burst_start = 0.0
+        # When the current run of landing downloads began, so the debounce below
+        # can be forced through at its ceiling instead of being pushed back
+        # forever by a queue that keeps delivering (see _on_download_recorded).
+        self._library_dl_burst_start = 0.0
+        # Outcome of the last folder scan (see tidaler.library_index SCAN_*), so
+        # Settings can tell "your library is empty" from "Waves can't read this
+        # folder". The progress dict feeds the live "Scanning… N of M" note
+        # during a cold scan (see libraryScanProgress).
+        self._library_scan_status = "unset"
+        self._library_scan_progress: dict = {}
+        self._library_scan_read_t0 = 0.0
+        self._library = self._open_library_index()
+        # The index object a scan currently holds (None outside a scan), so an
+        # invalidation can tell whether the object it just retired may be
+        # closed now or must be left to that scan's own cleanup.
+        self._library_scanning = None
+        # Freshness (see the _LIBRARY_* constants in bridge_library): a cheap
+        # container-mtime poll every few minutes (the network-safe backbone), an
+        # hourly full sweep (track-level changes inside an album), a twice-daily
+        # deep force_full sweep (heals a mount that never updates folder mtimes),
+        # and, on local disks only, a QFileSystemWatcher for near-instant
+        # updates. All timers and the watcher live on the GUI thread; heavy work
+        # is dispatched to the threadpool and marshalled back by signal.
+        self._librarySyncWatch.connect(self._sync_library_watch)
+        self._libraryPollDone.connect(self._on_library_poll_done)
+        self._downloadRecorded.connect(self._on_download_recorded)
+        self._revealResolved.connect(self._on_reveal_resolved)
+        self._library_dl_debounce = QtCore.QTimer(self)
+        self._library_dl_debounce.setSingleShot(True)
+        self._library_dl_debounce.setInterval(_LIBRARY_DL_DEBOUNCE_MS)
+        self._library_dl_debounce.timeout.connect(self._rebuild_library_index)
+        # (2) Hourly full incremental sweep: stats every folder incl. album leaves.
+        self._library_rescan_timer = QtCore.QTimer(self)
+        self._library_rescan_timer.setInterval(60 * 60 * 1000)
+        self._library_rescan_timer.timeout.connect(self._rebuild_library_index)
+        self._library_rescan_timer.start()
+        # (1) Cheap container-mtime poll: the universal, network-safe change check.
+        self._library_poll_timer = QtCore.QTimer(self)
+        self._library_poll_timer.setInterval(_LIBRARY_POLL_MS)
+        self._library_poll_timer.timeout.connect(self._poll_library_containers)
+        self._library_poll_timer.start()
+        # (3) Deep force_full sweep: re-lists ignoring the mtime cache to auto-heal
+        # a mount whose folders never change mtime (the manual Rescan does this too).
+        self._library_deep_timer = QtCore.QTimer(self)
+        self._library_deep_timer.setInterval(_LIBRARY_DEEP_SWEEP_MS)
+        self._library_deep_timer.timeout.connect(lambda: self._rebuild_library_index(force_full=True))
+        self._library_deep_timer.start()
+        # (4) Local-disk accelerator: one restartable debounce coalesces a burst of
+        # watcher events into a single rescan (the watcher itself is created lazily
+        # in _sync_library_watch once the root is known to be local).
+        self._library_watch_debounce = QtCore.QTimer(self)
+        self._library_watch_debounce.setSingleShot(True)
+        self._library_watch_debounce.setInterval(_LIBRARY_WATCH_DEBOUNCE_MS)
+        self._library_watch_debounce.timeout.connect(self._on_library_watch_settled)
+        # First scan after launch: the worker seeds badges instantly from the
+        # committed DB, then re-checks the library for changes made while Waves
+        # was closed. That check is normally the cheap mtime-incremental sweep,
+        # but if it has been longer than the deep-sweep interval since a full
+        # re-list, do a full one now so an add/remove/replace an unreliable mount
+        # hid from mtimes is caught on launch, not only after the 12h in-session
+        # sweep or a manual Rescan. The seed means this heavier sweep runs behind
+        # badges already shown.
+        self._rebuild_library_index(force_full=self._library.due_for_full_scan(_LIBRARY_DEEP_SWEEP_MS / 1000.0))
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
         # Now that the pref is known, raise diagnostics to verbose if asked
         # (starts the freeze watchdog + perf sampler; GUI thread required).
         diagnostics.set_verbose(self._waves_pref_bool("verbose_diagnostics"))
         self._try_token_login()
+
+    def _open_library_index(self) -> LibraryIndex:
+        """The scan cache for the CURRENT library root, opened beside the
+        settings file, degrading to a throwaway in-memory cache if the file
+        cannot be opened.
+
+        One file per root (see cache_file_for_root): choosing a new library
+        folder opens a new file and leaves the old folder's scan on disk, so
+        switching back later reopens a warm cache instead of rescanning
+        thousands of albums. Called again from _invalidate_library_index when
+        the root changes, so the open cache always belongs to the root the
+        badges are answered for.
+
+        A truncated cache file (a power cut during a WAL checkpoint, a full
+        disk) or a read-only config directory makes sqlite raise, and the first
+        call runs inside the bridge constructor, BEFORE the QML loads: an
+        exception here means the app never opens a window, so the user cannot
+        even reach the factory reset that would clear the file. Losing the
+        cache costs one re-scan; refusing to start costs the whole app."""
+        root = self._library_root()
+        path = cache_file_for_root(os.path.dirname(self.settings.file_path), root)
+
+        def stamped(idx: LibraryIndex) -> LibraryIndex:
+            # Which root this index answers for, by comparison key. A rebuild
+            # captured on one side of a folder change verifies its resolved
+            # root against this before scanning, so an index can never be
+            # walked for a root it was not opened for.
+            idx.opened_for_key = root_comparison_key(root)
+            return idx
+
+        try:
+            return stamped(LibraryIndex(path))
+        except Exception:
+            logger.exception("Library cache could not be opened; continuing without a persistent one")
+            try:
+                return stamped(LibraryIndex(":memory:"))
+            except Exception:
+                # Even :memory: failed, so sqlite ITSELF is broken, not our
+                # cache file, and half the app (settings, ownership) needs
+                # sqlite anyway. Nothing to fall back to: let it raise.
+                logger.exception("In-memory library cache unavailable too")
+                raise
 
     def eventFilter(self, obj, event) -> bool:
         """App-level filter for back/forward navigation input.
@@ -2726,6 +3025,10 @@ class WavesBridge(QObject):
             "year": _year(album),
             "date": _release_date(album),
             "tracks": _track_count(album),
+            # The release's total play length in raw seconds (0 when TIDAL
+            # never said), for the presence matcher's duration witness; the
+            # UI's readable form stays a per-view concern.
+            "duration_sec": int(getattr(album, "duration", 0) or 0),
             "quality": _quality_label(album),
             "popularity": _popularity(album),
             "explicit": bool(getattr(album, "explicit", False)),
@@ -2749,6 +3052,8 @@ class WavesBridge(QObject):
             "year": _year(track),
             "date": _release_date(track),
             "duration": _fmt_duration(getattr(track, "duration", 0)),
+            # And in raw seconds, for the presence matcher's duration witness.
+            "duration_sec": int(getattr(track, "duration", 0) or 0),
             "quality": _quality_label(track),
             "popularity": _popularity(track),
             "explicit": bool(getattr(track, "explicit", False)),
@@ -4795,6 +5100,9 @@ class WavesBridge(QObject):
                     self._remember(kind, media_id, obj)
                 desc = ""
                 artist_id = ""
+                album_artist = ""
+                album_year = ""
+                album_quality = ""
                 if kind == "mix":
                     with self._browse_lock:  # lazy Mix.items() also parses a page
                         raw = obj.items() or []
@@ -4813,7 +5121,10 @@ class WavesBridge(QObject):
                     subtitle = f"By {cname}" if cname else ""
                     desc = str(getattr(obj, "description", "") or "")
                 elif kind == "album":
-                    subtitle = name_builder_album_artist(obj) + (f"  ·  {_year(obj)}" if _year(obj) else "")
+                    album_artist = name_builder_album_artist(obj)
+                    album_year = _year(obj)
+                    album_quality = _quality_label(obj)  # TIDAL's best tier, static album metadata
+                    subtitle = album_artist + (f"  ·  {album_year}" if album_year else "")
                     artist_id = _artist_id(obj)
                 # "N tracks · 2 hr 14 min", fills the header's stats line.
                 total = sum(int(getattr(t, "duration", 0) or 0) for t in tracks)
@@ -4895,6 +5206,19 @@ class WavesBridge(QObject):
                         "desc": desc,
                         "stats": stats,
                         "artist_id": artist_id,
+                        # Explicit album metadata (album only; "" elsewhere) so QML
+                        # can drive the library album-presence check without
+                        # re-parsing the pre-joined subtitle. Static, so it persists
+                        # fine in _browse_pages; the presence result itself is NEVER
+                        # stored.
+                        "artist": album_artist,
+                        "year": album_year,
+                        "num_tracks": len(tracks),
+                        # Total play length in seconds over the same tracks
+                        # num_tracks counts, so the presence matcher's duration
+                        # witness compares like with like. Album pages only.
+                        "duration_sec": total if kind == "album" else 0,
+                        "quality": album_quality,
                         "art": _image(obj, 480),
                     },
                     "sections": sections,
@@ -5370,6 +5694,15 @@ class WavesBridge(QObject):
                 sample_rate=quality.get("sample_rate"),
                 codecs=quality.get("codecs"),
             )
+            # A new file changed its folder's mtime, so any cached ISRC map for
+            # a scan root above it is stale (directory mtimes settle at
+            # second-granularity on some filesystems, so drop the cache rather
+            # than trust the stamp to have moved). Deliberately AFTER the
+            # ownership write and separately guarded: the duplicate-skip cache
+            # is an optimisation, and a problem clearing it must never cost the
+            # ownership record, which is what DOWNLOADED and skip both read.
+            with contextlib.suppress(Exception):
+                self._recording_scan.forget()
             # The file was written this instant, so assert the cache entry
             # directly (no stat needed) and let QML flip the button now. The
             # next TTL refresh reconciles against the store's full row set.
@@ -5388,6 +5721,10 @@ class WavesBridge(QObject):
                 self._own_cache[str(ev.get("id"))] = (time.monotonic(), rec)
                 self._evict_own_cache_locked()
             self.ownershipChanged.emit(str(ev.get("id")))
+            # Cross to the GUI thread (queued): when the library IS the download
+            # folder, the landed file means the scan index is stale, so the
+            # debounced rebuild lights the album's badge soon after the batch.
+            self._downloadRecorded.emit()
         except Exception:
             logger.debug("Could not record ownership", exc_info=True)
 
@@ -5710,6 +6047,31 @@ class WavesBridge(QObject):
             # themselves. Housekeeping, not in settingsSchema.
             "illegal_map_offer_done": False,
             "clean_album_artist": True,
+            # The "in your library" ownership badge scan. library_enabled is the
+            # master switch, off by default: while it is off _library_root()
+            # resolves to nothing, so no folder (the download folder included) is
+            # ever scanned, whatever the other two prefs say. library_source is
+            # where an enabled scan looks: "separate" (a folder the user picks,
+            # the default) or "download" (the same folder Waves downloads to).
+            # library_folder is the separate folder's path. All three are staged
+            # on the Settings Library card and committed together by SAVE CHANGES
+            # (applySettings), which also starts the first scan.
+            "library_enabled": False,
+            "library_source": "separate",
+            "library_folder": "",
+            # While the scan is enabled, bulk downloads (a discography, an
+            # album, a playlist) leave out what the scan already claims, so a
+            # big queue never lands a clone of something the user has. On by
+            # default (skipping is the safe direction: it costs a re-click,
+            # never a file); a single-track click is always explicit and is
+            # never gated, and DOWNLOAD ANYWAY on a claimed album overrides
+            # the gate for that album. Inert while library_enabled is off.
+            "library_bulk_skip": True,
+            # MusicBrainz arbitration of matches the scan cannot prove:
+            # opt-in, OFF by default (it sends artist and album-title search
+            # terms to musicbrainz.org, and no-data-by-default is the
+            # promise). Inert while library_enabled is off.
+            "library_mb_arbiter": False,
             # Updates: opt-in, off by default (preserves the no-phone-home-by-
             # default promise). update_last_check is housekeeping state, not a
             # user-facing setting, so it isn't in settingsSchema.
@@ -5812,6 +6174,7 @@ class WavesBridge(QObject):
     def setWavesPref(self, key: str, value) -> None:
         if key not in self._waves_prefs:
             return
+        old = self._waves_prefs[key]
         # Preserve the pref's type, a bool stored via str() becomes the truthy
         # string "False", so coerce against the existing default's type.
         if isinstance(self._waves_prefs[key], bool):
@@ -5830,6 +6193,56 @@ class WavesBridge(QObject):
             self.videoHoverPeekChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
+        elif key == "library_enabled" and value != old:
+            # The library scan's master switch flipped (SAVE CHANGES or the
+            # settings reset, both via applySettings). Off drops every badge at
+            # once; on stays inert here, applySettings starts the first scan
+            # itself once the whole staged card has landed. Either way the QML
+            # mirrors re-read through librarySourceChanged.
+            devlog.event("library", "scan " + ("enabled" if value else "disabled"))
+            self._invalidate_library_index()
+            self.librarySourceChanged.emit()
+        elif key == "library_bulk_skip" and value != old:
+            # Enqueue-time gate only: no index to drop or rebuild. The emit
+            # keeps the Settings card's saved-state mirror honest so its dirty
+            # flag clears after SAVE CHANGES.
+            self.librarySourceChanged.emit()
+        elif key == "library_mb_arbiter" and value != old:
+            devlog.event("library", "MusicBrainz arbitration " + ("enabled" if value else "disabled"))
+            if not value:
+                # Switching off drops the overlay's answers at once, so no
+                # badge keeps wearing a proof the setting no longer allows.
+                self._mb_verdicts = {}
+                self._mb_pending = set()
+            # Re-announce so every pill re-resolves through (or without) the
+            # overlay, and the Settings mirror clears its dirty flag.
+            self.libraryPresenceChanged.emit()
+            self.librarySourceChanged.emit()
+        elif key == "library_source" and value != old:
+            # The scan's source flipped (SAVE CHANGES or the settings reset,
+            # both via applySettings): stale badges drop and the QML source
+            # picker re-reads.
+            self._invalidate_library_index()
+            self.librarySourceChanged.emit()
+        elif key == "library_folder" and value != old:
+            # Breadcrumb (no path, count-free): a non-empty folder becoming
+            # empty is almost always a bug upstream, not a user intent; make
+            # any recurrence visible in a diagnostics export.
+            if str(old).strip() and not str(value).strip():
+                logger.warning("library folder pref was cleared")
+            # The separate library folder moved: drop the old folder's badges
+            # rather than auto-indexing a folder the user may still be choosing;
+            # applySettings starts the scan of the new folder once the staged
+            # card lands. In download mode this field is hidden and does not
+            # drive the scan, so it has no badges of its own to drop.
+            if self._waves_prefs.get("library_source") != "download":
+                self._invalidate_library_index()
+            # The emit tells the Settings card a library pref committed, so its
+            # saved-state mirrors (which gate Rescan) re-read. Unconditional,
+            # unlike the drop above: the folder lands in waves.json whatever the
+            # source is, and a mirror that skipped it would leave the card
+            # showing the old path (and reading dirty) after a save.
+            self.librarySourceChanged.emit()
 
     def _waves_pref_bool(self, key: str) -> bool:
         v = self._waves_prefs.get(key, False)
@@ -6119,7 +6532,20 @@ class WavesBridge(QObject):
                         out.append(a)
         return out
 
-    def _build_download(self, signals: _ProgressSignals, event_abort: Event | None = None) -> Download:
+    def _library_claim_media(self, media) -> bool:
+        """Engine-facing adapter for the bulk claim gate: does the library scan
+        claim this track? Videos never match: the scan indexes audio, and a
+        music video sharing its song's title must not be skipped because the
+        audio copy exists. Artist resolution mirrors _track_key, so the gate
+        asks about the same identity the dedup and pill layers use."""
+        if media is None or isinstance(media, Video):
+            return False
+        artist = _primary_artist_name(media) or name_builder_artist(media)
+        return self._library_claims_track(artist, name_builder_title(media))
+
+    def _build_download(
+        self, signals: _ProgressSignals, event_abort: Event | None = None, library_claim=None
+    ) -> Download:
         self._resolve_ffmpeg()
         progress_gui = ProgressBars(
             item=signals.item,
@@ -6139,6 +6565,9 @@ class WavesBridge(QObject):
             track_signals=signals,
             ownership_of=self._ownership.ownership_of,
             target_rank=self._target_quality_rank(),
+            recording_scan=self._recording_scan,
+            skip_duplicate_recordings=bool(getattr(self.settings.data, "skip_duplicate_recordings", False)),
+            library_claim=library_claim,
         )
         self._warn_if_ffmpeg_missing(dl)
         return dl
@@ -6323,7 +6752,7 @@ class WavesBridge(QObject):
         origins[root] = url
         self.settings.data.network_mount_origins = origins
         self._save_settings()
-        logger.info("Recorded the download share's origin for later remounts")
+        logger.info("Recorded the share's origin for later remounts")
 
     # A failed remount is not retried inside this window, however many probes
     # fail meanwhile: the recovery watch re-probes every few seconds, and each
@@ -6335,7 +6764,9 @@ class WavesBridge(QObject):
         from /Volumes (macOS quietly ejects idle network shares on sleep or a
         network blip) and its origin was recorded while healthy, ask macOS to
         mount it back, the same request Finder serves when the user navigates
-        to the share by hand, minus the window. True when the mount call
+        to the share by hand, minus the window. Despite the name this serves
+        any share the app depends on: the library scan calls it for its root
+        too, which can live on a different volume than downloads. True when the mount call
         succeeded and the folder deserves one more probe. A mount point that
         still exists is normally left alone (present-but-cold is the warm-up
         path's job, and mounting over a live mount would fight the OS), UNLESS
@@ -6357,11 +6788,6 @@ class WavesBridge(QObject):
             return False
         if present and not wedged:
             return False
-        now = time.monotonic()
-        with self._remount_lock:
-            if now - self._remount_last < self._REMOUNT_COOLDOWN_SEC:
-                return False
-            self._remount_last = now
         origins = self.settings.data.network_mount_origins or {}
         root = os.path.join("/Volumes", vol)
         url = origins.get(root, "")
@@ -6374,13 +6800,23 @@ class WavesBridge(QObject):
                     url = candidate
                     break
         if not url:
-            logger.info("Download volume is gone and no origin is recorded; cannot mount it back")
+            logger.info("The share is gone and no origin is recorded; cannot mount it back")
             return False
+        # The cooldown is claimed only once there is a call to claim it for.
+        # Stamped before the origin lookup, a share that has no recorded origin
+        # (a library root never once reached, so never once healthy) spent the
+        # shared window on a mount it was never going to attempt, and the
+        # download folder's own recovery watch found the door closed behind it.
+        now = time.monotonic()
+        with self._remount_lock:
+            if now - self._remount_last < self._REMOUNT_COOLDOWN_SEC:
+                return False
+            self._remount_last = now
         if present:
             # Wedged: the mount point exists but has answered nothing for the
             # whole watch window. Force the corpse off first; if even that
             # fails, mounting on top would only stack a second zombie.
-            logger.info("Download volume is wedged; force-unmounting the hung mount")
+            logger.info("The share is wedged; force-unmounting the hung mount")
             try:
                 argv = ["/usr/sbin/diskutil", "unmount", "force", os.path.join("/Volumes", vol)]
                 out = subprocess.run(argv, capture_output=True, timeout=15)  # noqa: S603
@@ -6390,7 +6826,7 @@ class WavesBridge(QObject):
             if out.returncode != 0:
                 logger.info("Force unmount of the wedged volume was declined")
                 return False
-        logger.info("Download volume is gone; asking macOS to mount it back")
+        logger.info("The share is gone; asking macOS to mount it back")
         return netmount.remount(url, timeout_s=20.0)
 
     def _downloads_running(self) -> bool:
@@ -6796,7 +7232,15 @@ class WavesBridge(QObject):
         # _ProgressSignals); hold a strong ref so it lives for the whole job.
         signals = _ProgressSignals(self, qid, media_id, collection)
         self._job_signals[qid] = signals
-        dl = self._build_download(signals, event_abort=job_abort)
+        # The bulk claim gate rides only on collection jobs: a single-item
+        # click is an explicit ask and is never second-guessed by a tag match.
+        # DOWNLOAD ANYWAY on a claimed album registers an override for that
+        # album id, so the click that overruled the claim really downloads
+        # (and so do its retries this session).
+        library_claim = None
+        if collection and self._library_bulk_skip_on() and media_id not in self._library_claim_overrides:
+            library_claim = self._library_claim_media
+        dl = self._build_download(signals, event_abort=job_abort, library_claim=library_claim)
         if collection or merge_plan is not None:
             # Seed the per-track registry. A merge plan knows its exact track
             # list up front; a plain collection fills in as tracks start.
@@ -7117,8 +7561,8 @@ class WavesBridge(QObject):
                 stream = track.get_stream()
                 manifest = stream.get_stream_manifest()
                 if manifest.is_encrypted:
-                    # Encrypted streams need the download+decrypt path; not a
-                    # target for lightweight preview streaming.
+                    # Waves does not process encrypted streams, so there is
+                    # nothing here to preview.
                     raise RuntimeError("preview: encrypted stream is not previewable")  # noqa: TRY003
                 # BTS (a single https file) is directly seekable; hand it straight
                 # to ffmpeg too so every path yields a uniform local clip.
@@ -7173,7 +7617,7 @@ class WavesBridge(QObject):
         if not segments:
             return None
         if any(getattr(seg.key, "method", None) not in (None, "NONE") for seg in segments):
-            return None  # keyed segments belong to the download+decrypt path
+            return None  # Waves does not process keyed segments
         if not whole:
             keep, total = 0, 0.0
             for seg in segments:
@@ -7811,6 +8255,16 @@ class WavesBridge(QObject):
         )
 
     @Slot(str)
+    def downloadAlbumAnyway(self, album_id: str) -> None:
+        """DOWNLOAD ANYWAY on the library-claim dialog: the user has seen the
+        claim and overruled it, so this album's job bypasses the bulk claim
+        gate that would otherwise skip every matched track it contains (the
+        dialog fires precisely when the whole album matches, so an un-overridden
+        job would fetch nothing and report done)."""
+        self._library_claim_overrides.add(str(album_id))
+        self.downloadAlbum(album_id)
+
+    @Slot(str)
     def downloadAlbumBestOfBoth(self, album_id: str) -> None:
         """Download this album as a 'best of both': the most complete edition's
         track list, with each shared recording pulled from the highest-quality
@@ -8324,6 +8778,22 @@ class WavesBridge(QObject):
                     deduped, plans = self._merge_editions(deduped)
                 else:
                     deduped = self._collapse_editions(deduped)
+            # The bulk claim gate, album-grained: leave out whole albums the
+            # library scan fully claims (the same bar that turns their buttons
+            # gold) before anything is queued, so a discography neither
+            # re-fetches nor re-folders what the user already has. Partially
+            # matched albums still queue; the engine's per-track gate skips
+            # the tracks the scan claims inside them. A merge identity that is
+            # fully claimed drops with its plan: the user has the album, so
+            # there is nothing to assemble.
+            skipped = 0
+            if self._library_bulk_skip_on():
+                kept_albums = [a for a in deduped if not self._library_claims_album(a)]
+                kept_plans = [(i, p) for i, p in plans if not self._library_claims_album(i)]
+                skipped = (len(deduped) - len(kept_albums)) + (len(plans) - len(kept_plans))
+                deduped, plans = kept_albums, kept_plans
+                if skipped:
+                    devlog.event("library", f"discography skipped {skipped} claimed albums")
             keys: list[str] = []
             for album in deduped:
                 key = str(getattr(album, "id", id(album)))
@@ -8356,6 +8826,13 @@ class WavesBridge(QObject):
                         self._set_status("Could not load the full discography, try again")
                         return
                 for t in self._dedup_tracks(gtracks):
+                    # Guest spots queue as single-track jobs, which the
+                    # engine's claim gate deliberately ignores (a single click
+                    # is explicit); a discography queueing them is a bulk
+                    # action, so the claim is applied here instead.
+                    if self._library_bulk_skip_on() and self._library_claim_media(t):
+                        skipped += 1
+                        continue
                     tkey = str(getattr(t, "id", id(t)))
                     self._remember("track", tkey, t)
                     track_keys.append(tkey)
@@ -8391,7 +8868,9 @@ class WavesBridge(QObject):
                 devlog.event("discography_videos", videos=len(video_keys))
             if not keys and not track_keys and not video_keys:
                 self.downloadState.emit(artist_id, "")
-                self._set_status("No albums to download")
+                # An all-claimed discography is a success story, not an empty
+                # artist; say which of the two happened.
+                self._set_status("Everything here is already in your library" if skipped else "No albums to download")
                 return
             # Register an aggregate group BEFORE queueing so each album's (and
             # guest track's) progress/completion rolls up into the artist
@@ -8425,7 +8904,8 @@ class WavesBridge(QObject):
                 parts.append(f"{len(track_keys)} guest tracks")
             if video_keys:
                 parts.append(f"{len(video_keys)} videos")
-            self._set_status("Downloading " + " + ".join(parts) + "…")
+            note = f" ({skipped} already in your library)" if skipped else ""
+            self._set_status("Downloading " + " + ".join(parts) + "…" + note)
 
         # Serialised scan pool: queueing several artists scans them one at a time
         # rather than racing on the shared tidalapi session and caches.
@@ -8553,6 +9033,21 @@ class WavesBridge(QObject):
         every abort event (segment loops check it per chunk, see
         ``download._download_segment``), drop work that has not started, then
         wait a bounded moment for in-flight jobs to unwind."""
+        # Stop the library-watch timers and drop file watches first, so no new
+        # scan is dispatched during teardown and no watch handles leak.
+        for _t in (
+            "_library_dl_debounce",
+            "_library_rescan_timer",
+            "_library_poll_timer",
+            "_library_deep_timer",
+            "_library_watch_debounce",
+        ):
+            with contextlib.suppress(Exception):
+                getattr(self, _t, None) and getattr(self, _t).stop()
+        with contextlib.suppress(Exception):
+            self._teardown_library_watch()
+        # getattr: partial test stubs drive shutdown without the library family.
+        self._library_gen = getattr(self, "_library_gen", 0) + 1  # any in-flight scan bails at its next check
         try:
             if getattr(self, "_event_abort", None) is not None:
                 self._event_abort.set()
@@ -8585,6 +9080,19 @@ class WavesBridge(QObject):
             self._ownership.close()
         except Exception:
             logger.debug("shutdown: ownership store close failed", exc_info=True)
+        # The library scan cache closes after the pools drain (its scan worker
+        # runs on threadpool, waited on above, and bails on the bumped gen).
+        try:
+            self._library.close()
+        except Exception:
+            logger.debug("shutdown: library index close failed", exc_info=True)
+        # The MusicBrainz response cache, if arbitration ever ran this session.
+        try:
+            arb = getattr(self, "_mb_arbiter", None)
+            if arb is not None:
+                arb.close()
+        except Exception:
+            logger.debug("shutdown: MusicBrainz cache close failed", exc_info=True)
         # The kept preview clips are session files; sweep them on the way out
         # (the pools are drained above, so no remux is still writing one).
         for path in self._preview_clips.values():
@@ -8908,14 +9416,61 @@ class WavesBridge(QObject):
 
     @Slot()
     def clearFinished(self) -> None:
+        """Clear the Completed section: done and cancelled rows.
+
+        Failed rows are NOT swept here. Losing them silently alongside the
+        completed ones is issue #18: a failure would vanish before it could be
+        retried. The Failed section carries its own CLEAR, so dismissing a
+        failure is always something the user aimed at."""
         with self._queue_lock:
-            self._queue = [q for q in self._queue if q["status"] not in {"done", "failed", "cancelled"}]
+            self._queue = [q for q in self._queue if q["status"] not in {"done", "cancelled"}]
             self._reindex_queue()
         self._emit_queue()
 
     @Slot()
+    def clearFailed(self) -> None:
+        """Clear the Failed section. Terminal rows, so no Worker to abort."""
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["status"] != "failed"]
+            self._reindex_queue()
+        self._emit_queue()
+
+    @Slot()
+    def clearQueued(self) -> None:
+        """Clear the Queued section: work that has not started yet.
+
+        Each row may already have a Worker sitting in dl_pool that has not
+        picked up, so abort every one before dropping it. Without that the
+        download would go ahead invisibly, with no row left to show or stop
+        it (the same reasoning as clearQueue)."""
+        with self._queue_lock:
+            doomed = [q for q in self._queue if q["status"] == "queued"]
+        for q in doomed:
+            ev = self._job_aborts.get(q["qid"])
+            if ev is not None:
+                ev.set()
+        with self._queue_lock:
+            self._queue = [q for q in self._queue if q["status"] != "queued"]
+            self._reindex_queue()
+        self._emit_queue()
+
+    @Slot()
+    def retryAllFailed(self) -> None:
+        """Retry every failed row in one click (the Failed section's header).
+
+        Snapshot the qids first: retryQueueItem mutates the queue (drops the
+        row, re-enqueues the download) while this loop walks it."""
+        with self._queue_lock:
+            qids = [q["qid"] for q in self._queue if q["status"] == "failed"]
+        for qid in qids:
+            self.retryQueueItem(qid)
+
+    @Slot()
     def clearQueue(self) -> None:
-        """Clear the whole list (running downloads keep going in the background)."""
+        """Clear every row that is not actively downloading (the footer's CLEAR ALL).
+
+        Rows still writing bytes are spared and keep going: killing a transfer
+        mid-write is per-row CANCEL's job, not a bulk button's."""
         # A 'queued' row may already have a Worker submitted to dl_pool that
         # hasn't started; dropping the row without aborting it would let it
         # download invisibly. Abort every removed non-running item so its pooled
@@ -9144,6 +9699,38 @@ class WavesBridge(QObject):
             f["key"]: f
             for f in [
                 {
+                    # Composite control (QML renders "library" specially): a
+                    # master on/off toggle (off by default, the card below it
+                    # greys out), a download-vs-separate source picker, the
+                    # separate folder field, the live scan progress, and a
+                    # Rescan button. The controls stage into the page's editMap
+                    # and commit through SAVE CHANGES (applySettings), which
+                    # also starts the first scan; only Rescan acts immediately,
+                    # and only on the saved configuration.
+                    "key": "library",
+                    # The composite is a UI marker, not a pref; naming its
+                    # backing prefs here lets _factory_default_values enumerate
+                    # them, so RESET ALL SETTINGS restores the library switch,
+                    # source, folder, bulk-skip and MusicBrainz toggles like
+                    # every other field.
+                    "enabled_key": "library_enabled",
+                    "file_key": "library_source",
+                    "child_key": "library_folder",
+                    "bulk_key": "library_bulk_skip",
+                    "mb_key": "library_mb_arbiter",
+                    "label": "Music library",
+                    "help": (
+                        "Choose where your music library lives, then SAVE CHANGES to scan it. Waves matches "
+                        "your TIDAL browsing against it to badge what you already have. Scanning only ever "
+                        "reads: it never writes, moves or renames anything it finds."
+                    ),
+                    "type": "library",
+                    # The composite reads its state live from the bridge; this empty
+                    # value only satisfies the generic str/enum delegates, which
+                    # still instantiate (hidden) for every field and read f.value.
+                    "value": "",
+                },
+                {
                     "key": "explicit_mode",
                     "label": "Explicit versions",
                     "help": (
@@ -9241,8 +9828,10 @@ class WavesBridge(QObject):
                     "help": (
                         "Preview and download controls rise up from the bottom of a cover with a "
                         "small bounce when you hover it, and roll their contents over when a "
-                        "preview or a download starts. Turn this off to have them simply fade "
-                        "in and out, and change over instantly."
+                        "preview or a download starts. Download buttons ride the same roll "
+                        "between their states (queued, progress, done, retry), with colours "
+                        "fading along. Turn this off to have them simply fade in and out, and "
+                        "change over instantly."
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("hover_control_motion"),
@@ -9447,8 +10036,17 @@ class WavesBridge(QObject):
                     "downloads_concurrent_max",
                     "download_dolby_atmos",
                     "skip_existing",
+                    "skip_duplicate_recordings",
                     "confirm_category_download",
                     "download_delay",
+                ],
+            },
+            {
+                "group": "Library",
+                "id": "library",
+                "desc": "Point Waves at your music library so it can badge what you already have.",
+                "fields": [
+                    "library",
                 ],
             },
             {
@@ -9668,6 +10266,14 @@ class WavesBridge(QObject):
             values = values.toVariant()
         values = dict(values or {})
         data = self.settings.data
+        # Snapshot what the library scan follows BEFORE the loop below writes
+        # it, so the triggers at the end can ask "did this change" instead of
+        # "was this submitted". The Settings page deliberately keeps its edit
+        # map populated after a save (the controls go on showing what landed),
+        # so every later save in the same visit resubmits these keys unchanged:
+        # a presence test would sweep the library again on each one.
+        lib_before = {k: self._waves_prefs.get(k) for k in ("library_enabled", "library_source", "library_folder")}
+        dl_base_before = getattr(data, "download_base_path", None)
         for key, value in values.items():
             if key in self._waves_prefs:
                 self.setWavesPref(key, value)
@@ -9756,6 +10362,26 @@ class WavesBridge(QObject):
         # status so the glyph + toggles update live (no reopen needed).
         if "path_binary_ffmpeg" in values:
             self.ffmpegStatusChanged.emit()
+        # The library-scan target follows the download folder when the user said
+        # their library IS the download folder; a moved folder means stale badges,
+        # so drop them (the rescan below builds the new folder's index).
+        lib_edit = any(self._waves_prefs.get(k) != v for k, v in lib_before.items())
+        if (
+            getattr(data, "download_base_path", None) != dl_base_before
+            and self._waves_prefs.get("library_source") == "download"
+        ):
+            self._invalidate_library_index()
+            lib_edit = True
+        # SAVE CHANGES is also the library card's Start scan: a library setting
+        # that actually MOVED starts the fresh configuration's first scan,
+        # provided the master switch is on and a folder is set, which is exactly
+        # when _library_root resolves. A disabled or unconfigured save resolves
+        # no root and scans nothing; the setWavesPref branches already dropped
+        # any stale badges the moment their keys landed. A save that resubmits
+        # the same library values (any second save in one visit) scans nothing:
+        # re-walking the tree is what the card's own Rescan button is for.
+        if lib_edit and self._library_root():
+            self._rebuild_library_index()
         # No dl_pool resize: the queue is serial by design (one item at a time,
         # in order). downloads_concurrent_max sizes the engine's per-collection
         # track executor, which reads settings.data live on each download, so a
@@ -9778,7 +10404,14 @@ class WavesBridge(QObject):
         values: dict = {}
         for section in self.settingsSchema():
             for field in section["fields"]:
-                for key in (field.get("key"), field.get("file_key"), field.get("child_key")):
+                for key in (
+                    field.get("key"),
+                    field.get("enabled_key"),
+                    field.get("file_key"),
+                    field.get("child_key"),
+                    field.get("bulk_key"),
+                    field.get("mb_key"),
+                ):
                     if not key or key in values:
                         continue
                     if key in pref_defaults:
@@ -9839,6 +10472,24 @@ class WavesBridge(QObject):
         # throwaway in-memory store instead of a closed connection.
         with contextlib.suppress(Exception):
             self._ownership = OwnershipStore(":memory:")
+        # Same close-then-reopen-in-memory for the library scan cache, so a
+        # straggler scan or badge query can neither crash nor resurrect the file
+        # between the wipe and the quit. getattr: partial test stubs drive this
+        # slot without the library family.
+        self._library_gen = getattr(self, "_library_gen", 0) + 1  # discard any in-flight scan's publish
+        with contextlib.suppress(Exception):
+            self._library.close()
+        with contextlib.suppress(Exception):
+            self._library = LibraryIndex(":memory:")
+        # Same for the MusicBrainz response cache, so the wipe can delete its
+        # file and a straggler arbitration neither crashes nor resurrects it.
+        with contextlib.suppress(Exception):
+            arb = getattr(self, "_mb_arbiter", None)
+            if arb is not None:
+                arb.close()
+                from tidaler.mb_arbiter import MBArbiter
+
+                self._mb_arbiter = MBArbiter(":memory:")
         with contextlib.suppress(Exception):
             diagnostics.detach_disk_log()
         base = path_config_base()
