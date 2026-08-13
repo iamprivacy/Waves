@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.18"
+version = "0.1.19"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -157,6 +157,11 @@ ignore = [
 # Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
 # helper for real on macOS (S603, fixed argv).
 "tests/test_apple_double_cleanup.py" = ["S603"]
+# The library scanner's directory walk (_walk_album_dirs) is a small state
+# machine over each folder's probe result (unchanged / relist / transient error /
+# vanished / root offline); the branching is the point and the function was kept
+# whole so it reads (and was reviewed) as one flow, so exempt mccabe (C901).
+"tidaler/library_index.py" = ["C901"]
 # Same subprocess-isolation + linear-scenario shape as the scroll guard.
 "tests/test_forward_history_account_switch.py" = ["S603", "C901"]
 "tests/test_playlist_folder_qml.py" = ["S603", "C901"]
@@ -165,10 +170,21 @@ ignore = [
 "tests/test_search_scroll_reset.py" = ["S603", "C901"]
 "tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
 "tests/test_boot_handover_gate.py" = ["S603", "C901"]
+"tests/test_browse_card_library_state.py" = ["S603", "C901"]
+"tests/test_library_track_claim.py" = ["S603", "C901"]
 "tests/test_boot_version_drain_order.py" = ["S603", "C901"]
 "tests/test_boot_scroll_dressing_hidden.py" = ["S603", "C901"]
 "tests/test_boot_input_shield.py" = ["S603", "C901"]
 "tests/test_boot_reveal_prewarm.py" = ["S603", "C901"]
+"tests/test_search_paste_autosearch.py" = ["S603", "C901"]
+"tests/test_queue_failed_section.py" = ["S603", "C901"]
+"tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
+"tests/test_library_downloaded_state.py" = ["S603", "C901"]
+"tests/test_qml_loads.py" = ["S603", "C901"]
+"tests/test_presence_call_budget.py" = ["S603", "C901"]
+# Imports the download engine in a clean interpreter to check its import closure
+# (S603, fixed argv: sys.executable -c with a literal probe).
+"tests/test_library_bridge.py" = ["S603"]
 "tests/test_nav_seq_and_history_guards.py" = ["S603", "C901"]
 "tests/test_folder_badge_and_crumb_labels.py" = ["S603", "C901"]
 "tests/test_hover_swell_fade.py" = ["S603", "C901"]
