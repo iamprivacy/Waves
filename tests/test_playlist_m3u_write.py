@@ -55,7 +55,7 @@ class TestTheM3uIsWrittenWhole:
 
         written = dl.playlist_populate({directory}, "My List", is_album=True, sort_alphabetically=True)
 
-        assert [p.name for p in written] == ["_My List.m3u"]
+        assert [p.name for p in written] == ["_My List.m3u8"]
         assert written[0].read_text(encoding="utf-8").splitlines() == ["01 One.flac", "02 Two.flac"]
 
     def test_a_failure_mid_write_leaves_the_previous_playlist_intact(self, tmp_path):
@@ -111,7 +111,7 @@ class TestTheM3uNameFollowsTheStandIns:
 
         written = dl.playlist_populate({directory}, "?", is_album=False, sort_alphabetically=True)
 
-        assert [p.name for p in written] == ["_？.m3u"]
+        assert [p.name for p in written] == ["_？.m3u8"]
 
     def test_a_rejected_character_inside_the_name_uses_its_stand_in(self, tmp_path):
         dl = _make_download(tmp_path, illegal_map={":": " · "})
@@ -119,7 +119,7 @@ class TestTheM3uNameFollowsTheStandIns:
 
         written = dl.playlist_populate({directory}, "Rarities: Live", is_album=False, sort_alphabetically=True)
 
-        assert [p.name for p in written] == ["_Rarities · Live.m3u"]
+        assert [p.name for p in written] == ["_Rarities · Live.m3u8"]
 
     def test_the_universal_rules_still_apply(self, tmp_path):
         # A library often sits on a share other machines mount too, so a name
@@ -129,4 +129,4 @@ class TestTheM3uNameFollowsTheStandIns:
 
         written = dl.playlist_populate({directory}, "Live. ", is_album=False, sort_alphabetically=True)
 
-        assert [p.name for p in written] == ["_Live.m3u"]
+        assert [p.name for p in written] == ["_Live.m3u8"]

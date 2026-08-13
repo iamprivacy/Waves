@@ -69,7 +69,11 @@ def test_warming_is_not_the_reveal_dial():
     src = QML_MAIN.read_text()
 
     assert re.search(r"property bool bootWarming: false", src)
-    assert "enabled: root.bootContentShown > 0" in src
+    # The interface's own gate is uiShown, the dial folded together with a
+    # pending terms gate: same input gating, and nothing paints while an
+    # agreement is owed.
+    assert "readonly property real uiShown: termsGate.wanted ? 0 : bootContentShown" in src
+    assert "enabled: root.uiShown > 0" in src
     assert "enabled: root.bootContentShown === 0" in src  # the shield
 
 

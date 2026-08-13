@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
@@ -53,6 +54,10 @@ _ROWS = [
 def test_playlist_rows_expand_and_title_opens_the_page():
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
+    # Sandboxed: this scenario builds a REAL WavesBridge, and a bridge that
+    # finds the packaged app's config dir adopts its settings, writes its
+    # log, and starts a real scan of the user's music library.
+    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="waves-playlist-block-test-")
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--run-scenario"],
         env=env,

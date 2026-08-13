@@ -25,7 +25,9 @@ class _Signal:
 
 class _InlinePool:
     @staticmethod
-    def start(worker):
+    def start(worker, priority: int = 0):
+        # Accepted and ignored, same as conftest's: QThreadPool takes a
+        # priority and inline dispatch has no queue to order.
         worker.fn()
 
 

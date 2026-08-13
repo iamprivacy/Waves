@@ -205,6 +205,46 @@ def _run_scenario() -> int:
     bridge._set_logged_in(True)
     settle()
 
+    # Animation, THEN agreement, and the interface only after that. The card is
+    # what the launch reveal paints when one is owed: it rides the same dial as
+    # the interface, and the interface's own share of that dial (uiShown) stays
+    # at nothing. Revealing the interface first and dropping the card on top
+    # left the whole app readable and usable behind it, unagreed.
+    q("setupSettings.ffmpegSetupDone = true")
+    q("legalSettings.termsAccepted = false")
+    q("bootContentShown = 0")
+    settle()
+    gate_waits = bool(q("termsGate.wanted")) and not bool(q("termsGate.visible"))
+    q("bootContentShown = 1")  # the reveal runs
+    settle()
+    gate_waits = (
+        gate_waits
+        and bool(q("termsGate.visible"))
+        and q("termsGate.opacity") == 1  # the card is what got revealed...
+        and q("uiShown") == 0  # ...and the app is not painted behind it
+        and not bool(q("mainColumn.enabled"))  # nor reachable
+    )
+    # Agreeing hands the frame on to the interface.
+    q("legalSettings.termsAcceptedVersion = termsVersion")
+    q("legalSettings.termsAccepted = true")
+    settle()
+    gate_waits = gate_waits and not bool(q("termsGate.visible")) and q("uiShown") == 1 and bool(q("mainColumn.enabled"))
+    q("legalSettings.termsAccepted = false")
+    q("bootContentShown = 0")
+
+    # Terms accepted: no gate, so the data leg holds as before.
+    q("bootHandover.stop()")
+    q("bootBlk.stop()")
+    q("bootZoom.stop()")
+    q("handoverCap.stop()")
+    q("handoverCap.expired = false")
+    q("bootOverlay.done = false")
+    q("bootVer.shown = 1")
+    q("bootContentShown = 0")
+    q("legalSettings.termsAcceptedVersion = termsVersion")
+    q("legalSettings.termsAccepted = true")
+    settle()
+
     q("bootOverlay.handover()")
     settle(300)
     data_held = (
@@ -218,12 +258,16 @@ def _run_scenario() -> int:
     settle(3000)
     data_handed = bool(q("bootOverlay.done")) and q("bootContentShown") == 1
 
+    # And even mid-reveal the gate outranks the launch overlay in paint order.
+    gate_on_top = q("termsGate.z") > q("bootOverlay.z")
+
     print(
         f"held={held} handed={handed} drained={drained} parked={parked} applied={applied} "
-        f"data_held={data_held} data_handed={data_handed}",
+        f"data_held={data_held} data_handed={data_handed} gate_waits={gate_waits} "
+        f"gate_on_top={gate_on_top}",
         flush=True,
     )
-    ok = held and handed and drained and parked and applied and data_held and data_handed
+    ok = held and handed and drained and parked and applied and data_held and data_handed and gate_waits and gate_on_top
     return _EXIT_OK if ok else _EXIT_REGRESSED
 
 

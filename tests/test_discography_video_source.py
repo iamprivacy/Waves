@@ -153,6 +153,11 @@ class _DiscoStub:
     def _waves_pref_bool(self, key):
         return False
 
+    def _library_bulk_skip_on(self):
+        # The bulk claim gate is off here, like a library-less install; its
+        # own filtering is covered by test_library_bridge.py.
+        return False
+
     def _remember(self, bucket, key, obj):
         self.remembered.append((bucket, key))
 
@@ -274,4 +279,36 @@ def test_a_videography_at_the_ceiling_refuses_the_whole_scan():
     assert stub._artist_groups == {}
     assert stub._albumsQueued.emits == [] and stub._videosQueued.emits == []
     assert "Could not load the full discography, try again" in stub.statuses
+    assert stub.downloadState.emits[-1] == ("art1", "")
+
+
+def test_discography_leaves_out_claimed_albums():
+    # The bulk claim gate, album-grained: a fully claimed album never queues,
+    # the status line counts it, and the artist aggregate only tracks what
+    # actually queued (or the group would wait forever on a member that was
+    # never dispatched).
+    artist = _Artist([])
+    stub = _DiscoStub(artist, video_download=False)
+    kept = SimpleNamespace(id="al1")
+    owned = SimpleNamespace(id="al2")
+    stub._artist_releases = lambda a: ([kept, owned], [], True)
+    stub._library_bulk_skip_on = lambda: True
+    stub._library_claims_album = lambda a: a is owned
+    stub.downloadArtist("art1")
+    assert stub._albumsQueued.emits == [["al1"]]
+    assert stub._artist_groups["art1"]["keys"] == {"al1"}
+    assert any("(1 already in your library)" in s for s in stub.statuses)
+
+
+def test_an_all_claimed_discography_says_so():
+    # Nothing queues, but the empty result is a success story ("you have it
+    # all"), not the "No albums to download" of a genuinely empty artist.
+    artist = _Artist([])
+    stub = _DiscoStub(artist, video_download=False)
+    stub._library_bulk_skip_on = lambda: True
+    stub._library_claims_album = lambda a: True
+    stub.downloadArtist("art1")
+    assert stub._albumsQueued.emits == []
+    assert stub._artist_groups == {}
+    assert "Everything here is already in your library" in stub.statuses
     assert stub.downloadState.emits[-1] == ("art1", "")

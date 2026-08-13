@@ -101,11 +101,13 @@ def test_gate_keeps_its_one_time_non_naggy_shape():
     m = re.search(r"id: updateOptInGate\b.*?shouldShow:(.*?)// Rather than pop", src, re.S)
     assert m, "the update opt-in gate must exist in Main.qml"
     cond = m.group(1)
-    # The whole first-run chain comes first: never over login, FFmpeg or terms.
+    # The whole first-run chain comes first: never over login, FFmpeg or terms
+    # (termsCurrentAccepted, version included, so a terms-revision re-prompt
+    # keeps this card waiting behind the terms gate too).
     for clause in (
         "waves.loggedIn",
         "setupSettings.ffmpegSetupDone",
-        "legalSettings.termsAccepted",
+        "root.termsCurrentAccepted",
         "bootOverlay.done",
         "!ffmpegGate.visible",
         "!setupSettings.updatePromptAnswered",

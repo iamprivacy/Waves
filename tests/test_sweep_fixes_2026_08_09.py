@@ -73,6 +73,7 @@ class TestTheM3uKeepsItsOldName:
 
         assert paths == [legacy], "the established name keeps receiving the playlist"
         assert not (tmp_path / "_Best of- 2010.m3u").exists(), "no second m3u appears"
+        assert not (tmp_path / "_Best of- 2010.m3u8").exists(), "no m3u8 sibling appears either"
 
     def test_a_fresh_library_gets_the_preferred_spelling(self, tmp_path):
         dl = _make_download(tmp_path)
@@ -80,7 +81,7 @@ class TestTheM3uKeepsItsOldName:
 
         paths = Download.playlist_populate(dl, {tmp_path}, "Best of: 2010", True, True)
 
-        assert paths == [tmp_path / "_Best of- 2010.m3u"]
+        assert paths == [tmp_path / "_Best of- 2010.m3u8"]
 
 
 class TestTheFolderPathKeepsItsOldSpelling:

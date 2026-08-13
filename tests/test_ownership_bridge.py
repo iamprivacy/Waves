@@ -113,6 +113,13 @@ def _new_tracked():
     td._target_rank = 2  # LOSSLESS
     td._tls = local()
     td._skip_existing_base = False
+    # Duplicate-recording skip: off, like the shipped default, so these
+    # ownership tests exercise the ownership gate alone.
+    td._recording_scan = None
+    td._skip_duplicate_recordings = False
+    # Library bulk claim: not injected, like any single-item job, so these
+    # ownership tests exercise the ownership gate alone.
+    td._library_claim = None
     return td
 
 

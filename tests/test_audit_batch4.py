@@ -235,12 +235,28 @@ def test_the_save_serializes_one_shot_never_incrementally(tmp_path: pathlib.Path
 def test_factory_reset_pattern_cannot_match_a_user_file() -> None:
     from tidaler.waves_ui.backend import _FACTORY_WIPE_LOG_PATTERNS
 
-    bundle_pat = _FACTORY_WIPE_LOG_PATTERNS[-1]
-    assert bundle_pat.match("waves-diagnostics-20260802-121314-123.txt")
+    def one_pattern_matches(name: str) -> bool:
+        return any(pat.match(name) for pat in _FACTORY_WIPE_LOG_PATTERNS)
+
+    assert one_pattern_matches("waves-diagnostics-20260802-121314-123.txt")
+    # The per-root library caches (see cache_file_for_root) and their sidecars.
+    assert one_pattern_matches("library-0123456789ab.sqlite3")
+    assert one_pattern_matches("library-0123456789ab.sqlite3-wal")
+    assert one_pattern_matches("library-0123456789ab.sqlite3-shm")
     for name in (
         "waves-diagnostics-20260802-121314-123.txt.bak",
         "my-waves-diagnostics-20260802-121314-123.txt",
         "waves-diagnostics-2026-08-02.txt",
         "waves-diagnostics-.txt",
+        # A name a user could plausibly have put beside ours must never match:
+        # no digest, wrong digest length, uppercase (ours are hexdigest lower),
+        # a prefix or suffix, or a non-sqlite extension.
+        "library.sqlite3.bak",
+        "library-mymusic.sqlite3",
+        "library-0123456789ab.sqlite3.bak",
+        "library-0123456789AB.sqlite3",
+        "library-0123456789abcd.sqlite3",
+        "my-library-0123456789ab.sqlite3",
+        "library-0123456789ab.txt",
     ):
-        assert not bundle_pat.match(name), name
+        assert not one_pattern_matches(name), name

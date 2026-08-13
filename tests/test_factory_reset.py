@@ -49,6 +49,17 @@ def _values_stub():
                     "child_key": None,
                 },
                 {"key": "cover_album_file", "child_key": "cover_single_track_file"},
+                # The library composite: its marker key is not a pref, its
+                # backing prefs ride enabled_key / file_key / child_key /
+                # bulk_key / mb_key.
+                {
+                    "key": "library",
+                    "enabled_key": "library_enabled",
+                    "file_key": "library_source",
+                    "child_key": "library_folder",
+                    "bulk_key": "library_bulk_skip",
+                    "mb_key": "library_mb_arbiter",
+                },
                 {"key": "not_a_real_key"},
             ],
         }
@@ -67,6 +78,15 @@ def test_factory_defaults_cover_schema_keys_in_apply_shape():
     # Composite sub-keys are resolved too.
     assert "metadata_cover_file_dimension" in values
     assert "cover_single_track_file" in values
+    # The library composite's marker key is not a pref; its backing prefs land,
+    # and a reset restores the master switch to OFF.
+    assert "library" not in values
+    assert values["library_enabled"] is False
+    assert values["library_source"] == "separate"
+    assert values["library_folder"] == ""
+    assert values["library_bulk_skip"] is True
+    # The MusicBrainz opt-in resets to OFF (no-data-by-default).
+    assert values["library_mb_arbiter"] is False
     # Unknown keys are skipped, not invented.
     assert "not_a_real_key" not in values
 
@@ -133,6 +153,15 @@ def test_factory_reset_wipes_waves_files_and_keeps_install_channel(tmp_path, mon
         "browse_tile_art.json",
         "ownership.sqlite3",
         "ownership.sqlite3-wal",
+        # The library and MusicBrainz caches hold what the user's library
+        # contains and which titles the arbiter asked about: exactly the
+        # activity trace "erases everything Waves has saved" promises to take.
+        "library.sqlite3",
+        "library-0123456789ab.sqlite3",
+        "library-0123456789ab.sqlite3-wal",
+        "mbarbiter.sqlite3",
+        "mbarbiter.sqlite3-wal",
+        "mbarbiter.sqlite3-shm",
         "crash.log",
         "crash.log.1",
         "waves_dev.log",

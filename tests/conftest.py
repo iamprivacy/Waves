@@ -41,5 +41,8 @@ class _InlinePool:
     a real thread or event loop and the slot completes before ``start`` returns.
     """
 
-    def start(self, worker) -> None:
+    def start(self, worker, priority: int = 0) -> None:
+        # Priority is accepted and ignored: QThreadPool takes one (the library
+        # seed is dispatched raised, to jump a queue busy with downloads), and
+        # running inline there is no queue for it to jump.
         worker.run()

@@ -32,7 +32,16 @@ def _stub():
     stub._queue_emit_suspended = False
     stub._emit_queue = lambda: None
     stub._job_aborts = {}
-    for name in ("_enqueue", "_reindex_queue", "_queue_item", "removeQueueItem", "clearFinished", "clearQueue"):
+    for name in (
+        "_enqueue",
+        "_reindex_queue",
+        "_queue_item",
+        "removeQueueItem",
+        "clearFinished",
+        "clearFailed",
+        "clearQueued",
+        "clearQueue",
+    ):
         setattr(stub, name, _bind(stub, name))
     return stub
 
@@ -57,15 +66,49 @@ def test_remove_reindexes():
     assert _mirror_ok(stub)
 
 
-def test_clear_finished_reindexes():
+def test_each_section_clear_takes_only_its_own_section():
+    # Every section clears itself and nothing else, and none of them ever
+    # touches a running row: stopping a live transfer is the row's own control.
+    for slot, gone in (
+        ("clearFinished", {"done", "cancelled"}),  # the Completed section
+        ("clearFailed", {"failed"}),
+        ("clearQueued", {"queued"}),
+    ):
+        stub = _stub()
+        states = ("done", "cancelled", "failed", "queued", "running")
+        qids = {st: stub._enqueue(st, "track", media_id=st) for st in states}
+        for st, qid in qids.items():
+            stub._queue_item(qid)["status"] = st
+        getattr(stub, slot)()
+        left = {it["status"] for it in stub._queue}
+        assert left == set(states) - gone, f"{slot} cleared {set(states) - left}, expected {gone}"
+        assert "running" in left, f"{slot} must never take a row that is downloading"
+        assert _mirror_ok(stub)
+
+
+def test_clear_all_empties_everything_except_the_running_row():
     stub = _stub()
-    qids = [stub._enqueue(n, "track", media_id=n) for n in ("A", "B", "C")]
-    stub._queue_item(qids[0])["status"] = "done"
-    stub._queue_item(qids[2])["status"] = "failed"
-    stub.clearFinished()
-    assert [it["qid"] for it in stub._queue] == [qids[1]]
-    assert stub._queue_item(qids[0]) is None and stub._queue_item(qids[2]) is None
+    states = ("done", "cancelled", "failed", "queued", "running")
+    qids = {st: stub._enqueue(st, "track", media_id=st) for st in states}
+    for st, qid in qids.items():
+        stub._queue_item(qid)["status"] = st
+    stub.clearQueue()
+    assert [it["status"] for it in stub._queue] == ["running"]
     assert _mirror_ok(stub)
+
+
+def test_retry_all_failed_retries_exactly_the_failed_rows():
+    stub = _stub()
+    stub.retryAllFailed = _bind(stub, "retryAllFailed")
+    retried = []
+    stub.retryQueueItem = retried.append
+    qids = [stub._enqueue(n, "track", media_id=n) for n in ("A", "B", "C", "D")]
+    stub._queue_item(qids[0])["status"] = "failed"
+    stub._queue_item(qids[1])["status"] = "running"
+    stub._queue_item(qids[2])["status"] = "failed"
+    stub._queue_item(qids[3])["status"] = "cancelled"
+    stub.retryAllFailed()
+    assert retried == [qids[0], qids[2]]
 
 
 def test_clear_queue_reindexes():
