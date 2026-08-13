@@ -52,6 +52,7 @@ from tidaler.constants import (
     METADATA_EXPLICIT,
     METADATA_LOOKUP_UPC,
     PLAYLIST_EXTENSION,
+    PLAYLIST_EXTENSION_LEGACY,
     PLAYLIST_PREFIX,
     REQUESTS_TIMEOUT_SEC,
     UNIQUIFY_THRESHOLD,
@@ -63,7 +64,6 @@ from tidaler.constants import (
     QualityVideo,
 )
 from tidaler.helper.camelot import format_initial_key
-from tidaler.helper.decryption import decrypt_file, decrypt_security_token
 from tidaler.helper.exceptions import MediaMissing
 from tidaler.helper.path import (
     PATH_LENGTH_MAX,
@@ -384,6 +384,16 @@ class Download:
         # runs one queued item at a time, so instance scope covers every
         # in-process collision.
         self._names_reserved: set[str] = set()
+        # Final destination names this run has already WRITTEN, against the item
+        # each one now holds. A claim covers only the stretch between picking a
+        # name and moving the file there, which is the whole answer while the
+        # disk is consulted: once the file lands it answers for itself. With
+        # skipping off nothing consults the disk, so a landed file was invisible
+        # and the next track of the same name simply took it (issue #19: six
+        # same-title tracks downloaded three at a time left four files, a
+        # different four each run). This ledger is what a landed file would have
+        # said, and it is never released.
+        self._names_written: dict[str, str] = {}
         self._names_reserved_lock: Lock = Lock()
 
         # One pooled, keep-alive HTTP session shared by every segment download.
@@ -630,7 +640,7 @@ class Download:
         stream_manifest: StreamManifest | None = None,
         n_tail_spurious: int | None = None,
     ) -> tuple[bool, pathlib.Path]:
-        """Merge segments, decrypt if needed, and return the final file path.
+        """Merge the downloaded segments and return the final file path.
 
         Args:
             result_segments (bool): Whether all segments downloaded successfully.
@@ -642,9 +652,9 @@ class Download:
                 trailing URLs; see ``_download_segments``. Defaults to None.
 
         Returns:
-            tuple[bool, pathlib.Path]: (Success, path to downloaded or decrypted file)
+            tuple[bool, pathlib.Path]: (Success, path to the downloaded file)
         """
-        tmp_path_file_decrypted: pathlib.Path = path_file
+        path_file_merged: pathlib.Path = path_file
         result_merge: bool = False
 
         # Only if no error happened while downloading.
@@ -659,12 +669,18 @@ class Download:
                     f"Something went wrong while writing to {log_content(media.name)}. File is corrupt!"
                 )
             elif isinstance(media, Track) and stream_manifest.is_encrypted:
-                key, nonce = decrypt_security_token(stream_manifest.encryption_key)
-                tmp_path_file_decrypted = path_file.with_suffix(".decrypted")
+                # Waves does not process encrypted streams. TIDAL serves plain
+                # MPEG-DASH for every quality Waves requests, so this branch is
+                # not reached in normal operation. Should a stream ever arrive
+                # encrypted, fail the download rather than leave an unplayable
+                # file behind.
+                self.fn_logger.error(
+                    f"{log_content(media.name)} arrived as an encrypted stream, which Waves does not process. "
+                    "The download was stopped so no unplayable file is written."
+                )
+                result_merge = False
 
-                decrypt_file(path_file, tmp_path_file_decrypted, key, nonce)
-
-        return result_merge, tmp_path_file_decrypted
+        return result_merge, path_file_merged
 
     def _download(
         self,
@@ -682,7 +698,7 @@ class Download:
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
-            tuple[bool, pathlib.Path]: (Success, path to downloaded or decrypted file)
+            tuple[bool, pathlib.Path]: (Success, path to the downloaded file)
         """
         media_name: str = name_builder_item(media)
 
@@ -714,11 +730,11 @@ class Download:
             urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop, n_tail_spurious
         )
 
-        result_merge, tmp_path_file_decrypted = self._download_postprocess(
+        result_merge, path_file_merged = self._download_postprocess(
             result_segments, path_file, dl_segment_results, media, stream_manifest, n_tail_spurious
         )
 
-        return result_merge, tmp_path_file_decrypted
+        return result_merge, path_file_merged
 
     def _segments_merge(
         self,
@@ -1259,6 +1275,82 @@ class Download:
 
         return None
 
+    def _names_unavailable_to(self, media_id: str) -> set[str]:
+        """The destination names this item may not take. Call under the lock.
+
+        Two sources, one answer: a name another download is holding in flight,
+        and a name this run has already written for a DIFFERENT item. The
+        second is what keeps a track that starts after its same-name sibling
+        landed from replacing it in overwrite mode, where the file on disk is
+        never looked at.
+
+        Only for a different item: the same track twice in one playlist still
+        lands on its own file, which is what the setting asks for, and what it
+        has always done.
+        """
+        return self._names_reserved | {
+            name for name, owner in self._names_written.items() if not media_id or owner != media_id
+        }
+
+    def _is_own_copy(self, path_file: pathlib.Path, media_id: str) -> bool:
+        """Whether the file already at this name is this item's own to replace.
+
+        Asked only with skipping off, where an existing file is exactly what
+        the download means to replace. It may replace its own earlier copy
+        (the point of the setting, and of a quality upgrade) and an untagged
+        one, which read_item_id leaves unidentified and a library predating
+        the tag is full of: refusing those would strew numbered copies through
+        the very library the user asked to refresh. A file carrying a
+        different item's id is a different song, and replacing it loses it.
+        """
+        if not media_id:
+            return True
+
+        occupant: str = read_item_id(path_file)
+
+        return not occupant or occupant == media_id
+
+    def _claim_destination(self, path_media_dst: pathlib.Path, media_id: str) -> tuple[pathlib.Path, str | None]:
+        """Pick this download's final name and hold it, in one locked step.
+
+        Picking and claiming cannot be two steps: the file only appears on disk
+        at the move far below (metadata, the lyrics fetch and the cover run in
+        between, seconds of it), so two colliding tracks would both find the
+        same name free, and one would overwrite or lose the other.
+
+        The claim is taken in every mode; only what counts as occupied differs,
+        which is what _names_unavailable_to and _is_own_copy answer.
+
+        Args:
+            path_media_dst (pathlib.Path): The name the template produced.
+            media_id (str): The item being downloaded, "" when it has no id.
+
+        Returns:
+            tuple[pathlib.Path, str | None]: The name to use and the claim to
+                release once the file is in place, or the name unchanged and
+                None when it and all of its numbered variants are taken.
+        """
+        with self._names_reserved_lock:
+            path_media_unique: pathlib.Path | None = path_file_uniquify(
+                path_media_dst,
+                names_taken=self._names_unavailable_to(media_id),
+                check_disk=self.skip_existing,
+                is_own_copy=lambda candidate: self._is_own_copy(candidate, media_id),
+            )
+
+            if path_media_unique is None:
+                return path_media_dst, None
+
+            name_reserved: str = str(path_media_unique)
+            self._names_reserved.add(name_reserved)
+
+            return path_media_unique, name_reserved
+
+    def _record_name_written(self, path_file: pathlib.Path, media_id: str) -> None:
+        """Note that this item's file now occupies this name."""
+        with self._names_reserved_lock:
+            self._names_written[str(path_file)] = media_id
+
     def _prepare_file_paths_and_skip_logic(
         self,
         media: Track | Video,
@@ -1673,31 +1765,10 @@ class Download:
             # skipped upstream, so an occupied destination is a different track). Resolve the
             # unique name BEFORE writing lyrics/cover so those sidecars align with the final
             # audio file.
-            #
-            # Picking the name and claiming it happen together under the lock, because the
-            # file only appears on disk at the move far below (metadata, the lyrics fetch and
-            # the cover run in between, seconds of it). Without the claim two colliding tracks
-            # both saw the same name free and one overwrote or lost the other.
-            #
-            # The claim is taken in every mode; only what counts as occupied differs. With
-            # skip_existing off (the setting, or the per-track override a quality upgrade
-            # uses) an existing file is exactly what this download means to replace, so disk
-            # contents are ignored, but a name a sibling is holding in flight is never free:
-            # two same-name mixes being upgraded together both compute the base name, and
-            # without the claim the second simply overwrote the first.
             overwrite: bool = not self.skip_existing
-            name_reserved: str | None = None
-
-            with self._names_reserved_lock:
-                path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
-                path_media_unique: pathlib.Path | None = path_file_uniquify(
-                    path_media_dst, names_taken=self._names_reserved, check_disk=self.skip_existing
-                )
-
-                if path_media_unique is not None:
-                    path_media_dst = path_media_unique
-                    name_reserved = str(path_media_dst)
-                    self._names_reserved.add(name_reserved)
+            media_id: str = str(getattr(media, "id", "") or "")
+            path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
+            path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id)
 
             if name_reserved is None:
                 # Every numbered variant of this name is taken. Nothing is lost
@@ -1721,6 +1792,11 @@ class Download:
 
                 # Move final file to the configured destination directory.
                 moved: bool = self._move_file(tmp_path_file, path_media_dst, overwrite=overwrite)
+
+                if moved:
+                    # Recorded before the claim is released below, so the name is
+                    # never momentarily free between the two.
+                    self._record_name_written(path_media_dst, media_id)
 
                 # Sidecars only once the audio is really there. Landing them
                 # first left a cover.jpg and a .lrc in the library for a track
@@ -1907,6 +1983,7 @@ class Download:
             # at somebody else's track.
             overwrite: bool = not self.skip_existing
             name_reserved: str | None = None
+            media_id: str = str(getattr(media, "id", "") or "")
 
             if self.skip_existing:
                 path_media_found: pathlib.Path | None = (
@@ -1928,20 +2005,10 @@ class Download:
                 skip_symlink: bool = False
 
             if not skip_file:
-                # Picked and claimed together under the lock: a sibling track of
-                # the same collection reaches this move on another thread and
-                # would otherwise pick the very same free name. Disk contents
-                # count only when skipping is on, exactly as in the plain
-                # download path.
-                with self._names_reserved_lock:
-                    path_media_unique: pathlib.Path | None = path_file_uniquify(
-                        path_media_dst, names_taken=self._names_reserved, check_disk=self.skip_existing
-                    )
-
-                    if path_media_unique is not None:
-                        path_media_dst = path_media_unique
-                        name_reserved = str(path_media_dst)
-                        self._names_reserved.add(name_reserved)
+                # The same claim the plain download path takes, for the same
+                # reason: a sibling track of this collection reaches this move
+                # on another thread and would otherwise pick the very same name.
+                path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id)
 
                 if name_reserved is None:
                     # No free name in the track folder. The audio is safe where
@@ -1956,6 +2023,9 @@ class Download:
 
             try:
                 self._symlink_after_move(path_media_src, path_media_dst, skip_file, skip_symlink, overwrite)
+
+                if not skip_file:
+                    self._record_name_written(path_media_dst, media_id)
             finally:
                 if name_reserved is not None:
                     with self._names_reserved_lock:
@@ -2739,7 +2809,7 @@ class Download:
         list_total: int = len(items)
 
         # Execute downloads
-        result_dirs: list[pathlib.Path] = self._execute_collection_downloads(
+        result_paths: list[pathlib.Path] = self._execute_collection_downloads(
             items,
             file_name_relative,
             quality_audio,
@@ -2753,9 +2823,17 @@ class Download:
             event_stop,
         )
 
-        # Create playlist file if requested
+        # Create playlist file if requested. The landed paths carry the list's
+        # own track order, so the m3u plays back in TIDAL's order (issue #22);
+        # the directory set alone cannot say which track comes first.
         if self.settings.data.playlist_create:
-            self.playlist_populate(set(result_dirs), list_media_name, is_album, sort_by_track_num)
+            self.playlist_populate(
+                {p.parent for p in result_paths},
+                list_media_name,
+                is_album,
+                sort_by_track_num,
+                paths_ordered=result_paths,
+            )
 
         self.fn_logger.info(f"Finished list '{log_content(list_media_name)}'.")
 
@@ -2850,9 +2928,10 @@ class Download:
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
-            list[pathlib.Path]: List of result directories.
+            list[pathlib.Path]: The landed file paths in list order (see
+            _process_download_futures).
         """
-        result_dirs: list[pathlib.Path] = []
+        result_paths: list[pathlib.Path] = []
 
         # Check if items list is empty
         if not items:
@@ -2862,7 +2941,7 @@ class Download:
             if not progress_stdout and self.progress_gui:
                 self.progress_gui.list_item.emit(100.0)
 
-            return result_dirs
+            return result_paths
 
         # Iterate through list items. Gate on THIS collection's own task, never on
         # `progress.finished`: that is `all(task.finished)` over every task on the
@@ -2889,13 +2968,15 @@ class Download:
                 ]
 
                 # Process download results
-                result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
+                result_paths = self._process_download_futures(
+                    download_futures, progress, progress_task, progress_stdout
+                )
 
                 # Check for abort signal
                 if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                    return result_dirs
+                    return result_paths
 
-        return result_dirs
+        return result_paths
 
     def _process_download_futures(
         self,
@@ -2913,25 +2994,18 @@ class Download:
             progress_stdout (bool): Whether to show progress in stdout.
 
         Returns:
-            list[pathlib.Path]: List of result directories.
+            list[pathlib.Path]: The items' landed file paths, in LIST ORDER
+            (the submission order of the futures), one per item that produced a
+            file. This order is the collection's own track order, which the m3u
+            writer reproduces; a set of directories would lose it (issue #22).
         """
-        result_dirs: list[pathlib.Path] = []
-
         # Report results as they become available
         for future in futures.as_completed(futures_list):
-            # Retrieve result
-            _status, result_path_file = future.result()
-
-            if result_path_file:
-                result_dirs.append(result_path_file.parent)
-
-            # Advance progress bar.
-            progress.advance(progress_task)
-
-            if not progress_stdout:
-                self.progress_gui.list_item.emit(progress.tasks[progress_task].percentage)
-
-            # If app is terminated (CTRL+C)
+            # If app is terminated (CTRL+C). Checked BEFORE the result below,
+            # so a stop is a stop: an item that crashed on its way out reached
+            # this loop in whatever order it finished, and surfacing it turned
+            # the user's Cancel into a job failure or not depending on which
+            # future as_completed happened to yield first.
             if self.event_abort.is_set():
                 # Cancel all not yet started tasks
                 for f in futures_list:
@@ -2939,18 +3013,60 @@ class Download:
 
                 break
 
-        return result_dirs
+            # Surface a crashed item's exception now, as this always did.
+            future.result()
+
+            # Advance progress bar.
+            progress.advance(progress_task)
+
+            if not progress_stdout:
+                self.progress_gui.list_item.emit(progress.tasks[progress_task].percentage)
+
+        # Collect in submission order, not completion order. On abort the
+        # cancelled and still-running tail is skipped, exactly the items the
+        # as_completed loop above never reported either.
+        result_paths: list[pathlib.Path] = []
+
+        for future in futures_list:
+            if future.cancelled() or not future.done():
+                continue
+            # An item that crashed produced no file, and its exception was
+            # either already raised by the loop above or never reported at all
+            # (an abort broke out of it first). Re-raising here would turn the
+            # user's Cancel into a job failure, which items() promises it never
+            # does for a per-item error.
+            if future.exception() is not None:
+                continue
+
+            _status, result_path_file = future.result()
+
+            if result_path_file:
+                result_paths.append(pathlib.Path(result_path_file))
+
+        return result_paths
 
     def playlist_populate(
-        self, dirs_scoped: set[pathlib.Path], name_list: str, is_album: bool, sort_alphabetically: bool
+        self,
+        dirs_scoped: set[pathlib.Path],
+        name_list: str,
+        is_album: bool,
+        sort_alphabetically: bool,
+        paths_ordered: list[pathlib.Path] | None = None,
     ) -> list[pathlib.Path]:
-        """Create playlist files (m3u) for downloaded tracks in each directory.
+        """Create playlist files (m3u8) for downloaded tracks in each directory.
 
         Args:
             dirs_scoped (set[pathlib.Path]): Set of directories containing tracks.
             name_list (str): Name of the playlist.
             is_album (bool): Whether this is an album.
             sort_alphabetically (bool): Whether to sort tracks alphabetically.
+            paths_ordered (list[pathlib.Path] | None, optional): The collection's
+                landed file paths in ITS OWN track order. When given, each
+                directory's playlist lists exactly these files in this order,
+                which is what makes a downloaded TIDAL playlist play back in
+                TIDAL's order (issue #22). Without it the directory is globbed
+                and sorted by name or file age, which reconstructs an album's
+                order from numbered filenames but knows nothing of a playlist's.
 
         Returns:
             list[pathlib.Path]: List of created playlist file paths.
@@ -2968,41 +3084,35 @@ class Download:
             path_playlist = dir_scoped / sanitize_filename(PLAYLIST_PREFIX + name_sanitized + PLAYLIST_EXTENSION)
             path_playlist = pathlib.Path(path_file_sanitize(path_playlist, adapt=True))
 
-            # An m3u a 0.1.17 library already holds keeps its name: the old
-            # spelling took no stand-ins and left the doubled space a removed
-            # character created. Writing the new spelling beside it left two
-            # m3u files for one playlist, both ingested by a library scanner,
-            # and the stale one can never be removed (prevention-only cleanup).
-            # Same answer _keep_existing_layout gives every other name.
-            path_playlist_legacy = dir_scoped / sanitize_filename(PLAYLIST_PREFIX + name_list + PLAYLIST_EXTENSION)
-            path_playlist_legacy = pathlib.Path(path_file_sanitize(path_playlist_legacy, adapt=True))
-            if (
-                path_playlist_legacy.name != path_playlist.name
-                and not path_playlist.is_file()
-                and path_playlist_legacy.is_file()
+            # A playlist file the library already holds keeps its name: older
+            # versions wrote .m3u (and, before 0.1.18, a spelling with no
+            # stand-ins that left the doubled space a removed character
+            # created). Writing the new name beside an old one left two files
+            # for one playlist, both ingested by a library scanner, and the
+            # stale one can never be removed (prevention-only cleanup). Same
+            # answer _keep_existing_layout gives every other name; most recent
+            # spelling first.
+            for stem, extension in (
+                (name_sanitized, PLAYLIST_EXTENSION_LEGACY),
+                (name_list, PLAYLIST_EXTENSION_LEGACY),
             ):
-                path_playlist = path_playlist_legacy
+                if path_playlist.is_file():
+                    break
 
-            self.fn_logger.debug(f"Playlist: Creating {path_playlist}")
+                path_playlist_legacy = dir_scoped / sanitize_filename(PLAYLIST_PREFIX + stem + extension)
+                path_playlist_legacy = pathlib.Path(path_file_sanitize(path_playlist_legacy, adapt=True))
 
-            # Get all tracks in the directory
-            path_tracks: list[pathlib.Path] = []
+                if path_playlist_legacy.name != path_playlist.name and path_playlist_legacy.is_file():
+                    path_playlist = path_playlist_legacy
+                    break
 
-            for extension_audio in AudioExtensionsValid:
-                # pathlib's glob matches hidden files, so filter dotfiles: macOS
-                # AppleDouble ghosts (._Track.flac) must never become playlist entries.
-                path_tracks = path_tracks + [
-                    p for p in dir_scoped.glob(f"*{extension_audio!s}") if not p.name.startswith(".")
-                ]
+            # The NAME only, and as content: the full path spells out the
+            # download root, which normally sits under the user's home.
+            self.fn_logger.debug(f"Playlist: Creating {log_content(path_playlist.name)}")
 
-            # Sort alphabetically, e.g. if items are prefixed with numbers
-            if sort_alphabetically:
-                path_tracks.sort()
-            elif not is_album:
-                # If it is not an album sort by creation time
-                path_tracks.sort(
-                    key=lambda x: x.stat().st_birthtime if hasattr(x.stat(), "st_birthtime") else x.stat().st_ctime
-                )
+            path_tracks: list[pathlib.Path] = self._playlist_entries(
+                dir_scoped, is_album, sort_alphabetically, paths_ordered
+            )
 
             # Write the m3u the way every other file reaches the library: into a
             # hidden temp sibling, flushed to stable storage, then swapped into
@@ -3051,6 +3161,69 @@ class Download:
             result.append(path_playlist)
 
         return result
+
+    @staticmethod
+    def _playlist_entries(
+        dir_scoped: pathlib.Path,
+        is_album: bool,
+        sort_alphabetically: bool,
+        paths_ordered: list[pathlib.Path] | None,
+    ) -> list[pathlib.Path]:
+        """One directory's playlist lines, in playback order (see
+        playlist_populate for the two modes)."""
+        # Every audio file the directory holds, which is what an m3u describes.
+        # The ordered list below is only allowed to REORDER this, never to
+        # shorten it.
+        path_tracks: list[pathlib.Path] = []
+
+        for extension_audio in AudioExtensionsValid:
+            # pathlib's glob matches hidden files, so filter dotfiles: macOS
+            # AppleDouble ghosts (._Track.flac) must never become playlist entries.
+            path_tracks = path_tracks + [
+                p for p in dir_scoped.glob(f"*{extension_audio!s}") if not p.name.startswith(".")
+            ]
+
+        # Sort alphabetically, e.g. if items are prefixed with numbers
+        if sort_alphabetically:
+            path_tracks.sort()
+        elif not is_album:
+            # If it is not an album sort by creation time
+            def _born(p: pathlib.Path) -> float:
+                try:
+                    st = p.stat()
+                except OSError:
+                    # A playlist-folder entry is a symlink into the track tree,
+                    # and a target on a share that is away cannot be stat'd. It
+                    # still belongs in the list, so it sorts oldest-first rather
+                    # than taking the whole write down with it.
+                    return 0.0
+                return float(getattr(st, "st_birthtime", st.st_ctime))
+
+            path_tracks.sort(key=_born)
+
+        if paths_ordered is None:
+            return path_tracks
+
+        # The collection's own order (issue #22), but only when this run can
+        # account for every file in the folder. A run reports back only what it
+        # actually fetched: a re-download skips the tracks you already have, a
+        # cancelled run stops partway, an item can fail. Writing just those, on
+        # a folder that already held a full playlist, REPLACED a complete m3u
+        # with a one-line one, which is the file equivalent of losing the
+        # playlist. So the folder is the truth about what belongs in the list,
+        # and this run's order is applied to it only when the two agree on the
+        # contents; otherwise the folder listing stands, exactly as it did
+        # before order was known at all.
+        here = set(path_tracks)
+        # First occurrences only: a playlist can carry the same track twice,
+        # and both occurrences land on ONE file (the name ledger lets an item
+        # retake its own name), so the raw ordered list held that path twice,
+        # could never match the folder's count, and the order fix silently
+        # stood down for exactly those playlists. One entry per file keeps the
+        # order; the duplicate spin is the playlist's business, not the m3u's.
+        seen: set[pathlib.Path] = set()
+        ordered = [p for p in paths_ordered if p in here and not (p in seen or seen.add(p))]
+        return ordered if len(ordered) == len(path_tracks) else path_tracks
 
     def _video_convert(self, path_file: pathlib.Path) -> pathlib.Path:
         """Convert a TS video file to MP4 using ffmpeg.

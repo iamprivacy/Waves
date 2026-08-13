@@ -12,7 +12,11 @@ COVER_NAME: str = "cover.jpg"
 BLOCK_SIZE: int = 4096
 BLOCKS: int = 1024
 CHUNK_SIZE: int = BLOCK_SIZE * BLOCKS
-PLAYLIST_EXTENSION: str = ".m3u"
+# The file is written UTF-8, which is what the 8 promises (and what the UI has
+# always said it writes). Libraries built before the rename keep their .m3u
+# name: the writer prefers an existing legacy file over minting a sibling.
+PLAYLIST_EXTENSION: str = ".m3u8"
+PLAYLIST_EXTENSION_LEGACY: str = ".m3u"
 PLAYLIST_PREFIX: str = "_"
 FILENAME_LENGTH_MAX: int = 255
 FORMAT_TEMPLATE_EXPLICIT: str = " (Explicit)"

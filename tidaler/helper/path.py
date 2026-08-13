@@ -8,7 +8,7 @@ import shutil
 import sys
 import threading
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from copy import deepcopy
 from urllib.parse import unquote, urlsplit
 
@@ -1145,7 +1145,11 @@ def name_comparison_key(value: str) -> str:
 
 
 def path_file_uniquify(
-    path_file: pathlib.Path, *, names_taken: Collection[str] | None = None, check_disk: bool = True
+    path_file: pathlib.Path,
+    *,
+    names_taken: Collection[str] | None = None,
+    check_disk: bool = True,
+    is_own_copy: Callable[[pathlib.Path], bool] | None = None,
 ) -> pathlib.Path | None:
     """Ensure a file path is unique by appending a suffix if necessary.
 
@@ -1157,13 +1161,19 @@ def path_file_uniquify(
             False for a download that is meant to replace what is there (skip-existing
             off, or a quality upgrade), which still has to step around the names its
             concurrent siblings hold. Defaults to True.
+        is_own_copy (Callable[[pathlib.Path], bool] | None, optional): Asked, when
+            check_disk is False, whether the file sitting at a candidate is this
+            download's own to replace. Defaults to None, which answers yes to
+            everything, the historical behaviour of overwrite mode.
 
     Returns:
         pathlib.Path | None: The unique file path, or None when the name and all of its
             numbered variants are taken. The caller has to fail the download then: the
             old answer, the last occupied candidate, only moved the loss one step on.
     """
-    unique_suffix: str | None = file_unique_suffix(path_file, names_taken=names_taken, check_disk=check_disk)
+    unique_suffix: str | None = file_unique_suffix(
+        path_file, names_taken=names_taken, check_disk=check_disk, is_own_copy=is_own_copy
+    )
 
     if unique_suffix is None:
         return None
@@ -1233,6 +1243,7 @@ def file_unique_suffix(
     *,
     names_taken: Collection[str] | None = None,
     check_disk: bool = True,
+    is_own_copy: Callable[[pathlib.Path], bool] | None = None,
 ) -> str | None:
     """Generate a unique suffix for a file path.
 
@@ -1253,6 +1264,12 @@ def file_unique_suffix(
             on is its own older copy. Claims are honored either way, since a name a
             sibling is holding belongs to a download nothing may overwrite.
             Defaults to True.
+        is_own_copy (Callable[[pathlib.Path], bool] | None, optional): Whether the file
+            at a candidate is this download's own copy, the one overwrite mode means to
+            replace. Only asked when check_disk is False, and "its own older copy" was
+            taken on faith before this existed: a DIFFERENT track that happened to share
+            the name was replaced too, and the song was gone (issue #19). Defaults to
+            None, which answers yes to everything.
 
     Returns:
         str | None: The unique suffix, an empty string if not needed, or None when the
@@ -1271,7 +1288,16 @@ def file_unique_suffix(
     unique_suffix: str = ""
 
     def _occupied(candidate: pathlib.Path) -> bool:
-        return (check_disk and check_file_exists(candidate)) or name_comparison_key(str(candidate)) in taken
+        if name_comparison_key(str(candidate)) in taken:
+            return True
+
+        if not check_file_exists(candidate):
+            return False
+
+        # Skipping on: a file here is somebody else's, since this item's own
+        # copy was skipped upstream. Skipping off: only a file this download
+        # may NOT replace holds the name against it.
+        return check_disk or (is_own_copy is not None and not is_own_copy(candidate))
 
     while _occupied(path_file_tmp):
         if count >= UNIQUIFY_THRESHOLD:
