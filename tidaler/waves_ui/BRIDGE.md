@@ -126,6 +126,15 @@ after the exact-id ownership gate declines and never for a merge-plan member
 `downloadAlbumAnyway(album_id)` (the claim dialog's DOWNLOAD ANYWAY) registers
 a per-album override so that click really downloads.
 
+Both claims are strict on IDENTITY, not just presence. The track claim asks
+whether a copy is already filed under the release being fetched, so the album
+has to reach it: an album job passes its own release (the only place the year
+is reliably spelled out), a playlist or mix lets each track name its own, and
+a track with no release to name is fetched. Reading bare presence as a claim
+was issue #24: a title and artist match every compilation and re-release that
+share them, so tracks were dropped out of albums the user had explicitly
+asked for.
+
 ## Preview and video playback
 
 | Signal                          | Fires when                                                       |

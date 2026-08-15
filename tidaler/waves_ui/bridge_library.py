@@ -850,6 +850,44 @@ class LibraryMixin:
             return True
         return self._library_scan_status in (SCAN_MISSING, SCAN_UNREADABLE)
 
+    @Slot(result=bool)
+    def downloadsInsideLibrary(self) -> bool:
+        """Do fresh downloads land inside the scanned library folder? Drives
+        the done-face wording: a finished download may only read IN LIBRARY
+        when the library will actually contain it, either because downloads
+        land inside the library root (this answer) or because the scan later
+        proves the copy present (libPresent). With a separate download folder
+        the face says DOWNLOADED instead, and moving the files into the
+        library flips it through the normal rescan path.
+
+        Pure string comparison on the configured paths, no filesystem access:
+        this is read from QML bindings on the GUI thread, and a stat against a
+        dead network mount can hang for many seconds. In download-source mode
+        the library root IS the download folder, so the answer is trivially
+        true whenever a root resolves."""
+        root = self._library_root()
+        if not root:
+            return False
+        base = (self.settings.data.download_base_path or "").strip()
+        if not base:
+            return False
+        try:
+            r = os.path.normcase(os.path.normpath(os.path.expanduser(root)))
+            b = os.path.normcase(os.path.normpath(os.path.expanduser(base)))
+        except Exception:
+            return False
+        if sys.platform == "darwin":
+            # normcase only folds case on Windows, but macOS volumes are
+            # case-insensitive by default (APFS and HFS+ both), so /Music and
+            # /music name the SAME folder and the unfolded compare would call
+            # a download folder separate from the library it sits in. This is
+            # the same bet Windows already makes through normcase, on the same
+            # grounds: the platform default wins, and the opt-in exception
+            # (case-sensitive APFS, NTFS per-directory case sensitivity) is
+            # rare enough that neither normcase nor this may stat to find out.
+            r, b = r.lower(), b.lower()
+        return b == r or b.startswith(r + os.sep)
+
     @Slot()
     def rescanLibrary(self) -> None:
         """Rescan the music library now (Settings' Rescan button), for when the
@@ -1081,18 +1119,32 @@ class LibraryMixin:
             return False
         return bool(p.get("present")) and not p.get("partial")
 
-    def _library_claims_track(self, artist: str, title: str) -> bool:
-        """Whether the scan claims this exact track (the presence pill's own
-        match). Bulk actions use it to skip one track inside a queued
-        collection; single-track clicks never consult it."""
+    def _library_claims_track(self, artist: str, title: str, album: str = "", album_year: str = "", duration=0) -> bool:
+        """Whether the scan holds this track ALREADY FILED UNDER the release
+        being fetched: present, and proven on the identity axis. Bulk actions
+        use it to skip one track inside a queued collection; single-track
+        clicks never consult it.
+
+        Presence alone is not enough, and reading it that way was the bug in
+        issue #24. A title and artist match every compilation, best-of and
+        re-release that share them, so "you own this song somewhere" was
+        skipping tracks out of an album the user had explicitly asked for: the
+        folder landed short and nothing on screen said which tracks were
+        missing. The album this track belongs to is what makes the question
+        answerable, so it is passed in and the proven axis is required.
+
+        Same bar, same reasoning as _library_claims_album: a wrong skip costs
+        the user a track they never find out was missing, so it may not
+        happen on a guess."""
         idx = self._library_track_index
         if not idx or not title or not artist:
             return False
         try:
-            return bool(matching.decide_track_presence(title, artist, idx).get("present"))
+            v = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
         except Exception:
             logger.debug("Track claim lookup failed; not gating", exc_info=True)
             return False
+        return bool(v.get("present")) and bool(v.get("sure"))
 
     @Slot(str, result="QVariant")
     def artistLibraryPresence(self, name):

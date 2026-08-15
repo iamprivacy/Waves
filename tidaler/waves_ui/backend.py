@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -95,7 +96,6 @@ from tidaler.model.cfg import Settings as CfgSettings
 from tidaler.model.cfg import Settings as ModelSettings
 from tidaler.model.gui_data import ProgressBars
 from tidaler.ownership import OwnershipStore, quality_rank
-from tidaler.recording_scan import RecordingScan
 from tidaler.waves_ui import proc
 from tidaler.waves_ui.session import WavesTidal
 from tidaler.worker import Worker
@@ -301,7 +301,6 @@ _FLAG_FIELDS = [
     # than as its own tile; listed here so applySettings persists it as a bool.
     "cover_single_track_file",
     "skip_existing",
-    "skip_duplicate_recordings",
     "confirm_category_download",
     "symlink_to_track",
     "playlist_create",
@@ -674,7 +673,6 @@ _FIELD_LABELS = {
     "downloads_concurrent_max": "Concurrent track downloads",
     "download_dolby_atmos": "Download Dolby Atmos",
     "confirm_category_download": "Confirm bulk downloads",
-    "skip_duplicate_recordings": "Skip songs you already have",
     # Discography & editions (a source toggle like the disco_* prefs)
     "video_download": "Music videos",
     # File organization
@@ -889,9 +887,8 @@ class _TrackedDownload(Download):
         track_signals: _ProgressSignals | None = None,
         ownership_of=None,
         target_rank: int = -1,
-        recording_scan=None,
-        skip_duplicate_recordings: bool = False,
         library_claim=None,
+        force_redownload: bool = False,
         **kwargs,
     ) -> None:
         # Per-thread override for skip_existing, set up BEFORE super().__init__,
@@ -910,13 +907,6 @@ class _TrackedDownload(Download):
         # raising the quality setting re-fetches, a plain re-click does not.
         self._ownership_of = ownership_of
         self._target_rank = int(target_rank)
-        # "Skip songs you already have": an ISRC lookup over the artist folder
-        # this job writes into, for the same recording filed under another
-        # album (see tidaler/recording_scan.py). Off unless the user asked for
-        # it, and never applied to a merge plan, whose whole purpose is
-        # assembling one complete folder.
-        self._recording_scan = recording_scan
-        self._skip_duplicate_recordings = bool(skip_duplicate_recordings)
         # The library scan's bulk claim gate (library_bulk_skip): a callable
         # answering "does the user's library already claim this track?" from
         # the tag-matched presence index, or None when the gate is off or this
@@ -926,6 +916,10 @@ class _TrackedDownload(Download):
         # merge-plan member (a merge assembles ONE complete folder, and a
         # claim points at the library, not this job's destination).
         self._library_claim = library_claim
+        # REDOWNLOAD from the owned gate: this job re-fetches everything it
+        # names, so every pre-fetch gate stands down and each track overwrites
+        # its old copy in place (the same force the upgrade path uses).
+        self._force_redownload = bool(force_redownload)
         # Per-track outcome tallies. The engine returns ok=False WITHOUT raising
         # when a stream URL can't be fetched (e.g. an unentitled free account
         # whose playback requests are rejected), so the job worker cannot tell
@@ -1042,61 +1036,13 @@ class _TrackedDownload(Download):
             logger.debug("Ownership lookup failed; not gating", exc_info=True)
             return None
         if not rec:
-            # Not owned under THIS track's id. The same recording may still sit
-            # under another edition's id (a shared song on a standard and a
-            # deluxe release have two different TIDAL ids), which only an ISRC
-            # match can see. Opt-in, and never for a merge member.
-            return "skip" if identity_id is None and self._duplicate_recording_owned(media, file_template) else None
+            return None
         if identity_id is not None and not self._owned_at_destination(rec, media, file_template):
             return None
         # Rank -1 means no quality concept (a video's tier-less record): nothing
         # to upgrade to, so owned simply means skip.
         rank = int(rec.get("quality_rank", -1))
         return "skip" if rank < 0 or rank >= self._target_rank else "force"
-
-    def _duplicate_recording_owned(self, media, file_template: str | None) -> bool:
-        """Whether this recording already exists elsewhere under the artist
-        folder this job writes into, matched by ISRC.
-
-        The scan root is the PARENT of the destination album folder, i.e. the
-        artist folder under every default template, so a sibling edition is in
-        scope and the rest of the library is not. A template that puts albums
-        straight under the download root would make the root itself the scan
-        scope, which is why the root is never allowed as a scan target.
-
-        Any doubt (no ISRC, no template, an unresolvable destination) returns
-        False: downloading a second copy costs disk, a wrong skip costs a song.
-        """
-        if not self._skip_duplicate_recordings or self._recording_scan is None or media is None:
-            return False
-        isrc = _track_isrc(media)
-        if not isrc:
-            return False
-        destination_dir = self._destination_dir(media, file_template)
-        if destination_dir is None:
-            return False
-        scan_root = destination_dir.parent
-        base = pathlib.Path(self.path_base).expanduser().absolute()
-        try:
-            # Refuse to scan the download root (or above it): that is the whole
-            # library, which this is deliberately not.
-            if os.path.normcase(str(scan_root)) == os.path.normcase(str(base)) or base not in scan_root.parents:
-                return False
-        except Exception:
-            return False
-        try:
-            found = self._recording_scan.path_for(str(scan_root), isrc)
-        except Exception:
-            # A dead mount, a permissions wall: never let a lookup failure
-            # reach the download path, and never let it become a skip.
-            logger.debug("Recording lookup failed; not gating", exc_info=True)
-            return False
-        if not found:
-            return False
-        # A copy inside the destination folder itself is skip-existing's job and
-        # is reported by the normal path; only a copy filed ELSEWHERE is this
-        # gate's business, so the two never both claim the same skip.
-        return os.path.normcase(str(pathlib.Path(found).parent)) != os.path.normcase(str(destination_dir))
 
     def _destination_dir(self, media, file_template: str | None) -> pathlib.Path | None:
         """The folder this job would write ``media`` into, through the same
@@ -1147,7 +1093,11 @@ class _TrackedDownload(Download):
         that. A merge-plan member (waves_identity_id set) never consults the
         claim: a merge assembles ONE complete folder, and the claim points at
         the library, not this job's destination. A claim lookup failure never
-        gates: downloading twice beats not downloading at all."""
+        gates: downloading twice beats not downloading at all. A REDOWNLOAD
+        job forces every item: the user clicked through the owned gate, so
+        being owned is exactly what must not skip it."""
+        if self._force_redownload:
+            return "force"
         verdict = self._ownership_verdict(media, file_template)
         if verdict is None and self._library_claim is not None and getattr(media, "waves_identity_id", None) is None:
             try:
@@ -1183,6 +1133,40 @@ class _TrackedDownload(Download):
                 }
             )
         return True, ""
+
+    def _note_stage(self, media, frac: float) -> None:
+        """Engine hook (download.py) at finalize-step boundaries: the stream is
+        fully fetched but extraction, tagging and the move still run. Streams
+        the fraction to the queue row as ``fpct`` so the drawer's FINISHING
+        word fills as the steps land. The id mirrors item()'s: a merge-plan
+        member reports under its identity id, which is the row's key."""
+        relay = self._track_signals
+        if relay is None or media is None or getattr(media, "id", None) is None:
+            return
+        relay.track_event.emit(
+            {
+                "id": str(getattr(media, "waves_identity_id", None) or media.id),
+                "status": "running",
+                "fpct": float(frac),
+            }
+        )
+
+    def _note_delivered(self, media) -> None:
+        """Engine hook (download.py): the file and its sidecars are on disk,
+        only post-processing and the deliberate inter-download delay remain.
+        Flips the row's word to its finished state now, so FINISHING never
+        sits full through a sleep. Carries no path or quality on purpose: the
+        definitive done event (item(), below) still follows and is the one
+        that records ownership from reality."""
+        relay = self._track_signals
+        if relay is None or media is None or getattr(media, "id", None) is None:
+            return
+        relay.track_event.emit(
+            {
+                "id": str(getattr(media, "waves_identity_id", None) or media.id),
+                "status": "done",
+            }
+        )
 
     def item(self, *args, media=None, event_stop=None, **kwargs):
         # Ownership gate first, before any stream is fetched: an item owned at
@@ -1388,6 +1372,54 @@ def _date_added(obj) -> str:
         return str(dt)
 
 
+def _tier_word(name: str) -> str:
+    """The one word the UI shows for a quality, from any of the names TIDAL
+    spells it with (enum member, enum value, or an already-delivered tier)."""
+    lowered = str(name or "").lower()
+    if "hi_res" in lowered or "hires" in lowered:
+        return "HI-RES"
+    if "lossless" in lowered:
+        return "LOSSLESS"
+    if "320" in lowered or lowered == "high":
+        return "HIGH"
+    if "96" in lowered or lowered == "low":
+        return "LOW"
+    return str(name).replace("_", " ").upper() if name else ""
+
+
+# Best tier first, for the order a mixed rollup lists its tiers in. Anything
+# unrecognised sorts last rather than being dropped: a tier nobody named here
+# is still a tier the user got.
+_TIER_RANK = {"HI-RES": 0, "LOSSLESS": 1, "HIGH": 2, "LOW": 3}
+
+
+def _delivered_rollup(reg: dict) -> tuple[str, list[dict]]:
+    """What a job's tracks have actually LANDED at, from its per-track registry.
+
+    Returns (one tier they all agree on, per-tier counts when they do not), of
+    which exactly one is ever non-empty: ("", []) until a track reports,
+    ("LOSSLESS", []) once they agree, ("", [{q, n}, ...]) once they do not.
+
+    This is the collapsed row's answer, and it is why the row does not need the
+    drawer expansion to know it. The registry is filled by _track_lifecycle on
+    every track event whether or not anyone is looking, while the expanded
+    ledger's track list arrives from loadQueueTracks, which is a network fetch
+    and therefore only runs on expand. Rolling up here means a row states its
+    real tier (and its MIXED) while collapsed, which is where it gets noticed.
+    """
+    counts: dict[str, int] = {}
+    for row in reg.values():
+        tier = str(row.get("quality") or "")
+        if tier:
+            counts[tier] = counts.get(tier, 0) + 1
+    if not counts:
+        return "", []
+    if len(counts) == 1:
+        return next(iter(counts)), []
+    order = sorted(counts, key=lambda tier: (_TIER_RANK.get(tier, 9), tier))
+    return "", [{"q": tier, "n": counts[tier]} for tier in order]
+
+
 def _quality_label(obj) -> str:
     # Prefer the true highest available quality (from media_metadata_tags),
     # since audio_quality alone reports LOSSLESS even when hi-res is available.
@@ -1400,16 +1432,7 @@ def _quality_label(obj) -> str:
     if not name:
         aq = getattr(obj, "audio_quality", None)
         name = getattr(aq, "name", "") or (str(aq) if aq else "")
-    lowered = name.lower()
-    if "hi_res" in lowered or "hires" in lowered:
-        return "HI-RES"
-    if "lossless" in lowered:
-        return "LOSSLESS"
-    if "320" in lowered or lowered == "high":
-        return "HIGH"
-    if "96" in lowered or lowered == "low":
-        return "LOW"
-    return name.replace("_", " ").upper() if name else ""
+    return _tier_word(name)
 
 
 def _track_count(obj) -> int:
@@ -2541,6 +2564,11 @@ class WavesBridge(LibraryMixin, QObject):
         # ANYWAY: their jobs bypass the bulk claim gate for the session (a
         # retry of an overridden album must not silently re-gate).
         self._library_claim_overrides: set[str] = set()
+        # Collection ids the user asked to REDOWNLOAD through the owned gate:
+        # their jobs force every item (ownership and library claim both stand
+        # down, tracks overwrite in place). Session-long like the claim
+        # overrides, so a retry of a forced job stays forced.
+        self._redownload_overrides: set[str] = set()
         # When set, _emit_queue() coalesces, used while enqueueing a batch so
         # QML receives a single queueChanged for the whole discography.
         self._queue_emit_suspended = False
@@ -2563,11 +2591,6 @@ class WavesBridge(LibraryMixin, QObject):
         # and every query re-checks the filesystem, so the account has no bearing
         # on correctness.
         self._ownership = OwnershipStore(os.path.join(os.path.dirname(self.settings.file_path), "ownership.sqlite3"))
-        # ISRC lookups for "Skip songs you already have": no database and no
-        # background scan, just a per-folder cache built on demand (see
-        # tidaler/recording_scan.py). Cleared whenever a download lands so the
-        # next lookup sees the new file.
-        self._recording_scan = RecordingScan()
         # GUI-facing ownership answers come from this cache, refreshed on a tiny
         # dedicated pool: ownership_of stats the recorded file, and a stat on a
         # dropped network mount can block for many seconds, so it must never run
@@ -5465,9 +5488,48 @@ class WavesBridge(LibraryMixin, QObject):
 
     # ----- downloads -----------------------------------------------------
 
+    # Settled rows: finished work with nothing left to do about it. A FAILED
+    # row is not settled, however old it is, because it is the only record
+    # that something still needs retrying.
+    _QUEUE_SETTLED = frozenset({"done", "cancelled"})
+    _QUEUE_HISTORY_MAX = 250
+
+    def _trim_queue_history(self) -> None:
+        """Bound what the finished half of the queue costs, without asking.
+
+        Everything the queue does per change is proportional to its length: the
+        whole list is marshalled across to QML on every status change and
+        reconciled row by row there, and each collection row also holds a
+        per-track registry that lives as long as the row. Nothing ever removed
+        a finished row, so a long batch left the drawer carrying its own
+        history and paying for it on every update, which is the lag reported
+        in issue #24.
+
+        Oldest settled rows go first, and only past the cap; queued, running
+        and failed rows are never touched. Nothing is lost with them: what was
+        downloaded is recorded in the ownership store, which is what every
+        later question (already have it? which quality? which tracks were in
+        that album?) is answered from. These rows are a view of the session,
+        and past a couple of hundred they are a view nobody scrolls to."""
+        if len(self._queue) <= self._QUEUE_HISTORY_MAX:
+            return
+        with self._queue_lock:
+            over = len(self._queue) - self._QUEUE_HISTORY_MAX
+            kept = []
+            for row in self._queue:
+                if over > 0 and row.get("status") in self._QUEUE_SETTLED:
+                    over -= 1
+                    continue
+                kept.append(row)
+            if len(kept) == len(self._queue):
+                return  # all of it is live work; the cap does not apply
+            self._queue = kept
+            self._reindex_queue()
+
     def _emit_queue(self) -> None:
         if self._queue_emit_suspended:
             return
+        self._trim_queue_history()  # the finished half is bounded, not banked
         self._prune_job_tracks()  # registries follow their queue rows out
         self.queueChanged.emit(list(self._queue))
 
@@ -5510,6 +5572,16 @@ class WavesBridge(LibraryMixin, QObject):
             self._queue_emit_suspended = False
         self._emit_queue()
 
+    def _target_tier(self) -> str:
+        """The tier the audio-quality setting asks for, as the UI's one word.
+        Best-effort: an unreadable setting means the row states no target
+        rather than the download failing to queue."""
+        try:
+            return _tier_word(getattr(Quality(self.settings.data.quality_audio), "name", ""))
+        except Exception:
+            logger.debug("Could not read the target audio quality", exc_info=True)
+            return ""
+
     def _enqueue(
         self,
         name: str,
@@ -5538,6 +5610,19 @@ class WavesBridge(LibraryMixin, QObject):
             "tracks": tracks,
             # Cover/thumb URL for the queue card (empty when unavailable).
             "art": art,
+            # The tier this job will ASK for, known before a byte is fetched, so
+            # the drawer can state a quality while the row is still queued. What
+            # actually lands is reported per track and can differ (a release
+            # without a hi-res master downgrades), which is the point of showing
+            # the two separately.
+            "quality": self._target_tier(),
+            # The delivery, rolled up from the per-track registry by
+            # _track_lifecycle (see _delivered_rollup). Seeded here so every row
+            # carries both fields from birth: the drawer's model fixes its roles
+            # from the first row it is handed, so a field that only appears
+            # later exists on no row at all.
+            "landed": "",
+            "mix": [],
         }
         with self._queue_lock:
             self._queue.append(row)
@@ -5638,6 +5723,37 @@ class WavesBridge(LibraryMixin, QObject):
             row["status"] = ev["status"]
             if ev.get("desc"):
                 row["desc"] = ev["desc"]
+        # Finalize progress (post-download steps), a second axis next to the
+        # stream pct. A stage event carries it; a plain "running" event is the
+        # track (re)starting, which resets it so a retry does not open on a
+        # full FINISHING word from the previous attempt.
+        if "fpct" in ev:
+            row["fpct"] = float(ev["fpct"])
+        elif ev["status"] == "running":
+            row["fpct"] = 0.0
+        # What the track was DELIVERED at, as the one word the drawer shows.
+        # The event carries the full stream description (tier, mode, depth,
+        # rate); the row keeps the tier, since that is what a track line has
+        # room to say and the rest is already recorded into ownership.
+        delivered = ev.get("quality")
+        if isinstance(delivered, dict):
+            row["quality"] = _tier_word(delivered.get("tier") or "")
+        elif delivered:
+            row["quality"] = _tier_word(delivered)
+        # Roll the registry up onto the queue row, so the collapsed row can
+        # state the delivery (and MIXED) without the expansion's track fetch.
+        # Recomputed from the whole registry rather than nudged, because a
+        # retried track can land at a different tier than it did the first
+        # time, and a rollup that only ever accumulates would keep calling
+        # that MIXED after the second answer made it uniform again.
+        item = self._queue_item(qid)
+        if item is not None:
+            landed, mix = _delivered_rollup(reg)
+            if landed != item.get("landed") or mix != item.get("mix"):
+                item["landed"], item["mix"] = landed, mix
+                # Only on a real change: the tier is learned once per track, so
+                # this fires a handful of times per job, not per progress tick.
+                self._emit_queue()
         # An ownership skip is complete work (nothing to fetch), so it fills the
         # bar; it records nothing new (the file is already owned and the event
         # carries no freshly delivered quality).
@@ -5648,11 +5764,11 @@ class WavesBridge(LibraryMixin, QObject):
             # the reachability gate's liveness window (cheap, no I/O). Only
             # when it landed under the CURRENT setting: a job still writing to
             # the previous folder must not vouch for a never-written new one.
-            landed = str(ev.get("path") or "")
-            if landed:
+            landed_path = str(ev.get("path") or "")
+            if landed_path:
                 base = self.settings.data.download_base_path
                 base_abs = str(pathlib.Path(base).expanduser())
-                if landed == base_abs or landed.startswith(base_abs + os.sep):
+                if landed_path == base_abs or landed_path.startswith(base_abs + os.sep):
                     self._note_download_base_ok(base)
             # Recording ownership resolves the real path (os.path.realpath
             # walks and stats every component) and writes sqlite. Against a
@@ -5694,15 +5810,6 @@ class WavesBridge(LibraryMixin, QObject):
                 sample_rate=quality.get("sample_rate"),
                 codecs=quality.get("codecs"),
             )
-            # A new file changed its folder's mtime, so any cached ISRC map for
-            # a scan root above it is stale (directory mtimes settle at
-            # second-granularity on some filesystems, so drop the cache rather
-            # than trust the stamp to have moved). Deliberately AFTER the
-            # ownership write and separately guarded: the duplicate-skip cache
-            # is an optimisation, and a problem clearing it must never cost the
-            # ownership record, which is what DOWNLOADED and skip both read.
-            with contextlib.suppress(Exception):
-                self._recording_scan.forget()
             # The file was written this instant, so assert the cache entry
             # directly (no stat needed) and let QML flip the button now. The
             # next TTL refresh reconciles against the store's full row set.
@@ -5769,7 +5876,10 @@ class WavesBridge(LibraryMixin, QObject):
             self._own_cache[tid] = (time.monotonic(), rec)
             self._evict_own_cache_locked()
             self._own_pending.discard(tid)
-        if (prev[1] if prev else None) != rec:
+        # The FIRST answer always announces itself, even "not owned": a cold
+        # query was served with a pending marker, and the button holding its
+        # roll animation on it needs this nudge to arm, whatever the answer.
+        if prev is None or prev[1] != rec:
             self.ownershipChanged.emit(tid)
 
     @Slot(str, result="QVariant")
@@ -5794,7 +5904,12 @@ class WavesBridge(LibraryMixin, QObject):
         if need:
             self._own_pool.start(Worker(lambda: self._own_refresh(tid)))
         if not rec:
-            return {"owned": False}
+            # pending marks a question never answered this session (vs a firm
+            # "not owned" already refreshed once): buttons hold their roll
+            # animation on it, so a page's first paint never visibly flips
+            # from DOWNLOAD to DOWNLOADED when the real answer lands a beat
+            # later. A stale-but-known answer stays unmarked on purpose.
+            return {"owned": False, "pending": True} if hit is None else {"owned": False}
         rank = int(rec.get("quality_rank", -1))
         return {**rec, "up_to_date": rank < 0 or rank >= self._target_quality_rank()}
 
@@ -5914,6 +6029,13 @@ class WavesBridge(LibraryMixin, QObject):
                         **entry,
                         "status": st.get("status", "pending"),
                         "pct": float(st.get("pct", 0.0)),
+                        # The tier this track actually landed at. Carried over
+                        # explicitly: the fetched entry only knows the album's
+                        # running order, so a row expanded AFTER its tracks
+                        # finished would otherwise show a blank quality for
+                        # every one of them, the registry holding the answer
+                        # all along.
+                        "quality": st.get("quality", ""),
                     }
                 )
         else:
@@ -5926,6 +6048,7 @@ class WavesBridge(LibraryMixin, QObject):
                         "duration": st.get("duration", ""),
                         "status": st.get("status", "pending"),
                         "pct": float(st.get("pct", 0.0)),
+                        "quality": st.get("quality", ""),
                     }
                 )
             for i, row in enumerate(rows, start=1):
@@ -6139,6 +6262,9 @@ class WavesBridge(LibraryMixin, QObject):
             "win_w": 0,
             "win_h": 0,
             "win_max": False,
+            # The queue drawer's dragged width, remembered the same way and with
+            # the same zero sentinel. Written by queueSaveWidth as a real int.
+            "queue_w": 0,
         }
 
     def _load_waves_prefs(self) -> dict:
@@ -6322,6 +6448,41 @@ class WavesBridge(LibraryMixin, QObject):
         if changed:
             self._save_waves_prefs()
             _win_log.debug("save window %dx%d @ %d,%d max=%s", w, h, x, y, mx)
+
+    @Slot(result=int)
+    def queueRestoreWidth(self) -> int:
+        """The remembered width of the queue drawer, or 0 on a fresh install.
+
+        Zero is the never-saved sentinel, the same convention the window frame
+        uses, and QML falls back to the drawer's floor there. Nothing to fit to
+        a screen: the drawer clamps its width against the LIVE window on every
+        read, so a width saved on a wider window narrows itself on a smaller one
+        rather than hanging off the side, and widens again on the next big
+        window because what is stored is the width that was asked for."""
+        try:
+            return max(0, int(self._waves_prefs.get("queue_w") or 0))
+        except (TypeError, ValueError):
+            return 0  # hand-edited or corrupt: fall back to the floor
+
+    @Slot(int)
+    def queueSaveWidth(self, w: int) -> None:
+        """Persist the queue drawer's dragged width.
+
+        QML debounces the per-pixel storm of a drag into one settled call, the
+        same as the window frame, and the value is written as a real int,
+        bypassing setWavesPref's non-bool str() coercion. Unlike the window
+        frame this is kept on a headless run too: a width means the same thing
+        with no windowing system, where a window POSITION does not."""
+        try:
+            w = int(w)
+        except (TypeError, ValueError):
+            return
+        if w <= 0:
+            return  # a zero during teardown must never clobber a good save
+        if self._waves_prefs.get("queue_w") != w:
+            self._waves_prefs["queue_w"] = w
+            self._save_waves_prefs()
+            _win_log.debug("save queue drawer width %d", w)
 
     # ----- diagnostics export --------------------------------------------
 
@@ -6532,19 +6693,38 @@ class WavesBridge(LibraryMixin, QObject):
                         out.append(a)
         return out
 
-    def _library_claim_media(self, media) -> bool:
+    def _library_claim_media(self, media, album=None) -> bool:
         """Engine-facing adapter for the bulk claim gate: does the library scan
-        claim this track? Videos never match: the scan indexes audio, and a
-        music video sharing its song's title must not be skipped because the
-        audio copy exists. Artist resolution mirrors _track_key, so the gate
-        asks about the same identity the dedup and pill layers use."""
+        hold this track already filed under the release being fetched? Videos
+        never match: the scan indexes audio, and a music video sharing its
+        song's title must not be skipped because the audio copy exists. Artist
+        resolution mirrors _track_key, so the gate asks about the same identity
+        the dedup and pill layers use.
+
+        ``album`` is the job's own release when the job IS an album, which is
+        the only place its year is reliably spelled out (a track's embedded
+        album carries a title but often no date). A playlist or mix fans out
+        tracks from many releases and passes None, so each track answers for
+        the album it belongs to. Without a release to name, the claim cannot
+        be proven and the track is fetched, which is the safe direction."""
         if media is None or isinstance(media, Video):
             return False
         artist = _primary_artist_name(media) or name_builder_artist(media)
-        return self._library_claims_track(artist, name_builder_title(media))
+        release = album if album is not None else getattr(media, "album", None)
+        return self._library_claims_track(
+            artist,
+            name_builder_title(media),
+            str(getattr(release, "name", "") or ""),
+            str(getattr(release, "year", "") or ""),
+            int(getattr(media, "duration", 0) or 0),
+        )
 
     def _build_download(
-        self, signals: _ProgressSignals, event_abort: Event | None = None, library_claim=None
+        self,
+        signals: _ProgressSignals,
+        event_abort: Event | None = None,
+        library_claim=None,
+        force_redownload: bool = False,
     ) -> Download:
         self._resolve_ffmpeg()
         progress_gui = ProgressBars(
@@ -6565,9 +6745,8 @@ class WavesBridge(LibraryMixin, QObject):
             track_signals=signals,
             ownership_of=self._ownership.ownership_of,
             target_rank=self._target_quality_rank(),
-            recording_scan=self._recording_scan,
-            skip_duplicate_recordings=bool(getattr(self.settings.data, "skip_duplicate_recordings", False)),
             library_claim=library_claim,
+            force_redownload=force_redownload,
         )
         self._warn_if_ffmpeg_missing(dl)
         return dl
@@ -7239,8 +7418,16 @@ class WavesBridge(LibraryMixin, QObject):
         # (and so do its retries this session).
         library_claim = None
         if collection and self._library_bulk_skip_on() and media_id not in self._library_claim_overrides:
-            library_claim = self._library_claim_media
-        dl = self._build_download(signals, event_abort=job_abort, library_claim=library_claim)
+            # An album job names its own release, and it is the only place the
+            # release YEAR is reliably spelled out; a playlist or mix carries
+            # tracks from many, so those let each track name its own.
+            library_claim = functools.partial(self._library_claim_media, album=obj if type_media == "album" else None)
+        dl = self._build_download(
+            signals,
+            event_abort=job_abort,
+            library_claim=library_claim,
+            force_redownload=media_id in self._redownload_overrides,
+        )
         if collection or merge_plan is not None:
             # Seed the per-track registry. A merge plan knows its exact track
             # list up front; a plain collection fills in as tracks start.
@@ -8265,6 +8452,16 @@ class WavesBridge(LibraryMixin, QObject):
         self.downloadAlbum(album_id)
 
     @Slot(str)
+    def registerRedownload(self, media_id: str) -> None:
+        """REDOWNLOAD confirmed on the owned gate: mark this collection so its
+        next job (started by the caller right after this) forces every item.
+        The library claim override rides along: a forced job must not be
+        second-guessed by a tag match either."""
+        mid = str(media_id)
+        self._redownload_overrides.add(mid)
+        self._library_claim_overrides.add(mid)
+
+    @Slot(str)
     def downloadAlbumBestOfBoth(self, album_id: str) -> None:
         """Download this album as a 'best of both': the most complete edition's
         track list, with each shared recording pulled from the highest-quality
@@ -8812,11 +9009,18 @@ class WavesBridge(LibraryMixin, QObject):
             if guest:
                 self._set_status("Scanning guest appearances…")
                 gtracks: list = []
+                # The release each guest track came from, kept beside the list
+                # rather than written onto the track: the claim gate wants the
+                # release's YEAR (a track's embedded album usually has none),
+                # and track.album is what the output path is built from, so it
+                # must not be swapped out from under the download.
+                grel: dict[str, object] = {}
                 for rel in guest:
                     try:
                         for t in rel.tracks():
                             if _artist_on_track(t, artist_id):
                                 gtracks.append(t)
+                                grel.setdefault(str(getattr(t, "id", id(t))), rel)
                     except Exception:
                         # Same partial-scan rule as _artist_releases: a failed
                         # track fetch would silently drop this release's guest
@@ -8830,10 +9034,10 @@ class WavesBridge(LibraryMixin, QObject):
                     # engine's claim gate deliberately ignores (a single click
                     # is explicit); a discography queueing them is a bulk
                     # action, so the claim is applied here instead.
-                    if self._library_bulk_skip_on() and self._library_claim_media(t):
+                    tkey = str(getattr(t, "id", id(t)))
+                    if self._library_bulk_skip_on() and self._library_claim_media(t, album=grel.get(tkey)):
                         skipped += 1
                         continue
-                    tkey = str(getattr(t, "id", id(t)))
                     self._remember("track", tkey, t)
                     track_keys.append(tkey)
                 devlog.event("guest_tracks", releases=len(guest), tracks=len(track_keys))
@@ -10036,7 +10240,6 @@ class WavesBridge(LibraryMixin, QObject):
                     "downloads_concurrent_max",
                     "download_dolby_atmos",
                     "skip_existing",
-                    "skip_duplicate_recordings",
                     "confirm_category_download",
                     "download_delay",
                 ],
@@ -10372,6 +10575,14 @@ class WavesBridge(LibraryMixin, QObject):
         ):
             self._invalidate_library_index()
             lib_edit = True
+        # A moved download folder can also enter or leave a SEPARATE library
+        # folder, which flips downloadsInsideLibrary and with it the done-face
+        # word (IN LIBRARY vs DOWNLOADED). The QML mirror re-reads on this
+        # signal; in download-source mode the branch above already set
+        # lib_edit, but no emit happened on that path either, so this one
+        # covers both.
+        if getattr(data, "download_base_path", None) != dl_base_before:
+            self.librarySourceChanged.emit()
         # SAVE CHANGES is also the library card's Start scan: a library setting
         # that actually MOVED starts the fresh configuration's first scan,
         # provided the master switch is on and a folder is set, which is exactly
