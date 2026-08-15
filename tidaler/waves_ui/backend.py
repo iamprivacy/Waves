@@ -935,6 +935,14 @@ class _TrackedDownload(Download):
         self.write_count = 0
         self.skip_count = 0
         self.fail_count = 0
+        # Items TIDAL itself refuses to stream (allow_streaming false), tallied
+        # apart from fail_count because they are not a failure of this app and
+        # no retry can turn them into a file. Counting them as failures is what
+        # painted a whole album red and told the user 15 of 15 tracks had failed
+        # when TIDAL had simply delisted every one of them (issue #25).
+        self.unavailable_count = 0
+        # The collection itself was refused, so no track was ever reached.
+        self.list_unavailable = False
         # Delivered-quality snapshots captured in _get_track_stream_info, keyed by
         # str(track id), popped by item() onto the completion event. Only a real
         # download (a stream was fetched) populates this; a skip_existing
@@ -979,6 +987,35 @@ class _TrackedDownload(Download):
                 self.write_count += 1
             else:
                 self.fail_count += 1
+
+    def _note_unavailable(self, media) -> None:
+        """Engine hook (download.py): TIDAL refuses to stream this item. Marks
+        the calling thread so item(), which sees only a bare ok=False from the
+        engine, can tell a refusal from a failure. Thread-local because items()
+        fans item() out on a pool, so the mark has to belong to the track that
+        raised it and to no other. A refused COLLECTION never reaches item()
+        (the engine returns before the track loop), so it is recorded on the
+        job instead."""
+        if isinstance(media, Track | Video):
+            self._tls.unavailable = True
+        else:
+            self.list_unavailable = True
+
+    def _take_unavailable(self) -> bool:
+        """Read and clear this thread's refusal mark. Cleared on every item()
+        whether it was set or not, so a refusal can never leak onto the next
+        track this pool thread picks up. Reading it is free of consequence on
+        purpose: the tally belongs to the outcome, so item() decides that."""
+        refused = bool(getattr(self._tls, "unavailable", False))
+        self._tls.unavailable = False
+        return refused
+
+    def _note_refusal(self) -> None:
+        """Tally a track TIDAL refused. Deliberately beside ok_count and
+        fail_count rather than inside either: it is not work this app got wrong
+        and not work it got done."""
+        with self._outcome_lock:
+            self.unavailable_count += 1
 
     def _get_track_stream_info(self, media):
         """Capture the delivered stream's quality as a side effect, without
@@ -1181,7 +1218,12 @@ class _TrackedDownload(Download):
         if relay is None or media is None or getattr(media, "id", None) is None:
             with force:
                 ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
-            self._note_outcome(ok)
+            # Same split as the tracked branch below: a refusal is neither a
+            # success nor a failure, it is TIDAL saying the item is gone.
+            if self._take_unavailable() and not ok:
+                self._note_refusal()
+            else:
+                self._note_outcome(ok)
             return ok, path
         name = name_builder_item(media)
         base = {
@@ -1202,11 +1244,20 @@ class _TrackedDownload(Download):
                 ok, path = super().item(*args, media=media, event_stop=event_stop, **kwargs)
         except Exception:
             self._delivered.pop(str(media.id), None)
+            self._take_unavailable()
             relay.track_event.emit({**base, "status": "failed"})
             raise
         aborted = self.event_abort.is_set() or (event_stop is not None and event_stop.is_set())
-        status = "done" if ok else ("cancelled" if aborted else "failed")
-        self._note_outcome(ok)
+        # A refusal is its own outcome. It keeps out of fail_count (so it never
+        # fails the album around it) and out of ok_count (so an album of nothing
+        # but refusals cannot report a clean done over an empty folder).
+        refused = self._take_unavailable() and not ok
+        if refused:
+            status = "unavailable"
+            self._note_refusal()
+        else:
+            status = "done" if ok else ("cancelled" if aborted else "failed")
+            self._note_outcome(ok)
         with self._delivered_lock:
             quality = self._delivered.pop(str(media.id), None)
         event = {**base, "status": status}
@@ -1250,7 +1301,17 @@ def _raise_download_incomplete(message: str) -> None:
     raise RuntimeError(message)
 
 
-def _collection_incomplete_reason(write_count: int, ok_count: int, fail_count: int) -> str | None:
+def _tracks_word(n: int) -> str:
+    return "1 track" if n == 1 else f"{n} tracks"
+
+
+def _collection_incomplete_reason(
+    write_count: int,
+    ok_count: int,
+    fail_count: int,
+    unavailable_count: int = 0,
+    list_unavailable: bool = False,
+) -> str | None:
     """Why a finished collection download is incomplete, or None if it succeeded.
 
     dl.items() swallows a per-track stream failure as ok=False without raising,
@@ -1262,12 +1323,36 @@ def _collection_incomplete_reason(write_count: int, ok_count: int, fail_count: i
         unentitled or free account that rejected every stream.
     An all-owned collection (ownership skips count as ok, no failures, no writes)
     is a real success, so it returns None.
+
+    Tracks TIDAL refuses to stream are counted apart and do NOT make the
+    collection a failure: the app did everything it could and the rest of the
+    album is on disk, so the job settles as finished and the refusals are named
+    in the status line instead (see _unavailable_note). Reading them as failures
+    is what turned a delisted commentary edition into a red "15 of 15 tracks
+    failed" (issue #25). What they may not do is prop up a false success: an
+    album whose every track was refused wrote nothing, so it says exactly that
+    rather than reporting done over an empty folder.
     """
     if fail_count > 0:
-        return f"{fail_count} of {ok_count + fail_count} tracks failed"
+        return f"{fail_count} of {ok_count + fail_count + unavailable_count} tracks failed"
+    if list_unavailable:
+        return "this release is not available on TIDAL anymore"
     if write_count == 0 and ok_count == 0:
+        if unavailable_count:
+            return f"not available on TIDAL anymore ({_tracks_word(unavailable_count)})"
         return "no tracks were downloaded"
     return None
+
+
+def _unavailable_note(unavailable_count: int) -> str:
+    """The trailing clause naming refusals on an otherwise finished collection,
+    empty when there were none. The job succeeded, so this is a footnote to the
+    status line, not a failure: it tells the user which part of the album TIDAL
+    no longer carries, which is the one thing an empty-handed retry would never
+    have told them."""
+    if unavailable_count <= 0:
+        return ""
+    return f" ({_tracks_word(unavailable_count)} no longer on TIDAL)"
 
 
 def _fmt_duration(seconds: int | None) -> str:
@@ -5756,8 +5841,10 @@ class WavesBridge(LibraryMixin, QObject):
                 self._emit_queue()
         # An ownership skip is complete work (nothing to fetch), so it fills the
         # bar; it records nothing new (the file is already owned and the event
-        # carries no freshly delivered quality).
-        if ev["status"] in ("done", "skipped"):
+        # carries no freshly delivered quality). A track TIDAL refuses is
+        # settled too: there is nothing left to wait for, and a row left at zero
+        # would read as still pending for the rest of the job.
+        if ev["status"] in ("done", "skipped", "unavailable"):
             row["pct"] = 100.0
         if ev["status"] == "done":
             # A finished track just proved the download folder writable: feed
@@ -5969,7 +6056,7 @@ class WavesBridge(LibraryMixin, QObject):
         total = int(item.get("tracks") or 0)
         if total <= 0:
             return
-        consumed = sum(1 for r in reg.values() if r.get("status") in ("done", "failed", "cancelled"))
+        consumed = sum(1 for r in reg.values() if r.get("status") in ("done", "failed", "cancelled", "unavailable"))
         running = sum(float(r.get("pct", 0.0)) for r in reg.values() if r.get("status") == "running")
         smooth = min(100.0, (consumed * 100.0 + running) / total)
         if smooth <= float(item.get("progress", 0.0)) + 0.1:
@@ -7494,7 +7581,13 @@ class WavesBridge(LibraryMixin, QObject):
                     # Skip-existing makes the retry cheap: it re-attempts only the
                     # missing tracks.
                     if not job_abort.is_set():
-                        reason = _collection_incomplete_reason(dl.write_count, dl.ok_count, dl.fail_count)
+                        reason = _collection_incomplete_reason(
+                            dl.write_count,
+                            dl.ok_count,
+                            dl.fail_count,
+                            dl.unavailable_count,
+                            dl.list_unavailable,
+                        )
                         if reason:
                             _raise_download_incomplete(reason)
                 else:
@@ -7504,7 +7597,12 @@ class WavesBridge(LibraryMixin, QObject):
                     # would flip the button to a false "done".
                     ok, _path = dl.item(file_template=file_template, media=obj)
                     if not ok and not job_abort.is_set():
-                        _raise_download_incomplete("track produced no file")
+                        # A track the user asked for by name still has to report
+                        # that it produced nothing, but it may as well say why:
+                        # TIDAL no longer carries it, so no retry will help.
+                        _raise_download_incomplete(
+                            "not available on TIDAL anymore" if dl.unavailable_count else "track produced no file"
+                        )
                 if job_abort.is_set():
                     # Cancelled mid-download, don't report success.
                     self.downloadState.emit(media_id, "")
@@ -7521,7 +7619,10 @@ class WavesBridge(LibraryMixin, QObject):
                     self.downloadState.emit(media_id, "done")
                     self._set_queue_status(qid, "done")
                     self._bump_download_groups(media_id, 100.0, "done")
-                    self._set_status(f"Finished {name}")
+                    # The job finished; if TIDAL withheld part of it, the status
+                    # line says so rather than leaving the user to count the
+                    # files. The queue's own track rows name which ones.
+                    self._set_status(f"Finished {name}{_unavailable_note(dl.unavailable_count)}")
                     devlog.done("download", f"done {type_media} id={media_id}", devlog.clock() - t0)
             except Exception:
                 if job_abort.is_set():
