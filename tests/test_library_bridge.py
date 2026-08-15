@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ _METHODS = (
     "librarySource",
     "libraryDownloadFolder",
     "_library_bulk_skip_on",
+    "downloadsInsideLibrary",
     "_library_claims_album",
     "_library_claims_track",
     # The MusicBrainz overlay rides inside the presence slot; the opt-in pref
@@ -1085,14 +1087,20 @@ def test_bulk_claim_answers_full_albums_and_exact_tracks_only(tmp_path):
     # Before any scan: an unbuilt index claims nothing, whatever the prefs say.
     assert s._library_bulk_skip_on() is True
     assert s._library_claims_album(_tidal_album("Whole", "A", 2000, 2)) is False
-    assert s._library_claims_track("A", "Song W") is False
+    assert s._library_claims_track("A", "Song W", "Whole", "2000") is False
     s._rebuild_library_index()
     assert s._library_claims_album(_tidal_album("Whole", "A", 2000, 2)) is True
     # The partial copy (1 of 12 tracks) is not claimed at album grain...
     assert s._library_claims_album(_tidal_album("Part", "A", 2001, 12)) is False
     # ...but its one track is, exactly, and nothing else.
-    assert s._library_claims_track("A", "Song P") is True
-    assert s._library_claims_track("A", "Some Other Song") is False
+    assert s._library_claims_track("A", "Song P", "Part", "2001") is True
+    assert s._library_claims_track("A", "Some Other Song", "Part", "2001") is False
+    # The track claim is scoped to the release being fetched (issue #24). The
+    # same song filed under a different album is NOT a reason to leave it out
+    # of the one the user asked for, and a caller that cannot name a release
+    # gets no claim at all.
+    assert s._library_claims_track("A", "Song P", "Greatest Hits", "2019") is False
+    assert s._library_claims_track("A", "Song P") is False
     assert s._library_claims_album(_tidal_album("", "A", 2000, 2)) is False
     assert s._library_claims_album(None) is False
 
@@ -1314,3 +1322,59 @@ def test_a_healthy_scan_records_the_library_shares_origin(tmp_path):
     gone._remember_share_origin = remembered.append
     gone._rebuild_library_index()
     assert remembered == [lib], "a missing root must not be treated as proof of life"
+
+
+# ---------------------------------------------------------------------------
+# downloadsInsideLibrary: the done-face wording gate. IN LIBRARY on a finished
+# download is only honest when the library will actually contain the file; a
+# separate download folder must answer False so the face says DOWNLOADED
+# until the scan proves the moved copy present.
+# ---------------------------------------------------------------------------
+
+
+def test_downloads_inside_library_true_in_download_source_mode(tmp_path):
+    dl = str(tmp_path / "dl")
+    s = _make(tmp_path, library_source="download", download_base=dl)
+    assert s.downloadsInsideLibrary() is True
+
+
+def test_downloads_inside_library_true_when_base_is_the_library(tmp_path):
+    lib = str(tmp_path / "lib")
+    s = _make(tmp_path, library_folder=lib, download_base=lib)
+    assert s.downloadsInsideLibrary() is True
+
+
+def test_downloads_inside_library_true_for_a_subfolder(tmp_path):
+    lib = str(tmp_path / "lib")
+    s = _make(tmp_path, library_folder=lib, download_base=os.path.join(lib, "new"))
+    assert s.downloadsInsideLibrary() is True
+
+
+def test_downloads_inside_library_false_for_a_separate_folder(tmp_path):
+    s = _make(tmp_path, library_folder=str(tmp_path / "lib"), download_base=str(tmp_path / "dl"))
+    assert s.downloadsInsideLibrary() is False
+
+
+def test_downloads_inside_library_false_for_a_sibling_prefix_name(tmp_path):
+    # "lib2" begins with "lib" as a STRING but is not inside it; the check
+    # must compare path segments, not characters.
+    s = _make(tmp_path, library_folder=str(tmp_path / "lib"), download_base=str(tmp_path / "lib2"))
+    assert s.downloadsInsideLibrary() is False
+
+
+def test_downloads_inside_library_folds_case_where_the_platform_does(tmp_path):
+    # One folder spelled two ways. On macOS (APFS/HFS+ case-insensitive by
+    # default) and on Windows (folded by normcase) those name the SAME folder,
+    # so the download folder really is inside the library and the done face may
+    # say IN LIBRARY. On a case-sensitive filesystem they are two folders and
+    # the answer stays False.
+    s = _make(tmp_path, library_folder=str(tmp_path / "Lib"), download_base=str(tmp_path / "lib"))
+    assert s.downloadsInsideLibrary() is (sys.platform in ("darwin", "win32"))
+
+
+def test_downloads_inside_library_false_when_scan_off_or_unconfigured(tmp_path):
+    lib = str(tmp_path / "lib")
+    off = _make(tmp_path, library_enabled=False, library_folder=lib, download_base=lib)
+    assert off.downloadsInsideLibrary() is False
+    nobase = _make(tmp_path, library_folder=lib, download_base="")
+    assert nobase.downloadsInsideLibrary() is False

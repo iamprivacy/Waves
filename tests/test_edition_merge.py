@@ -338,6 +338,7 @@ def _gate_dl(records: dict, tmp_path) -> _TrackedDownload:
     dl._target_rank = 2
     dl.settings = _GateSettings()
     dl.path_base = str(tmp_path)
+    dl._force_redownload = False
     return dl
 
 

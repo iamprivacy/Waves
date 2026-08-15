@@ -67,11 +67,20 @@ class _BridgeStub:
         self._OWN_TTL_BUSY = WavesBridge._OWN_TTL_BUSY
         self._downloads_running = lambda: False
         self._base_ok = ("", 0.0)
+        # _track_lifecycle also rolls the per-track registry up onto the job's
+        # queue row (so a collapsed row can state its delivered tier). These
+        # tests drive it with no queue at all, which is a real shape: an event
+        # can arrive for a row already cleared. An empty index makes _queue_item
+        # answer None, the rollup no-ops, and the ownership behaviour under test
+        # is unaffected either way.
+        self._queue_index: dict = {}
+        self._emit_queue = lambda: None
         self.settings = SimpleNamespace(
             data=SimpleNamespace(quality_audio=quality_audio, download_base_path="", symlink_to_track=False)
         )
         for name in (
             "_track_lifecycle",
+            "_queue_item",
             "_record_ownership",
             "_evict_own_cache_locked",
             "_note_download_base_ok",
@@ -113,13 +122,10 @@ def _new_tracked():
     td._target_rank = 2  # LOSSLESS
     td._tls = local()
     td._skip_existing_base = False
-    # Duplicate-recording skip: off, like the shipped default, so these
-    # ownership tests exercise the ownership gate alone.
-    td._recording_scan = None
-    td._skip_duplicate_recordings = False
     # Library bulk claim: not injected, like any single-item job, so these
     # ownership tests exercise the ownership gate alone.
     td._library_claim = None
+    td._force_redownload = False
     return td
 
 
@@ -247,15 +253,15 @@ def test_done_without_quality_is_not_recorded(tmp_path):
     stub = _BridgeStub(tmp_path)
     f = _make_file(tmp_path)
     stub._track_lifecycle(1, {"id": "42", "status": "done", "path": str(f)})  # a skip: no quality
-    assert stub.ownershipOf("42") == {"owned": False}
-    assert stub.ownershipChanged.emits == []
+    assert stub.ownershipChanged.emits == []  # nothing recorded, nothing announced
+    assert stub.own("42") == {"owned": False}
 
 
 def test_failed_event_is_not_recorded(tmp_path):
     stub = _BridgeStub(tmp_path)
     f = _make_file(tmp_path)
     stub._track_lifecycle(1, {"id": "42", "status": "failed", "path": str(f), "quality": {"tier": "LOSSLESS"}})
-    assert stub.ownershipOf("42") == {"owned": False}
+    assert stub.own("42") == {"owned": False}
 
 
 def test_symlink_records_resolved_target(tmp_path):
@@ -275,6 +281,10 @@ def test_symlink_records_resolved_target(tmp_path):
 
 def test_ownership_of_unrecorded_is_not_owned(tmp_path):
     stub = _BridgeStub(tmp_path)
+    # The FIRST cold call carries the pending marker (the truth is being
+    # fetched; buttons hold their roll animation on it); once the refresh has
+    # answered, an unrecorded id is a firm, unmarked "not owned".
+    assert stub.ownershipOf("nope") == {"owned": False, "pending": True}
     assert stub.ownershipOf("nope") == {"owned": False}
 
 
@@ -423,8 +433,8 @@ def test_skipped_event_fills_bar_and_records_nothing(tmp_path):
     stub._track_lifecycle(1, {"id": "42", "status": "skipped", "title": "Song", "desc": "d"})
     row = stub.queueTrackState.emits[-1][1]
     assert row["pct"] == 100.0
-    assert stub.ownershipOf("42") == {"owned": False}
-    assert stub.ownershipChanged.emits == []
+    assert stub.ownershipChanged.emits == []  # the skip recorded nothing
+    assert stub.own("42") == {"owned": False}
 
 
 def test_deleted_file_reads_as_not_owned(tmp_path):
@@ -480,9 +490,9 @@ def test_ownership_of_never_stats_on_the_calling_thread(tmp_path, monkeypatch):
         raise AssertionError("the store must not be queried on the calling thread")
 
     monkeypatch.setattr(stub._ownership, "ownership_of", _boom)
-    assert stub.ownershipOf("42") == {"owned": False}
+    assert stub.ownershipOf("42") == {"owned": False, "pending": True}
     assert stub._own_pool.started == 1
-    assert stub.ownershipOf("42") == {"owned": False}
+    assert stub.ownershipOf("42") == {"owned": False, "pending": True}
     assert stub._own_pool.started == 1, "a pending refresh must not be scheduled twice"
 
 

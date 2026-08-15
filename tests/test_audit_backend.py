@@ -98,6 +98,12 @@ class _Stub:
         self._queue = rows
         self._reindex_queue()
 
+    _QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
+    _QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX
+
+    def _trim_queue_history(self):
+        return WavesBridge._trim_queue_history(self)
+
     def _emit_queue(self):
         return WavesBridge._emit_queue(self)
 

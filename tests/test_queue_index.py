@@ -31,11 +31,17 @@ def _stub():
     stub._queue_lock = Lock()
     stub._queue_emit_suspended = False
     stub._emit_queue = lambda: None
+    # A queued row states the tier its job will ask for; the setting behind
+    # that word is not what these tests are about.
+    stub._target_tier = lambda: "LOSSLESS"
     stub._job_aborts = {}
+    stub._QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
+    stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX
     for name in (
         "_enqueue",
         "_reindex_queue",
         "_queue_item",
+        "_trim_queue_history",
         "removeQueueItem",
         "clearFinished",
         "clearFailed",
@@ -118,3 +124,85 @@ def test_clear_queue_reindexes():
     stub.clearQueue()
     assert [it["qid"] for it in stub._queue] == [qids[0]]
     assert _mirror_ok(stub)
+
+
+# --- Automatic history retention (issue #24) ----------------------------------
+# Nothing ever removed a finished queue row, and every per-change cost is
+# proportional to the list's length (a full marshal to QML, a row-by-row
+# reconcile there, a per-track registry held per collection row). A long batch
+# therefore got heavier the longer it ran. The finished half is now bounded
+# automatically, with no switch to find and nothing asked of the user: manual
+# clearing should not be the thing standing between them and a responsive app.
+
+
+def _settled_queue(stub, live=0, done=0, failed=0):
+    """A queue in arrival order: `live` still queued, then `done` finished,
+    then `failed`. Returns the qids in that order."""
+    order = []
+    for i in range(live):
+        order.append(stub._enqueue(f"live{i}", "album", media_id=f"L{i}"))
+    for i in range(done):
+        qid = stub._enqueue(f"done{i}", "album", media_id=f"D{i}")
+        stub._queue_item(qid)["status"] = "done"
+        order.append(qid)
+    for i in range(failed):
+        qid = stub._enqueue(f"fail{i}", "album", media_id=f"F{i}")
+        stub._queue_item(qid)["status"] = "failed"
+        order.append(qid)
+    return order
+
+
+def test_a_queue_under_the_cap_is_left_alone():
+    stub = _stub()
+    qids = _settled_queue(stub, done=stub._QUEUE_HISTORY_MAX)
+    stub._trim_queue_history()
+    assert [it["qid"] for it in stub._queue] == qids
+
+
+def test_settled_rows_past_the_cap_go_oldest_first():
+    stub = _stub()
+    over = 12
+    qids = _settled_queue(stub, done=stub._QUEUE_HISTORY_MAX + over)
+    stub._trim_queue_history()
+    assert len(stub._queue) == stub._QUEUE_HISTORY_MAX
+    # The oldest are what went, and the newest are all still there in order.
+    assert [it["qid"] for it in stub._queue] == qids[over:]
+    assert _mirror_ok(stub)
+
+
+def test_a_cancelled_row_settles_too():
+    stub = _stub()
+    stub._queue_item(_settled_queue(stub, done=stub._QUEUE_HISTORY_MAX + 1)[0])["status"] = "cancelled"
+    stub._trim_queue_history()
+    assert len(stub._queue) == stub._QUEUE_HISTORY_MAX
+
+
+def test_failed_rows_are_never_trimmed():
+    # A failed row is the only record that something still needs retrying, and
+    # RETRY ALL is the whole point of the Failed section. Age is no argument.
+    stub = _stub()
+    qids = _settled_queue(stub, failed=stub._QUEUE_HISTORY_MAX + 40)
+    stub._trim_queue_history()
+    assert [it["qid"] for it in stub._queue] == qids
+
+
+def test_live_work_is_never_trimmed_and_holds_the_queue_over_the_cap():
+    # A discography queues hundreds of rows at once. They are all live work,
+    # so the cap simply does not apply until they finish.
+    stub = _stub()
+    qids = _settled_queue(stub, live=stub._QUEUE_HISTORY_MAX + 50)
+    stub._trim_queue_history()
+    assert [it["qid"] for it in stub._queue] == qids
+
+
+def test_the_trim_takes_settled_rows_out_from_among_live_ones():
+    # Arrival order interleaves: finished albums sit between still-queued ones,
+    # and only the finished ones may be taken, oldest first.
+    stub = _stub()
+    live = _settled_queue(stub, live=stub._QUEUE_HISTORY_MAX)
+    done = _settled_queue(stub, done=10)
+    more_live = _settled_queue(stub, live=5)
+    stub._trim_queue_history()
+    assert [it["qid"] for it in stub._queue] == live + more_live
+    assert all(it["status"] == "queued" for it in stub._queue)
+    assert done and _mirror_ok(stub)

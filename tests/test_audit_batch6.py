@@ -388,6 +388,15 @@ class _LifecycleStub:
     def _prune_job_tracks(self):
         pass
 
+    # _track_lifecycle also rolls the registry up onto the job's queue row.
+    # These tests are about the liveness stamp and drive it with no queue, so
+    # the row lookup answers None and the rollup no-ops.
+    def _queue_item(self, qid):
+        return None
+
+    def _emit_queue(self):
+        pass
+
 
 def test_a_track_landing_in_the_old_folder_does_not_vouch_for_the_new_one(tmp_path):
     stub = _LifecycleStub(base=str(tmp_path / "NewLibrary"))

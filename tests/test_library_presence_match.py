@@ -1076,13 +1076,15 @@ def test_artist_rollup_sums_a_sets_discs_and_dedups_editions():
     assert roll2[artist_key]["albums"] == 1 and roll2[artist_key]["tracks"] == 20
 
 
-def test_track_length_proves_alone():
+def test_track_length_never_proves_on_its_own():
+    # Seconds name a RECORDING, and every compilation, best-of and re-release
+    # carries the same recording to the second, so matching length can never
+    # stand in for the album the caller asked about (issue #24).
     from tidaler.matching import decide_track_presence
 
-    # Title, artist and seconds together name a recording: no album context needed.
     idx = _tindex(("Song", "A", {"length": 200}))
-    assert decide_track_presence("Song", "A", idx, duration=201)["sure"] is True
-    assert decide_track_presence("Song", "A", idx, duration=203)["sure"] is False  # past 2s: unproven
+    assert decide_track_presence("Song", "A", idx, duration=201)["present"] is True
+    assert decide_track_presence("Song", "A", idx, duration=201)["sure"] is False
 
 
 def test_track_length_refutes_folder_proof():
@@ -1103,6 +1105,32 @@ def test_track_without_length_keeps_folder_proof():
     idx = _tindex(("Song", "A", {"album": "Album", "album_year": "2020"}))
     assert decide_track_presence("Song", "A", idx, "Album", "2020", 200)["sure"] is True
     assert decide_track_presence("Song", "A", idx, "Album", "2020")["sure"] is True
+
+
+def test_a_copy_filed_under_another_album_is_reported_but_never_proven():
+    """Issue #24: the compilation case, which is the common case.
+
+    A studio album is on disk and the user opens a best-of that reuses its
+    recordings. Every track matches on title, artist AND seconds, because it
+    is literally the same master. That is worth SAYING (the pill points at
+    the copy they have), but it is not this release, and the bulk claim gate
+    rides the proven axis: reporting it proven skipped those tracks out of the
+    best-of, which then landed as a folder with holes and no word of it.
+    """
+    from tidaler.matching import decide_track_presence
+
+    true = {"id": "/lib/Avicii/True", "album": "True", "album_year": "2013", "codec": "flac", "length": 247}
+    idx = _tindex(("Wake Me Up", "Avicii", true))
+
+    # The best-of: same recording to the second, different release.
+    best_of = decide_track_presence("Wake Me Up", "Avicii", idx, "Avicii Forever", "2024", 247)
+    assert best_of["present"] is True, "the copy they hold is still worth pointing at"
+    assert best_of["sure"] is False, "a copy filed elsewhere may not answer for this release"
+    assert best_of["local_album_id"] == "/lib/Avicii/True", "and the pill still names where it is"
+
+    # The album it really belongs to: proven, and the gate may skip it.
+    home = decide_track_presence("Wake Me Up", "Avicii", idx, "True", "2013", 247)
+    assert home["present"] is True and home["sure"] is True
 
 
 def test_disc_set_runtime_is_its_discs_summed():

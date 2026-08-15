@@ -42,9 +42,8 @@ def _gate(*, claim, ownership_of=None, target_rank=3, identity=None):
     dl = _TrackedDownload.__new__(_TrackedDownload)
     dl._ownership_of = ownership_of
     dl._target_rank = target_rank
-    dl._recording_scan = None
-    dl._skip_duplicate_recordings = False
     dl._library_claim = claim
+    dl._force_redownload = False
     return dl, _media(identity=identity)
 
 
@@ -101,3 +100,48 @@ def test_a_claim_lookup_failure_never_gates():
 
     dl, m = _gate(claim=boom)
     assert dl._claim_verdict(m) is None
+
+
+# --- What the gate is asked about (issue #24) ---------------------------------
+# The claim is only ever "you already have this track filed under the release I
+# am fetching". Which release that is has to reach the matcher, or the question
+# degrades into "you own this song somewhere", which is true of every best-of
+# and was skipping tracks out of albums the user had asked for.
+
+
+def _adapter(media, album=None):
+    """_library_claim_media on a stub that records the question it asks."""
+    from tidaler.waves_ui.backend import WavesBridge
+
+    asked: list[tuple] = []
+    stub = types.SimpleNamespace(_library_claims_track=lambda *a: asked.append(a) or False)
+    WavesBridge._library_claim_media(stub, media, album=album)
+    return asked[0] if asked else None
+
+
+def _track(album_name, album_year, duration=200):
+    return types.SimpleNamespace(
+        id=99,
+        name="Song",
+        artist=types.SimpleNamespace(name="Artist"),
+        artists=[types.SimpleNamespace(name="Artist")],
+        duration=duration,
+        album=types.SimpleNamespace(name=album_name, year=album_year),
+    )
+
+
+def test_an_album_job_names_its_own_release():
+    # The job's album is the only place the release YEAR is reliably spelled
+    # out: a track's embedded album usually carries a title and no date.
+    job = types.SimpleNamespace(name="True", year=2013)
+    assert _adapter(_track("True", None), album=job) == ("Artist", "Song", "True", "2013", 200)
+
+
+def test_a_playlist_job_lets_each_track_name_its_own():
+    assert _adapter(_track("True", 2013)) == ("Artist", "Song", "True", "2013", 200)
+
+
+def test_a_track_with_no_release_to_name_asks_an_unprovable_question():
+    # Which the matcher answers unproven, so the track is fetched. A wrong
+    # skip costs a track nobody finds out was missing.
+    assert _adapter(_track("", None)) == ("Artist", "Song", "", "", 200)

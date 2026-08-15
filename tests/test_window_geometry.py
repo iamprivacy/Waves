@@ -127,6 +127,8 @@ class _PrefsStub:
             "_waves_pref_bool",
             "windowSaveGeometry",
             "windowRestoreGeometry",
+            "queueSaveWidth",
+            "queueRestoreWidth",
         ):
             setattr(self, name, getattr(WavesBridge, name).__get__(self, _PrefsStub))
         self._waves_prefs = self._load_waves_prefs()
@@ -249,6 +251,50 @@ def test_restore_clamps_offscreen_frame_onto_a_live_screen(tmp_path):
     r = _PrefsStub(tmp_path).windowRestoreGeometry()
     assert (r["x"], r["y"], r["w"], r["h"]) == (920, 100, 1000, 800)
     _assert_fully_inside((r["x"], r["y"], r["w"], r["h"]), ONE_SCREEN)
+
+
+# ---------------------------------------------------------------------------
+# The queue drawer's width, remembered the same way
+# ---------------------------------------------------------------------------
+
+
+def test_queue_width_round_trips(tmp_path):
+    """A dragged width survives a restart, stored as a real int rather than the
+    string setWavesPref would coerce it to, so QML reads back a number."""
+    _PrefsStub(tmp_path).queueSaveWidth(620)
+    stored = json.loads((tmp_path / "waves.json").read_text(encoding="utf-8"))["queue_w"]
+    assert stored == 620 and isinstance(stored, int)
+    assert _PrefsStub(tmp_path).queueRestoreWidth() == 620
+
+
+def test_fresh_install_has_no_remembered_queue_width(tmp_path):
+    """Zero is the never-saved sentinel; QML falls back to the drawer's floor."""
+    assert _PrefsStub(tmp_path).queueRestoreWidth() == 0
+
+
+def test_queue_width_saves_only_on_a_real_change(tmp_path):
+    """QML debounces a drag, but a settled call that changes nothing still must
+    not rewrite waves.json."""
+    stub = _PrefsStub(tmp_path)
+    stub.queueSaveWidth(620)
+    stub.queueSaveWidth(620)
+    assert stub.save_calls == 1
+
+
+def test_a_zero_queue_width_never_clobbers_a_saved_one(tmp_path):
+    """The teardown case: a drawer reporting nothing on its way out must not
+    wipe a good width, the same guard the window frame keeps for a 0x0 frame."""
+    stub = _PrefsStub(tmp_path)
+    stub.queueSaveWidth(620)
+    stub.queueSaveWidth(0)
+    assert stub.queueRestoreWidth() == 620
+
+
+def test_a_corrupt_queue_width_falls_back_to_the_sentinel(tmp_path):
+    """A hand-edited prefs file cannot take the drawer down with it: a width
+    that will not parse reads as never-saved."""
+    (tmp_path / "waves.json").write_text('{"queue_w": "very wide"}', encoding="utf-8")
+    assert _PrefsStub(tmp_path).queueRestoreWidth() == 0
 
 
 def test_unparseable_prefs_file_falls_back_to_defaults(tmp_path):
