@@ -22,6 +22,13 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.21 (2026-08-15)
+
+### 🐛 Fixed
+
+- 🎼 Albums whose tracks TIDAL marks as not streamable now download the tracks your account can actually play. Some editions (commentary or album-experience versions) carry that flag on every track even though the tracks still play, and Waves was refusing all of them up front, so an album could fail entirely when most of it was downloadable. Waves now asks TIDAL for each track and saves the ones it will serve ([issue #25](https://github.com/iamprivacy/Waves/issues/25)).
+- 🚫 A track TIDAL genuinely will not serve is now marked UNAVAILABLE instead of failed, and the rest of the album still finishes. Such a track used to be reported as a failure with a retry that could never work, and a whole album of them turned red ([issue #25](https://github.com/iamprivacy/Waves/issues/25)).
+
 ## 🗂️ v0.1.20 (2026-08-15)
 
 ### ✨ Added
