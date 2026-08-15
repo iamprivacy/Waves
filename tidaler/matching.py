@@ -1114,23 +1114,32 @@ def decide_track_presence(title, artist, index, album="", album_year="", duratio
     readout of the best copy.
 
     There is no completeness bar here because there is nothing to complete: a
-    track is either on disk or not, so this decision only ever drives the pill,
-    never an inert download button, and a miss costs a badge, not a download.
-    Still refused: an empty artist (a title-only key matches any local song
-    that shares the title) and Various-Artists credits, same as albums.
+    track is either on disk or not. ``present`` is therefore the loosest thing
+    this module reports, and it is deliberately so: it answers "a song by this
+    name and artist is somewhere in your library", which is what a hedged pill
+    wants to say. It is NOT an answer to "you already have this album's copy",
+    and no caller may read it as one. Still refused: an empty artist (a
+    title-only key matches any local song that shares the title) and
+    Various-Artists credits, same as albums.
 
-    ``sure`` is the same IDENTITY axis the album verdict reports, inherited
-    from the folder the copy sits in: a track carries no year of its own, and
-    its title plus artist match every edition, compilation and re-recording
-    that shares them, so the holding album is the only evidence there is. When
-    the caller names the album the track belongs to (``album``/``album_year``),
-    a candidate whose folder agrees on both (edition-qualified title, years
-    within one) proves the match. The file's own play length is a second
-    witness: a copy matching ``duration`` (TIDAL's seconds) within 2 seconds
-    is that recording and proves alone, and one minutes away is refuted even
-    when its folder agrees. Callers that name no album and no duration get
-    sure False, which is the safe direction and what the bulk claim gate
-    relies on.
+    ``sure`` is that stricter question, and the IDENTITY axis the album verdict
+    reports: the copy sits in the release the caller named. A track carries no
+    year of its own and its title plus artist match every edition, compilation
+    and re-recording that share them, so the holding folder is the only
+    evidence there is. When the caller names the album the track belongs to
+    (``album``/``album_year``), a candidate whose folder agrees on both
+    (edition-qualified title, years within one) proves the match. Callers that
+    name no album get sure False, which is the safe direction.
+
+    The file's own play length only ever REFUTES. A copy minutes from the
+    track on screen is a different recording wearing the same name, whatever
+    its folder says, so ``duration`` (TIDAL's seconds) can throw a candidate
+    out. It cannot vouch for one: seconds prove a RECORDING, and every
+    compilation, best-of and re-release carries the same recording to the
+    second. Letting length prove alone is what made a copy filed under one
+    album answer for another (issue #24): the pill went green on a compilation
+    whose tracks were nowhere on disk, and the bulk claim gate, which rides
+    this axis, skipped them out of an album the user had explicitly asked for.
 
     Candidate choice follows that proof rather than fighting it: among copies
     whose folder agrees, the best quality wins; only when none agrees does the
@@ -1168,13 +1177,10 @@ def decide_track_presence(title, artist, index, album="", album_year="", duratio
     want_len = _as_int(duration)
 
     def proves(c) -> bool:
-        word = _track_length_word(want_len, c)
-        if word is False:
+        if _track_length_word(want_len, c) is False:
             # A copy minutes from the track on screen is a different recording
             # wearing the same name, whatever its folder says.
             return False
-        if word is True:
-            return True
         if not gate_title(want_album) or ty is None:
             return False
         by = to_year_int(c.get("album_year"))

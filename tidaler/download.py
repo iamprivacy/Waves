@@ -1014,6 +1014,14 @@ class Download:
             event_stop,
         )
 
+        # The file and its sidecars are fully on disk here; what follows is
+        # post-processing (symlinks) and the randomized politeness delay
+        # before the NEXT download. The queue row must not sit on a full
+        # FINISHING word through a deliberate sleep, so the delivery is
+        # announced now and the delay stays invisible.
+        if download_success:
+            self._note_delivered(media)
+
         # Step 5: Post-processing
         self._perform_post_processing(
             media,
@@ -1687,6 +1695,64 @@ class Download:
             media_stream=media_stream,
         )
 
+    def _note_stage(self, media: Track | Video, frac: float) -> None:
+        """Post-download finalize progress (0-100) for this media item. The
+        stream bytes finishing is not the work finishing: extraction, the
+        remux, tagging with its lyrics and cover fetches, and the move to the
+        destination all still run. A no-op here; the GUI's tracked download
+        overrides it to fill the queue row's FINISHING word. Called at step
+        boundaries, so the fill moves in honest jumps, not a fake glide."""
+
+    def _note_delivered(self, media: Track | Video) -> None:
+        """The item's file and sidecars are fully on disk; only post-processing
+        and the deliberate inter-download delay remain. A no-op here; the GUI's
+        tracked download overrides it to flip the queue row to its finished
+        word right away instead of letting it sit through the delay."""
+
+    def _finalize_plan(
+        self,
+        media: Track | Video,
+        path_media_dst: pathlib.Path,
+        do_flac_extract: bool,
+        media_stream: Stream | None,
+    ) -> dict[str, float]:
+        """Cumulative FINISHING-fill fractions per finalize step: weight only
+        the steps this item will actually run, so each step's share is awarded
+        as it completes. Fixed milestones read wrong: the ffmpeg steps are
+        skipped for most items, so the word opened two-thirds full and the
+        slow work (tagging with its lyrics/cover fetches, the move to the
+        library) was squeezed into the last quarter. The weights are rough
+        step costs; a step predicted here but skipped at runtime just passes
+        its share through instantly, which is invisible."""
+        will_convert = isinstance(media, Video) and self.settings.data.video_convert_mp4
+        will_extract = isinstance(media, Track) and self.settings.data.extract_flac and do_flac_extract
+        will_downsample = (
+            isinstance(media, Track)
+            and self.settings.data.downsample_enabled
+            and (will_extract or path_media_dst.suffix == AudioExtensions.FLAC)
+        )
+        will_remux = (
+            isinstance(media, Track)
+            and path_media_dst.suffix in (AudioExtensions.M4A, AudioExtensions.MP4)
+            and not getattr(media_stream, "is_bts", False)
+            and bool(self.settings.data.path_binary_ffmpeg)
+        )
+        plan = {
+            "convert": 35 * will_convert,
+            "extract": 20 * will_extract,
+            "downsample": 25 * will_downsample,
+            "remux": 8 * will_remux,
+            "tag": 30,
+            "move": 15,
+        }
+        total_weight = sum(plan.values())
+        acc = 0.0
+        cum: dict[str, float] = {}
+        for step_name, weight in plan.items():
+            acc += weight
+            cum[step_name] = 100.0 * acc / total_weight
+        return cum
+
     def _perform_actual_download(
         self,
         media: Track | Video,
@@ -1727,13 +1793,20 @@ class Download:
             if not result_download:
                 return False, path_media_dst
 
+            cum = self._finalize_plan(media, path_media_dst, do_flac_extract, media_stream)
+            self._note_stage(media, 0)
+
             # Convert video from TS to MP4
             if isinstance(media, Video) and self.settings.data.video_convert_mp4:
                 tmp_path_file = self._video_convert(tmp_path_file)
 
+            self._note_stage(media, cum["convert"])
+
             # Extract FLAC from MP4 container using ffmpeg
             if isinstance(media, Track) and self.settings.data.extract_flac and do_flac_extract:
                 tmp_path_file = self._extract_flac(tmp_path_file)
+
+            self._note_stage(media, cum["extract"])
 
             # Downsample FLAC to the configured target rate/depth (no-op for low-res sources)
             if (
@@ -1742,6 +1815,8 @@ class Download:
                 and tmp_path_file.suffix == AudioExtensions.FLAC
             ):
                 tmp_path_file = self._downsample_audio(tmp_path_file)
+
+            self._note_stage(media, cum["downsample"])
 
             # Rebuild the MP4/M4A container so its moov/mvhd carries the real duration.
             # A DASH download is a raw byte-concatenation of fragmented-MP4 segments
@@ -1760,6 +1835,8 @@ class Download:
                 and self.settings.data.path_binary_ffmpeg
             ):
                 tmp_path_file = self._faststart_remux(tmp_path_file, path_media_dst.suffix)
+
+            self._note_stage(media, cum["remux"])
 
             # De-duplicate colliding distinct tracks (skip_existing on: same track was already
             # skipped upstream, so an occupied destination is a different track). Resolve the
@@ -1790,10 +1867,13 @@ class Download:
 
                 self.fn_logger.info(f"Downloaded item '{log_content(name_builder_item(media))}'.")
 
+                self._note_stage(media, cum["tag"])
+
                 # Move final file to the configured destination directory.
                 moved: bool = self._move_file(tmp_path_file, path_media_dst, overwrite=overwrite)
 
                 if moved:
+                    self._note_stage(media, cum["move"])
                     # Recorded before the claim is released below, so the name is
                     # never momentarily free between the two.
                     self._record_name_written(path_media_dst, media_id)

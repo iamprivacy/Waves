@@ -10,12 +10,6 @@ from tidaler.constants import CoverDimensions, DownsampleTarget, InitialKey, Met
 @dataclass
 class Settings:
     skip_existing: bool = True
-    # Skip a track when the SAME RECORDING (matched by ISRC, never by file
-    # name) already sits somewhere under the artist folder this download
-    # writes into. Off by default: leaving it off means every album folder
-    # ends up a complete album, at the cost of a shared song existing once
-    # per edition. See tidaler/recording_scan.py.
-    skip_duplicate_recordings: bool = False
     lyrics_embed: bool = False
     lyrics_file: bool = False
     # When saving lyrics files: timed lyrics go to .lrc, untimed to .txt.
@@ -162,11 +156,6 @@ class Settings:
 @dataclass
 class HelpSettings:
     skip_existing: str = "Skip download if file already exists."
-    skip_duplicate_recordings: str = (
-        "Skip a song you already have under this artist, even when it sits in another album's folder. "
-        "Matched by the recording's ISRC code, not by file name, so a different version or a live take is "
-        "never mistaken for the same song. Leave this off to keep every album folder complete on its own."
-    )
     confirm_category_download: str = (
         "Ask before queueing a whole Browse playlist category with DOWNLOAD ALL. "
         'Turning the dialog off with its "Don\'t ask again" box switches this off; '
