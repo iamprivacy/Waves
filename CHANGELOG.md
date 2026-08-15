@@ -22,6 +22,28 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.20 (2026-08-15)
+
+### ✨ Added
+
+- 🎧 Every queue row now shows its audio quality: the quality being fetched, then the quality that actually arrived, or MIXED when an album's tracks landed at different ones. Expanded tracks each show their own, so a release that arrives below the quality you asked for is visible instead of silent.
+
+### 🔧 Changed
+
+- 📋 Each track in an expanded album now states its outcome in words: QUEUED while waiting, DOWNLOADING with live progress, FINISHING while the file is tagged and moved into place, then COMPLETED, IN LIBRARY for a track you already own, or FAILED in red.
+- 📐 The download queue drawer is wider and can be resized by dragging its left edge. The width you choose is remembered.
+- 📚 A finished download only says IN LIBRARY when your library actually contains it. If downloads land outside your library folder, the done button says DOWNLOADED instead, and moving the files in flips it to IN LIBRARY on the next scan.
+- 🖼️ A downloaded album's artwork keeps its Preview button: the download half now shows DOWNLOADED with a checkmark instead of replacing the whole control. It stays remembered across restarts, and clicking it asks whether to redownload; confirming re-fetches every track and replaces only the copies Waves itself wrote.
+- ⚡ The download queue stays responsive through long batches: finished rows no longer pile up for the whole session, and progress updates cost far less. Nothing is forgotten: what you downloaded is recorded independently of the queue ([issue #24](https://github.com/iamprivacy/Waves/issues/24)).
+
+### 🐛 Fixed
+
+- 📚 Library detection no longer treats a song you own from one album as owned on every other album. Bulk downloads stopped silently leaving those tracks out of an album you asked for, and a compilation reusing recordings you hold now shows the gold MAYBE IN LIBRARY badge instead of a confident green one ([issue #24](https://github.com/iamprivacy/Waves/issues/24)).
+
+### 🗑️ Removed
+
+- 🔁 The "Skip songs you already have" setting is gone: owning a song on a single or another edition could leave a hole in an album you explicitly asked for, so an album you ask for now always arrives complete. Skip existing still skips files already in place, and library detection still skips a whole release you already hold ([issue #18](https://github.com/iamprivacy/Waves/issues/18), [issue #24](https://github.com/iamprivacy/Waves/issues/24)).
+
 ## 🗂️ v0.1.19 (2026-08-13)
 
 ### ✨ Added
