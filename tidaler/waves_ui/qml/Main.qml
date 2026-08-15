@@ -42,10 +42,18 @@ ApplicationWindow {
     // library in the picture "you have this" is the claim that matters, and
     // DOWNLOADED is just how the app happens to know it.
     property bool libraryOn: waves.wavesPref("library_enabled") === true
+    // Whether fresh downloads land INSIDE the library folder. IN LIBRARY on a
+    // done face is only honest when the library will actually contain the
+    // file: either downloads land in the library (this flag) or the scan has
+    // proven the copy present (libPresent per button). With a separate
+    // download folder the face says DOWNLOADED, and moving the files into
+    // the library flips it through the normal rescan.
+    property bool dlInLibrary: waves.downloadsInsideLibrary() === true
     Connections {
         target: waves
         function onLibrarySourceChanged() {
             root.libraryOn = waves.wavesPref("library_enabled") === true
+            root.dlInLibrary = waves.downloadsInsideLibrary() === true
         }
         function onArtHoverTiltChanged() {
             root.artHoverTilt = waves.wavesPref("art_hover_tilt") !== false
@@ -227,6 +235,11 @@ ApplicationWindow {
     onVisibilityChanged: if (_geomReady) winGeomSaveTimer.restart()
     onClosing: function (close) {
         _winPersist()   // best-effort final flush; not the only save path
+        // The drawer's width rides its own debounce, so a drag settled inside
+        // the last interval would leave with the timer that never fired. Same
+        // best-effort flush as the frame above, and the same guards behind it:
+        // the bridge drops a save that changes nothing, and drops a zero.
+        waves.queueSaveWidth(Math.round(root.queueWidth))
         // Downloads still running: veto the close and ask first. EXIT ANYWAY
         // re-closes with confirmed set, so this runs at most once per attempt.
         // Qt.quit() paths (factory reset) bypass by design: nothing to save.
@@ -688,6 +701,25 @@ ApplicationWindow {
     // streamed live from the bridge while the album downloads.
     property var queueExpanded: ({})
     property var queueTracks: ({})
+    // Queue drawer width, dragged by the handle on its own edge, and remembered
+    // across launches the way the window frame is (0 is the never-saved
+    // sentinel). 420 is the floor as well as the default: below it the quality
+    // a row states and the title it states it for start fighting for the same
+    // pixels. Read through the clamp in the Drawer below, so shrinking the
+    // window pulls an over-wide drawer in rather than letting it hang off the
+    // side, while what is STORED stays the width that was asked for.
+    property real queueWidth: {
+        var w = waves.queueRestoreWidth()
+        return w > 0 ? w : 420
+    }
+    // One settled write per drag rather than one per pixel, same as the window
+    // frame above. Restoring fires this too; the bridge drops a no-op save.
+    Timer { id: queueWidthSaveTimer; interval: 600; onTriggered: waves.queueSaveWidth(Math.round(root.queueWidth)) }
+    onQueueWidthChanged: queueWidthSaveTimer.restart()
+    // True while the drawer's resize edge is held. DotMatrix reads it to hold
+    // its column rebuild until the hand has let go AND the release animation
+    // has finished, so the one rebuild per gesture lands on a static screen.
+    property bool queueEdgeHeld: false
 
     // ---- Browse (TIDAL editorial pages) --------------------------------
     // The landing payload (content rows + the genre/mood/decade chip sets)
@@ -3381,6 +3413,23 @@ ApplicationWindow {
         return keys.map(function(k) { return { q: k, n: counts[k] } })
     }
 
+    // The tier one line of an expanded album states: what the file landed at
+    // once it has landed, and until then what the job is ASKING for, which the
+    // caller renders faded.
+    //
+    // "pending" has to be in that second group and was not: it is the state a
+    // fetched track list starts in (_merge_queue_tracks defaults to it) and so
+    // it is every track of a queued album and every not-yet-started track of a
+    // running one, which is precisely the stretch where the only thing to say
+    // is the request. Without it the column sat blank until each track's turn
+    // came. A track that is skipped, cancelled or failed says nothing: no tier
+    // was ever delivered for it, and the request is not news about a file that
+    // is not coming.
+    function queueTrackTier(delivered, status, target) {
+        if (delivered !== "") return delivered
+        return (status === "pending" || status === "queued" || status === "running") ? target : ""
+    }
+
     component QualTag: Row {
         id: qt
         property string q: ""
@@ -3390,7 +3439,10 @@ ApplicationWindow {
         // Real per-item spec when we know it (a video's actual resolution);
         // empty falls back to the tier's standard spec.
         property string spec: ""
-        readonly property string specText: spec !== "" ? spec : root.qualSpec(qt.q)
+        // Narrow surfaces (the queue drawer) show the tier word alone: the
+        // spec is what makes the pill wide enough to crush a title.
+        property bool compact: false
+        readonly property string specText: compact ? "" : (spec !== "" ? spec : root.qualSpec(qt.q))
         readonly property bool mixed: mix.length > 1
         visible: q !== "" || mixed
         Rectangle {
@@ -3443,7 +3495,10 @@ ApplicationWindow {
                     text: "MIXED"; color: root.textHi; font.family: root.mono; font.pixelSize: 9; font.bold: true
                 }
                 Repeater {
-                    model: qt.mix
+                    // The per-tier counts are the widest thing a pill can
+                    // carry; on a narrow surface the dots say "not uniform"
+                    // and the expanded ledger says exactly how.
+                    model: qt.compact ? [] : qt.mix
                     delegate: Row {
                         required property var modelData
                         required property int index
@@ -3583,10 +3638,27 @@ ApplicationWindow {
     // `kind` is "album" (the default) or "track", and only picks the wording
     // and which download the ANYWAY click makes.
     function openLibraryClaim(albumId, albumTitle, folder, kind) {
+        libraryClaimGate.mode = "claim"
+        libraryClaimGate.card = null
         libraryClaimGate.albumId = albumId
         libraryClaimGate.albumTitle = albumTitle
         libraryClaimGate.folder = folder
         libraryClaimGate.kind = kind === "track" ? "track" : "album"
+        libraryClaimGate.shown = true
+    }
+    // The owned twin of the claim gate, same dialog in its other mode: this
+    // is a RECORD of a download Waves made, not a tag guess, so the question
+    // is not "is the match right" but "fetch it again?". REDOWNLOAD forces
+    // the whole job (the ownership gate would otherwise skip every track and
+    // the job would fetch nothing). Takes the card so the confirm can start
+    // the right kind of download (album, playlist or mix).
+    function openRedownloadGate(card) {
+        libraryClaimGate.mode = "owned"
+        libraryClaimGate.card = card
+        libraryClaimGate.albumId = "" + (card.id || "")
+        libraryClaimGate.albumTitle = "" + (card.title || "")
+        libraryClaimGate.folder = ""
+        libraryClaimGate.kind = "album"
         libraryClaimGate.shown = true
     }
     function pillClassFg(c) {
@@ -4013,9 +4085,11 @@ ApplicationWindow {
         property bool owned: false
         // Owned AND current for today's quality setting: an owned copy below the
         // target quality shows Download again (clicking upgrades in place).
+        property var _ownIds: null
         function refreshOwned() {
             if (collectionCheck) {
                 var ids = di.mediaId !== "" ? waves.collectionMemberIds(di.mediaId) : null
+                _ownIds = ids
                 if (!ids || ids.length === 0) { owned = false; return }
                 var n = 0
                 for (var i = 0; i < ids.length; ++i) {
@@ -4035,7 +4109,9 @@ ApplicationWindow {
             target: waves
             // Empty id = broadcast (the quality setting changed).
             function onOwnershipChanged(tid) {
-                if (di.collectionCheck) { di.refreshOwned() }
+                if (di.collectionCheck) {
+                    if (tid === "" || (di._ownIds && di._ownIds.indexOf(tid) !== -1)) di.refreshOwned()
+                }
                 else if (tid === di.mediaId || tid === "") { di.refreshOwned() }
             }
             function onCollectionMembershipChanged(cid) { if (di.collectionCheck && cid === di.mediaId) di.refreshOwned() }
@@ -4999,25 +5075,49 @@ ApplicationWindow {
             root.openLibraryClaim(db.mediaId, db.libTitle, db.libPath,
                                   db.libAlbum ? "album" : "track")
         }
+        // "pending" = at least one member's ownership has never been answered
+        // this session (the cache is cold and a worker is fetching); a single
+        // firm "not owned" settles the rollup to false no matter what is
+        // still in flight. The button holds its roll animation on pending so
+        // the answer landing a beat later snaps in instead of visibly
+        // flipping a face that was never true.
         function _rollup(ids) {
             if (!ids || ids.length === 0) return false
-            var n = 0
+            var pending = false
             for (var i = 0; i < ids.length; ++i) {
                 var oi = waves.ownershipOf(ids[i])
-                if (oi.owned === true && oi.up_to_date === true) ++n
+                if (oi.pending === true) { pending = true; continue }
+                if (!(oi.owned === true && oi.up_to_date === true)) return false
             }
-            return n === ids.length
+            return pending ? "pending" : true
         }
+        property bool ownPending: false
+        // collectionCheck mode's member ids, cached so the ownership listener
+        // can ignore other collections' answers (see the ArtCard twin).
+        property var _ownIds: null
         function refreshOwned() {
-            if (collectionIds !== null) { owned = _rollup(collectionIds); return }
-            if (collectionCheck && mediaId !== "") { owned = _rollup(waves.collectionMemberIds(mediaId)); return }
-            var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
-            owned = o.owned === true && o.up_to_date === true
+            var r
+            if (collectionIds !== null) r = _rollup(collectionIds)
+            else if (collectionCheck && mediaId !== "") {
+                _ownIds = waves.collectionMemberIds(mediaId)
+                r = _rollup(_ownIds)
+            }
+            else {
+                var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
+                r = o.pending === true ? "pending" : (o.owned === true && o.up_to_date === true)
+            }
+            ownPending = (r === "pending")
+            owned = (r === true)
         }
+        onOwnPendingChanged: if (!ownPending && !rollReady) { syncGhost(); dbSettle.restart() }
         // Only if the libAlbum binding has not already answered: an
         // unconditional resolve here is exactly the extra call this shape
         // exists to avoid.
-        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent(); syncGhost(); rollReady = true }
+        // rollReady only once the ownership answer is real: a cold cache
+        // answers "pending" and the truth lands a beat later; arming the roll
+        // then would animate a flip the user reads as every button changing
+        // its mind (reported from livetesting an owned album page).
+        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent(); syncGhost(); if (!ownPending) rollReady = true }
         onMediaIdChanged: { if (rollReady) { rollReady = false; dbSettle.restart() } refreshOwned() }
         onOwnedCheckChanged: refreshOwned()
         onCollectionIdsChanged: refreshOwned()
@@ -5037,7 +5137,7 @@ ApplicationWindow {
                 if (db.collectionIds !== null) {
                     if (tid === "" || db.collectionIds.indexOf(tid) !== -1) db.refreshOwned()
                 } else if (db.collectionCheck) {
-                    db.refreshOwned()
+                    if (tid === "" || (db._ownIds && db._ownIds.indexOf(tid) !== -1)) db.refreshOwned()
                 } else if (tid === db.mediaId || tid === "") {
                     db.refreshOwned()
                 }
@@ -5074,7 +5174,7 @@ ApplicationWindow {
             id: dbMetricDone
             visible: false; spacing: 7
             Ico { name: "check"; color: root.accent; size: 14 }
-            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || root.dlInLibrary) ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // The longest library-claim label ("PARTIALLY IN LIBRARY" beats "MAYBE
         // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
@@ -5331,13 +5431,17 @@ ApplicationWindow {
                 // recognised this". The gold stays: colour separates it from
                 // green DOWNLOADED, the word explains why they differ.
                 // With the library scan on, the done state reads IN LIBRARY
-                // instead of DOWNLOADED: "you have this" is the claim that
-                // matters then, and green still marks it as a recorded fact
-                // (gold MAYBE and cyan PARTIALLY are the guesses).
+                // instead of DOWNLOADED, but only when the library actually
+                // holds the copy: downloads land inside the library root
+                // (dlInLibrary) or the scan proved this one present
+                // (libPresent). A download to a folder OUTSIDE the library
+                // stays DOWNLOADED; move the files in and the rescan flips
+                // the word. Green still marks a recorded fact (gold MAYBE
+                // and cyan PARTIALLY are the guesses).
                 // "running" keeps the queued face frozen: the row is riding the
                 // exit belt as the matrix arrives, and letting the text fall
                 // through to the idle label would restart the roll mid-exit.
-                text: db.libGuess ? "MAYBE IN LIBRARY" : db.st === "done" ? ((db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn ? "IN LIBRARY" : "DOWNLOADED")) : db.st === "failed" ? "RETRY" : (db.waiting || db.st === "running") ? db.queuedLabel : db.libPartialClaim ? "PARTIALLY IN LIBRARY" : db.label.toUpperCase()
+                text: db.libGuess ? "MAYBE IN LIBRARY" : db.st === "done" ? ((db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || root.dlInLibrary) ? "IN LIBRARY" : "DOWNLOADED")) : db.st === "failed" ? "RETRY" : (db.waiting || db.st === "running") ? db.queuedLabel : db.libPartialClaim ? "PARTIALLY IN LIBRARY" : db.label.toUpperCase()
                 color: db.libGuess ? root.gold : db.st === "done" ? root.accent : db.st === "failed" ? root.red : (db.waiting || db.st === "running") ? root.accentDim : db.libPartialClaim ? root.cyan : root.accent
                 Behavior on color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
                 font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
@@ -6471,8 +6575,10 @@ ApplicationWindow {
                 // The same wording rule as the cell's own DownloadButton done
                 // face (whose noun is "video"): one cell must never say
                 // DOWNLOADED on the art and VIDEO IN LIBRARY on the button
-                // for the same ownership record. Both read off root.libraryOn.
-                textFormat: Text.PlainText; text: root.libraryOn ? "IN LIBRARY" : "DOWNLOADED"
+                // for the same ownership record. A video is never in the
+                // scan (audio only), so its libPresent is always false and
+                // both faces reduce to libraryOn && dlInLibrary.
+                textFormat: Text.PlainText; text: root.libraryOn && root.dlInLibrary ? "IN LIBRARY" : "DOWNLOADED"
                 color: root.green; font.family: root.mono; font.pixelSize: 10
             }
         }
@@ -6676,8 +6782,30 @@ ApplicationWindow {
         // download surfaces set this; the player's scrub track is playback
         // position, not work, and must stay static at 100%.
         property bool finishing: false
+        // The column count follows a SETTLED width, not the live one. Cols
+        // riding width directly meant a drawer-edge drag (which resizes per
+        // mouse move) changed `total` on every pixel, and the Repeater tore
+        // down and rebuilt every dot each time: thousands of object churns
+        // per drag, a GUI event backlog, and a pointer that stayed wedged
+        // for a beat after letting go. The bar tolerating a stale column
+        // count for a beat is invisible; the churn was not.
+        // 300ms, and never while the drawer edge is held: at 120ms the one
+        // remaining rebuild landed mid-way through the grip's 220ms release
+        // animation and visibly froze it (a plain click, changing nothing,
+        // was smooth). Letting the release animation finish first moves the
+        // same rebuild onto a static screen, where it cannot be seen.
+        // Declared with a binding for a correct first paint, then the
+        // imperative assignment below BREAKS that binding on completion so
+        // a drag can no longer ride it; from then on only the timer writes.
+        property real _settledWidth: width
+        Component.onCompleted: _settledWidth = width
+        onWidthChanged: dmSettle.restart()
+        Timer {
+            id: dmSettle; interval: 300
+            onTriggered: if (root.queueEdgeHeld) dmSettle.restart(); else dm._settledWidth = dm.width
+        }
         readonly property int cols: {
-            var c = Math.max(1, Math.floor((width + gap) / (dot + gap)))
+            var c = Math.max(1, Math.floor((_settledWidth + gap) / (dot + gap)))
             return (maxCols > 0 && c > maxCols) ? maxCols : c
         }
         readonly property int total: rows * cols
@@ -6709,6 +6837,38 @@ ApplicationWindow {
                 opacity: (dm.finishing && lit)
                        ? 0.62 + 0.38 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (root.shimmerPhase * 2 + twinkleR)))
                        : pulsing ? root.ledPulse : (lit ? 1.0 : 0.16)
+            }
+        }
+    }
+
+    // A word that "decrypts" in: every glyph starts scrambled and locks left
+    // to right. Carried over from the queue design lab for the ledger's
+    // status cell; any target change while live replays the decode, so a
+    // state flip (QUEUED -> DOWNLOADING -> COMPLETED) announces itself.
+    component DecryptText: Text {
+        id: dt
+        property string target: ""
+        property int _step: 0
+        property bool _live: false
+        readonly property string glyphs: "#%&*+=<>/\\~"
+        textFormat: Text.PlainText
+        font.family: root.mono
+        Component.onCompleted: { text = target; _live = true }
+        onTargetChanged: if (_live) replay(); else text = target
+        function replay() { _step = 0; dtTimer.restart(); _frame() }
+        function _frame() {
+            var out = ""
+            for (var i = 0; i < target.length; ++i)
+                out += i < _step ? target.charAt(i) : glyphs.charAt(Math.floor(Math.random() * glyphs.length))
+            text = out
+        }
+        Timer {
+            id: dtTimer
+            interval: 28; repeat: true
+            onTriggered: {
+                dt._step++
+                if (dt._step > dt.target.length) { dt.text = dt.target; stop() }
+                else dt._frame()
             }
         }
     }
@@ -8190,13 +8350,55 @@ ApplicationWindow {
                                              "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
                 : null
         }
-        onCardChanged: resolveLibPresence()
-        Component.onCompleted: if (!_libResolved) resolveLibPresence()
+        // The cross-session downloaded fact, the same rollup the full button
+        // uses: every member track recorded by a real download and still up
+        // to date. Session state (root.dlSt) only lives until quit; this is
+        // what lets a card still say DOWNLOADED tomorrow. Collections only:
+        // membership is recorded per collection id, and it is one cached
+        // bridge call per card, the same budget the library verdict spends.
+        readonly property bool ownable: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
+        property bool owned: false
+        // Member ids from the last rollup, kept so the ownership listener can
+        // ignore answers about other collections' tracks: at launch every
+        // cold query announces its first answer, and a grid of cards each
+        // re-rolling on every one of them is a signal storm on the GUI
+        // thread (reported as the launch animation turning jumpy).
+        property var _ownIds: null
+        function refreshOwned() {
+            if (!ac.ownable) { owned = false; return }
+            var ids = waves.collectionMemberIds("" + (ac.card.id || ""))
+            _ownIds = ids
+            if (!ids || ids.length === 0) { owned = false; return }
+            var pending = false
+            for (var i = 0; i < ids.length; ++i) {
+                var oi = waves.ownershipOf(ids[i])
+                if (oi.pending === true) { pending = true; continue }
+                if (!(oi.owned === true && oi.up_to_date === true)) { owned = false; return }
+            }
+            // Cold answers in flight and nothing firmly against: keep the last
+            // known word rather than flashing the strip through DOWNLOAD; the
+            // ownershipChanged nudge re-asks once the truth lands.
+            if (!pending) owned = true
+        }
+        onCardChanged: { resolveLibPresence(); refreshOwned() }
+        Component.onCompleted: { if (!_libResolved) resolveLibPresence(); refreshOwned() }
         Connections {
             target: waves
             enabled: ac.kind === "album"
             function onLibraryPresenceChanged() { ac.resolveLibPresence() }
         }
+        Connections {
+            target: waves
+            enabled: ac.ownable
+            // Empty id = broadcast (the quality setting changed). Only this
+            // card's own members matter, and a burst of member answers (an
+            // album's cold queries all landing) coalesces into one rollup.
+            function onOwnershipChanged(tid) {
+                if (tid === "" || (ac._ownIds && ac._ownIds.indexOf(tid) !== -1)) acOwnCoalesce.restart()
+            }
+            function onCollectionMembershipChanged(cid) { if (cid === "" + (ac.card.id || "")) ac.refreshOwned() }
+        }
+        Timer { id: acOwnCoalesce; interval: 50; onTriggered: ac.refreshOwned() }
         readonly property bool libPresent: !!(ac.libPresence && ac.libPresence.present === true)
         readonly property bool libFull: !!(ac.libPresence && ac.libPresence.full === true)
         readonly property bool libSure: !!(ac.libPresence && ac.libPresence.sure === true)
@@ -8312,13 +8514,22 @@ ApplicationWindow {
                 height: acSwap.implicitHeight
                 readonly property string acPvSt: root.pvSt(ac.kind, ac.card.id || "")
                 readonly property string acDlSt: root.dlSt(ac.card.id || "")
+                // A finished download is not a live control: it goes back to
+                // the split strip, whose download half now reads the checkmark
+                // and DOWNLOADED, so Preview stays one click away instead of
+                // being evicted by a full-width done pill for the session.
+                // Session state OR the ownership rollup: this session's done
+                // and last week's download must wear the same word. A LIVE
+                // state (queued, running, failed) outranks the rollup, so a
+                // re-download of an owned album still shows its progress.
+                readonly property bool dlDone: acDlSt === "done" || (acDlSt === "" && ac.owned)
             // Idle strip and live controls are the same pill: it rolls its
             // contents over and stretches to the arriving side's size, in both
             // directions, for a preview and for a download alike.
             RollSwap {
                 id: acSwap
                 anchors.horizontalCenter: parent.horizontalCenter
-                live: acRiser.acPvSt !== "" || acRiser.acDlSt !== ""
+                live: acRiser.acPvSt !== "" || (acRiser.acDlSt !== "" && !acRiser.dlDone)
                 // The live side carries its own fill (a download button is a
                 // filled control); only the outline is the pill's, so it takes
                 // the arriving control's edge colour with it.
@@ -8332,7 +8543,7 @@ ApplicationWindow {
                     id: acLive
                     spacing: 6
                     readonly property bool pvOn: acRiser.acPvSt !== ""
-                    readonly property bool dlOn: acRiser.acDlSt !== ""
+                    readonly property bool dlOn: acRiser.acDlSt !== "" && !acRiser.dlDone
                     // Full width while a full-width row is showing; a finished
                     // or failed download goes back to hugging its label, the
                     // way inline buttons do everywhere else.
@@ -8377,10 +8588,18 @@ ApplicationWindow {
                     // carries it, which is why proven reads in the pill's
                     // lossless green rather than the filled button's accent:
                     // the accent is already on PREVIEW, one divider away.
-                    readonly property color stInk: ac.libState === "proven" ? root.green
+                    // A download Waves made is the freshest fact the half can
+                    // state: it wears the checkmark and the fact green ahead
+                    // of any library verdict (a gold MAYBE over a file Waves
+                    // itself wrote would be absurd), and its click opens the
+                    // owned gate with REDOWNLOAD one click away.
+                    readonly property bool dlDone: acRiser.dlDone
+                    readonly property color stInk: dlDone ? root.green
+                                                   : ac.libState === "proven" ? root.green
                                                    : ac.libState === "maybe" ? root.gold
                                                    : ac.libState === "partial" ? root.cyan : root.accent
-                    readonly property color stEdge: ac.libState === "proven" ? root.greenDim
+                    readonly property color stEdge: dlDone ? root.greenDim
+                                                    : ac.libState === "proven" ? root.greenDim
                                                     : ac.libState === "maybe" ? root.goldDim
                                                     : ac.libState === "partial" ? root.cyanDim : root.accentDim
                     // Ninety pixels of half, so the full button's wording
@@ -8389,6 +8608,7 @@ ApplicationWindow {
                     // and a partial copy spends them on the count itself, which
                     // is the thing worth knowing.
                     readonly property string stWord: {
+                        if (acStrip.dlDone) return "DOWNLOADED"
                         if (ac.libState === "proven") return "IN LIBRARY"
                         if (ac.libState === "maybe") return "MAYBE"
                         if (ac.libState === "partial") {
@@ -8447,19 +8667,24 @@ ApplicationWindow {
                             Row {
                                 id: acStripDl
                                 anchors.centerIn: parent; spacing: 6
-                                Ico { name: ac.libClaim ? "check" : "arrow-down"; color: acStrip.stInk; size: ac.libClaim ? 14 : 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
+                                Ico { name: (acStrip.dlDone || ac.libClaim) ? "check" : "arrow-down"; color: acStrip.stInk; size: (acStrip.dlDone || ac.libClaim) ? 14 : 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
                                 Text { textFormat: Text.PlainText; text: acStrip.stWord; color: acStrip.stInk; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                // A full claim opens the gate instead of
-                                // downloading, the same click the full button
-                                // gives it. A partial copy downloads: with the
-                                // bulk skip gate on, that fetches the rest.
-                                onClicked: ac.libClaim
-                                           ? root.openLibraryClaim(ac.card.id || "", "" + (ac.card.title || ""),
-                                                                   "" + (ac.libPresence.local_album_id || ""))
-                                           : root.browseCardDownload(ac.card)
+                                // A finished download opens the owned gate:
+                                // the fact, then REDOWNLOAD one click away. A
+                                // full claim opens the claim gate, the same
+                                // click the full button gives it. A partial
+                                // copy downloads: with the bulk skip gate on,
+                                // that fetches the rest.
+                                onClicked: {
+                                    if (acStrip.dlDone) { root.openRedownloadGate(ac.card); return }
+                                    if (ac.libClaim)
+                                        root.openLibraryClaim(ac.card.id || "", "" + (ac.card.title || ""),
+                                                              "" + (ac.libPresence.local_album_id || ""))
+                                    else root.browseCardDownload(ac.card)
+                                }
                             }
                         }
                     }
@@ -9424,6 +9649,19 @@ ApplicationWindow {
                 if (row.name !== it.name) m.setProperty(idx, "name", it.name)
                 if (row.artist !== it.artist) m.setProperty(idx, "artist", it.artist || "")
                 if (row.tracks !== it.tracks) m.setProperty(idx, "tracks", it.tracks || 0)
+                var q = it.quality || ""
+                if (row.quality !== q) m.setProperty(idx, "quality", q)
+                // What the files landed at, rolled up by the bridge from its
+                // per-track registry, so a COLLAPSED row states the delivery.
+                var ld = it.landed || ""
+                if (row.landed !== ld) m.setProperty(idx, "landed", ld)
+                // Per-tier counts as a JSON string, not a list: a ListModel
+                // role given a JS array turns it into a nested ListModel, and
+                // the delegate wants the array back. A string role also gives
+                // the badge a stable value to bind against, so it rebuilds when
+                // the mix really changes and not on every tick.
+                var mx = JSON.stringify(it.mix || [])
+                if (row.mixJson !== mx) m.setProperty(idx, "mixJson", mx)
                 // Keep a row that has already moved to Completed there; otherwise
                 // group by status: failed rows get their own section (with the
                 // RETRY ALL header), queued rows theirs, the rest ride Downloading.
@@ -9432,15 +9670,44 @@ ApplicationWindow {
                         : it.status === "queued" ? "queued" : "downloading"
                 if (row.uiGroup !== grp) m.setProperty(idx, "uiGroup", grp)
             } else {
+                // EVERY field the drawer reads has to be named HERE, including
+                // ones that are empty on arrival: a ListModel fixes its roles
+                // from the first object appended, so a role missing here does
+                // not exist on any row, reads as undefined in the delegate, and
+                // fails silently (no warning, no binding error). `quality` was
+                // exactly that: the bridge set it on every row and the drawer
+                // never saw one, so a queued row could not state its tier.
                 m.append({ qid: it.qid, name: it.name, type: it.type, status: it.status,
                            progress: it.progress, media_id: it.media_id, template: it.template,
                            collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
-                           art: it.art || "",
+                           art: it.art || "", quality: it.quality || "",
+                           landed: it.landed || "", mixJson: JSON.stringify(it.mix || []),
                            uiGroup: (it.status === "failed" ? "failed" : it.status === "queued" ? "queued" : "downloading"), moved: false,
                            doneAt: (it.status === "done" ? Date.now() : 0), leaving: false })
             }
         }
-        for (var k = m.count - 1; k >= 0; --k) if (!seen[m.get(k).qid]) m.remove(k)
+        // A row that has left the queue takes its per-qid state with it: the
+        // expanded track list AND the expansion flag itself. queueTracks is
+        // copied wholesale on every live tick, so a session's worth of finished
+        // albums would make each tick cost more than the one before it;
+        // queueExpanded is only copied on a click, but it is the same row's
+        // state and outliving its row is the same leak. One copy of each for
+        // the whole sweep, not one per row.
+        var dropped = []
+        for (var k = m.count - 1; k >= 0; --k) {
+            var gone = m.get(k).qid
+            if (!seen[gone]) { dropped.push(gone); m.remove(k) }
+        }
+        if (dropped.length > 0) {
+            var tracks = Object.assign({}, root.queueTracks), forgot = false
+            var exp = Object.assign({}, root.queueExpanded), collapsed = false
+            for (var d = 0; d < dropped.length; ++d) {
+                if (tracks[dropped[d]] !== undefined) { delete tracks[dropped[d]]; forgot = true }
+                if (exp[dropped[d]] !== undefined) { delete exp[dropped[d]]; collapsed = true }
+            }
+            if (forgot) root.queueTracks = tracks
+            if (collapsed) root.queueExpanded = exp
+        }
         queuePartition()
         updateQueueCounts()
     }
@@ -9459,10 +9726,16 @@ ApplicationWindow {
         }
     }
 
+    // qid -> model row, rebuilt in the pass that recounts the groups (every
+    // structural change already ends in one, so the map costs nothing extra).
+    // See queueRowIndexOf for why it exists.
+    property var queueRowIndex: ({})
+
     function updateQueueCounts() {
-        var m = queueModel, c = 0, f = 0, d = 0, q = 0, l = 0
+        var m = queueModel, c = 0, f = 0, d = 0, q = 0, l = 0, idx = ({})
         for (var i = 0; i < m.count; ++i) {
             var row = m.get(i)
+            idx[row.qid] = i
             var grp = row.uiGroup
             if (grp === "completed") c++
             else if (grp === "failed") f++
@@ -9470,8 +9743,25 @@ ApplicationWindow {
             else q++
             if (row.status === "done" && !row.moved) l++
         }
+        root.queueRowIndex = idx
         root.completedCount = c; root.failedCount = f; root.downloadingCount = d; root.queuedCount = q
         root.lingerCount = l
+    }
+
+    // The model row holding a qid, without walking the model to find it.
+    // Progress ticks arrive per delivered segment, dozens a second per active
+    // download, and each one used to scan every row until it hit its own: with
+    // a few hundred rows behind it that scan ran on the GUI thread thousands of
+    // times a second and is what made a long batch feel heavy (issue #24). The
+    // map above is rebuilt after every structural change; a tick landing
+    // between a move and that rebuild pays for one rebuild here, not a scan.
+    // -1 means the row is gone, which a late tick for a cancelled job will see.
+    function queueRowIndexOf(qid) {
+        var i = root.queueRowIndex[qid]
+        if (i !== undefined && i < queueModel.count && queueModel.get(i).qid === qid) return i
+        updateQueueCounts()
+        i = root.queueRowIndex[qid]
+        return (i === undefined) ? -1 : i
     }
 
     // The linger clock: finished rows fold into Completed on a wall clock
@@ -9504,21 +9794,20 @@ ApplicationWindow {
     // slides to the top of Completed via the ListView move transition.
     function promoteCompleted(qid) {
         var m = queueModel
-        for (var i = 0; i < m.count; ++i) {
-            if (m.get(i).qid === qid) {
-                if (m.get(i).uiGroup === "completed") return
-                // Land at the TOP of the Completed group (newest first, oldest
-                // at the bottom); Completed is the first group, so that is
-                // model index 0. The ListView move transition slides it up.
-                m.setProperty(i, "moved", true)
-                m.setProperty(i, "uiGroup", "completed")
-                m.setProperty(i, "leaving", false)
-                if (i !== 0) m.move(i, 0, 1)
-                root.compBump += 1
-                updateQueueCounts()
-                return
-            }
-        }
+        // Indexed, not searched: the linger clock promotes every row of a
+        // finished batch, and a scan apiece made that whole sweep cost the
+        // square of the batch.
+        var i = root.queueRowIndexOf(qid)
+        if (i < 0 || m.get(i).uiGroup === "completed") return
+        // Land at the TOP of the Completed group (newest first, oldest at the
+        // bottom); Completed is the first group, so that is model index 0. The
+        // ListView move transition slides it up.
+        m.setProperty(i, "moved", true)
+        m.setProperty(i, "uiGroup", "completed")
+        m.setProperty(i, "leaving", false)
+        if (i !== 0) m.move(i, 0, 1)
+        root.compBump += 1
+        updateQueueCounts()
     }
 
     // Media rows carry an `artists` array (clickable per-artist); ListModel
@@ -9995,9 +10284,8 @@ ApplicationWindow {
             root.activeQueueCount = n
         }
         function onQueueItemProgress(qid, pct) {
-            for (var i = 0; i < queueModel.count; ++i) {
-                if (queueModel.get(i).qid === qid) { queueModel.setProperty(i, "progress", pct); break }
-            }
+            var i = root.queueRowIndexOf(qid)
+            if (i >= 0) queueModel.setProperty(i, "progress", pct)
         }
         // ---- queue-row album expansion: per-track snapshot + live updates ----
         function onQueueTracksLoaded(qid, tracks) {
@@ -10009,12 +10297,18 @@ ApplicationWindow {
             var copy = arr.slice(), found = false
             for (var i = 0; i < copy.length; ++i) {
                 if (copy[i].id === row.id) {
-                    copy[i] = Object.assign({}, copy[i], { status: row.status, pct: row.pct })
+                    copy[i] = Object.assign({}, copy[i], { status: row.status, pct: row.pct,
+                                                          fpct: row.fpct || 0 })
+                    // A delivered quality only arrives with the state change,
+                    // so keep the one already on the row when the event has
+                    // none rather than blanking the track's tier.
+                    if (row.quality) copy[i].quality = row.quality
                     found = true; break
                 }
             }
             if (!found) copy.push({ id: row.id, num: copy.length + 1, title: row.title,
-                                    duration: row.duration, status: row.status, pct: row.pct })
+                                    duration: row.duration, status: row.status, pct: row.pct,
+                                    fpct: row.fpct || 0, quality: row.quality })
             var m = Object.assign({}, root.queueTracks); m[qid] = copy; root.queueTracks = m
         }
         function onQueueTrackPct(qid, ticks) {
@@ -12575,7 +12869,13 @@ ApplicationWindow {
     // ====================================================================
     Drawer {
         id: queueDrawer
-        edge: Qt.RightEdge; width: 340; height: root.height
+        // 420, not the 340 it shipped at: the quality a row states is the
+        // element that costs the title its width, and at 340 either the tier
+        // or the title had to give way. It is the floor now rather than the
+        // width, since the handle below drags it wider, and the clamp is
+        // re-read here so shrinking the window pulls an over-wide drawer in.
+        edge: Qt.RightEdge; height: root.height
+        width: Math.max(420, Math.min(root.width - 80, root.queueWidth))
         background: Rectangle { color: root.surface; border.color: root.line1 }
         ColumnLayout {
             anchors.fill: parent; anchors.margins: 16; spacing: 12
@@ -12711,6 +13011,29 @@ ApplicationWindow {
                     // Driven by the root lingerClock via the model, so the
                     // fold works with the drawer closed (no delegate) too.
                     readonly property bool leaving: model.leaving === true
+                    // What this release is being fetched at. Once its tracks
+                    // report, they are the truth: an album whose tracks did not
+                    // all land at the same tier says MIXED and the expanded
+                    // ledger itemizes it.
+                    //
+                    // Both of these come off the ROW, rolled up by the bridge
+                    // from the registry it keeps for every job. They used to be
+                    // computed here from root.queueTracks[qid], which is filled
+                    // by loadQueueTracks: a network fetch, so it only runs when
+                    // the user expands the row. A row nobody opened therefore
+                    // went on advertising the tier it had ASKED for and could
+                    // never say MIXED, which is precisely the row that needed
+                    // to, since nobody was looking at its ledger.
+                    readonly property var tierMix: JSON.parse(model.mixJson || "[]")
+                    // The one tier they all landed at. It outranks the asked-for
+                    // tier the moment the first track reports: a release with no
+                    // hi-res master answers a HI-RES request in LOSSLESS from
+                    // end to end, and no MIXED will ever catch that (one tier is
+                    // not a mix).
+                    readonly property string landed: "" + (model.landed || "")
+                    readonly property string tier: tierMix.length > 1 ? ""
+                                                 : landed !== "" ? landed
+                                                 : ("" + (model.quality || ""))
                     width: ListView.view.width
                     property real bodyH: actCol.implicitHeight + 18
                     height: (collapsed || leaving) ? 0 : bodyH + 8
@@ -12829,6 +13152,19 @@ ApplicationWindow {
                                         NumberAnimation { target: doneChip; property: "scale"; to: 1.0; duration: 130; easing.type: Easing.OutCubic }
                                     }
                                 }
+                                // The quality the row is fetching at, beside the
+                                // dismiss X and centred with it. Compact: the
+                                // drawer has room for the tier word, not for the
+                                // full spec behind it, and the expanded ledger
+                                // states the per-track detail anyway. The DONE
+                                // chip owns the spare width while it lingers.
+                                QualTag {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: !doneChip.visible && (qrow.tier !== "" || qrow.tierMix.length > 1)
+                                    compact: true
+                                    q: qrow.tier
+                                    mix: qrow.tierMix
+                                }
                                 RetryMark {
                                     Layout.alignment: Qt.AlignVCenter; visible: qrow.st === "failed"
                                     color: root.accent; box: 16
@@ -12916,24 +13252,154 @@ ApplicationWindow {
                                         Text {
                                             textFormat: Text.PlainText
                                             text: td.title || ""
-                                            color: td.status === "running" ? root.textHi
-                                                 : td.status === "done" ? root.textLo
-                                                 : td.status === "failed" ? root.textHi : root.textLo
+                                            // Grey until the track is actually
+                                            // yours: a finished download or a
+                                            // copy already in the library reads
+                                            // bright, a failure reads red, the
+                                            // rest stay quiet.
+                                            color: td.status === "failed" ? root.red
+                                                 : (td.status === "done" || td.status === "skipped") ? root.textHi
+                                                 : root.textLo
+                                            Behavior on color { ColorAnimation { duration: 260 } }
                                             font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true
                                         }
+                                        // The tier, in a column of its own so
+                                        // qualities stack and scan vertically.
+                                        // Faded while it is still only what the
+                                        // job is asking for, full strength once
+                                        // the file has landed at it.
                                         Text {
+                                            objectName: "qTrackTier"
                                             textFormat: Text.PlainText
-                                            text: td.status === "done" ? "✓"
-                                                : td.status === "running" ? Math.round(td.pct || 0) + "%"
-                                                : td.status === "failed" ? "✕"
-                                                : td.status === "skipped" ? "HAVE"
-                                                : td.status === "cancelled" ? "-" : "·"
-                                            color: td.status === "done" || td.status === "running" ? root.accent
-                                                 : td.status === "failed" ? root.red
-                                                 : td.status === "skipped" ? root.green : root.textDim
+                                            readonly property string delivered: "" + (td.quality || "")
+                                            readonly property string tier: root.queueTrackTier(
+                                                delivered, "" + (td.status || ""), "" + (qrow.model.quality || ""))
+                                            // Still only the request: there is a tier to
+                                            // state and no file has landed at it yet.
+                                            readonly property bool promised: delivered === "" && tier !== ""
+                                            visible: tier !== ""
+                                            text: tier
+                                            color: root.qualFg(tier)
+                                            opacity: promised ? 0.45 : 1
+                                            Behavior on opacity { NumberAnimation { duration: 260 } }
                                             font.family: root.mono; font.pixelSize: 10
-                                            font.bold: td.status === "running"
-                                            Layout.preferredWidth: 34; horizontalAlignment: Text.AlignRight
+                                            Layout.preferredWidth: 56; horizontalAlignment: Text.AlignRight
+                                        }
+                                        // The outcome in words: a track you
+                                        // already hold says so, rather than
+                                        // spending the reader a glyph they have
+                                        // to learn. "pending" is the state a
+                                        // fetched track list starts in (see
+                                        // queueTrackTier), so it reads QUEUED
+                                        // like the tracks awaiting their turn,
+                                        // never a blank dot. One overlapped
+                                        // cell so a state switch crossfades:
+                                        // a downloading track is the word
+                                        // DOWNLOADING, faded, with the full
+                                        // green pouring over it in lockstep
+                                        // with the track's own progress.
+                                        Item {
+                                            id: scell
+                                            readonly property bool dl: td.status === "running"
+                                            // The stream finishing is not the work
+                                            // finishing: extraction, tagging and the
+                                            // move still run with the bar at 100.
+                                            // Same threshold as the LED twinkle.
+                                            readonly property bool fin: dl && (td.pct || 0) >= 99.9
+                                            onDlChanged: if (dl && dlWord._live) dlWord.replay()
+                                            onFinChanged: if (fin && finWord._live) finWord.replay()
+                                            Layout.preferredWidth: 78
+                                            implicitHeight: Math.max(sWord.implicitHeight, dlWord.implicitHeight)
+                                            DecryptText {
+                                                id: sWord
+                                                anchors.right: parent.right
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                opacity: scell.dl ? 0 : 1
+                                                visible: opacity > 0
+                                                Behavior on opacity { NumberAnimation { duration: 180 } }
+                                                target: td.status === "done" ? "COMPLETED"
+                                                    : td.status === "failed" ? "FAILED"
+                                                    : td.status === "skipped" ? "IN LIBRARY"
+                                                    : td.status === "cancelled" ? "CANCELLED"
+                                                    : (td.status === "queued" || td.status === "pending") ? "QUEUED"
+                                                    : td.status === "running" ? "" : "·"
+                                                color: td.status === "done" ? root.accent
+                                                     : td.status === "failed" ? root.red
+                                                     : td.status === "skipped" ? root.libAccent : root.textDim
+                                                Behavior on color { ColorAnimation { duration: 260 } }
+                                                font.pixelSize: 10
+                                                font.bold: target !== "·" && target !== "QUEUED" && target !== "CANCELLED"
+                                            }
+                                            Item {
+                                                anchors.right: parent.right
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: dlWord.implicitWidth; height: dlWord.implicitHeight
+                                                opacity: scell.dl && !scell.fin ? 1 : 0
+                                                visible: opacity > 0
+                                                Behavior on opacity { NumberAnimation { duration: 260 } }
+                                                DecryptText {
+                                                    id: dlWord
+                                                    // Faded green, warming as the
+                                                    // download progresses, while the
+                                                    // full-bright fill sweeps over it.
+                                                    // Decrypts in each time the track
+                                                    // starts downloading.
+                                                    target: "DOWNLOADING"
+                                                    color: Qt.alpha(root.accent, 0.28 + 0.4 * Math.max(0, Math.min(100, td.pct || 0)) / 100)
+                                                    font.pixelSize: 10; font.bold: true
+                                                }
+                                                // The green ink pours over the faded
+                                                // word in lockstep with the track's
+                                                // own progress, smoothed between ticks.
+                                                Item {
+                                                    clip: true
+                                                    anchors.left: parent.left
+                                                    anchors.top: parent.top; anchors.bottom: parent.bottom
+                                                    width: parent.width * Math.max(0, Math.min(100, td.pct || 0)) / 100
+                                                    Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                                                    Text {
+                                                        textFormat: Text.PlainText
+                                                        // Mirrors the scramble frames
+                                                        // so the fill stays letter-
+                                                        // aligned while it decodes.
+                                                        text: dlWord.text; color: root.accent
+                                                        font.family: root.mono; font.pixelSize: 10; font.bold: true
+                                                    }
+                                                }
+                                            }
+                                            // The stream landing hands the slot to
+                                            // FINISHING: its own word with its OWN
+                                            // fill riding fpct (the finalize steps:
+                                            // extract, tag, move), so it opens
+                                            // empty and earns its ink, instead of
+                                            // inheriting the finished download's
+                                            // full fill and draining backwards.
+                                            Item {
+                                                anchors.right: parent.right
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: finWord.implicitWidth; height: finWord.implicitHeight
+                                                opacity: scell.fin ? 1 : 0
+                                                visible: opacity > 0
+                                                Behavior on opacity { NumberAnimation { duration: 260 } }
+                                                DecryptText {
+                                                    id: finWord
+                                                    target: "FINISHING"
+                                                    color: Qt.alpha(root.accent, 0.28 + 0.4 * Math.max(0, Math.min(100, td.fpct || 0)) / 100)
+                                                    font.pixelSize: 10; font.bold: true
+                                                }
+                                                Item {
+                                                    clip: true
+                                                    anchors.left: parent.left
+                                                    anchors.top: parent.top; anchors.bottom: parent.bottom
+                                                    width: parent.width * Math.max(0, Math.min(100, td.fpct || 0)) / 100
+                                                    Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                                                    Text {
+                                                        textFormat: Text.PlainText
+                                                        text: finWord.text; color: root.accent
+                                                        font.family: root.mono; font.pixelSize: 10; font.bold: true
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -12974,6 +13440,123 @@ ApplicationWindow {
                 SpecBtn {
                     danger: true; label: "CLEAR ALL"
                     onClicked: waves.clearQueue()
+                }
+            }
+        }
+
+        // ---- Drag the drawer wider by its own edge ----------------------
+        // The handle IS the border, never a bar beside it. `parent` here is the
+        // Popup's own content item, which sits at leftPadding (the background's
+        // 1px border), so undoing exactly that puts x=0 on the border line.
+        // Declared after the ColumnLayout, which is what puts it on top; it
+        // covers the layout's 16px left margin, where nothing else lives.
+        Item {
+            id: queueGrip
+            anchors.left: parent.left
+            anchors.leftMargin: -queueDrawer.leftPadding
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 16
+            z: 50
+
+            // Where the grip point is on the edge (the spot the magnet glow
+            // centres on). WRITTEN by the MouseArea below, never read off
+            // mouseY: it must not follow the pointer during the drag (the
+            // glow's squeeze stays on the spot that was taken hold of), and
+            // letting go must leave it exactly where it was let go. Bound to
+            // mouseY it did the opposite, snapping on release to wherever the
+            // pointer had wandered to by then, or to a stale reading if the
+            // pointer had left the 16px band altogether.
+            property real handY: 0
+            readonly property bool lit: gripMouse.containsMouse || gripMouse.pressed
+
+            // True only while the grip point is being PLACED rather than
+            // moved: the pointer arriving on the band, or taking hold of it.
+            // Both are jumps to somewhere the light was not, and the light
+            // belongs under the pointer at once; the smoothing below is for
+            // travelling along the edge. Without this, grabbing the edge low
+            // down after the light was last seen high up drags a comet
+            // through the drag's first quarter second.
+            property bool placing: false
+            function placeHand(y) { placing = true; handY = y; placing = false }
+
+            Rectangle { x: 0; width: 1; height: parent.height; color: root.line1 }
+
+            // The edge lights where the pointer is before anything is grabbed, and
+            // runs the full height once it is: the whole edge is the handle,
+            // not one notch on it.
+            Rectangle {
+                id: gripGlow
+                x: 0
+                width: gripMouse.pressed ? 4 : 3
+                // What the light is centred on: the grip point, held clear of the
+                // very ends so a blob in a corner is not half off the edge.
+                // The travel animation lives HERE rather than on y, because y
+                // moves when the HEIGHT changes too, and the two disagreeing is
+                // the whole bug: y was smoothed by distance (1600 px/s) while
+                // the height was timed (220ms), so letting go near the bottom
+                // of a tall window re-formed the finished blob up at the top
+                // and then slid it down. Centre and height cannot disagree.
+                property real centre: Math.max(35, Math.min(parent.height - 35, queueGrip.handY))
+                Behavior on centre { enabled: !queueGrip.placing; SmoothedAnimation { velocity: 1600 } }
+                // Grabbed, the light runs the whole edge: twice the drawer's
+                // height, so its own fade stays off screen and only the bright
+                // middle shows. Let go, it collapses back to a blob. Nothing
+                // but the height changes between those two, and it changes
+                // about the centre, so both ends travel the same distance in
+                // the same time and the grip point keeps the middle throughout.
+                height: gripMouse.pressed ? parent.height * 2 : 190
+                y: centre - height / 2
+                opacity: queueGrip.lit ? 1 : 0
+                gradient: Gradient {
+                    GradientStop { position: 0.0;  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0) }
+                    GradientStop { position: 0.42; color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.93) }
+                    GradientStop { position: 0.58; color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.93) }
+                    GradientStop { position: 1.0;  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0) }
+                }
+                Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 140 } }
+                Behavior on opacity { NumberAnimation { duration: 180 } }
+            }
+            // The stretch being squeezed, brighter than the lit edge around it
+            // so the grip still reads once the glow has gone full height.
+            Rectangle {
+                x: 0; width: 4
+                height: gripMouse.pressed ? 56 : 0
+                y: queueGrip.handY - height / 2
+                color: root.accentSoft
+                Behavior on height { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+            }
+
+            MouseArea {
+                id: gripMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+                // A horizontal drag is also the Drawer's own dismiss gesture,
+                // which is the same axis this one drags in. Without it the
+                // drawer slides shut instead of resizing.
+                preventStealing: true
+                onPressedChanged: root.queueEdgeHeld = pressed
+                property real startScene: 0
+                property real startWidth: 0
+                // Hovering, the glow follows the pointer; holding, its centre
+                // stays put and the pointer's job is the width instead. The
+                // pressed guard matters: mid-drag the edge lags the pointer,
+                // and a vertical wiggle makes the pointer leave and re-enter
+                // the band, each re-entry an onEntered. Unguarded, every one
+                // of them teleported the glow to the pointer's y (reported
+                // as jumping up and down while resizing).
+                onEntered: if (!pressed) queueGrip.placeHand(mouseY)
+                onPressed: function (m) {
+                    queueGrip.placeHand(m.y)
+                    startScene = mapToItem(null, m.x, m.y).x
+                    startWidth = queueDrawer.width
+                }
+                onPositionChanged: function (m) {
+                    if (!pressed) { queueGrip.handY = m.y; return }
+                    var want = startWidth + (startScene - mapToItem(null, m.x, m.y).x)
+                    root.queueWidth = Math.max(420, Math.min(root.width - 80, want))
                 }
             }
         }
@@ -13965,7 +14548,12 @@ ApplicationWindow {
         // "album" or "track". Picks the wording and the download the ANYWAY
         // click makes; everything else about the conversation is the same.
         property string kind: "album"
+        // "claim" (a library tag match, the original conversation) or
+        // "owned" (a record of a download Waves made; REDOWNLOAD re-fetches).
+        property string mode: "claim"
+        property var card: null
         readonly property bool isTrack: kind === "track"
+        readonly property bool isOwned: mode === "owned"
         visible: opacity > 0
         opacity: shown ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
@@ -13975,6 +14563,13 @@ ApplicationWindow {
             var wasTrack = libraryClaimGate.isTrack
             libraryClaimGate.shown = false
             if (aid === "") return
+            if (libraryClaimGate.isOwned) {
+                // Force first, then start the normal per-kind download: the
+                // override is what makes the job actually fetch owned tracks.
+                waves.registerRedownload(aid)
+                if (libraryClaimGate.card) root.browseCardDownload(libraryClaimGate.card)
+                return
+            }
             // A single track needs no override: the bulk claim gate rides only
             // on collection jobs, so one track asked for by name has never been
             // skippable and downloadTrack really downloads.
@@ -14002,7 +14597,8 @@ ApplicationWindow {
                     textFormat: Text.PlainText; Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
-                    text: "This looks like it is already in your library"
+                    text: libraryClaimGate.isOwned ? "You already downloaded this"
+                                                   : "This looks like it is already in your library"
                 }
                 Text {
                     textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -14011,15 +14607,23 @@ ApplicationWindow {
                     // A track match names a file, not a folder, and the folder
                     // line below is then the album it was found sitting in,
                     // which is also the evidence the identity was proven from.
-                    text: (libraryClaimGate.isTrack
+                    // The owned mode is a different conversation: a record of
+                    // a download Waves made, not a guess to be judged.
+                    text: libraryClaimGate.isOwned
+                        ? ((libraryClaimGate.albumTitle !== ""
+                              ? "Waves downloaded “" + libraryClaimGate.albumTitle + "” itself, so this is a record, not a guess."
+                              : "Waves downloaded this itself, so this is a record, not a guess.")
+                           + " Redownloading fetches every track fresh and replaces the copies Waves wrote;"
+                           + " nothing else on disk is touched.")
+                        : ((libraryClaimGate.isTrack
                             ? (libraryClaimGate.albumTitle !== ""
                                 ? "A file in your music library matches “" + libraryClaimGate.albumTitle + "”."
                                 : "A file in your music library matches this track.")
                             : (libraryClaimGate.albumTitle !== ""
                                 ? "A folder in your music library matches “" + libraryClaimGate.albumTitle + "”."
                                 : "A folder in your music library matches this album."))
-                        + " The match is made from tags, so it can be wrong. Downloading again makes a"
-                        + " second copy; your existing files are never touched either way."
+                           + " The match is made from tags, so it can be wrong. Downloading again makes a"
+                           + " second copy; your existing files are never touched either way.")
                 }
                 // The evidence, so the user can judge the match rather than
                 // take the button's word for it.
@@ -14046,7 +14650,7 @@ ApplicationWindow {
                         visible: libraryClaimGate.folder !== ""
                         onClicked: libraryClaimGate.reveal()
                     }
-                    SpecBtn { label: "DOWNLOAD ANYWAY"; onClicked: libraryClaimGate.proceed() }
+                    SpecBtn { label: libraryClaimGate.isOwned ? "REDOWNLOAD" : "DOWNLOAD ANYWAY"; onClicked: libraryClaimGate.proceed() }
                 }
             }
         }
