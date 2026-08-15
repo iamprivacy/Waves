@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import HTTPError
 from rich.progress import Progress, TaskID
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
-from tidalapi.exceptions import TooManyRequests
+from tidalapi.exceptions import AssetNotAvailable, ObjectNotFound, StreamNotAvailable, TooManyRequests
 from tidalapi.media import (
     AudioExtensions,
     AudioMode,
@@ -113,6 +113,51 @@ _PATH_LENGTH_MAX: int = PATH_LENGTH_MAX
 # Child of "waves", so it inherits the app's handlers and its INFO records join
 # the always-on breadcrumb ring crash reports are stitched from.
 logger = logging.getLogger("waves.download")
+
+# TIDAL's subStatus family for "your session, not the content": 11001 user not
+# authorised, 11002 invalid token, 11003 expired token. A 401 carrying one of
+# these is a login problem and must never be read as "this track is gone".
+_TIDAL_SUBSTATUS_AUTH_MIN: int = 11000
+_TIDAL_SUBSTATUS_AUTH_MAX: int = 11999
+
+
+def _tidal_refuses_asset(error: HTTPError) -> str | None:
+    """TIDAL's own words when it refuses to serve an item, or None if this is
+    something else (a network hiccup, a dead session, a server error).
+
+    The playback-info endpoint answers a track the account cannot play with a
+    401 or 403 whose body says why (observed: ``subStatus 4005 "Asset is not
+    ready for playback"`` for tracks greyed out in the official apps). The
+    same 401 status also announces an expired or invalid token, so the body is
+    the only way to tell "TIDAL will not give you this track" from "TIDAL does
+    not know who you are"; tidalapi already retried the expired-token case
+    once with a refresh, so what reaches here is whatever survived that.
+
+    Args:
+        error (HTTPError): The requests error raised for the playback request.
+
+    Returns:
+        str | None: TIDAL's user message (or a generic one) when this is a
+            refusal of the asset itself, None otherwise.
+    """
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status not in (401, 403):
+        return None
+    body: dict = {}
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except Exception:  # noqa: S110  # a body that is not JSON is still a refusal
+        pass
+    message = str(body.get("userMessage") or "")
+    if message.startswith("The token has expired"):
+        return None
+    sub_status = body.get("subStatus")
+    if isinstance(sub_status, int) and _TIDAL_SUBSTATUS_AUTH_MIN <= sub_status <= _TIDAL_SUBSTATUS_AUTH_MAX:
+        return None
+    return message or f"HTTP {status}"
 
 
 def _staging_path(path_destination: pathlib.Path) -> pathlib.Path:
@@ -1062,21 +1107,30 @@ class Download:
                 # Throws `tidalapi.exceptions.ObjectNotFound` if item is not available anymore.
                 media = instantiate_media(self.session, media_type, media_id)
             elif isinstance(media, Track | Video):
-                # Check if media is available not deactivated / removed from TIDAL.
-                if not media.allow_streaming:
-                    self.fn_logger.info(
-                        f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_item(media))}"
-                    )
-                    return None
-                elif isinstance(media, Track) and not keep_album:
+                # Deliberately NOT gated on media.allow_streaming here. That flag
+                # is a false negative for our client: TIDAL serves editions like
+                # "ALICIA (With Commentary)" with allowStreaming=false on every
+                # track, yet the official apps and our own account still play
+                # most of them, and the ones it truly withholds answer the
+                # playback request with a 401 (issue #25). So availability is
+                # decided where it is authoritative, when the stream is actually
+                # fetched (_get_stream_info), and a real refusal becomes the
+                # UNAVAILABLE outcome there. Gating on the flag here refused
+                # tracks the account could play and painted whole albums red.
+                if isinstance(media, Track) and not keep_album:
                     # Re-create media instance with full album information.
                     # Skipped when keep_album is set: a best-of-both merge passes a
                     # track deliberately re-tagged under another edition's album and
                     # numbering, which this re-fetch would otherwise clobber.
                     media = self.session.track(str(media.id), with_album=True)
             elif isinstance(media, Album):
-                # Check if media is available not deactivated / removed from TIDAL.
+                # An album whose own allowStreaming is false is a different case
+                # from the per-track flag above: the collection itself is gone,
+                # so there is nothing to enumerate. (efc2549 added this for
+                # region-locked albums.) Individual tracks are still let through
+                # and settled at stream time.
                 if not media.allow_streaming:
+                    self._note_unavailable(media)
                     self.fn_logger.info(
                         f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_title(media))}"
                     )
@@ -1643,6 +1697,33 @@ class Download:
                 )
                 return None, "", False, None
 
+            except (StreamNotAvailable, ObjectNotFound, AssetNotAvailable):
+                # TIDAL knows the track but will not serve a stream for it: the
+                # 404 / "no stream" answer for an asset that is genuinely gone.
+                # A refusal, not a failure, so mark it UNAVAILABLE (issue #25).
+                self._note_unavailable(media)
+                self.fn_logger.info(
+                    f"This item is not available for listening anymore on TIDAL. Skipping: "
+                    f"{log_content(name_builder_item(media))}"
+                )
+                return None, "", False, None
+
+            except HTTPError as error:
+                # A 401/403 whose body says the asset itself is withheld (e.g.
+                # subStatus 4005 "Asset is not ready for playback") is TIDAL
+                # refusing the content, not our session, so it is UNAVAILABLE
+                # too. Anything else (a dead session, a 5xx, a network error) is
+                # a real failure and keeps the old "something went wrong" path.
+                if _tidal_refuses_asset(error) is not None:
+                    self._note_unavailable(media)
+                    self.fn_logger.info(
+                        f"This item is not available for listening anymore on TIDAL. Skipping: "
+                        f"{log_content(name_builder_item(media))}"
+                    )
+                    return None, "", False, None
+                self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
+                return None, "", False, None
+
             except Exception:
                 self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
                 return None, "", False, None
@@ -1708,6 +1789,13 @@ class Download:
         and the deliberate inter-download delay remain. A no-op here; the GUI's
         tracked download overrides it to flip the queue row to its finished
         word right away instead of letting it sit through the delay."""
+
+    def _note_unavailable(self, media: Track | Video | Album) -> None:
+        """TIDAL refuses to stream this item, so the engine skips it. A no-op
+        here; the GUI's tracked download overrides it to tell a refusal apart
+        from a download that failed. They are not the same news: a failure is
+        something to retry, a refusal is TIDAL saying the item is gone, and
+        nothing the app does will fetch it."""
 
     def _finalize_plan(
         self,
