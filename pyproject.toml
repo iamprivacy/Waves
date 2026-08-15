@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.20"
+version = "0.1.21"
 description = "Waves: a native desktop app for downloading from TIDAL"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -180,6 +180,7 @@ ignore = [
 "tests/test_queue_failed_section.py" = ["S603", "C901"]
 "tests/test_queue_row_index.py" = ["S603", "C901"]
 "tests/test_queue_row_quality.py" = ["S603", "C901"]
+"tests/test_queue_unavailable_word.py" = ["S603", "C901"]
 "tests/test_queue_drawer_resize.py" = ["S603", "C901"]
 "tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
 "tests/test_library_downloaded_state.py" = ["S603", "C901"]
