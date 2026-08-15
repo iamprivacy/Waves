@@ -13312,19 +13312,29 @@ ApplicationWindow {
                                             implicitHeight: Math.max(sWord.implicitHeight, dlWord.implicitHeight)
                                             DecryptText {
                                                 id: sWord
+                                                objectName: "qTrackWord"
                                                 anchors.right: parent.right
                                                 anchors.verticalCenter: parent.verticalCenter
                                                 opacity: scell.dl ? 0 : 1
                                                 visible: opacity > 0
                                                 Behavior on opacity { NumberAnimation { duration: 180 } }
+                                                // UNAVAILABLE is TIDAL's answer,
+                                                // not a failure of ours: it wears
+                                                // the muted red so it reads as
+                                                // "you did not get this one"
+                                                // without the alarm of RETRY,
+                                                // which would promise something a
+                                                // retry cannot deliver.
                                                 target: td.status === "done" ? "COMPLETED"
                                                     : td.status === "failed" ? "FAILED"
+                                                    : td.status === "unavailable" ? "UNAVAILABLE"
                                                     : td.status === "skipped" ? "IN LIBRARY"
                                                     : td.status === "cancelled" ? "CANCELLED"
                                                     : (td.status === "queued" || td.status === "pending") ? "QUEUED"
                                                     : td.status === "running" ? "" : "·"
                                                 color: td.status === "done" ? root.accent
                                                      : td.status === "failed" ? root.red
+                                                     : td.status === "unavailable" ? root.redDim
                                                      : td.status === "skipped" ? root.libAccent : root.textDim
                                                 Behavior on color { ColorAnimation { duration: 260 } }
                                                 font.pixelSize: 10
