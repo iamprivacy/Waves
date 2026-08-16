@@ -26,7 +26,7 @@ issue. A test enforces it.
 
 ### 🐛 Fixed
 
-- 🎼 Albums whose tracks TIDAL marks as not streamable now download the tracks your account can actually play. Some editions (commentary or album-experience versions) carry that flag on every track even though the tracks still play, and Waves was refusing all of them up front, so an album could fail entirely when most of it was downloadable. Waves now asks TIDAL for each track and saves the ones it will serve ([issue #25](https://github.com/iamprivacy/Waves/issues/25)).
+- 🎼 Albums whose tracks TIDAL marks as not streamable now save the tracks your account can play. Some editions (commentary or album-experience versions) carry that flag on every track even though TIDAL's own apps still play them, and Waves was refusing all of them up front, so an album could fail entirely when most of it was available to you. Waves now lets TIDAL itself decide, track by track: what TIDAL serves to your account is saved, and nothing more ([issue #25](https://github.com/iamprivacy/Waves/issues/25)).
 - 🚫 A track TIDAL genuinely will not serve is now marked UNAVAILABLE instead of failed, and the rest of the album still finishes. Such a track used to be reported as a failure with a retry that could never work, and a whole album of them turned red ([issue #25](https://github.com/iamprivacy/Waves/issues/25)).
 
 ## 🗂️ v0.1.20 (2026-08-15)
@@ -490,7 +490,7 @@ issue. A test enforces it.
 - 📋 The Completed section of the download queue now lists the most recently finished item first, oldest at the bottom.
 - 🔍 Pressing Search puts the cursor in the search bar, ready to type. Any previous query is selected, so typing starts a fresh search.
 - 🎤 Artist pages show the first 5 top tracks with a SHOW ALL link for the rest, and the Top tracks, Albums and EPs & Singles sections are now collapsible. A collapsed section stays collapsed on every artist page until you reopen it, so album hunters skip the top tracks for good.
-- ✨ Download bars no longer freeze at 100% while the final steps run (merging, decrypting, tagging): the dots twinkle softly until the item is actually done. Applies to the queue rows, download buttons and the small hover-card bars alike.
+- ✨ Download bars no longer freeze at 100% while the final steps run (merging, converting, tagging): the dots twinkle softly until the item is actually done. Applies to the queue rows, download buttons and the small hover-card bars alike.
 
 ### 🐛 Fixed
 
@@ -620,7 +620,7 @@ issue. A test enforces it.
   <a href="https://www.buymeacoffee.com/iamprivacy"><img src="https://img.shields.io/badge/-Buy%20me%20a%20coffee-ffdd00?style=flat&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
 </p>
 
-First public release of Waves: a native desktop TIDAL downloader built on the Tidal-DL-NG engine (actively maintained as Tidaler) with a from-scratch Qt Quick interface.
+First public release of Waves: a native desktop app for saving music from your own TIDAL account for offline listening, built on the Tidal-DL-NG engine (actively maintained as Tidaler) with a from-scratch Qt Quick interface.
 
 ### ✨ Added
 
@@ -629,7 +629,7 @@ First public release of Waves: a native desktop TIDAL downloader built on the Ti
 - 🔍 Search-first navigation: one field searches artists, albums, tracks, videos, playlists, and mixes, and resolves pasted tidal.com links directly.
 - ▶️ Full seekable track previews streamed from your own account, with a now-playing bar that follows you across views.
 - 🎬 A built-in video player with seek, keyboard controls, and a per-video quality picker (up to 1080p) that can switch resolution mid-stream.
-- 🎤 Artist pages (bio, discography, EPs and singles, top tracks) with one-click whole-artist downloads: per-source toggles, most-complete-edition selection, and features/compilations limited to the artist's own tracks.
+- 🎤 Artist pages (bio, discography, EPs and singles, top tracks) with one-click whole-artist saving: per-source toggles, most-complete-edition selection, and features/compilations limited to the artist's own tracks.
 - 🧩 "Best of both" album merging: when editions differ in tracks and quality, the download takes each song at its best, matched strictly by ISRC.
 - 📚 A Plex-friendly library layout by default (Artist/[Year] Album/...), a clean album-artist tagging mode, and an explicit/clean version preference.
 - ❤️ My TIDAL: favorite albums, tracks, artists, videos, playlists, and mixes with smooth virtualized scrolling.
