@@ -22,6 +22,43 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.22 (2026-08-19)
+
+### 🔧 Changed
+
+- 🔊 The Dolby Atmos version of an album or song now appears as its own entry in search results, next to the regular version, marked ATMOS SPATIAL. It used to be folded into the regular entry, so you could not see it or choose it. The same ATMOS mark is used everywhere a quality is shown, in place of a quality tier that did not apply.
+- 📊 A download button's progress bar now fills the whole button with a denser grid of blocks. Hover the button (or the cover, on a Browse card) to see the percentage. The queue shows progress too: a percentage for a single song, and how many songs are done for an album, playlist or mix.
+- 📊 The queue's per-row progress bar uses the same denser grid.
+- ⚙️ "Best of both" no longer needs "Most-complete edition only" switched on, and its setting is always visible in Settings. It works on its own, both when you save a single album and when you save a whole discography.
+- 🧩 "Best of both" now works on albums that also have a clean or explicit twin. It builds the version you asked for and never mixes the two: songs are only ever taken from editions of the same kind.
+- 📚 Open a queued album, playlist or mix in the queue and the songs you already have are marked straight away, each with the quality of the copy you hold, in the same green (Waves wrote it) or gold (matched by tags) as the download button. They used to be marked one at a time as the download reached them, and showed no quality at all.
+- 📋 A downloading playlist or mix opens in the queue like an album does: hover the row to peek, click for the per-track list with live progress and quality. Only album rows could open before. A playlist longer than 500 tracks lists the first 500 and says how many more it holds.
+- 🔮 The queue now shows the quality a download will really get before it starts: the tier you asked for, capped by what TIDAL lists for that release and track.
+
+### 🐛 Fixed
+
+- ⏱️ The "Download delay" setting works. It had no effect either way before: an album always paused a few seconds between songs even with the delay switched off, and a single song never paused even with it switched on.
+- 🎛️ Changing a setting part-way through a download no longer affects the songs still to come in it. Answering a question about your download folder, or ticking "Don't ask again", could leave the rest of an album without its finishing step, so those songs showed the wrong length, or could fail them outright.
+- 📊 In the queue, each song's progress bar shows that song's progress. On a release with a long list of artists every song showed the same figure, and the album's overall bar could run ahead of the truth and stay there.
+- 🔐 A connection problem when Waves starts no longer signs you out. TIDAL being busy, a server error, or a wifi sign-in page at a hotel or airport used to clear your sign-in for good, so you had to sign in again. Waves now keeps you signed in and tries again.
+- 🔊 With Dolby Atmos downloads switched on and audio quality set to Lossless or Max, saving an album again no longer downloads its Atmos songs a second time, and the album shows as downloaded. Before, those songs were downloaded again every time and the button stayed on DOWNLOAD.
+- 🔊 Dolby Atmos songs save straight after you sign in. On a first launch, or after signing out and back in, every Atmos song in every download failed until you quit Waves and opened it again.
+- 🔊 Dolby Atmos songs now save in Dolby Atmos. They had been saving as ordinary stereo files instead, and were never marked ATMOS SPATIAL. If you already have one of those stereo copies, Redownload it to get the Dolby Atmos version.
+- 🖼️ The progress bar on a Browse card (an album, playlist or mix cover) has its green outline back; since v0.1.18 it painted over its own edge.
+- 🎚️ In the queue's per-track list, a track's quality no longer disappears for a few seconds when it says COMPLETED.
+- 🎧 Changing the audio quality no longer affects downloads already queued or in progress. They finish at the quality they started at, and the new choice applies to what you queue next.
+- 🚀 The Browse landing is ready sooner after launch, and cover art no longer holds up the interface.
+- 🏁 A "best of both" album is no longer marked failed when TIDAL has withheld one of its songs. It finishes with the songs it could get and the status line names what was left out, the same as any other album.
+- ⚖️ "Best of both" now builds a merged album only when that gets you better audio at the quality you chose. It used to build one whenever another edition listed a higher quality, even where your setting meant every song downloaded exactly the same.
+- 🎵 "Best of both" no longer takes every song from an edition that happens to hold one higher-quality track, and never takes a song at a lower quality than the edition it started from.
+- 💾 An album saved as a "best of both" shows as downloaded when you reopen Waves.
+- ♻️ Saving an album again after a "best of both" replaces the files instead of leaving a second copy of each borrowed song beside them. This now works for a library saved by an older version too, where the album's folder was named a little differently: the higher-quality songs land in the folder you already have instead of the save quietly skipping them.
+- 🔁 When Waves cannot compare an album's editions, it now says so and you can try again. It used to save the plain album and stop offering "best of both" for that album until you restarted.
+- 📃 An album saved as a "best of both" gets its playlist file (.m3u8) when that setting is on, the same as any other album. It was the one kind of album that never did, and saving it again did not add one.
+- 📁 Saving an album adds to the album folder you already have, even when that folder keeps a name from before v0.1.17 (the doubled space left where an illegal character was removed). On the file naming Waves ships with, the songs went into a second, tidier-named folder beside it, so the album ended up saved twice.
+- 📚 Changing "Bulk downloads skip what you have" no longer affects downloads already queued. They run with the setting they were queued with, and the new choice applies to what you queue next, the same as the audio quality.
+- 🖼️ The Preview and Download buttons that appear when you point at a cover in Browse now fit on the cover. On an album you had already saved the second one reads DOWNLOADED, which was wide enough to be cut off at both ends.
+
 ## 🗂️ v0.1.21 (2026-08-15)
 
 ### 🐛 Fixed
@@ -630,7 +667,7 @@ First public release of Waves: a native desktop app for saving music from your o
 - ▶️ Full seekable track previews streamed from your own account, with a now-playing bar that follows you across views.
 - 🎬 A built-in video player with seek, keyboard controls, and a per-video quality picker (up to 1080p) that can switch resolution mid-stream.
 - 🎤 Artist pages (bio, discography, EPs and singles, top tracks) with one-click whole-artist saving: per-source toggles, most-complete-edition selection, and features/compilations limited to the artist's own tracks.
-- 🧩 "Best of both" album merging: when editions differ in tracks and quality, the download takes each song at its best, matched strictly by ISRC.
+- 🧩 "Best of both" album merging: when editions differ in tracks and quality, the download takes each song at its best, matched by ISRC first, otherwise only on an identical title and near-identical length.
 - 📚 A Plex-friendly library layout by default (Artist/[Year] Album/...), a clean album-artist tagging mode, and an explicit/clean version preference.
 - ❤️ My TIDAL: favorite albums, tracks, artists, videos, playlists, and mixes with smooth virtualized scrolling.
 - 📥 A grouped download queue (Completed / Downloading / Queued) with live per-track progress and per-album / per-artist roll-ups.
