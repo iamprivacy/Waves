@@ -1,7 +1,7 @@
 site_name: Waves
 repo_url: https://github.com/iamprivacy/Waves
 site_url: https://iamprivacy.github.io/Waves
-site_description: "Waves: a native desktop UI for the Tidaler download engine."
+site_description: "Waves: a native desktop app for saving music from your own TIDAL account for offline listening."
 site_author: iamprivacy
 edit_uri: edit/master/docs/
 repo_name: iamprivacy/Waves
