@@ -36,6 +36,7 @@ call site, which the optional export checkbox reduces to an opaque hash.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import faulthandler
 import getpass
@@ -43,6 +44,7 @@ import hashlib
 import logging
 import os
 import platform
+import queue as _queue
 import re
 import socket
 import sys
@@ -51,7 +53,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
 logger = logging.getLogger("waves.diag")
@@ -77,10 +79,20 @@ _CRUMB_DUMP_INTERVAL_SEC = 30.0
 # Freeze watchdog: re-arm every _WATCHDOG_TICK_MS from the GUI thread; if the
 # event loop stalls past _WATCHDOG_DUMP_SEC the pending faulthandler dump
 # fires (all-thread tracebacks into crash.log). Stalls that recover before the
-# dump are still recorded, as a WARNING with the observed gap.
+# dump are still recorded, as a WARNING with the observed gap. The dump used
+# to wait 6s: a 3.9s freeze in a livetest (2026-08-17, a playlist download
+# beside a library scan) left only the WARNING and no stack to name the
+# caller, so it now aims at the same 2.5s gap the WARNING reports from.
+#
+# The dump wait is that target PLUS one tick, and it has to be. Each tick
+# re-arms the countdown, so what the dump actually measures is the gap between
+# two ticks: at a 2.5s wait on a 2s tick only 0.5s of it was headroom, and a
+# block starting just before a tick was due fired a full dump after half a
+# second. The threshold was 0.5s or 2.5s depending on nothing but phase.
 _WATCHDOG_TICK_MS = 2_000
-_WATCHDOG_DUMP_SEC = 6.0
-_WATCHDOG_WARN_GAP_SEC = 3.5
+_WATCHDOG_STALL_TARGET_SEC = 2.5
+_WATCHDOG_DUMP_SEC = _WATCHDOG_STALL_TARGET_SEC + _WATCHDOG_TICK_MS / 1000.0
+_WATCHDOG_WARN_GAP_SEC = 2.5
 
 _SAMPLER_INTERVAL_MS = 5_000
 
@@ -500,6 +512,15 @@ class _PerfSampler:
 _installed = False
 _log_dir: Path | None = None
 _file_handler: RotatingFileHandler | None = None
+# What the loggers actually hold for disk output: a QueueHandler that filters
+# (level + redaction) on the logging thread and hands the record to a writer
+# thread, which owns _file_handler. Disk writes never run on the caller's
+# thread: the file handler used to sit on the loggers directly, and a WARNING
+# logged from the GUI thread while the disk was busy (the library scan and the
+# ownership stats hammering it at launch) blocked the event loop for the
+# write, 50-130ms sampled live, seen as the launch animation stalling.
+_disk_handler: QueueHandler | None = None
+_disk_listener: QueueListener | None = None
 _stream_handler: logging.StreamHandler | None = None
 _crumbs = _BreadcrumbHandler()
 _watchdog = _Watchdog()
@@ -534,7 +555,7 @@ def install(log_dir: str) -> Path | None:
     level is WARNING plus breadcrumb dumps, per the privacy model. Returns the
     log-file path, or None if the directory is unwritable.
     """
-    global _installed, _log_dir, _file_handler, _stream_handler
+    global _installed, _log_dir, _file_handler, _stream_handler, _disk_handler, _disk_listener
     if _installed:
         return log_path()
     _installed = True
@@ -564,11 +585,22 @@ def install(log_dir: str) -> Path | None:
             path / LOG_FILENAME, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS, encoding="utf-8"
         )
         _file_handler.setFormatter(fmt)
-        _file_handler.setLevel(logging.WARNING)
-        _file_handler.addFilter(redact)
+        # Level and redaction are decided by the QueueHandler in front (on the
+        # logging thread, before anything is queued); the file handler behind
+        # it writes whatever arrives. The QueueHandler merges each record's
+        # message and (already scrubbed) traceback text before queueing, so
+        # what crosses to the writer thread is plain text plus metadata.
+        _disk_handler = QueueHandler(_queue.Queue())
+        _disk_handler.setLevel(logging.WARNING)
+        _disk_handler.addFilter(redact)
+        _disk_listener = QueueListener(_disk_handler.queue, _file_handler)
+        _disk_listener.start()
+        atexit.register(_stop_disk_listener)
     except OSError:
         _log_dir = None
         _file_handler = None
+        _disk_handler = None
+        _disk_listener = None
 
     _crumbs.setFormatter(fmt)
     _crumbs.addFilter(redact)
@@ -576,9 +608,9 @@ def install(log_dir: str) -> Path | None:
     for target in (waves, root):
         target.addHandler(_stream_handler)
         target.addHandler(_crumbs)
-        if _file_handler is not None:
-            target.addHandler(_file_handler)
-            target.addHandler(_CrumbDumpHandler(_crumbs, _file_handler))
+        if _disk_handler is not None:
+            target.addHandler(_disk_handler)
+            target.addHandler(_CrumbDumpHandler(_crumbs, _disk_handler))
 
     _install_qt_handler()
     logger.info("[init] session=%s waves diagnostics installed", SESSION_ID)
@@ -597,8 +629,8 @@ def set_verbose(on: bool) -> None:
     if on == _verbose:
         return
     _verbose = on
-    if _file_handler is not None:
-        _file_handler.setLevel(logging.DEBUG if on else logging.WARNING)
+    if _disk_handler is not None:
+        _disk_handler.setLevel(logging.DEBUG if on else logging.WARNING)
     if on:
         logger.warning("[init] verbose diagnostics ON (session=%s, v%s)", SESSION_ID, _app_version())
         _watchdog.start(_crash_file)
@@ -613,6 +645,23 @@ def is_verbose() -> bool:
     return _verbose
 
 
+def stop_freeze_watchdog() -> None:
+    """Stop the freeze watchdog and cancel any pending dump (teardown).
+
+    Quitting is the one time the GUI thread blocks on purpose: shutdown()
+    drains four worker pools after the event loop has already exited, up to
+    eight seconds of it, and the watchdog cannot tick through that. The
+    countdown armed by the last tick then expired and faulthandler appended a
+    full all-thread traceback to crash.log, so a quit during a download wrote
+    a freeze record for a freeze that never happened. Worse, that dump goes
+    straight to the file descriptor without passing the scrubber, and
+    crash.log is rotated only at process start, so the fabricated stacks piled
+    up and crowded the window export_bundle ships.
+
+    Idempotent, and safe to call when the watchdog was never started."""
+    _watchdog.stop()
+
+
 def detach_disk_log() -> None:
     """Close and detach the on-disk log handlers (factory reset).
 
@@ -621,18 +670,45 @@ def detach_disk_log() -> None:
     Windows where an open file cannot be deleted. Breadcrumbs and the stderr
     handler keep running; only disk output stops. One-way: the app quits
     right after a factory reset, so nothing re-attaches."""
-    global _file_handler
+    global _file_handler, _disk_handler
     if _file_handler is None:
         return
     _watchdog.stop()
     _sampler.stop()
     for target in (logging.getLogger("waves"), logging.getLogger()):
         for handler in list(target.handlers):
-            if handler is _file_handler or isinstance(handler, _CrumbDumpHandler):
+            if handler is _disk_handler or isinstance(handler, _CrumbDumpHandler):
                 target.removeHandler(handler)
+    _stop_disk_listener()
     with contextlib.suppress(Exception):
         _file_handler.close()
     _file_handler = None
+    _disk_handler = None
+
+
+def _stop_disk_listener() -> None:
+    """Drain the disk-log queue and stop its writer thread (exit / detach).
+    Idempotent: the writer joins once, and a second call finds it gone."""
+    global _disk_listener
+    listener, _disk_listener = _disk_listener, None
+    if listener is not None:
+        with contextlib.suppress(Exception):
+            listener.stop()
+
+
+def flush_disk_log(timeout: float = 2.0) -> None:
+    """Best-effort wait for queued disk records to reach the file (before an
+    export reads it back). Bounded: a busy disk is precisely what the queue
+    exists to keep off this thread, so it never waits longer than ``timeout``."""
+    handler = _disk_handler
+    if handler is None:
+        return
+    deadline = time.monotonic() + timeout
+    while not handler.queue.empty() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if _file_handler is not None:
+        with contextlib.suppress(Exception):
+            _file_handler.flush()
 
 
 # --------------------------------------------------------------------------
@@ -676,6 +752,9 @@ def export_bundle(redact_content: bool = False) -> str:
     content spans are hashed when the user asked for that too."""
     if _log_dir is None:
         return ""
+    # The disk log is written by its own thread; let what is queued land
+    # first so the bundle carries the newest lines.
+    flush_disk_log()
     # Sub-second suffix: two exports in the same second (double-click, or one
     # with and one without content redaction) must not overwrite each other.
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]

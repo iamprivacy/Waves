@@ -1120,7 +1120,13 @@ class LibraryMixin:
         return bool(p.get("present")) and not p.get("partial")
 
     def _library_claims_track(self, artist: str, title: str, album: str = "", album_year: str = "", duration=0) -> bool:
-        """Whether the scan holds this track ALREADY FILED UNDER the release
+        return self._library_track_claim(artist, title, album, album_year, duration) is not None
+
+    def _library_track_claim(self, artist: str, title: str, album: str = "", album_year: str = "", duration=0):
+        """The presence verdict when the scan claims this track (None when it
+        does not), so the caller also learns the local copy's class.
+
+        Whether the scan holds this track ALREADY FILED UNDER the release
         being fetched: present, and proven on the identity axis. Bulk actions
         use it to skip one track inside a queued collection; single-track
         clicks never consult it.
@@ -1138,13 +1144,13 @@ class LibraryMixin:
         happen on a guess."""
         idx = self._library_track_index
         if not idx or not title or not artist:
-            return False
+            return None
         try:
             v = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
         except Exception:
             logger.debug("Track claim lookup failed; not gating", exc_info=True)
-            return False
-        return bool(v.get("present")) and bool(v.get("sure"))
+            return None
+        return v if bool(v.get("present")) and bool(v.get("sure")) else None
 
     @Slot(str, result="QVariant")
     def artistLibraryPresence(self, name):

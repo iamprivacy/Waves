@@ -61,7 +61,6 @@ feature.
 | `downloadFolderMissing` / `downloadFolderDefault`                  | The download folder is invalid (blocking) / still the historical default (nudge) |
 | `downloadFolderUnreachable(path)`                                  | The folder is an unreachable network share; queued work held for "Try again"     |
 | `ffmpegMissingBlocked`                                             | A download would come out degraded without FFmpeg; a blocking choice is shown    |
-| `editionMergeChanged`                                              | The "best of both" edition-merge opt-in flipped                                  |
 
 ## Local library presence (the "in your library" badge)
 

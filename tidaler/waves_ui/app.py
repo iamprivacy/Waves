@@ -11,16 +11,18 @@ or import :func:`waves_activate` and call it (optionally passing an existing
 from __future__ import annotations
 
 import faulthandler
+import gc
 import logging
 import os
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QWindow
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest, QSslConfiguration
 from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 
 from tidaler.config import Tidal
@@ -61,6 +63,25 @@ class _CacheFirstNAM(QNetworkAccessManager):
         # the link for the small image payloads.
         request.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
         return super().createRequest(op, request, outgoingData)
+
+
+def _warm_tls() -> None:
+    """Pay Qt's one-time TLS setup on a background thread at launch.
+
+    The first HTTPS request in the process makes QtNetwork build its default
+    QSslConfiguration: the system CA store is read (~160 certificates from
+    the keychain on macOS), ~90-100ms measured. Left alone that happened
+    inside the FIRST cover-art request, i.e. inside _CacheFirstNAM's Python
+    createRequest override on the QML network thread, with the interpreter
+    held for the whole call: sampled live as a ~110ms GUI-thread stall
+    landing right in the launch animation. Here it runs on its own thread
+    while the QML is still loading, and PySide releases the interpreter for
+    the call, so nothing waits on it. If a request outruns it the override
+    simply pays as before."""
+    try:
+        QSslConfiguration.defaultConfiguration()
+    except Exception:
+        logging.getLogger(__name__).debug("TLS warm-up failed", exc_info=True)
 
 
 class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
@@ -306,6 +327,88 @@ def _raise_fd_limit() -> None:
         logging.getLogger(__name__).debug("could not raise fd limit", exc_info=True)
 
 
+def _tune_interpreter_for_gui() -> None:
+    """Interpreter settings for a GUI process with busy background threads.
+
+    Every one of these was found by sampling the launch animation dropping
+    frames while the library scan, the ownership refresh pool and the network
+    workers were all running (2026-08-16):
+
+    * The switch interval. A QML binding or handler that calls into the bridge
+      needs the interpreter, and when a worker is running Python it gets it
+      only when the worker is asked to hand it over, which happens once per
+      switch interval. At the default 5ms every one of the ~100 bridge calls
+      a shelf makes as it builds could wait that long; 2ms bounds the wait
+      without measurably slowing the workers (they only ever switch when
+      someone is waiting).
+    * Full garbage collections. The collector walks the whole heap with the
+      interpreter held, and the heap here is large (the library index alone
+      is hundreds of thousands of objects); each pass measured 15-60ms, and
+      the default cadence ran one every few hundred milliseconds while that
+      index was being built at launch, each a dropped frame or two. The young
+      generations keep their defaults (short-lived cycles are still collected
+      promptly); only the full pass is made rare.
+    """
+    sys.setswitchinterval(0.002)
+    gc.set_threshold(700, 10, 100)
+    _memoize_macos_proxy_lookups()
+
+
+def _memoize_macos_proxy_lookups(ttl: float = 60.0) -> None:
+    """Cache macOS system-proxy answers for a minute.
+
+    On macOS, ``requests`` consults the system proxy settings for EVERY
+    request through urllib's ``getproxies_macosx_sysconf`` and
+    ``proxy_bypass_macosx_sysconf`` (both C calls into SystemConfiguration
+    that hold the interpreter for their duration). Normally sub-millisecond,
+    they were sampled taking 100-150ms during launch, with every other
+    Python thread, the GUI thread included, waiting behind them; the launch
+    animation stalled for exactly that long. The answers rarely change, so
+    the app-wide network workers (dozens of requests at launch) now share
+    one lookup per minute instead of two per request. urllib's own
+    ``getproxies``/``proxy_bypass`` look these names up at call time, so
+    patching the module attributes is enough for requests too."""
+    if sys.platform != "darwin":
+        return
+    import urllib.request as ur
+
+    orig_get = getattr(ur, "getproxies_macosx_sysconf", None)
+    orig_bypass = getattr(ur, "proxy_bypass_macosx_sysconf", None)
+    if orig_get is None or orig_bypass is None:
+        return
+    lock = threading.Lock()
+    memo: dict = {}
+
+    def getproxies_macosx_sysconf():
+        now = time.monotonic()
+        with lock:
+            hit = memo.get("proxies")
+            if hit is not None and now - hit[0] < ttl:
+                return dict(hit[1])
+        val = orig_get()
+        with lock:
+            memo["proxies"] = (now, dict(val))
+        return val
+
+    def proxy_bypass_macosx_sysconf(host):
+        now = time.monotonic()
+        key = ("bypass", host)
+        with lock:
+            hit = memo.get(key)
+            if hit is not None and now - hit[0] < ttl:
+                return hit[1]
+        val = orig_bypass(host)
+        with lock:
+            memo[key] = (now, val)
+            if len(memo) > 512:  # a session visits few hosts; never let this grow unbounded
+                memo.clear()
+                memo[key] = (now, val)
+        return val
+
+    ur.getproxies_macosx_sysconf = getproxies_macosx_sysconf
+    ur.proxy_bypass_macosx_sysconf = proxy_bypass_macosx_sysconf
+
+
 def _log_config_migration() -> None:
     """Breadcrumb the legacy-config migration outcome (never the path itself:
     home paths are PII). The migration ran as a side effect of the first
@@ -319,6 +422,7 @@ def _log_config_migration() -> None:
 
 
 def waves_activate(tidal: Tidal | None = None) -> int:
+    _tune_interpreter_for_gui()
     _install_crash_diagnostics()
     _log_config_migration()
     # The freeze watchdog's stuck-event-loop tracebacks belong in the same
@@ -355,6 +459,8 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     if icon is not None:
         app.setWindowIcon(icon)
 
+    threading.Thread(target=_warm_tls, name="waves-tls-warm", daemon=True).start()
+
     engine = QQmlApplicationEngine()
     bridge = WavesBridge(tidal=tidal)
     # HTTP disk cache for artwork (must be installed before the QML loads).
@@ -368,9 +474,6 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine.rootContext().setContextProperty("uiFontFamily", _ui_font())
     # Keep a reference so it isn't garbage-collected.
     app._waves_bridge = bridge  # type: ignore[attr-defined]
-    # Back-navigation filter: consumes mouse back-button presses, passes the
-    # macOS back-swipe gesture through non-consuming (won't affect scrolling).
-    app.installEventFilter(bridge)
     # Abort downloads and drain the worker pools before the Qt object graph is
     # torn down, otherwise quitting mid-download hangs in QThreadPool teardown.
     app.aboutToQuit.connect(bridge.shutdown)
@@ -380,6 +483,19 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     if not root_objects:
         print("Failed to load Waves QML UI", file=sys.stderr)
         return 1
+
+    # Back-navigation filter (mouse back/forward buttons, the macOS back-swipe)
+    # plus the activate/deactivate swallow: installed on the WINDOW, not the
+    # application. Every one of those events is delivered to the QQuickWindow
+    # itself, so the window's filter sees them all, and an application-wide
+    # filter is a per-event tax on the whole process: each of the thousands of
+    # ChildAdded / DeferredDelete / MetaCall events the QML engine raises while
+    # it builds a page crossed into Python (a wrapper allocated for the target
+    # object, the GIL taken, the filter run and declined), and while a scan
+    # worker held the GIL the GUI thread queued behind it for each one. Sampled
+    # at launch: object creation ran ~3.5x longer with the filter on the app,
+    # and the launch animation dropped frames for it.
+    root_objects[0].installEventFilter(bridge)
 
     # Also set the icon on the actual top-level window, not just the application
     # default. app.setWindowIcon only sets a fallback that a Nuitka-compiled
