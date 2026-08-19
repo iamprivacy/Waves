@@ -8,6 +8,14 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
+    // The bridge's signed-in flag, mirrored ONCE here. Every binding in this
+    // file reads root.signedIn instead of waves.loggedIn: a read of a bridge
+    // property is a call into Python (the interpreter must be taken, and at
+    // launch the scan and network workers hold it), and the moment the flag
+    // flips some three dozen bindings re-evaluate at once. One crossing here,
+    // then plain QML reads everywhere else. The onLoggedInChanged handlers
+    // below still ride the bridge signal itself.
+    readonly property bool signedIn: waves.loggedIn
     // Starts hidden and is shown from Component.onCompleted once the saved
     // frame (issue #6) has been applied, so a remembered size/position takes
     // effect BEFORE the first present: the window opens where it was left with
@@ -280,7 +288,7 @@ ApplicationWindow {
         else root.visible = true
         root._geomReady = true
 
-        if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+        if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true
             waves.loadBrowse()
         }
@@ -646,7 +654,40 @@ ApplicationWindow {
     // every instantiated download control on every tick, which under a burst of
     // per-segment ticks stole GUI-thread frames from scrolling and cover art.)
     property var dlHolders: ({})
-    Component { id: dlHolderComp; QtObject { property real pct: -1; property string st: "" } }
+    Component {
+        id: dlHolderComp
+        QtObject {
+            id: dlh
+            property real pct: -1
+            property string st: ""
+            // What the controls draw (dlPct reads it). It rides pct, but a
+            // jump FORWARD of more than 3 points is filled at speed rather
+            // than snapped: a resumed album or playlist opens with its owned
+            // tracks skipped in one burst, and the bar used to leap straight
+            // to that point (livetest report, 2026-08-17).
+            // LINEAR, and 200ms plus 22ms a point (1.5s at most): the bar's
+            // blocks light in fill order, so a linear ramp lights them at an
+            // even cadence and the eye follows the fill across. The first cut
+            // at this rode OutCubic over 8ms a point, which spent half the
+            // travel in the first fifth of the ramp: at a glance the blocks
+            // all still arrived together (livetest report, 2026-08-17). An
+            // ordinary tick (a fraction of a point) lands at once, so a bar
+            // that is merely downloading is untouched; a fall (a new run
+            // resetting to -1 / 0) and the very first reading snap; with
+            // hover motion off everything snaps.
+            property real shownPct: -1
+            property int rampMs: 0
+            onPctChanged: {
+                var d = pct - shownPct
+                rampMs = (root.hoverMotion && shownPct >= 0 && d > 3) ? Math.min(1500, 200 + d * 22) : 0
+                shownPct = pct
+            }
+            Behavior on shownPct {
+                enabled: dlh.rampMs > 0
+                NumberAnimation { duration: dlh.rampMs; easing.type: Easing.Linear }
+            }
+        }
+    }
     // In-app preview: exactly one preview plays at a time, addressed by
     // (previewKind, previewId), kind "track" or "artist". previewStopMs caps
     // playback (0 = whole track, the norm; a positive value clips it, same path).
@@ -701,6 +742,13 @@ ApplicationWindow {
     // streamed live from the bridge while the album downloads.
     property var queueExpanded: ({})
     property var queueTracks: ({})
+    // How many ledger rows an expanded queue row builds, and how many the
+    // hover peek builds. Both are ceilings, not page sizes: the whole list is
+    // already in queueTracks and every row's live state keeps arriving, these
+    // only bound how many delegates exist. 500 covers any album and all but
+    // the largest playlists in full; the peek only ever shows its top sliver.
+    readonly property int queueLedgerMax: 500
+    readonly property int queueLedgerPeek: 3
     // Queue drawer width, dragged by the handle on its own edge, and remembered
     // across launches the way the window frame is (0 is the never-saved
     // sentinel). 420 is the floor as well as the default: below it the quality
@@ -787,6 +835,13 @@ ApplicationWindow {
         browseBuildGuard.restart()   // progress: the guard watches for a STALL
         if (++_browseBuildReady >= _browseBuildTotal) { browseBuilding = false; browseBuildGuard.stop() }
     }
+    // A shelf's cards incubate behind their own asynchronous Loaders (see the
+    // shelf ListViews), so a shelf reporting loaded is not the shelf being
+    // painted: each card created while the veil is up joins the count, and
+    // ticks when it lands, so the veil still drops on a finished page. Both
+    // no-ops once the veil is down (a card scrolled into view later).
+    function _browseCardStart(async) { if (async && browseBuilding) ++_browseBuildTotal }
+    function _browseCardTick(async) { if (async) _browseBuildTick() }
     // A loader that errors (or a miscount) must never pin the veil. Re-armed
     // by every loader that reports, so this is an inactivity timeout, not a
     // budget for the whole build: a landing with a dozen shelves used to blow
@@ -808,7 +863,7 @@ ApplicationWindow {
         id: browseLandingFreshTimer
         interval: 5 * 60 * 1000    // max-age: editorial rows move a few times a day
         repeat: true
-        running: waves.loggedIn && root.browseOpen && root.browsePageKey === ""
+        running: root.signedIn && root.browseOpen && root.browsePageKey === ""
                  && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
         onTriggered: waves.refreshBrowse()   // silent, throttled; repaints only on change
     }
@@ -1290,7 +1345,7 @@ ApplicationWindow {
         }
         return h
     }
-    function dlPct(id) { var h = dlHolders[id]; return h !== undefined ? h.pct : -1 }
+    function dlPct(id) { var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
     function dlSt(id) { var h = dlHolders[id]; return h !== undefined ? h.st : "" }
     // The queue row a media id is waiting in, so a download button can cancel
     // its own wait without the queue drawer being opened. Walked on the click,
@@ -1633,16 +1688,25 @@ ApplicationWindow {
     // Clears the red error flash a couple of seconds after a failed resolve.
     Timer { id: previewErrorTimer; interval: 2500; onTriggered: root.previewError = "" }
 
-    function qualBg(q) { return surface2 }
-    function qualFg(q) { return (q === "HI-RES" || q === "VIDEO") ? gold : q === "LOSSLESS" ? green : q === "HIGH" ? cyan : textLo }
-    function qualBorder(q) { return (q === "HI-RES" || q === "VIDEO") ? goldDim : q === "LOSSLESS" ? greenDim : outline }
+    // ATMOS is a KIND of file, not a rung on the gold/green/cyan ladder, and it
+    // must not read as one: a Dolby Atmos copy is delivered at one fixed tier
+    // the audio quality setting cannot raise, so there is no better Atmos to
+    // want. It therefore wears none of the ladder's colours and none of its
+    // ground. Outline only, plain ink, the same filled dot every tier pill
+    // draws, and SPATIAL where a tier states its spec. Same word, same ink, on
+    // every surface that shows a quality, from the search row to the queue
+    // drawer's tier column.
+    function qualBg(q) { return q === "ATMOS" ? "transparent" : surface2 }
+    function qualFg(q) { return (q === "HI-RES" || q === "VIDEO") ? gold : q === "LOSSLESS" ? green : q === "HIGH" ? cyan : q === "ATMOS" ? textHi : textLo }
+    function qualBorder(q) { return (q === "HI-RES" || q === "VIDEO") ? goldDim : q === "LOSSLESS" ? greenDim : q === "ATMOS" ? textDim : outline }
     function qualDot(q) { return q === "LOW" ? textDim : qualFg(q) }
     // Standard spec for each TIDAL quality tier (the exact hi-res sample rate
     // isn't exposed without a per-track stream lookup, so we show the tier's
     // baseline: lossless is always FLAC 16-bit/44.1kHz, hi-res is 24-bit FLAC).
     function qualSpec(q) {
         return q === "HI-RES" ? "24-bit" : q === "LOSSLESS" ? "16/44.1"
-             : q === "HIGH" ? "AAC 320" : q === "LOW" ? "AAC 96" : q === "VIDEO" ? "1080p" : ""
+             : q === "HIGH" ? "AAC 320" : q === "LOW" ? "AAC 96" : q === "VIDEO" ? "1080p"
+             : q === "ATMOS" ? "SPATIAL" : ""
     }
     function qualSpecFg(q) { return (q === "HI-RES" || q === "VIDEO") ? goldContTx : q === "LOSSLESS" ? greenContTx : q === "HIGH" ? "#a6e7f1" : textLo }
     function statusColor(s) { return s === "running" ? accent : s === "done" ? accent : s === "failed" ? red : s === "queued" ? cyanDim : textLo }
@@ -1812,9 +1876,9 @@ ApplicationWindow {
                 browseTitleHint = !s.page ? (s.label || "") : ""
                 browsePageLoading = false; browsePageError = false
             }
-            if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+            if (root.signedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false; waves.loadBrowse()
-            } else if (waves.loggedIn) {
+            } else if (root.signedIn) {
                 waves.refreshBrowse()   // silent, throttled; repaints only on change
             }
         } else {   // search
@@ -2121,10 +2185,10 @@ ApplicationWindow {
             navOrigin = "browse"
             browseOpen = true
             settingsOpen = false; artistOpen = false; libraryOpen = false
-            if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+            if (root.signedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false
                 waves.loadBrowse()
-            } else if (waves.loggedIn) {
+            } else if (root.signedIn) {
                 waves.refreshBrowse()   // silent, throttled; repaints only on change
             }
             return
@@ -2147,10 +2211,10 @@ ApplicationWindow {
         // (the pane is alive, so a plain set is exact).
         browseLanding.pendingRestoreY = -1
         browseLanding.contentY = 0
-        if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+        if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
             waves.loadBrowse()
-        } else if (waves.loggedIn) {
+        } else if (root.signedIn) {
             waves.refreshBrowse()   // silent, throttled; repaints only on change
         }
     }
@@ -2437,7 +2501,7 @@ ApplicationWindow {
         openBrowseItem("album", albumId, highlight || "", title || "")   // snapshots the view being left
         settingsOpen = false; artistOpen = false; libraryOpen = false
         browseOpen = true
-        if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+        if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
             waves.loadBrowse()
         }
@@ -2453,7 +2517,7 @@ ApplicationWindow {
         openBrowseItem("playlist", playlistId, "", title || "")
         settingsOpen = false; artistOpen = false; libraryOpen = false
         browseOpen = true
-        if (waves.loggedIn && browseSections.length === 0 && !browseLoading) {
+        if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
             waves.loadBrowse()
         }
@@ -3422,12 +3486,53 @@ ApplicationWindow {
     // it is every track of a queued album and every not-yet-started track of a
     // running one, which is precisely the stretch where the only thing to say
     // is the request. Without it the column sat blank until each track's turn
-    // came. A track that is skipped, cancelled or failed says nothing: no tier
-    // was ever delivered for it, and the request is not news about a file that
-    // is not coming.
-    function queueTrackTier(delivered, status, target) {
+    // came. A track that is cancelled or failed says nothing: no tier was ever
+    // delivered for it, and the request is not news about a file that is not
+    // coming. A skipped track (IN LIBRARY) states the copy you already hold:
+    // its skip event carries that copy's tier as the delivery, full strength,
+    // since it is what the file IS rather than what a fetch is asking for.
+    // The lower of two tiers: what a download will most likely land at when
+    // the request is one and the catalog's advertised ceiling is the other.
+    // Either side empty yields the other; a word neither ranks yields the
+    // request, since that is at least what the job asked for.
+    readonly property var _tierRank: ({ "HI-RES": 0, "LOSSLESS": 1, "HIGH": 2, "LOW": 3 })
+    function tierFloor(request, ceiling) {
+        request = "" + (request || ""); ceiling = "" + (ceiling || "")
+        if (request === "") return ceiling
+        if (ceiling === "") return request
+        var r = _tierRank[request], c = _tierRank[ceiling]
+        if (r === undefined || c === undefined) return request
+        return c > r ? ceiling : request
+    }
+    // The tier a ledger row states: the delivery once a file has landed, and
+    // before that the honest prediction, the request floored by the track's
+    // advertised ceiling. A finished row with neither says nothing.
+    function queueTrackTier(delivered, status, target, expected) {
         if (delivered !== "") return delivered
-        return (status === "pending" || status === "queued" || status === "running") ? target : ""
+        if (status !== "pending" && status !== "queued" && status !== "running") return ""
+        return tierFloor(target, expected)
+    }
+
+    // ---- ownership batch listening ------------------------------------------
+    // The bridge announces cold-cache ownership answers in batches
+    // (ownershipChangedBatch: one ",id1,id2,...," string per flush), because
+    // per-id signals at launch ran every listening card's handler for every
+    // one of ~1500 answers. A listener precomputes the keys of the ids it
+    // cares about (",id,") once, when it learns them, and tests a batch with
+    // that many substring searches: no allocation, no walk of a bridge list
+    // (indexOf on a QVariantList converts every element on every call, and
+    // those conversions were what forced the JS garbage collector mid-launch).
+    function ownKeys(ids) {
+        if (!ids) return null
+        var out = []
+        for (var i = 0; i < ids.length; ++i) out.push("," + ids[i] + ",")
+        return out
+    }
+    function ownBatchHits(batch, keys) {
+        if (!keys) return false
+        for (var i = 0; i < keys.length; ++i)
+            if (batch.indexOf(keys[i]) !== -1) return true
+        return false
     }
 
     component QualTag: Row {
@@ -3447,7 +3552,9 @@ ApplicationWindow {
         visible: q !== "" || mixed
         Rectangle {
             visible: !qt.mixed
-            radius: 4; color: root.surface2
+            // The ground is the tier's, not the pill's: ATMOS is an outline
+            // (see qualBg), every ladder tier sits on surface2.
+            radius: 4; color: root.qualBg(qt.q)
             border.color: root.qualBorder(qt.q); border.width: 1
             implicitHeight: 22; implicitWidth: tagRow.implicitWidth + 16
             Row {
@@ -4086,19 +4193,19 @@ ApplicationWindow {
         // Owned AND current for today's quality setting: an owned copy below the
         // target quality shows Download again (clicking upgrades in place).
         property var _ownIds: null
+        // Batch keys for the ids this indicator answers for (root.ownKeys).
+        property var _ownKeys: null
         function refreshOwned() {
             if (collectionCheck) {
-                var ids = di.mediaId !== "" ? waves.collectionMemberIds(di.mediaId) : null
+                // One bridge call for ids + verdict (see collectionOwnership).
+                var co = di.mediaId !== "" ? waves.collectionOwnership(di.mediaId) : null
+                var ids = co ? co.ids : null
                 _ownIds = ids
-                if (!ids || ids.length === 0) { owned = false; return }
-                var n = 0
-                for (var i = 0; i < ids.length; ++i) {
-                    var oi = waves.ownershipOf(ids[i])
-                    if (oi.owned === true && oi.up_to_date === true) ++n
-                }
-                owned = n === ids.length
+                _ownKeys = root.ownKeys(ids)
+                owned = !!co && co.verdict === "owned"
                 return
             }
+            _ownKeys = di.mediaId !== "" ? [ "," + di.mediaId + "," ] : null
             var o = di.mediaId !== "" ? waves.ownershipOf(di.mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
@@ -4114,6 +4221,7 @@ ApplicationWindow {
                 }
                 else if (tid === di.mediaId || tid === "") { di.refreshOwned() }
             }
+            function onOwnershipChangedBatch(batch) { if (root.ownBatchHits(batch, di._ownKeys)) di.refreshOwned() }
             function onCollectionMembershipChanged(cid) { if (di.collectionCheck && cid === di.mediaId) di.refreshOwned() }
         }
         readonly property string liveSt: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
@@ -4848,10 +4956,22 @@ ApplicationWindow {
                     onClicked: function(m){ m.accepted = true; root.stopPreview() }
                 }
             }
+            // Same reservation as the download button's readout, for the same
+            // reason: the scrub track is anchored to this text's left edge, so
+            // the minute rolling over to two digits mid-track would resize the
+            // matrix and leave its columns stale for the settle interval. The
+            // widest this track can read is the duration on both sides.
+            TextMetrics {
+                id: pbarTimeM
+                font: pbarTime.font
+                readonly property real widest: Math.max(root.previewDuration, root.previewPosition)
+                text: root.fmtMs(widest) + " / " + root.fmtMs(widest)
+            }
             Text {
                 id: pbarTime
                 textFormat: Text.PlainText
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                width: pbarTimeM.width; horizontalAlignment: Text.AlignRight
                 text: root.fmtMs(root.previewPosition) + " / " + root.fmtMs(root.previewDuration)
                 color: root.textLo; font.family: root.mono; font.pixelSize: 10
             }
@@ -5081,28 +5201,29 @@ ApplicationWindow {
         // still in flight. The button holds its roll animation on pending so
         // the answer landing a beat later snaps in instead of visibly
         // flipping a face that was never true.
-        function _rollup(ids) {
-            if (!ids || ids.length === 0) return false
-            var pending = false
-            for (var i = 0; i < ids.length; ++i) {
-                var oi = waves.ownershipOf(ids[i])
-                if (oi.pending === true) { pending = true; continue }
-                if (!(oi.owned === true && oi.up_to_date === true)) return false
-            }
-            return pending ? "pending" : true
-        }
+        // The bridge answers the whole rollup in one call (see
+        // collectionOwnership): "owned" / "pending" / "no".
+        function _rollupWord(v) { return v === "owned" ? true : v === "pending" ? "pending" : false }
         property bool ownPending: false
         // collectionCheck mode's member ids, cached so the ownership listener
         // can ignore other collections' answers (see the ArtCard twin).
         property var _ownIds: null
+        // Batch keys for the ids this button answers for (root.ownKeys).
+        property var _ownKeys: null
         function refreshOwned() {
             var r
-            if (collectionIds !== null) r = _rollup(collectionIds)
+            if (collectionIds !== null) {
+                _ownKeys = root.ownKeys(collectionIds)
+                r = _rollupWord(waves.collectionOwnershipFor(collectionIds))
+            }
             else if (collectionCheck && mediaId !== "") {
-                _ownIds = waves.collectionMemberIds(mediaId)
-                r = _rollup(_ownIds)
+                var co = waves.collectionOwnership(mediaId)
+                _ownIds = co ? co.ids : null
+                _ownKeys = root.ownKeys(_ownIds)
+                r = _rollupWord(co ? co.verdict : "no")
             }
             else {
+                _ownKeys = ownedCheck && mediaId !== "" ? [ "," + mediaId + "," ] : null
                 var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
                 r = o.pending === true ? "pending" : (o.owned === true && o.up_to_date === true)
             }
@@ -5142,6 +5263,7 @@ ApplicationWindow {
                     db.refreshOwned()
                 }
             }
+            function onOwnershipChangedBatch(batch) { if (root.ownBatchHits(batch, db._ownKeys)) db.refreshOwned() }
             function onCollectionMembershipChanged(cid) {
                 if (db.collectionCheck && cid === db.mediaId) db.refreshOwned()
             }
@@ -5224,7 +5346,13 @@ ApplicationWindow {
         // fetches what's missing), coloured to say part of this is on disk.
         readonly property color fill: libGuess ? root.goldCont : libPartialClaim ? root.cyanCont : st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
         readonly property color edge: libGuess ? root.goldDim : libPartialClaim ? root.cyanDim : st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
-        color: fill
+        // Bare = inside a RollSwap, where the pill draws BOTH fill and outline
+        // (it takes `fill` through liveColor). Painting the fill here too laid
+        // an opaque rectangle over the pill's own border ring (Qt draws a
+        // border inside the item's bounds), so on the Browse cards the running
+        // bar lost its green edge and kept only a ragged sliver of it at the
+        // corners, where this rectangle's antialiased corner let it through.
+        color: bare ? "transparent" : fill
         border.width: bare ? 0 : root.btnBorderW
         border.color: edge
         // State changes FADE between colours instead of snapping: queued ->
@@ -5240,21 +5368,34 @@ ApplicationWindow {
         scale: 1
         Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
 
-        // RUNNING, dot matrix fills the full button width; % pinned to the right.
+        // RUNNING, the dot matrix fills the whole button, edge to edge, five
+        // rows dense; the percentage is carved into it while hovered (see
+        // DotMatrix.word). Until the progress pill lab (2026-08-17) the bar
+        // stopped 12px in and a "NN%" readout sat to its right in a slot
+        // reserved for "100%", which left a two-character hole beside a short
+        // number for most of a run.
         // Behind a Loader rather than plain `visible: false`: an invisible
-        // subtree is still BUILT, and this one is a 92-dot matrix. A row that
+        // subtree is still BUILT, and this one is a 200-dot matrix. A row that
         // is not downloading has no progress to draw, but every row of a
-        // 500-track playlist was paying for the matrix anyway: 92 of the 232
-        // items a TrackRow creates, measured. The Loader has a size, so the
-        // loaded Item is sized to it (no anchors needed inside).
+        // 500-track playlist was paying for the matrix anyway (measured at 92
+        // of the 232 items a TrackRow created, when it was four rows). The
+        // Loader has a size, so the loaded Item is sized to it (no anchors
+        // needed inside).
+        // The percentage shows while the pointer is over the button, or over
+        // whatever the caller names (a Browse card passes its whole art, the
+        // way its controls already rise for the card, not the pill).
+        property bool wordHover: dbHover.hovered
         Loader {
             // The matrix rides the same state roll as the label faces: it
             // arrives from below when a run starts (while the queued face
             // exits above) and leaves through the top when the run ends.
             // Kept active until its own exit lands, or the end of a run would
-            // unload 92 bright dots in a single frame.
+            // unload 200 bright dots in a single frame.
             active: db.st === "running" || opacity > 0
-            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+            // Inside the 1px outline: the grid runs to it and its outer
+            // cells fade (edgeFadeW / H below), so nothing meets the border
+            // hard and the corner cells vanish under the radius.
+            anchors.fill: parent; anchors.leftMargin: 1; anchors.rightMargin: 1
             // The exit belt is taken ONLY when this roll is the matrix's own
             // exit (matrixRollOut, set when the state leaves "running"). Every
             // other roll is a label swap between two text faces, and riding
@@ -5264,21 +5405,49 @@ ApplicationWindow {
             opacity: db.st === "running" ? db.rollIn : (db.matrixRollOut ? db.rollOut : 0)
             transform: Translate { y: db.st === "running" ? 10 * (1 - db.rollIn) : -10 * (1 - db.rollOut) }
             sourceComponent: Item {
-                Text {
-                    textFormat: Text.PlainText
-                    // pct is -1 until the first progress event (mirrors DownIcon's "…")
-                    id: dbPct; text: db.pct >= 0 ? Math.round(db.pct) + "%" : "…"
-                    color: root.accent; font.family: root.mono; font.pixelSize: 11; font.bold: true
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                }
+                // Nothing beside the matrix any more: its width IS the item's,
+                // so no digit landing can ever reflow it (the case the
+                // stable-width test guards).
                 DotMatrix {
-                    anchors.left: parent.left; anchors.right: dbPct.left; anchors.rightMargin: 8
-                    anchors.verticalCenter: parent.verticalCenter
-                    rows: 4; dot: 3; gap: 2; pct: Math.max(0, db.pct)
+                    objectName: "dbMatrix"
+                    anchors.left: parent.left; anchors.right: parent.right
+                    // Centred to the DEVICE pixel, not the logical one: the
+                    // grid is 27px in a 28px button, an offset of 0.5, which
+                    // is a whole pixel at 2x. Rounding to a logical pixel sat
+                    // the (then five-row) bar a pixel low on every retina
+                    // display (livetest report), and an anchor centre left it
+                    // on a half pixel at 1x.
+                    y: Math.round((parent.height - implicitHeight) / 2 * Screen.devicePixelRatio) / Screen.devicePixelRatio
+                    // Seven rows of 3px cells with 1px gaps fill the button
+                    // top to bottom; the outer cells fade toward every edge
+                    // (26px at the ends, 8px top and bottom, the shelf fades'
+                    // curve) so the field sits in a soft frame inside the
+                    // outline: progress pill lab round 6, 2026-08-17.
+                    rows: 7; dot: 3; gap: 1; pct: Math.max(0, db.pct)
+                    edgeFadeW: 26; edgeFadeH: 8
+                    // The two outer columns are pads that mirror the fill's
+                    // edge: the first real block lights two columns in, where
+                    // the fade is at 36% and the next at 60%, instead of under
+                    // it. Rows are not padded and no more columns are: four
+                    // pad columns plus pad rows (design Q) shipped and was
+                    // reverted the same day, the fill "started several blocks
+                    // to the right of the start" (livetest report). Progress
+                    // pill lab round 7, design V, 2026-08-17.
+                    padCols: 2; mirrorPads: true
                     // Only loaded while st === "running", so 100% here means the
                     // final steps are still in flight: twinkle in step with the
                     // queue row for the same item.
                     finishing: db.pct >= 99.9
+                    // pct is -1 until the first progress event: no word then
+                    // (the bar alone says "starting"; the readout used to show
+                    // DownIcon's "…" here).
+                    word: db.pct >= 0 ? Math.round(db.pct) + "%" : ""
+                    // 460ms both ways (the dissolve wants longer than a plain
+                    // fade to read as one), instant with motion off. One value
+                    // drives every cell, so leaving mid-reveal reverses from
+                    // wherever it is.
+                    wordReveal: db.wordHover ? 1 : 0
+                    Behavior on wordReveal { NumberAnimation { duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine } }
                 }
             }
         }
@@ -6134,9 +6303,9 @@ ApplicationWindow {
                     Text { textFormat: Text.PlainText; text: modelData.pat.repeat(8); font.family: root.mono; font.pixelSize: Math.round(modelData.px * banner.waveScale); color: modelData.col; opacity: modelData.op; font.letterSpacing: -1 }
                     NumberAnimation on x {
                         // Only run while the login panel is actually showing (banner
-                        // lives on it, visible: !waves.loggedIn). QML animations don't
+                        // lives on it, visible: !root.signedIn). QML animations don't
                         // stop on invisibility, so gate them off once signed in.
-                        running: wtile.width > 0 && !waves.loggedIn && root.onScreen
+                        running: wtile.width > 0 && !root.signedIn && root.onScreen
                         from: 0; to: -wtile.width
                         duration: Math.max(1, Math.round(wtile.width / (banner.wavePxPerSec * modelData.par) * 1000))
                         loops: Animation.Infinite
@@ -6168,7 +6337,7 @@ ApplicationWindow {
                     Text { textFormat: Text.PlainText; id: mqMain; x: 0; y: 0; text: banner.phrase.repeat(8); font.family: banner.titleFamily; font.pixelSize: banner.titleSize; font.bold: banner.bold; color: banner.ink }
                     NumberAnimation on x {
                         // Same gating as the wave layers: stop once signed in / hidden.
-                        running: phraseM.advanceWidth > 0 && !waves.loggedIn && root.onScreen
+                        running: phraseM.advanceWidth > 0 && !root.signedIn && root.onScreen
                         from: 0; to: -phraseM.advanceWidth
                         duration: Math.max(1, Math.round(phraseM.advanceWidth / banner.titleSpeed * 1000))
                         loops: Animation.Infinite
@@ -6563,6 +6732,9 @@ ApplicationWindow {
             target: waves
             // Empty id = broadcast (the quality setting changed).
             function onOwnershipChanged(tid) { if (tid === bvt.videoId || tid === "") bvt._refreshOwned() }
+            function onOwnershipChangedBatch(batch) {
+                if (bvt.videoId !== "" && batch.indexOf("," + bvt.videoId + ",") !== -1) bvt._refreshOwned()
+            }
         }
         Rectangle {
             visible: bvt.owned
@@ -6782,6 +6954,119 @@ ApplicationWindow {
         // download surfaces set this; the player's scrub track is playback
         // position, not work, and must stay static at 100%.
         property bool finishing: false
+        // The percentage, carved INTO the bar on demand rather than printed
+        // beside it (progress pill lab, rounds 2 to 5, 2026-08-17): `word`
+        // ("37%") is spelled in a 3x5 dot font in the matrix's own cells,
+        // centred, always lit, on a PLATE (the glyph box plus a cell of
+        // margin) knocked back to near black whatever the bar under it is
+        // doing, so the number reads the same at every percentage. Its cells
+        // used to take the INVERSE of the bar under them (a hole where the
+        // bar was lit, a lit dot where it was not), which read at either end
+        // of a run and not at all while the fill edge crossed the digits:
+        // half the number dark, half bright, for that whole stretch
+        // (livetest report, 2026-08-17).
+        // This polarity and not the other way up (dark digits on a lit
+        // plate), which the round 8 sheet settled: a 3x5 glyph is mostly
+        // stroke, so punched out of a plate it reads as a blob to be decoded
+        // from its counters, worst of all on "100%". Lit strokes are the
+        // polarity the font was drawn for.
+        // `wordReveal` 0..1 fades it in; every cell moves from its bar state
+        // to its digit state on its own pseudo-random delay (the "dissolve"),
+        // so the number condenses out of the bar and dissolves back into it,
+        // and a reveal that reverses mid-way plays back from wherever it is.
+        // The zone is the WORD's own width, centred: one, two or three digits
+        // all sit in the middle. It used to be a fixed four glyphs ("100%")
+        // with the word right-aligned in it, so that 9 -> 10 and 99 -> 100
+        // moved nothing, but that hung every ordinary reading off centre to
+        // the right for the sake of the one percent of a run that is 100.
+        // Needs five rows (a digit is five tall); with fewer, or no word, the
+        // matrix is the plain bar.
+        property string word: ""
+        property real wordReveal: 0
+        readonly property var font3x5: ({
+            "0": ["111","101","101","101","111"], "1": ["010","110","010","010","111"],
+            "2": ["111","001","111","100","111"], "3": ["111","001","111","001","111"],
+            "4": ["101","101","111","001","001"], "5": ["111","100","111","001","111"],
+            "6": ["111","100","111","101","111"], "7": ["111","001","001","001","001"],
+            "8": ["111","101","111","101","111"], "9": ["111","101","111","001","111"],
+            "%": ["101","001","010","100","101"] })
+        // A glyph is five rows tall; in a taller grid it sits on the middle
+        // five (the seven-row download face carries it on rows 1..5).
+        readonly property bool wordOn: rows >= 5 && word !== "" && wordReveal > 0
+        readonly property int wordZoneW: Math.max(0, word.length * 4 - 1)
+        // Rounded, not floored: a cell is 4px and the ideal start lands on a
+        // half cell whenever the leftover is odd, so rounding keeps the worst
+        // case to half a cell either way instead of a whole one.
+        readonly property int wordZoneStart: Math.round((cols - wordZoneW) / 2)
+        readonly property int wordRowTop: Math.floor((rows - 5) / 2)
+        // The plate the number sits on: the glyph box with a cell of margin
+        // all round (on the seven-row face that is the full height), held at
+        // this alpha, so no digit stroke ever touches a bar cell of its own
+        // brightness. Not 0: a whisper of the grid keeps it a plate laid over
+        // the bar rather than a hole cut out of the button.
+        property real wordPlate: 0.04
+        function wordPlateAt(col, rowTop) {
+            return col >= wordZoneStart - 1 && col <= wordZoneStart + wordZoneW
+                && rowTop >= wordRowTop - 1 && rowTop <= wordRowTop + 5
+        }
+        function wordOnAt(col, rowTop) {
+            var z = col - wordZoneStart
+            if (z < 0 || z >= wordZoneW || z % 4 === 3) return false
+            var r = rowTop - wordRowTop
+            if (r < 0 || r > 4) return false
+            var g = font3x5[word.charAt(Math.floor(z / 4))]
+            return g ? g[r].charAt(z % 4) === "1" : false
+        }
+        // Conveyor edge fade. Cells within edgeFadeW px of either end, or
+        // edgeFadeH px of the top / bottom, fade out on the SAME curve as
+        // ShelfEdgeFades and the LIP fades (darkness 1.0 @0, 0.82 @0.25,
+        // 0.28 @0.6, 0 @1 of the fade), so a bar that runs to its outline
+        // arrives and leaves like a shelf's cards at the shelf's end instead
+        // of stopping hard. 0 = no fade (the queue row, the scrubbers).
+        property real edgeFadeW: 0
+        property real edgeFadeH: 0
+        // Soft outer rows: each cell of the top row shades from `edgeSoft`
+        // alpha at its outer (top) edge to full at its inner edge, the
+        // bottom row mirrored, so the outermost blocks blend into whatever
+        // the bar sits on instead of stopping at a hard line (the queue
+        // row's bar, which has no outline to end at). -1 = off.
+        property real edgeSoft: -1
+        // Pad cells: the outermost padCols columns at either end and padRows
+        // rows top and bottom are decoration. They draw as field, but take no
+        // part in the fill (the fill runs over the inner fillCols x fillRows
+        // only), so the edge fade above spends itself on cells that carry no
+        // progress and the first real block lights a little further in,
+        // where the fade has mostly let go. Before this, the fade to zero
+        // hid the opening several percent of a run entirely (livetest
+        // report, 2026-08-17: a 56-track playlist at 9 tracks showed an
+        // empty bar). With mirrorPads a pad copies its nearest real
+        // neighbour's state rather than staying dark, so a full bar's ends
+        // still light and fade like the unpadded one; a pad never pulses.
+        // 0 / 0 = no pads (the queue row, the scrubbers). Keep the count
+        // small: the fill must still visibly start at the start of the bar
+        // (progress pill lab round 7, 2026-08-17).
+        property int padCols: 0
+        property int padRows: 0
+        property bool mirrorPads: false
+        readonly property int fillCols: Math.max(1, cols - 2 * padCols)
+        readonly property int fillRows: Math.max(1, rows - 2 * padRows)
+        readonly property int fillTotal: fillRows * fillCols
+        readonly property Gradient softTop: Gradient {
+            GradientStop { position: 0; color: Qt.alpha(dm.onColor, Math.max(0, dm.edgeSoft)) }
+            GradientStop { position: 1; color: dm.onColor }
+        }
+        readonly property Gradient softBottom: Gradient {
+            GradientStop { position: 0; color: dm.onColor }
+            GradientStop { position: 1; color: Qt.alpha(dm.onColor, Math.max(0, dm.edgeSoft)) }
+        }
+        readonly property real gridW: cols * (dot + gap) - gap
+        function edgeVis(t) {
+            t = Math.max(0, Math.min(1, t))
+            var d = t < 0.25 ? 1 - (t / 0.25) * 0.18
+                  : t < 0.6 ? 0.82 - ((t - 0.25) / 0.35) * 0.54
+                  : 0.28 - ((t - 0.6) / 0.4) * 0.28
+            return 1 - d
+        }
         // The column count follows a SETTLED width, not the live one. Cols
         // riding width directly meant a drawer-edge drag (which resizes per
         // mouse move) changed `total` on every pixel, and the Repeater tore
@@ -6795,10 +7080,19 @@ ApplicationWindow {
         // was smooth). Letting the release animation finish first moves the
         // same rebuild onto a static screen, where it cannot be seen.
         // Declared with a binding for a correct first paint, then the
-        // imperative assignment below BREAKS that binding on completion so
-        // a drag can no longer ride it; from then on only the timer writes.
+        // imperative assignment below BREAKS that binding so a drag can no
+        // longer ride it; from then on only the timer writes. The break is
+        // deferred one event-loop turn past completion, NOT done in
+        // onCompleted: a matrix is completed mid-cascade, before the sizes
+        // around it have finished landing (the download button's Loader
+        // builds it while the button is still the queued face's width, and
+        // the button widens to the running width a binding or two later), so
+        // breaking on completion latched that pre-layout width and the bar
+        // opened with two columns too many for the settle interval, then
+        // shed them. Every width write of the creating turn still rides the
+        // binding; the timer takes over from the next turn on.
         property real _settledWidth: width
-        Component.onCompleted: _settledWidth = width
+        Component.onCompleted: Qt.callLater(function() { if (dm) dm._settledWidth = dm.width })
         onWidthChanged: dmSettle.restart()
         Timer {
             id: dmSettle; interval: 300
@@ -6809,7 +7103,7 @@ ApplicationWindow {
             return (maxCols > 0 && c > maxCols) ? maxCols : c
         }
         readonly property int total: rows * cols
-        readonly property int litCount: Math.round(Math.max(0, Math.min(100, pct)) / 100 * total)
+        readonly property int litCount: Math.round(Math.max(0, Math.min(100, pct)) / 100 * fillTotal)
         implicitHeight: rows * dot + (rows - 1) * gap
         Repeater {
             model: dm.total
@@ -6819,10 +7113,17 @@ ApplicationWindow {
                 readonly property int rowTop: Math.floor(index / dm.cols)
                 // column-major, bottom-up: fill one column from the bottom to the
                 // top, then start the next column, like rising bars.
-                readonly property int fillIndex: col * dm.rows + (dm.rows - 1 - rowTop)
-                readonly property bool lit: fillIndex < dm.litCount
+                // Position within the fill (pads excluded); a pad clamps to its
+                // nearest real cell, which is what it mirrors when asked to.
+                readonly property int fillCol: col - dm.padCols
+                readonly property int fillRow: rowTop - dm.padRows
+                readonly property bool pad: fillCol < 0 || fillCol >= dm.fillCols || fillRow < 0 || fillRow >= dm.fillRows
+                readonly property int nearCol: Math.max(0, Math.min(dm.fillCols - 1, fillCol))
+                readonly property int nearRow: Math.max(0, Math.min(dm.fillRows - 1, fillRow))
+                readonly property int fillIndex: nearCol * dm.fillRows + (dm.fillRows - 1 - nearRow)
+                readonly property bool lit: (!pad || dm.mirrorPads) && fillIndex < dm.litCount
                 // the single next block pulses while a download is in progress
-                readonly property bool pulsing: dm.pulse && fillIndex === dm.litCount && dm.litCount < dm.total
+                readonly property bool pulsing: !pad && dm.pulse && fillIndex === dm.litCount && dm.litCount < dm.fillTotal
                 // Per-dot pseudo-random phase offset for the finishing twinkle
                 // (fract(sin(i)*const), the classic shader hash: cheap, stable,
                 // uniform enough for eyes).
@@ -6831,12 +7132,33 @@ ApplicationWindow {
                 y: rowTop * (dm.dot + dm.gap)
                 width: dm.dot; height: dm.dot; radius: 0   // sharp LED cells
                 color: dm.onColor
+                gradient: dm.edgeSoft < 0 ? null : rowTop === 0 ? dm.softTop : rowTop === dm.rows - 1 ? dm.softBottom : null
                 // Breathe off the shared 20 Hz clock (root.ledPulse) rather than a
                 // per-frame animation, so a running download doesn't repaint the
                 // whole window every vsync. See root.ledPulse.
-                opacity: (dm.finishing && lit)
+                readonly property real barOpacity: (dm.finishing && lit)
                        ? 0.62 + 0.38 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (root.shimmerPhase * 2 + twinkleR)))
                        : pulsing ? root.ledPulse : (lit ? 1.0 : 0.16)
+                // A cell of the word (a digit stroke) or of the plate behind
+                // it: its own reveal is the shared one shifted by a per-cell
+                // random delay (a second hash, so it does not line up with the
+                // twinkle), and it lerps its bar state -> its carve state on
+                // it. A stroke goes fully lit whatever the bar under it is
+                // doing, the plate around it goes to near black, so the
+                // number reads identically at 4% and at 96%.
+                readonly property bool wordCell: dm.wordOn && dm.wordOnAt(col, rowTop)
+                readonly property bool plateCell: dm.wordOn && !wordCell && dm.wordPlateAt(col, rowTop)
+                readonly property real wordTo: wordCell ? 1.0 : dm.wordPlate
+                readonly property real wordDelay: { var r = Math.sin(index * 78.233 + 1.7) * 43758.5453; return (r - Math.floor(r)) * 0.65 }
+                readonly property real wordT: Math.max(0, Math.min(1, (dm.wordReveal - wordDelay) / 0.35))
+                // Static per cell (its own position against the fade
+                // lengths), so the fade costs nothing per tick.
+                readonly property real edgeMul:
+                    (dm.edgeFadeW > 0 ? Math.min(dm.edgeVis((x + dm.dot / 2) / dm.edgeFadeW),
+                                                 dm.edgeVis((dm.gridW - x - dm.dot / 2) / dm.edgeFadeW)) : 1)
+                  * (dm.edgeFadeH > 0 ? Math.min(dm.edgeVis((y + dm.dot / 2) / dm.edgeFadeH),
+                                                 dm.edgeVis((dm.implicitHeight - y - dm.dot / 2) / dm.edgeFadeH)) : 1)
+                opacity: edgeMul * ((wordCell || plateCell) ? barOpacity + (wordTo - barOpacity) * wordT : barOpacity)
             }
         }
     }
@@ -8364,21 +8686,23 @@ ApplicationWindow {
         // re-rolling on every one of them is a signal storm on the GUI
         // thread (reported as the launch animation turning jumpy).
         property var _ownIds: null
+        // Batch keys for those members (root.ownKeys).
+        property var _ownKeys: null
         function refreshOwned() {
             if (!ac.ownable) { owned = false; return }
-            var ids = waves.collectionMemberIds("" + (ac.card.id || ""))
+            // One bridge call for the whole collection (member ids + verdict):
+            // a call per member was ~15 interpreter round-trips per card, and
+            // under the launch-time scan each of them queued for its turn.
+            var co = waves.collectionOwnership("" + (ac.card.id || ""))
+            var ids = co ? co.ids : null
             _ownIds = ids
-            if (!ids || ids.length === 0) { owned = false; return }
-            var pending = false
-            for (var i = 0; i < ids.length; ++i) {
-                var oi = waves.ownershipOf(ids[i])
-                if (oi.pending === true) { pending = true; continue }
-                if (!(oi.owned === true && oi.up_to_date === true)) { owned = false; return }
-            }
+            _ownKeys = root.ownKeys(ids)
+            var v = co ? co.verdict : "no"
+            if (v === "no") { owned = false; return }
             // Cold answers in flight and nothing firmly against: keep the last
             // known word rather than flashing the strip through DOWNLOAD; the
-            // ownershipChanged nudge re-asks once the truth lands.
-            if (!pending) owned = true
+            // ownership nudge re-asks once the truth lands.
+            if (v === "owned") owned = true
         }
         onCardChanged: { resolveLibPresence(); refreshOwned() }
         Component.onCompleted: { if (!_libResolved) resolveLibPresence(); refreshOwned() }
@@ -8396,6 +8720,7 @@ ApplicationWindow {
             function onOwnershipChanged(tid) {
                 if (tid === "" || (ac._ownIds && ac._ownIds.indexOf(tid) !== -1)) acOwnCoalesce.restart()
             }
+            function onOwnershipChangedBatch(batch) { if (root.ownBatchHits(batch, ac._ownKeys)) acOwnCoalesce.restart() }
             function onCollectionMembershipChanged(cid) { if (cid === "" + (ac.card.id || "")) ac.refreshOwned() }
         }
         Timer { id: acOwnCoalesce; interval: 50; onTriggered: ac.refreshOwned() }
@@ -8530,9 +8855,10 @@ ApplicationWindow {
                 id: acSwap
                 anchors.horizontalCenter: parent.horizontalCenter
                 live: acRiser.acPvSt !== "" || (acRiser.acDlSt !== "" && !acRiser.dlDone)
-                // The live side carries its own fill (a download button is a
-                // filled control); only the outline is the pill's, so it takes
-                // the arriving control's edge colour with it.
+                // The pill draws the live side's fill AND outline (a download
+                // button is a filled control, and a bare one paints neither):
+                // one rectangle, so the fill can never cover the border ring.
+                liveColor: acLive.dlOn ? acDl.fill : idleColor
                 liveBorder: acLive.dlOn ? acDl.edge
                                         : (acRiser.acPvSt === "error" ? root.red : root.accentDim)
                 // The idle pill's outline comes with the verdict too, so the
@@ -8570,6 +8896,11 @@ ApplicationWindow {
                         // never render. Computing it per card was pure cost.
                         collectionCheck: false
                         label: "Download " + acArt.kindLabel
+                        // The percentage carves in while the CARD is hovered,
+                        // not just the pill: the pill rose for the card's hover
+                        // in the first place, and a pointer anywhere on the art
+                        // is already asking about this download.
+                        wordHover: acWrapHover.hovered
                         onTap: function() { root.browseCardDownload(ac.card) }
                     }
                 }
@@ -8620,6 +8951,31 @@ ApplicationWindow {
                         }
                         return "DOWNLOAD"
                     }
+                    // The strip is sized by its own words and nothing capped it
+                    // against the cover it rides on, so the long ones outgrew
+                    // the artwork, which clips, and lost their first and last
+                    // letters at both ends (the pill is centred). On the
+                    // ordinary 200px card DOWNLOADED ran 7px past the cover,
+                    // and the everyday DOWNLOAD and IN LIBRARY closed to within
+                    // 5px of its edge, having already overrun the 10px-inset
+                    // slot the live controls sit in. The words are the shortest
+                    // forms that still say which state is true, so the room
+                    // comes out of the padding instead: each half keeps its
+                    // full 20 until the strip would not fit, then gives up as
+                    // much as it must, down to a floor that still reads as a
+                    // button. Measured against the ART, not that inset slot:
+                    // the pill may come within 6px of the cover's edge, which
+                    // is where the last few pixels come from.
+                    readonly property real padFull: 20
+                    readonly property real padMin: 8
+                    readonly property real availW: acArt.width - 12
+                    readonly property real naturalW: acStripPv.implicitWidth + acStripDl.implicitWidth
+                                                     + root.btnBorderW + 2 * padFull
+                    // Halved because both halves give the same amount up, which
+                    // keeps the divider where the words put it.
+                    readonly property real pad: naturalW <= availW
+                                                ? padFull
+                                                : Math.max(padMin, padFull - (naturalW - availW) / 2)
                     // Hover swell: one handler split by x (the halves' own
                     // MouseAreas would steal the hover), so crossing the
                     // divider hands the light over without a gap. Where PREVIEW
@@ -8649,7 +9005,7 @@ ApplicationWindow {
                         id: acStripRow
                         anchors.verticalCenter: parent.verticalCenter
                         Item {
-                            implicitWidth: acStripPv.implicitWidth + 20; implicitHeight: 30
+                            implicitWidth: acStripPv.implicitWidth + acStrip.pad; implicitHeight: 30
                             Row {
                                 id: acStripPv
                                 anchors.centerIn: parent; spacing: 6
@@ -8663,7 +9019,7 @@ ApplicationWindow {
                         }
                         Rectangle { width: root.btnBorderW; height: 30; color: acStrip.stEdge; anchors.verticalCenter: parent.verticalCenter }
                         Item {
-                            implicitWidth: acStripDl.implicitWidth + 20; implicitHeight: 30
+                            implicitWidth: acStripDl.implicitWidth + acStrip.pad; implicitHeight: 30
                             Row {
                                 id: acStripDl
                                 anchors.centerIn: parent; spacing: 6
@@ -9042,9 +9398,15 @@ ApplicationWindow {
             // the whole point of the two-pane design.
             model: !bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
                    ? bsec.sec.items : []
-            delegate: BrowseCard {
+            // Async per card, as the art shelf below (see its comment).
+            delegate: Loader {
+                id: bcLd
                 required property var modelData
-                card: modelData
+                width: 156; height: 236
+                asynchronous: bsec.landing && root._browseAsyncBuild
+                Component.onCompleted: root._browseCardStart(asynchronous)
+                onLoaded: root._browseCardTick(asynchronous)
+                sourceComponent: BrowseCard { card: bcLd.modelData }
             }
             ShelfWheelRedirect { pane: bsec.pane }
             ShelfEdgeFades {}
@@ -9062,10 +9424,28 @@ ApplicationWindow {
             // Local terms, not `visible` (see the console shelf above).
             model: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
                    ? bsec.sec.items : []
-            delegate: ArtCard {
+            // Each card incubates behind an asynchronous Loader of the card's
+            // fixed size, so the shelf's own creation is a row of empty slots
+            // (cheap) and the cards fill in across frames. A shelf whose eight
+            // cards were created inline took ~120ms in one atomic block at
+            // launch (sampled live: the cards' bridge calls, each waiting its
+            // turn behind the library scan), which the launch animation and
+            // any later shelf scroll dropped frames on. The veil accounting
+            // (root._browseCardStart / _browseBuildTick) keeps the landing
+            // covered until the cards are in, not just the shelves.
+            delegate: Loader {
+                id: acLd
                 required property var modelData
-                card: modelData
-                hero: bsec.hero
+                readonly property real artSize: bsec.hero ? 280 : 200
+                width: artSize; height: bsec.hero ? artSize : artSize + 46
+                // Only while the landing itself builds asynchronously (behind
+                // the veil): a synchronous in-place refresh, and every drilled
+                // page, still creates its cards inline so nothing is watched
+                // filling in.
+                asynchronous: bsec.landing && root._browseAsyncBuild
+                Component.onCompleted: root._browseCardStart(asynchronous)
+                onLoaded: root._browseCardTick(asynchronous)
+                sourceComponent: ArtCard { card: acLd.modelData; hero: bsec.hero }
             }
             ShelfWheelRedirect { pane: bsec.pane }
             ShelfEdgeFades {}
@@ -9414,6 +9794,7 @@ ApplicationWindow {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
             live: bt.catSt !== ""
+            liveColor: catBtn.fill
             liveBorder: catBtn.edge
             idleItem: Item {
             // Same pill as the album-card strip, one notch smaller: at the
@@ -9651,6 +10032,8 @@ ApplicationWindow {
                 if (row.tracks !== it.tracks) m.setProperty(idx, "tracks", it.tracks || 0)
                 var q = it.quality || ""
                 if (row.quality !== q) m.setProperty(idx, "quality", q)
+                var ex = it.expected || ""
+                if (row.expected !== ex) m.setProperty(idx, "expected", ex)
                 // What the files landed at, rolled up by the bridge from its
                 // per-track registry, so a COLLAPSED row states the delivery.
                 var ld = it.landed || ""
@@ -9680,7 +10063,7 @@ ApplicationWindow {
                 m.append({ qid: it.qid, name: it.name, type: it.type, status: it.status,
                            progress: it.progress, media_id: it.media_id, template: it.template,
                            collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
-                           art: it.art || "", quality: it.quality || "",
+                           art: it.art || "", quality: it.quality || "", expected: it.expected || "",
                            landed: it.landed || "", mixJson: JSON.stringify(it.mix || []),
                            uiGroup: (it.status === "failed" ? "failed" : it.status === "queued" ? "queued" : "downloading"), moved: false,
                            doneAt: (it.status === "done" ? Date.now() : 0), leaving: false })
@@ -10027,7 +10410,7 @@ ApplicationWindow {
             root.searchSaved = null
             // The drilled-into folder view holds the previous account's rows.
             root.plFolderReset()
-            if (waves.loggedIn && root.browseOpen) {
+            if (root.signedIn && root.browseOpen) {
                 root.browseLoading = true
                 waves.loadBrowse()
             }
@@ -10294,6 +10677,11 @@ ApplicationWindow {
         function onQueueTrackState(qid, row) {
             var arr = root.queueTracks[qid]
             if (!arr) return
+            // Every row carrying this id, not the first: a playlist or mix can
+            // list the same track twice, and the engine reports the track once
+            // (its registry is keyed by id), so both rows follow the one event.
+            // Stopping at the first hit left the second copy at QUEUED for
+            // good while onQueueTrackPct below moved its percentage.
             var copy = arr.slice(), found = false
             for (var i = 0; i < copy.length; ++i) {
                 if (copy[i].id === row.id) {
@@ -10303,12 +10691,15 @@ ApplicationWindow {
                     // so keep the one already on the row when the event has
                     // none rather than blanking the track's tier.
                     if (row.quality) copy[i].quality = row.quality
-                    found = true; break
+                    if (row.expected && !copy[i].expected) copy[i].expected = row.expected
+                    if (row.owned) copy[i].owned = row.owned
+                    found = true
                 }
             }
             if (!found) copy.push({ id: row.id, num: copy.length + 1, title: row.title,
                                     duration: row.duration, status: row.status, pct: row.pct,
-                                    fpct: row.fpct || 0, quality: row.quality })
+                                    fpct: row.fpct || 0, quality: row.quality, expected: row.expected || "",
+                                    owned: row.owned || "" })
             var m = Object.assign({}, root.queueTracks); m[qid] = copy; root.queueTracks = m
         }
         function onQueueTrackPct(qid, ticks) {
@@ -10463,13 +10854,13 @@ ApplicationWindow {
                     color: root.surface2; border.color: root.border1
                     RowLayout {
                         id: connRow; anchors.centerIn: parent; spacing: 7
-                        Rectangle { width: 7; height: 7; radius: 3.5; color: waves.loggedIn ? root.green : root.textDim }
-                        Text { textFormat: Text.PlainText; text: waves.loggedIn ? "CONNECTED" : "OFFLINE"; color: waves.loggedIn ? root.green : root.textDim; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: 1.1 }
+                        Rectangle { width: 7; height: 7; radius: 3.5; color: root.signedIn ? root.green : root.textDim }
+                        Text { textFormat: Text.PlainText; text: root.signedIn ? "CONNECTED" : "OFFLINE"; color: root.signedIn ? root.green : root.textDim; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: 1.1 }
                     }
                 }
                 // sign out, uppercase, red on hover
                 Text {
-                    visible: waves.loggedIn; text: "SIGN OUT"
+                    visible: root.signedIn; text: "SIGN OUT"
                     color: soMa.containsMouse ? root.red : root.textDim
                     font.pixelSize: 12; font.letterSpacing: 0.85
                     MouseArea { id: soMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: waves.logout() }
@@ -10503,7 +10894,7 @@ ApplicationWindow {
                     // ---- Search + sort ---------------------------------------------
                     RowLayout {
                         Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22; Layout.topMargin: 10; spacing: 10
-                        enabled: waves.loggedIn; opacity: waves.loggedIn ? 1 : 0.5
+                        enabled: root.signedIn; opacity: root.signedIn ? 1 : 0.5
                         Rectangle {
                             id: searchBox
                             Layout.fillWidth: true; implicitHeight: 44; radius: 8; color: root.surface2
@@ -10678,7 +11069,7 @@ ApplicationWindow {
                     // in (staggered fade + downward settle) as the bar grows down.
                     RowLayout {
                         Layout.fillWidth: true; Layout.leftMargin: 22; Layout.topMargin: 8; spacing: 8
-                        visible: waves.loggedIn && root.hasResults && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.browseOpen
+                        visible: root.signedIn && root.hasResults && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.browseOpen
                         Repeater {
                             model: [["all", "All"], ["artists", "Artists"], ["albums", "Albums"], ["tracks", "Tracks"], ["videos", "Videos"], ["playlists", "Playlists"], ["mixes", "Mixes"]]
                             delegate: Rectangle {
@@ -10765,10 +11156,10 @@ ApplicationWindow {
             // already on the tab); idempotent thanks to the loading flags
             // here and the in-flight guard backend-side.
             onVisibleChanged: {
-                if (visible && waves.loggedIn && root.browseSections.length === 0 && !root.browseLoading) {
+                if (visible && root.signedIn && root.browseSections.length === 0 && !root.browseLoading) {
                     root.browseLoading = true; root.browseError = false
                     waves.loadBrowse()
-                } else if (visible && waves.loggedIn) {
+                } else if (visible && root.signedIn) {
                     waves.refreshBrowse()   // silent, throttled; repaints only on change
                 }
             }
@@ -10793,7 +11184,7 @@ ApplicationWindow {
 
                     Text {
                         id: browseLandingHint
-                        visible: waves.loggedIn && (root.browseLoading || root.browseBuilding)
+                        visible: root.signedIn && (root.browseLoading || root.browseBuilding)
                         width: parent.width; horizontalAlignment: Text.AlignHCenter
                         text: "Reading the wire…"
                         color: root.textLo; font.pixelSize: 22; topPadding: 96
@@ -10806,7 +11197,7 @@ ApplicationWindow {
                     }
 
                     Column {
-                        visible: waves.loggedIn && root.browseError
+                        visible: root.signedIn && root.browseError
                         width: parent.width; spacing: 12
                         Text {
                             width: parent.width; horizontalAlignment: Text.AlignHCenter
@@ -11175,7 +11566,7 @@ ApplicationWindow {
 
                     Text {
                         id: browseDrillHint
-                        visible: waves.loggedIn && root.browsePageLoading
+                        visible: root.signedIn && root.browsePageLoading
                         width: parent.width; horizontalAlignment: Text.AlignHCenter
                         text: "Reading the wire…"
                         color: root.textLo; font.pixelSize: 22; topPadding: 96
@@ -11188,7 +11579,7 @@ ApplicationWindow {
                     }
 
                     Column {
-                        visible: waves.loggedIn && root.browsePageError
+                        visible: root.signedIn && root.browsePageError
                         width: parent.width; spacing: 12
                         Text {
                             width: parent.width; horizontalAlignment: Text.AlignHCenter
@@ -11217,7 +11608,7 @@ ApplicationWindow {
                     // page with no music). Better than a blank page below
                     // the back bar.
                     Text {
-                        visible: waves.loggedIn && root.browsePageKey !== "" && root.browsePage
+                        visible: root.signedIn && root.browsePageKey !== "" && root.browsePage
                                  && !root.browsePageLoading && !root.browsePageError
                                  && ((root.browsePage.sections || []).length === 0)
                         width: parent.width; horizontalAlignment: Text.AlignHCenter
@@ -11298,7 +11689,7 @@ ApplicationWindow {
 
                 Text {
                     id: emptyHint
-                    visible: waves.loggedIn && !root.hasResults
+                    visible: root.signedIn && !root.hasResults
                     width: parent.width; horizontalAlignment: Text.AlignHCenter
                     text: "Search for an artist, album, or track to begin"
                     color: root.textLo; font.pixelSize: 22; topPadding: 96
@@ -11312,7 +11703,7 @@ ApplicationWindow {
 
                 Text {
                     id: searchBuildHint
-                    visible: waves.loggedIn && root.searchBuilding
+                    visible: root.signedIn && root.searchBuilding
                     width: parent.width; horizontalAlignment: Text.AlignHCenter
                     text: "Reading the wire…"
                     color: root.textLo; font.pixelSize: 22; topPadding: 96
@@ -12443,7 +12834,7 @@ ApplicationWindow {
             // Browse layout switch (art-first vs console), floating over the
             // pane's bottom-right corner so it costs the landing page no row.
             Rectangle {
-                visible: waves.loggedIn && root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && root.browsePageKey === ""
+                visible: root.signedIn && root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && root.browsePageKey === ""
                 anchors.right: parent.right; anchors.bottom: parent.top
                 anchors.rightMargin: 22; anchors.bottomMargin: 14
                 radius: 14; implicitHeight: 28; implicitWidth: styleSeg.implicitWidth + 10
@@ -12994,14 +13385,36 @@ ApplicationWindow {
                     readonly property bool isComp: model.uiGroup === "completed"
                     readonly property bool collapsed: isComp && root.completedCollapsed
                     readonly property bool lingering: st === "done" && !model.moved
-                    // Album rows expand in place to an ordered per-track list
-                    // (live status/progress). Expansion state lives on root
-                    // (keyed by qid) so it survives delegate recycling.
-                    readonly property bool expandable: model.type === "album" && model.collection
+                    // Collection rows (album, playlist, mix) expand in place to
+                    // an ordered per-track list (live status/progress). The
+                    // per-track registry behind it is kept for every collection
+                    // job, and loadQueueTracks orders it by the collection's
+                    // own list; this used to be gated to albums alone, so a
+                    // playlist or mix row had no ledger and no hover peek.
+                    // Expansion state lives on root (keyed by qid) so it
+                    // survives delegate recycling.
+                    readonly property bool expandable: model.collection === true
                     readonly property bool qexp: expandable && root.queueExpanded[model.qid] === true
                     // Hover peek: a collapsed album card dips open ~30px so the
                     // track view's existence is discoverable without a click.
                     readonly property bool peeking: expandable && !qexp && cardHover.containsMouse
+                    // How many track rows the ledger holds, and how many of
+                    // them are actually built. A ledger row is not cheap (four
+                    // texts, two DecryptText cells, three running Behaviors),
+                    // and the Repeater below is not virtualised, so the count
+                    // is the cost. An album is 10 to 30 rows, which is what
+                    // this was written for; a playlist is routinely hundreds
+                    // and can be thousands, and the peek is reached by the
+                    // pointer merely crossing the row, so an unbounded count
+                    // would spend a quarter of a second of the GUI thread on a
+                    // gesture nobody made on purpose. The peek builds only
+                    // what its 30px sliver can show; the expansion, which the
+                    // user did ask for, builds up to root.queueLedgerMax and
+                    // says how many rows it is not showing.
+                    readonly property int ledgerLen: (root.queueTracks[model.qid] || []).length
+                    readonly property int ledgerShown: qexp ? Math.min(ledgerLen, root.queueLedgerMax)
+                                                    : peeking ? Math.min(ledgerLen, root.queueLedgerPeek)
+                                                    : 0
                     function qtoggle() {
                         var e = Object.assign({}, root.queueExpanded)
                         if (e[model.qid]) { delete e[model.qid] }
@@ -13031,9 +13444,12 @@ ApplicationWindow {
                     // end to end, and no MIXED will ever catch that (one tier is
                     // not a mix).
                     readonly property string landed: "" + (model.landed || "")
+                    // Before anything lands: the request floored by the
+                    // release's advertised ceiling, so a lossless-only album
+                    // asked for in HI-RES never promises HI-RES.
                     readonly property string tier: tierMix.length > 1 ? ""
                                                  : landed !== "" ? landed
-                                                 : ("" + (model.quality || ""))
+                                                 : root.tierFloor(model.quality, model.expected)
                     width: ListView.view.width
                     property real bodyH: actCol.implicitHeight + 18
                     height: (collapsed || leaving) ? 0 : bodyH + 8
@@ -13182,21 +13598,54 @@ ApplicationWindow {
                                 }
                             }
                             Item {
+                                id: qbarSlot
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: qrow.st === "running" ? 12 : 0
+                                // The slot is the bar's own height: four rows of
+                                // 3px cells with 1px gaps (15px), the same dense
+                                // grid as the download button's running face
+                                // (queue progress lab, 2026-08-17; it was two
+                                // rows of 4px cells with 4px gaps in 12px).
+                                Layout.preferredHeight: qrow.st === "running" ? 15 : 0
                                 opacity: qrow.st === "running" ? 1 : 0
                                 clip: true
                                 Behavior on Layout.preferredHeight { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                                 Behavior on opacity { NumberAnimation { duration: 240 } }
-                                DotMatrix {
+                                Loader {
+                                    // Collapsing the slot to height 0 and opacity
+                                    // 0 hides this grid, it does not spare it: an
+                                    // invisible subtree is still BUILT, the same
+                                    // reason the download button's smaller matrix
+                                    // sits behind a Loader. This one spans the
+                                    // whole drawer, so every QUEUED row was
+                                    // paying for 364 cells at the 420px floor and
+                                    // past a thousand with the drawer dragged
+                                    // wide, and a flick through a long queue
+                                    // dropped frames on rows that show nothing.
+                                    // Held active through the fade so the end of
+                                    // a run does not unload a lit grid in one
+                                    // frame.
+                                    active: qrow.st === "running" || qbarSlot.opacity > 0
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                                    rows: 2; dot: 4; gap: 4; maxCols: 0
+                                    height: 15
+                                    sourceComponent: DotMatrix {
+                                    objectName: "queueRowMatrix"
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                    rows: 4; dot: 3; gap: 1; maxCols: 0
+                                    // The ends fade on the shelf edge fades'
+                                    // curve like the download face's (28px, a
+                                    // shade shorter than a shelf's 34), and
+                                    // the outer rows' cells shade into the card
+                                    // from their outer edge, since this bar has
+                                    // no outline to end at (queue progress lab
+                                    // rounds 2-4, 2026-08-17).
+                                    edgeFadeW: 28; edgeSoft: 0.15
                                     pulse: qrow.st === "running"
                                     pct: qrow.st === "done" ? 100 : model.progress
                                     // 100% but still running = the final steps (merge,
                                     // decrypt, tag) are in flight: twinkle, don't freeze.
                                     finishing: qrow.st === "running" && model.progress >= 99.9
                                     onColor: qrow.st === "failed" ? root.red : qrow.st === "queued" ? root.cyanDim : root.accent
+                                    }
                                 }
                             }
                             // ---- expanded per-track list (album order, live state) ----
@@ -13236,7 +13685,7 @@ ApplicationWindow {
                                     // under the pointer. With the count as the model
                                     // the rows stay alive and each one's texts
                                     // re-evaluate in place.
-                                    model: qtrackClip.shown ? (root.queueTracks[qrow.model.qid] || []).length : 0
+                                    model: qrow.ledgerShown
                                     delegate: RowLayout {
                                         required property int index
                                         // Depends on root.queueTracks, so each tick
@@ -13250,6 +13699,7 @@ ApplicationWindow {
                                             Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight
                                         }
                                         Text {
+                                            objectName: "qTrackTitle"
                                             textFormat: Text.PlainText
                                             text: td.title || ""
                                             // Grey until the track is actually
@@ -13258,7 +13708,8 @@ ApplicationWindow {
                                             // bright, a failure reads red, the
                                             // rest stay quiet.
                                             color: td.status === "failed" ? root.red
-                                                 : (td.status === "done" || td.status === "skipped") ? root.textHi
+                                                 : (td.status === "done" || td.status === "skipped"
+                                                    || td.status === "owned") ? root.textHi
                                                  : root.textLo
                                             Behavior on color { ColorAnimation { duration: 260 } }
                                             font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true
@@ -13273,7 +13724,8 @@ ApplicationWindow {
                                             textFormat: Text.PlainText
                                             readonly property string delivered: "" + (td.quality || "")
                                             readonly property string tier: root.queueTrackTier(
-                                                delivered, "" + (td.status || ""), "" + (qrow.model.quality || ""))
+                                                delivered, "" + (td.status || ""), "" + (qrow.model.quality || ""),
+                                                "" + (td.expected || ""))
                                             // Still only the request: there is a tier to
                                             // state and no file has landed at it yet.
                                             readonly property bool promised: delivered === "" && tier !== ""
@@ -13315,7 +13767,15 @@ ApplicationWindow {
                                                 objectName: "qTrackWord"
                                                 anchors.right: parent.right
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                opacity: scell.dl ? 0 : 1
+                                                // Hidden while the DOWNLOADING word
+                                                // owns the cell; at half strength
+                                                // while IN LIBRARY is still only
+                                                // predicted ("owned"), the same
+                                                // half strength every other
+                                                // prediction in this drawer wears,
+                                                // and it fills in when the run
+                                                // reaches the track and agrees.
+                                                opacity: scell.dl ? 0 : (td.status === "owned" ? 0.5 : 1)
                                                 visible: opacity > 0
                                                 Behavior on opacity { NumberAnimation { duration: 180 } }
                                                 // UNAVAILABLE is TIDAL's answer,
@@ -13328,14 +13788,23 @@ ApplicationWindow {
                                                 target: td.status === "done" ? "COMPLETED"
                                                     : td.status === "failed" ? "FAILED"
                                                     : td.status === "unavailable" ? "UNAVAILABLE"
-                                                    : td.status === "skipped" ? "IN LIBRARY"
+                                                    : (td.status === "skipped" || td.status === "owned") ? "IN LIBRARY"
                                                     : td.status === "cancelled" ? "CANCELLED"
                                                     : (td.status === "queued" || td.status === "pending") ? "QUEUED"
                                                     : td.status === "running" ? "" : "·"
+                                                // IN LIBRARY speaks in the download
+                                                // button's two voices: green when
+                                                // Waves wrote that exact file (the
+                                                // ownership ledger, a fact), gold
+                                                // when the library scan matched it
+                                                // by tags (a guess). Its tier cell
+                                                // keeps the copy's own quality.
                                                 color: td.status === "done" ? root.accent
                                                      : td.status === "failed" ? root.red
                                                      : td.status === "unavailable" ? root.redDim
-                                                     : td.status === "skipped" ? root.libAccent : root.textDim
+                                                     : (td.status === "skipped" || td.status === "owned")
+                                                       ? (td.owned === "claim" ? root.libAccent : root.accent)
+                                                     : root.textDim
                                                 Behavior on color { ColorAnimation { duration: 260 } }
                                                 font.pixelSize: 10
                                                 font.bold: target !== "·" && target !== "QUEUED" && target !== "CANCELLED"
@@ -13412,6 +13881,20 @@ ApplicationWindow {
                                             }
                                         }
                                     }
+                                }
+                                // The ledger is capped, so say what it is not
+                                // showing rather than ending on a row that
+                                // looks like the last one. Only ever seen on a
+                                // playlist far larger than the drawer can list.
+                                Text {
+                                    objectName: "qTrackMore"
+                                    textFormat: Text.PlainText
+                                    readonly property int rest: qrow.ledgerLen - qrow.ledgerShown
+                                    visible: qrow.qexp && rest > 0
+                                    text: rest + (rest === 1 ? " more track" : " more tracks")
+                                    color: root.textDim
+                                    font.family: root.mono; font.pixelSize: 10
+                                    Layout.topMargin: 2
                                 }
                                 }
                             }
@@ -13605,7 +14088,7 @@ ApplicationWindow {
         // sessionResolved gates the overlay so an already-signed-in launch
         // doesn't flash the logged-out screen while the cached-token network
         // check is still in flight.
-        visible: waves.sessionResolved && !waves.loggedIn
+        visible: waves.sessionResolved && !root.signedIn
         // A logged-out cold launch fades in with the rest of the interface.
         opacity: root.bootContentShown
         color: "#d606070e"
@@ -13968,7 +14451,7 @@ ApplicationWindow {
         // are mutually exclusive on termsCurrentAccepted (the same test the
         // terms gate shows on, version included), so this never stacks with
         // termsGate, a terms-revision re-prompt included.
-        visible: waves.loggedIn && (
+        visible: root.signedIn && (
             (!setupSettings.ffmpegSetupDone && !root.termsCurrentAccepted)
             || (setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
                 && appFfmpeg.stateKey === "missing" && !ffmpegGate.sessionSnoozed
@@ -14409,7 +14892,7 @@ ApplicationWindow {
         // the interface normally rides (root.bootContentShown): the wordmark's
         // zoom fades directly into this card, with the app itself still
         // unpainted behind it. Agreement first, interface second.
-        readonly property bool wanted: waves.loggedIn && setupSettings.ffmpegSetupDone
+        readonly property bool wanted: root.signedIn && setupSettings.ffmpegSetupDone
             && !root.termsCurrentAccepted
         visible: wanted && root.bootContentShown > 0
         opacity: root.bootContentShown
@@ -14686,7 +15169,7 @@ ApplicationWindow {
         z: 1200
         // termsCurrentAccepted, not the bare boolean: during a terms-revision
         // re-prompt this card must wait behind the terms gate, never beside it.
-        readonly property bool shouldShow: waves.loggedIn && setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
+        readonly property bool shouldShow: root.signedIn && setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
             && bootOverlay.done
             && !ffmpegGate.visible
             && !setupSettings.updatePromptAnswered
@@ -14899,7 +15382,7 @@ ApplicationWindow {
         function maybeStart() {
             if (started || done) return
             if (!waves.sessionResolved) return
-            if (waves.loggedIn && root.browseSections.length === 0) return
+            if (root.signedIn && root.browseSections.length === 0) return
             started = true
             bootSeq.start()
         }
@@ -14953,7 +15436,7 @@ ApplicationWindow {
             // gate only covered the shelf assembly, and a slow login revealed
             // onto the bare "Reading the wire…" landing (reported from
             // livetesting).
-            if (waves.loggedIn && root.browseSections.length === 0 && !root.browseError
+            if (root.signedIn && root.browseSections.length === 0 && !root.browseError
                     && !handoverCap.expired) { handoverHeld = true; return }
             if (root.browseBuilding && !handoverCap.expired) { handoverHeld = true; return }
             handoverHeld = false
