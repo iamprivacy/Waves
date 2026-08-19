@@ -153,6 +153,10 @@ class _DiscoStub:
     def _waves_pref_bool(self, key):
         return False
 
+    def _merge_pref_on(self):
+        # Edition handling off: this file is about the video source toggle.
+        return False
+
     def _library_bulk_skip_on(self):
         # The bulk claim gate is off here, like a library-less install; its
         # own filtering is covered by test_library_bridge.py.
@@ -160,6 +164,22 @@ class _DiscoStub:
 
     def _remember(self, bucket, key, obj):
         self.remembered.append((bucket, key))
+
+
+def test_a_discography_marks_its_albums_for_one_hop_only():
+    # Every queued album is exempted from downloadAlbum's own edition scan,
+    # including when the merge is off: the pref can be flipped between the scan
+    # above and this queueing, and an album that slipped into the scan here
+    # would exit by a path that never bumps the artist rollup. Turning the merge
+    # ON later is not trapped by this, because the mark is consumed on the first
+    # read (see tests/test_edition_merge_gate.py).
+    artist = _Artist([])
+    stub = _DiscoStub(artist, video_download=False)
+
+    stub.downloadArtist("art1")
+
+    assert stub._albumsQueued.emits, "the albums did queue"
+    assert stub._merge_scanned == {"al1"}
 
 
 def test_discography_queues_videos_when_the_source_is_on():

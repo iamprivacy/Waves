@@ -32,6 +32,8 @@ def _tracked(relay):
     """A real _TrackedDownload without Download.__init__ (needs a session)."""
     td = backend._TrackedDownload.__new__(backend._TrackedDownload)
     td._track_signals = relay
+    td._delivered = {}
+    td._delivered_lock = Lock()
     return td
 
 
@@ -171,13 +173,30 @@ def test_a_step_that_runs_earns_its_share(tmp_path):
 
 
 def test_note_delivered_flips_the_word_early_and_carries_no_record():
-    """The early done must ride the row's key (the identity id) and carry
-    neither path nor quality: the definitive done event that follows is the
-    one allowed to record ownership from reality."""
+    """The early done must ride the row's key (the identity id) and carry no
+    path: the definitive done event that follows is the one allowed to record
+    ownership from reality. Nothing fetched yet (no captured stream) means no
+    quality either."""
     relay = MagicMock()
     _tracked(relay)._note_delivered(_media("456", identity="123"))
     assert relay.track_event.emit.call_args.args[0] == {"id": "123", "status": "done"}
     _tracked(None)._note_delivered(_media())  # headless: silent, no crash
+
+
+def test_note_delivered_carries_the_captured_tier_and_leaves_it_for_item():
+    """The early done states the delivered quality the stream capture already
+    holds, or the ledger's tier cell blanks for the whole politeness delay
+    (COMPLETED with no tier, then the tier popping back seconds later). It
+    reads the capture without consuming it: item()'s definitive event still
+    needs it to record ownership."""
+    relay = MagicMock()
+    td = _tracked(relay)
+    td._delivered["456"] = {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}
+    td._note_delivered(_media("456", identity="123"))
+    ev = relay.track_event.emit.call_args.args[0]
+    assert ev == {"id": "123", "status": "done", "quality": {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}}
+    assert "path" not in ev
+    assert td._delivered == {"456": {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}}
 
 
 def _run_item(tmp_path, *, success):

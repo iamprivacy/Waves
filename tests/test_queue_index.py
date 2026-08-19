@@ -34,6 +34,12 @@ def _stub():
     # A queued row states the tier its job will ask for; the setting behind
     # that word is not what these tests are about.
     stub._target_tier = lambda: "LOSSLESS"
+    # Likewise the raw quality a row pins for its job (see
+    # test_quality_pinned_per_job.py); these tests are about the index.
+    stub._queued_quality_value = lambda: "LOSSLESS"
+    # And likewise the library-skip gate a row pins for its job (see
+    # test_queue_row_pins_the_library_skip.py).
+    stub._library_bulk_skip_on = lambda: True
     stub._job_aborts = {}
     stub._QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
     stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX

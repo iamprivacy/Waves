@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pathlib
 from datetime import datetime
+from threading import Lock
 from types import SimpleNamespace
 
 from tidalapi import Album, Track
@@ -63,6 +64,10 @@ def _schema_stub():
     stub._waves_prefs = stub._default_waves_prefs()
     stub._waves_pref_bool = _bind(stub, "_waves_pref_bool")
     stub._ffmpeg_flag_prefs = {}
+    # applySettings does its ffmpeg restores and its write under this lock, the
+    # same one _save_settings holds, so a worker save cannot slip its borrowed
+    # path into the write. A stub that drives applySettings needs the real thing.
+    stub._settings_save_lock = Lock()
     stub.ffmpegState = lambda: {"status": "none", "source": "none", "path": ""}
     stub._user_ffmpeg_path = lambda: ""
     stub._ffmpeg_detected_path = lambda: ""
@@ -243,6 +248,10 @@ class TestSavingStandInsAnswersTheOfferToo:
         stub._saves = []
         stub._save_waves_prefs = lambda: stub._saves.append(dict(stub._waves_prefs))
         stub._ffmpeg_flag_prefs = {}
+        # applySettings does its ffmpeg restores and its write under this lock, the
+        # same one _save_settings holds, so a worker save cannot slip its borrowed
+        # path into the write. A stub that drives applySettings needs the real thing.
+        stub._settings_save_lock = Lock()
         stub._restore_ffmpeg_flags = lambda: None
         stub._restore_ffmpeg_path = lambda: None
         stub._ffmpeg_source_label = lambda: "system"

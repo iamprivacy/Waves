@@ -234,8 +234,10 @@ def test_save_settings_notifies_the_settings_page():
     stub = SimpleNamespace(
         _restore_ffmpeg_flags=lambda: None,
         _restore_ffmpeg_path=lambda: None,
-        settings=SimpleNamespace(save=lambda: None),
+        settings=SimpleNamespace(save=lambda: None, data=SimpleNamespace()),
         settingsPersistedExternally=_Signal(),
+        _ffmpeg_flag_prefs={},
+        _settings_save_lock=Lock(),
     )
     WavesBridge._save_settings(stub)
     assert stub.settingsPersistedExternally.emits == [()]
@@ -356,10 +358,11 @@ def test_category_download_warms_the_tree_under_the_rollup_id():
 class _BestOfBothStub:
     downloadAlbumBestOfBoth = WavesBridge.downloadAlbumBestOfBoth
 
-    def __init__(self, plan=None, identity_id="a1", scan_raises=False):
+    def __init__(self, plan=None, identity_id="a1", scan_raises=False, scan_complete=True):
         self._objs = {"album": {"a1": SimpleNamespace(id="a1")}}
         self._dl = object()
         self._merge_plans = {}
+        self._merge_scanned: set = set()
         self._scan_pool = _InlinePool()
         self.downloadState = _Signal()
         self._albumsQueued = _Signal()
@@ -367,6 +370,7 @@ class _BestOfBothStub:
         self._plan = plan
         self._identity_id = identity_id
         self._scan_raises = scan_raises
+        self._scan_complete = scan_complete
 
     def _set_status(self, text):
         self.statuses.append(text)
@@ -374,10 +378,13 @@ class _BestOfBothStub:
     def _sibling_editions(self, obj):
         if self._scan_raises:
             raise OSError("scan blew up")
-        return [SimpleNamespace(id="a1"), SimpleNamespace(id=self._identity_id)]
+        return [SimpleNamespace(id="a1"), SimpleNamespace(id=self._identity_id)], self._scan_complete
 
     def _merge_recs_factory(self):
         return lambda a: []
+
+    def _merge_rank_fn(self):
+        return lambda o: 0
 
     def _remember(self, bucket, key, obj):
         self._objs.setdefault(bucket, {})[key] = obj
@@ -387,7 +394,7 @@ def test_best_of_both_guards_the_button_before_the_scan():
     stub = _BestOfBothStub()
     with patch(
         "tidaler.waves_ui.backend._build_merge_plan",
-        return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}),
+        return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}, ""),
     ):
         stub.downloadAlbumBestOfBoth("a1")
 
@@ -400,7 +407,7 @@ def test_best_of_both_same_identity_keeps_the_button_waiting():
     stub = _BestOfBothStub()
     with patch(
         "tidaler.waves_ui.backend._build_merge_plan",
-        return_value=(SimpleNamespace(id="a1", full_name="Album"), {"a1": []}),
+        return_value=(SimpleNamespace(id="a1", full_name="Album"), {"a1": []}, ""),
     ):
         stub.downloadAlbumBestOfBoth("a1")
 
@@ -414,6 +421,31 @@ def test_a_failed_edition_scan_marks_the_button_failed():
 
     assert stub.downloadState.emits == [("a1", "preparing"), ("a1", "failed")]
     assert stub._albumsQueued.emits == []
+
+
+def test_a_failed_edition_scan_leaves_the_album_rescannable():
+    # downloadAlbum marks the album before dispatching the scan, and nothing
+    # will consume that mark now the scan queued nothing. Left set, the "try
+    # again" the status line just invited downloaded the album plain instead.
+    stub = _BestOfBothStub(scan_raises=True)
+    stub._merge_scanned.add("a1")
+
+    stub.downloadAlbumBestOfBoth("a1")
+
+    assert "a1" not in stub._merge_scanned
+
+
+def test_an_incomplete_sibling_scan_does_not_claim_no_richer_edition():
+    # One artist bucket failed, so the scan never saw the whole catalogue. It
+    # must fail visibly like a partial discography does, not report the absence
+    # of something it did not look for.
+    stub = _BestOfBothStub(scan_complete=False)
+
+    stub.downloadAlbumBestOfBoth("a1")
+
+    assert stub.downloadState.emits == [("a1", "preparing"), ("a1", "failed")]
+    assert stub._albumsQueued.emits == []
+    assert stub.statuses[-1] == "Could not scan editions, try again"
 
 
 # QML source guards (findings 29, 31, 36, 40).

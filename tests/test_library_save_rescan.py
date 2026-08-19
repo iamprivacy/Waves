@@ -15,6 +15,7 @@ shape test_quality_change_live.py uses.
 
 from __future__ import annotations
 
+from threading import Lock
 from types import SimpleNamespace
 
 from tidaler.waves_ui.backend import WavesBridge
@@ -65,6 +66,10 @@ def _stub(*, enabled=False, source="separate", folder="", download_base="/dl"):
         save=lambda: None,
     )
     s._ffmpeg_flag_prefs = {}
+    # applySettings does its ffmpeg restores and its write under this lock, the
+    # same one _save_settings holds, so a worker save cannot slip its borrowed
+    # path into the write. A stub that drives applySettings needs the real thing.
+    s._settings_save_lock = Lock()
     s._restore_ffmpeg_flags = lambda: None
     s._restore_ffmpeg_path = lambda: None
     s._ffmpeg_source_label = lambda: "system"

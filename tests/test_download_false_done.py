@@ -57,10 +57,7 @@ def _statuses(relay: MagicMock) -> list[str]:
 
 @pytest.fixture(autouse=True)
 def _stub_name_builders():
-    with (
-        patch.object(backend, "name_builder_item", return_value="Item Name"),
-        patch.object(backend, "name_builder_title", return_value="Title"),
-    ):
+    with (patch.object(backend, "name_builder_title", return_value="Title"),):
         yield
 
 

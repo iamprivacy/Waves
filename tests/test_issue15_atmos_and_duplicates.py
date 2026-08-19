@@ -56,7 +56,11 @@ def _track(track_id: int, audio_modes) -> Track:
     return t
 
 
-class TestAtmosOnlyTracksHonorTheToggle:
+class TestAtmosOnlyTracksAlwaysDownload:
+    """The toggle prefers stereo where there is a choice. An Atmos-only track
+    has no choice, so it downloads under either setting (2026-08-18); the old
+    behaviour skipped it and left a hole in the album."""
+
     def _run_item(self, dl, media):
         with (
             patch.object(dl, "_validate_and_prepare_media", return_value=media),
@@ -65,16 +69,16 @@ class TestAtmosOnlyTracksHonorTheToggle:
             prepare.return_value = (pathlib.Path("./tmp/x.flac"), ".flac", True, False)
             return dl.item(file_template="{track_title}", media=media)
 
-    def test_atmos_only_track_is_skipped_when_atmos_is_off(self):
+    def test_atmos_only_track_downloads_when_atmos_is_off(self):
         dl = _make_download()
         dl.settings.data.download_dolby_atmos = False
         media = _track(123, [AudioMode.dolby_atmos.value])
 
         ok, path = self._run_item(dl, media)
 
+        # Reaches the (stubbed) skip-existing path: no guard stands in its way.
         assert ok is True
-        assert path == ""
-        assert dl.fn_logger.info.called  # the skip is told, not silent
+        assert str(path) != ""
 
     def test_atmos_only_track_proceeds_when_atmos_is_on(self):
         dl = _make_download()

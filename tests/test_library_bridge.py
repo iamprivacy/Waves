@@ -37,6 +37,7 @@ _METHODS = (
     "downloadsInsideLibrary",
     "_library_claims_album",
     "_library_claims_track",
+    "_library_track_claim",
     # The MusicBrainz overlay rides inside the presence slot; the opt-in pref
     # defaults off in these stubs, so it answers pass-through (its own rules
     # are covered in test_mb_overlay.py).

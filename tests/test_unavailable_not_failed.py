@@ -85,7 +85,6 @@ def _statuses(relay: MagicMock) -> list[str]:
 @pytest.fixture(autouse=True)
 def _stub_name_builders():
     with (
-        patch.object(backend, "name_builder_item", return_value="Alicia Keys - Time Machine"),
         patch.object(backend, "name_builder_title", return_value="Time Machine"),
         patch.object(download_mod, "name_builder_item", return_value="Alicia Keys - Time Machine"),
         patch.object(download_mod, "name_builder_title", return_value="ALICIA (With Commentary)"),

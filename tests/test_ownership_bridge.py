@@ -51,16 +51,20 @@ class _BridgeStub:
     """Bare stand-in for WavesBridge carrying only what the ownership sink and
     query touch, with the real bridge methods bound on and a real store."""
 
-    def __init__(self, tmp_path, quality_audio="LOSSLESS"):
+    def __init__(self, tmp_path, quality_audio="LOSSLESS", atmos=False):
         self._job_tracks: dict = {}
         self._job_signals: dict = {}
         self.queueTrackState = _Signal()
         self.ownershipChanged = _Signal()
+        self.ownershipChangedBatch = _Signal()
+        self._ownAnnounceArm = _Signal()
         self.collectionMembershipChanged = _Signal()
         self._ownership = OwnershipStore(str(tmp_path / "ownership.sqlite3"))
         self._own_cache: dict = {}
         self._own_pending: set = set()
         self._own_lock = Lock()
+        self._own_announce: list = []
+        self._own_announce_armed = False
         self._OWN_CACHE_MAX = WavesBridge._OWN_CACHE_MAX
         self._own_pool = _SyncPool()
         self._OWN_TTL = WavesBridge._OWN_TTL
@@ -76,7 +80,12 @@ class _BridgeStub:
         self._queue_index: dict = {}
         self._emit_queue = lambda: None
         self.settings = SimpleNamespace(
-            data=SimpleNamespace(quality_audio=quality_audio, download_base_path="", symlink_to_track=False)
+            data=SimpleNamespace(
+                quality_audio=quality_audio,
+                download_base_path="",
+                symlink_to_track=False,
+                download_dolby_atmos=atmos,
+            )
         )
         for name in (
             "_track_lifecycle",
@@ -85,7 +94,10 @@ class _BridgeStub:
             "_evict_own_cache_locked",
             "_note_download_base_ok",
             "ownershipOf",
+            "_would_refetch_atmos",
             "_own_refresh",
+            "_announce_ownership",
+            "_own_announce_flush",
             "_target_quality_rank",
             "collectionMemberIds",
         ):
@@ -122,6 +134,9 @@ def _new_tracked():
     td._target_rank = 2  # LOSSLESS
     td._tls = local()
     td._skip_existing_base = False
+    # The gate asks whether THIS job would fetch Dolby Atmos for the track, so
+    # it can rank the owned copy on the scale that copy was delivered on.
+    td.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=False))
     # Library bulk claim: not injected, like any single-item job, so these
     # ownership tests exercise the ownership gate alone.
     td._library_claim = None
@@ -139,17 +154,20 @@ def _make_file(tmp_path, name="song.flac"):
 # _stream_quality: normalize a stream's delivered fields.
 # --------------------------------------------------------------------------- #
 def test_stream_quality_extracts_and_normalizes():
-    tier = SimpleNamespace(value="LOSSLESS")  # a Quality enum member stand-in
+    # A real Atmos delivery: the tier is the one the Atmos session asks for
+    # (constants.ATMOS_REQUEST_QUALITY), never the user's setting. Pairing
+    # DOLBY_ATMOS with LOSSLESS here would be a combination TIDAL cannot serve.
+    tier = SimpleNamespace(value="HIGH")  # a Quality enum member stand-in
     mode = SimpleNamespace(value="DOLBY_ATMOS")  # an AudioMode enum member stand-in
-    stream = SimpleNamespace(audio_quality=tier, audio_mode=mode, bit_depth=24, sample_rate=96000)
-    info = SimpleNamespace(media_stream=stream, stream_manifest=SimpleNamespace(codecs="FLAC"))
+    stream = SimpleNamespace(audio_quality=tier, audio_mode=mode, bit_depth=16, sample_rate=44100)
+    info = SimpleNamespace(media_stream=stream, stream_manifest=SimpleNamespace(codecs="EAC3"))
     q = _stream_quality(info)
     assert q == {
-        "tier": "LOSSLESS",
+        "tier": "HIGH",
         "audio_mode": "DOLBY_ATMOS",
-        "bit_depth": 24,
-        "sample_rate": 96000,
-        "codecs": "FLAC",
+        "bit_depth": 16,
+        "sample_rate": 44100,
+        "codecs": "EAC3",
     }
 
 
@@ -183,7 +201,6 @@ def test_get_track_stream_info_no_stream_captures_nothing(monkeypatch):
 
 
 def _patch_item_helpers(monkeypatch, return_value):
-    monkeypatch.setattr(backend, "name_builder_item", lambda m: "Song")
     monkeypatch.setattr(backend, "name_builder_title", lambda m: "Song Title")
     monkeypatch.setattr(backend, "_fmt_duration", lambda d: "3:00")
     monkeypatch.setattr(backend.Download, "item", lambda self, *a, media=None, event_stop=None, **k: return_value)
@@ -201,7 +218,7 @@ def test_item_attaches_path_and_quality_on_real_download(monkeypatch, tmp_path):
         "sample_rate": 44100,
         "codecs": "FLAC",
     }
-    ok, path = td.item(media=SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180))
+    ok, _path = td.item(media=SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180))
     assert ok is True
     done = [e for e in td._track_signals.track_event.emits if e["status"] == "done"]
     assert len(done) == 1
@@ -347,7 +364,6 @@ def test_item_skips_owned_track_without_fetching(monkeypatch, tmp_path):
     def _boom(self, *a, **k):
         raise AssertionError("super().item must not run for an owned track")
 
-    monkeypatch.setattr(backend, "name_builder_item", lambda m: "Song")
     monkeypatch.setattr(backend, "name_builder_title", lambda m: "Song Title")
     monkeypatch.setattr(backend, "_fmt_duration", lambda d: "3:00")
     monkeypatch.setattr(backend.Download, "item", _boom)
@@ -360,7 +376,11 @@ def test_item_skips_owned_track_without_fetching(monkeypatch, tmp_path):
     assert td.ok_count == 1, "an all-owned collection must still count as a success"
     ev = next(e for e in td._track_signals.track_event.emits if e["status"] == "skipped")
     assert ev["id"] == "42"
-    assert "quality" not in ev and "path" not in ev, "a skip must record nothing new"
+    assert "path" not in ev, "a skip must record nothing new"
+    # It DOES say what the copy you hold is (the ledger's IN LIBRARY row keeps
+    # its tier): the delivered word plus how it was found. Nothing is recorded
+    # from it: _track_lifecycle records ownership on "done" events only.
+    assert (ev["quality"], ev["owned"]) == ("LOSSLESS", "own")
 
 
 def test_item_downloads_when_not_owned(monkeypatch, tmp_path):
@@ -393,7 +413,6 @@ def test_item_skips_equal_or_better_quality(monkeypatch, tmp_path):
     def _boom(self, *a, **k):
         raise AssertionError("equal-or-better owned quality must not re-fetch")
 
-    monkeypatch.setattr(backend, "name_builder_item", lambda m: "Song")
     monkeypatch.setattr(backend, "name_builder_title", lambda m: "Song Title")
     monkeypatch.setattr(backend, "_fmt_duration", lambda d: "3:00")
     monkeypatch.setattr(backend.Download, "item", _boom)
@@ -413,7 +432,6 @@ def test_item_upgrades_owned_lower_quality_in_place(monkeypatch, tmp_path):
         seen["skip_existing"] = self.skip_existing
         return True, fpath
 
-    monkeypatch.setattr(backend, "name_builder_item", lambda m: "Song")
     monkeypatch.setattr(backend, "name_builder_title", lambda m: "Song Title")
     monkeypatch.setattr(backend, "_fmt_duration", lambda d: "3:00")
     monkeypatch.setattr(backend.Download, "item", _capture)
@@ -541,3 +559,50 @@ def test_membership_recorded_once_per_track_not_per_event(tmp_path):
 def test_collection_member_ids_unknown_collection_is_none(tmp_path):
     stub = _BridgeStub(tmp_path)
     assert stub.collectionMemberIds("never-seen") is None
+
+
+# ---- first answers are announced in batches ------------------------------------
+# A cold query's first answer used to emit ownershipChanged(tid) per id from the
+# pool; at launch that was ~1500 signals in two seconds, each running every
+# listening card's handler (see ownershipChangedBatch in backend.py). Now the
+# pool queues the id and arms ONE GUI-thread flush, which emits every queued id
+# as a single ",id1,id2,...," batch.
+
+
+def test_first_answers_queue_for_one_batch_and_arm_the_flush_once(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub.own("1")
+    stub.own("2")
+    stub.own("3")
+    assert stub.ownershipChanged.emits == []  # no per-id signal from the refresh path
+    assert stub._own_announce == ["1", "2", "3"]
+    assert stub._ownAnnounceArm.emits == [()]  # armed once, not per answer
+    stub._own_announce_flush()
+    assert stub.ownershipChangedBatch.emits == [",1,2,3,"]
+    assert stub._own_announce == [] and stub._own_announce_armed is False
+
+
+def test_an_answer_landing_after_a_flush_re_arms(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub.own("1")
+    stub._own_announce_flush()
+    stub.own("2")
+    assert stub._ownAnnounceArm.emits == [(), ()]
+    stub._own_announce_flush()
+    assert stub.ownershipChangedBatch.emits == [",1,", ",2,"]
+
+
+def test_a_flush_with_nothing_queued_emits_nothing(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._own_announce_flush()
+    assert stub.ownershipChangedBatch.emits == []
+
+
+def test_a_recorded_download_still_announces_its_id_directly(tmp_path):
+    # The download-done path is a single answer about one track: it keeps the
+    # per-id signal (the batch is for the cold-cache flood only).
+    stub = _BridgeStub(tmp_path)
+    f = _make_file(tmp_path)
+    stub._track_lifecycle(1, {"id": "42", "status": "done", "path": str(f), "quality": {"tier": "LOSSLESS"}})
+    assert stub.ownershipChanged.emits == ["42"]
+    assert stub._own_announce == []

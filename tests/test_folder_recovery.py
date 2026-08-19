@@ -87,6 +87,7 @@ class RecoveryHost:
         self._remount_last = -1e9
         self._recovery_started = time.monotonic()
         self._ffmpeg_flag_prefs: dict = {}
+        self._settings_save_lock = Lock()
         self._ffmpeg_user_path = ""
         self._base_ok = ("", 0.0)
         self._pending_downloads: list = []

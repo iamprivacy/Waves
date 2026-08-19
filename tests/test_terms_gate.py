@@ -90,7 +90,7 @@ def test_gate_cannot_be_escaped():
     # count (termsCurrentAccepted folds the stored version into the test). The
     # card rides the launch reveal itself, so the wordmark's zoom fades into
     # the agreement and the interface is never the thing revealed first.
-    assert "readonly property bool wanted: waves.loggedIn && setupSettings.ffmpegSetupDone" in gate
+    assert "readonly property bool wanted: root.signedIn && setupSettings.ffmpegSetupDone" in gate
     assert "&& !root.termsCurrentAccepted" in gate
     assert "visible: wanted && root.bootContentShown > 0" in gate
     assert "opacity: root.bootContentShown" in gate

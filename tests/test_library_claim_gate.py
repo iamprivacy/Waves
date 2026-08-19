@@ -44,6 +44,9 @@ def _gate(*, claim, ownership_of=None, target_rank=3, identity=None):
     dl._target_rank = target_rank
     dl._library_claim = claim
     dl._force_redownload = False
+    # The ownership half of the gate asks whether this job would fetch Dolby
+    # Atmos for the track; these tests are about the claim half, so it is off.
+    dl.settings = types.SimpleNamespace(data=types.SimpleNamespace(download_dolby_atmos=False))
     return dl, _media(identity=identity)
 
 
@@ -114,7 +117,7 @@ def _adapter(media, album=None):
     from tidaler.waves_ui.backend import WavesBridge
 
     asked: list[tuple] = []
-    stub = types.SimpleNamespace(_library_claims_track=lambda *a: asked.append(a) or False)
+    stub = types.SimpleNamespace(_library_track_claim=lambda *a: asked.append(a) and None)
     WavesBridge._library_claim_media(stub, media, album=album)
     return asked[0] if asked else None
 
@@ -145,3 +148,57 @@ def test_a_track_with_no_release_to_name_asks_an_unprovable_question():
     # Which the matcher answers unproven, so the track is fetched. A wrong
     # skip costs a track nobody finds out was missing.
     assert _adapter(_track("", None)) == ("Artist", "Song", "", "", 200)
+
+
+# ---- what a skip SAYS about the copy you hold ---------------------------------
+# The ledger's IN LIBRARY row keeps its quality column and speaks in the same
+# two voices as the download button: green when Waves wrote that exact file
+# (the ownership ledger), gold when the library scan matched it by tags. Both
+# ride on the skip event, so the detail must come out of the decision.
+
+
+def test_an_ownership_skip_names_the_owned_tier_as_a_fact():
+    rec = {"owned": True, "quality_rank": 3, "quality_tier": "LOSSLESS"}
+    dl, m = _gate(claim=None, ownership_of=lambda mid: rec)
+    assert dl._claim_decision(m) == ("skip", {"kind": "own", "tier": "LOSSLESS"})
+
+
+def test_a_tag_claim_names_the_local_class_as_a_guess():
+    verdict = {"present": True, "sure": True, "local_class": "hires"}
+    dl, m = _gate(claim=lambda media: verdict)
+    assert dl._claim_decision(m) == ("skip", {"kind": "claim", "tier": "HI-RES"})
+
+
+def test_a_bare_true_claim_still_skips_with_no_tier():
+    dl, m = _gate(claim=lambda media: True)
+    assert dl._claim_decision(m) == ("skip", {"kind": "claim", "tier": ""})
+
+
+def test_no_skip_carries_no_detail():
+    dl, m = _gate(claim=lambda media: False)
+    assert dl._claim_decision(m) == (None, {})
+    dl, m = _gate(claim=None, ownership_of=lambda mid: {"owned": True, "quality_rank": 1, "quality_tier": "HIGH"})
+    assert dl._claim_decision(m) == ("force", {})
+
+
+def test_the_skip_event_carries_the_copy_and_how_it_was_found():
+    from threading import Lock
+
+    class _Relay:
+        def __init__(self):
+            self.events = []
+            self.track_event = types.SimpleNamespace(emit=self.events.append)
+
+    dl, m = _gate(claim=None)
+    dl._outcome_lock = Lock()
+    dl.ok_count = dl.skip_count = 0
+    dl._track_signals = _Relay()
+    m.duration = 200
+    m.artists = [m.artist]
+    dl._emit_skip(m, {"kind": "own", "tier": "HI-RES"})
+    dl._emit_skip(m, {"kind": "claim", "tier": ""})
+    dl._emit_skip(m)
+    ev = dl._track_signals.events
+    assert (ev[0]["status"], ev[0]["owned"], ev[0]["quality"]) == ("skipped", "own", "HI-RES")
+    assert (ev[1]["owned"], "quality" in ev[1]) == ("claim", False)
+    assert "owned" not in ev[2] and "quality" not in ev[2]

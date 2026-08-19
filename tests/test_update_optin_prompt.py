@@ -105,7 +105,7 @@ def test_gate_keeps_its_one_time_non_naggy_shape():
     # (termsCurrentAccepted, version included, so a terms-revision re-prompt
     # keeps this card waiting behind the terms gate too).
     for clause in (
-        "waves.loggedIn",
+        "root.signedIn",
         "setupSettings.ffmpegSetupDone",
         "root.termsCurrentAccepted",
         "bootOverlay.done",

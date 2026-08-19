@@ -167,9 +167,11 @@ class _Stub:
         self._ownership = MagicMock()
         self.ownershipChanged = MagicMock()
         self.settings = SimpleNamespace(
-            data=SimpleNamespace(quality_audio="LOSSLESS", symlink_to_track=symlink_to_track)
+            data=SimpleNamespace(
+                quality_audio="LOSSLESS", symlink_to_track=symlink_to_track, download_dolby_atmos=False
+            )
         )
-        for name in ("ownershipOf", "_record_ownership"):
+        for name in ("ownershipOf", "_would_refetch_atmos", "_record_ownership"):
             setattr(self, name, getattr(WavesBridge, name).__get__(self, _Stub))
 
     def seed_stale(self, tid: str) -> None:
