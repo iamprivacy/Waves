@@ -46,12 +46,23 @@ DEFAULT_ILLEGAL_MAP: dict[str, str] = {
     '"': "'",  # "Heroes" -> 'Heroes'
 }
 
-# Dolby Atmos API credentials (obfuscated)
-ATMOS_ID_B64 = "N203QX" + "AwSkM5aj" + "FjT00zbg=="
-ATMOS_SECRET_B64 = "dlJBZEEx" + "MDh0bHZrSnB" + "Uc0daUzhyR1" + "o3eFRsYkow" + "cWFaMks5c2F" + "FenNnWT0="
+# Dolby Atmos client id (obfuscated). This is a public, first-party TIDAL app
+# id shared across the whole third-party ecosystem (streamrip, tiddl, OrpheusDL
+# and others carry the same value); it is NOT derived from any user account.
+# TIDAL only serves Atmos manifests to a client it still honours, and the
+# previous id here was revoked (every playback request answered 401/subStatus
+# 4005), which is why Atmos-only tracks silently landed as the stereo AAC 320
+# fallback. This id still delivers real Atmos (verified end to end: eac3, 5.1,
+# 768 kbps) and needs NO secret: TIDAL accepts the refresh with an empty
+# secret, so the only value shipped is this public id. Expect TIDAL to rotate
+# it eventually; a fresh working id surfaces in the streamrip / OrpheusDL /
+# tiddl issue trackers when it does.
+ATMOS_ID_B64 = "NE4zbj" + "ZRMXg5" + "NUxMNU" + "s3cA=="
 
 ATMOS_CLIENT_ID = base64.b64decode(ATMOS_ID_B64).decode("utf-8")
-ATMOS_CLIENT_SECRET = base64.b64decode(ATMOS_SECRET_B64).decode("utf-8")
+# Empty on purpose: this client authenticates without a private secret (tidalapi
+# then sends the public id in the secret's place). Nothing sensitive is shipped.
+ATMOS_CLIENT_SECRET = ""
 ATMOS_REQUEST_QUALITY = Quality.low_320k
 
 

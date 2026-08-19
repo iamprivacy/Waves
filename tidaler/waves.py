@@ -26,7 +26,7 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 #    nuitka-project: --linux-icon={MAIN_DIRECTORY}/ui/icon512.png
 # nuitka-project-if: {OS} in ("Windows"):
 #    nuitka-project: --windows-icon-from-ico={MAIN_DIRECTORY}/ui/icon.ico
-#    nuitka-project: --file-description="Waves: desktop TIDAL downloader."
+#    nuitka-project: --file-description="Waves: saves music from your TIDAL account for offline listening."
 
 # Debugging options, controlled via environment variable at compile time.
 # nuitka-project-if: {OS} == "Windows" and os.getenv("DEBUG_COMPILATION", "no") == "yes":

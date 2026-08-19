@@ -197,6 +197,12 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         self.session = tidalapi.Session(tidal_config)
         self.original_client_id = self.session.config.client_id
         self.original_client_secret = self.session.config.client_secret
+        # The PKCE pair is a separate set of fields, and it is the one that the
+        # refresh path actually authenticates with when the app is signed in
+        # via PKCE (which it always is). The Atmos swap has to move these too,
+        # so keep the originals to swap back to.
+        self.original_client_id_pkce = self.session.config.client_id_pkce
+        self.original_client_secret_pkce = self.session.config.client_secret_pkce
         # Lock to ensure session-switching is thread-safe.
         # This lock protects against a race condition where one thread
         # changes the session credentials while another is using them.
@@ -270,6 +276,30 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         with contextlib.suppress(OSError, NotImplementedError):
             os.chmod(self.file_path, 0o600)
 
+    def _reauthenticate_current_client(self) -> bool:
+        """Make the currently set client credentials actually take effect.
+
+        A client swap alone does nothing: ``login_token`` loads the saved
+        grant through ``load_oauth_session``, which only contacts TIDAL when
+        the stored access pass is already rejected. While that pass is still
+        valid (the normal case) the swap is a silent no-op, so the request
+        keeps going out under the old client. Forcing a refresh here exchanges
+        the saved refresh credential for a fresh access pass under the client
+        that is set right now, which is what proves (or disproves) that client.
+
+        The refresh result is deliberately not persisted: the saved sign-in on
+        disk stays the user's own, so an Atmos swap can never overwrite it.
+        """
+        try:
+            if not self.login_token(do_pkce=self.is_pkce):
+                return False
+            return bool(self.session.token_refresh(self.session.refresh_token))
+        except Exception as exc:
+            # A category, never the credential: the exception type says what
+            # kind of failure it was without naming any client id or endpoint.
+            logger.warning("Session re-authentication raised (%s)", type(exc).__name__)
+            return False
+
     def switch_to_atmos_session(self) -> bool:
         """
         Switches the shared session to Dolby Atmos credentials.
@@ -283,19 +313,27 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
             return True
 
         print("Switching session context to Dolby Atmos...")
+        # Move BOTH client pairs: the plain fields and the PKCE fields. The app
+        # signs in via PKCE, so the refresh path reads the PKCE pair; setting
+        # only the plain pair (the old behaviour) left the refresh reaching for
+        # the original client and never actually engaged Atmos.
         self.session.config.client_id = ATMOS_CLIENT_ID
         self.session.config.client_secret = ATMOS_CLIENT_SECRET
+        self.session.config.client_id_pkce = ATMOS_CLIENT_ID
+        self.session.config.client_secret_pkce = ATMOS_CLIENT_SECRET
         self.session.audio_quality = ATMOS_REQUEST_QUALITY
 
-        # Re-login with new credentials
-        if not self.login_token(do_pkce=self.is_pkce):
+        # Re-authenticate under the new client (a real refresh, not just a load).
+        if not self._reauthenticate_current_client():
             print("Warning: Atmos session authentication failed.")
+            logger.warning("Dolby Atmos session authentication failed; restoring the normal session")
             # Try to switch back to normal to be safe
             self.restore_normal_session(force=True)
             return False
 
         self.is_atmos_session = True  # Set the flag
         print("Session is now in Atmos mode.")
+        logger.info("Dolby Atmos session engaged")
         return True
 
     def restore_normal_session(self, force: bool = False) -> bool:
@@ -316,17 +354,21 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         print("Restoring session context to Normal...")
         self.session.config.client_id = self.original_client_id
         self.session.config.client_secret = self.original_client_secret
+        self.session.config.client_id_pkce = self.original_client_id_pkce
+        self.session.config.client_secret_pkce = self.original_client_secret_pkce
 
         # Explicitly restore audio quality to user's configured setting
         self.session.audio_quality = tidalapi.Quality(self.settings.data.quality_audio)
 
-        # Re-login with original credentials
-        if not self.login_token(do_pkce=self.is_pkce):
+        # Re-authenticate under the original client.
+        if not self._reauthenticate_current_client():
             print("Warning: Restoring the original session context failed. Please restart the application.")
+            logger.warning("Restoring the normal session failed")
             return False
 
         self.is_atmos_session = False  # Set the flag
         print("Session is now in Normal mode.")
+        logger.info("Normal session restored")
         return True
 
     def login(self, fn_print: Callable, fn_input: Callable) -> bool:

@@ -236,6 +236,47 @@ def _is_truncated_leftover(path_file: pathlib.Path) -> bool:
         return False
 
 
+def _waves_item_id(media) -> str:
+    """The id a downloaded file is filed under, which is not always ``media.id``.
+
+    A Waves 'best of both' merge fetches a track from one edition and lands it in
+    another edition's folder, so it carries ``waves_identity_id``: the id the
+    whole app (queue rows, ownership, collection membership) keys that download
+    by, while ``media.id`` stays the source stream being fetched. Stamping the
+    source id into the file meant a later plain job over the same folder asked
+    about the identity id, failed to recognise Waves' own file, and wrote a
+    ``_01`` duplicate beside it instead of replacing it.
+
+    Args:
+        media: The track or video being written.
+
+    Returns:
+        str: The identity id when the item carries one, else its own id, else "".
+    """
+    return str(getattr(media, "waves_identity_id", "") or getattr(media, "id", "") or "")
+
+
+def _waves_owned_ids(media) -> set[str]:
+    """Every item id a file on disk may legitimately carry for ``media``.
+
+    Normally just its own id. A best-of-both member is filed under the identity
+    edition (see :func:`_waves_item_id`), but every build up to v0.1.21 wrote the
+    SOURCE edition's id into that same file, so libraries assembled by an older
+    Waves are full of merged tracks tagged the other way. Recognising both means
+    a forced re-save replaces its own file, and re-tags it with the identity id
+    on the way, instead of leaving a numbered duplicate beside it that the app
+    will never delete.
+
+    Args:
+        media: The track or video being written.
+
+    Returns:
+        set[str]: The ids this download may treat as its own copy.
+    """
+    ids = (getattr(media, "waves_identity_id", ""), getattr(media, "id", ""))
+    return {str(i) for i in ids if i}
+
+
 # TODO: Set appropriate client string and use it for video download.
 # https://github.com/globocom/m3u8#using-different-http-clients
 class RequestsClient:
@@ -771,6 +812,12 @@ class Download:
         except Exception:
             return False, path_file
 
+        # Hand the caller the task that belongs to THIS item. A caller matching
+        # on the task's description instead would be matching on a display
+        # string truncated to 30 characters, which several tracks of one release
+        # share; the TaskID is the only per-item handle.
+        self._note_progress_task(media, p_task)
+
         result_segments, dl_segment_results = self._download_segments(
             urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop, n_tail_spurious
         )
@@ -1015,20 +1062,15 @@ class Download:
 
         media = validated_media
 
-        # An Atmos-only track IS the Atmos version (albums list it as its own
-        # track id); with Atmos downloads off there is no non-Atmos stream to
-        # fall back to, so honoring the setting means skipping it entirely
-        # instead of downloading an AC-4 file through the normal session.
-        if (
-            isinstance(media, Track)
-            and not self.settings.data.download_dolby_atmos
-            and getattr(media, "audio_modes", None)
-            and all(mode == AudioMode.dolby_atmos.value for mode in media.audio_modes)
-        ):
-            self.fn_logger.info(
-                f"Skipped Dolby Atmos track '{log_content(name_builder_item(media))}': Atmos downloads are off."
-            )
-            return True, ""
+        # An Atmos-only track (TIDAL lists the Atmos version of a song as its
+        # own track id, with no stereo stream behind it) is downloaded whether
+        # or not Dolby Atmos downloads are on. The setting means "prefer stereo
+        # where there is a choice", not "leave a hole in the album": a song you
+        # cannot play today beats one you never got. _get_track_stream_info
+        # takes the Atmos session for it because there is nothing else to take.
+        # It used to be skipped here, before any path work, and answered
+        # ok=True with an empty path, which is what put a permanent gap in every
+        # discography that carried a spatial-only single.
 
         # Check for stop signal
         if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
@@ -1176,16 +1218,17 @@ class Download:
         return safe_filename_replacement_map(getattr(self.settings.data, "filename_illegal_map", None))
 
     def _collection_dir(self, relative_template: str) -> pathlib.Path:
-        """The folder a partially formatted collection template points at.
+        """The folder a collection template points at.
 
-        The string still carries the per-track tokens, so the folder is
-        everything above them; a dummy suffix lets the normal sanitizer run
-        over the same shape a real destination takes.
+        The folder is everything above the last segment, whether that segment
+        still carries the per-track tokens or has been filled in by a real
+        item; a dummy suffix lets the normal sanitizer run over the same shape
+        a real destination takes.
         """
         candidate = (pathlib.Path(self.path_base).expanduser() / (relative_template + ".x")).absolute()
         return pathlib.Path(path_file_sanitize(candidate, adapt=True)).parent
 
-    def _keep_existing_collection_layout(self, tidied: str, *older: str) -> str:
+    def _keep_existing_collection_layout(self, tidied: str, *older: str, probes: list[str] | None = None) -> str:
         """The same choice as _keep_existing_layout, one level up.
 
         A collection's own folder is baked into the item template before any
@@ -1196,12 +1239,26 @@ class Download:
         the folder outright (issue #16) points at an ancestor, which exists
         whether or not anything was ever downloaded, and is therefore no
         evidence of an older layout.
+
+        ``probes`` is the same list of spellings (same order, preferred first)
+        resolved against a real item of the collection, and is what the folder
+        test is made on. A collection formats only the tokens its own type
+        answers to, and the shipped album template opens with {artist_name},
+        which only a track can answer: the spelling still carries it as
+        literal text, the folder tested therefore contains a literal
+        "{artist_name}" segment, never exists, and every library looked new.
+        A pre-0.1.17 album then got a second, tidy-spelled folder beside the
+        one it was already in. Without probes (an empty collection, or a
+        caller that has no item yet) the spellings are tested as they are,
+        which is the older behaviour.
         """
-        preferred_depth: int = len(self._collection_dir(tidied).parts)
-        for older_relative in older:
+        spellings: list[str] = [tidied, *older]
+        sources: list[str] = probes if probes and len(probes) == len(spellings) else spellings
+        dirs: list[pathlib.Path] = [self._collection_dir(source) for source in sources]
+        preferred_depth: int = len(dirs[0].parts)
+        for older_relative, older_dir in zip(spellings[1:], dirs[1:], strict=True):
             if older_relative == tidied:
                 continue
-            older_dir: pathlib.Path = self._collection_dir(older_relative)
             if len(older_dir.parts) == preferred_depth and older_dir.is_dir():
                 return older_relative
         return tidied
@@ -1290,11 +1347,12 @@ class Download:
         that difference is felt per track. Names are matched literally, never
         globbed, because a stem may hold glob characters of its own.
         """
-        media_id = str(getattr(media, "id", "") or "")
+        media_id = _waves_item_id(media)
+        owned_ids = _waves_owned_ids(media)
         if not media_id:
             return path_media_dst
         occupant_id = read_item_id(path_media_dst)
-        if not occupant_id or occupant_id == media_id:
+        if not occupant_id or occupant_id in owned_ids:
             return path_media_dst
 
         try:
@@ -1332,7 +1390,7 @@ class Download:
 
                 return sibling
 
-            if sibling_id == media_id:
+            if sibling_id in owned_ids:
                 return sibling
 
         return None
@@ -1354,7 +1412,7 @@ class Download:
             name for name, owner in self._names_written.items() if not media_id or owner != media_id
         }
 
-    def _is_own_copy(self, path_file: pathlib.Path, media_id: str) -> bool:
+    def _is_own_copy(self, path_file: pathlib.Path, media_id: str, owned_ids: set[str] | None = None) -> bool:
         """Whether the file already at this name is this item's own to replace.
 
         Asked only with skipping off, where an existing file is exactly what
@@ -1364,15 +1422,22 @@ class Download:
         the tag is full of: refusing those would strew numbered copies through
         the very library the user asked to refresh. A file carrying a
         different item's id is a different song, and replacing it loses it.
+
+        ``owned_ids`` widens "its own" to every id this item may have been
+        written under (see :func:`_waves_owned_ids`), which is what lets a
+        best-of-both member replace the copy an older Waves filed under the
+        source edition's id.
         """
         if not media_id:
             return True
 
         occupant: str = read_item_id(path_file)
 
-        return not occupant or occupant == media_id
+        return not occupant or occupant == media_id or occupant in (owned_ids or set())
 
-    def _claim_destination(self, path_media_dst: pathlib.Path, media_id: str) -> tuple[pathlib.Path, str | None]:
+    def _claim_destination(
+        self, path_media_dst: pathlib.Path, media_id: str, owned_ids: set[str] | None = None
+    ) -> tuple[pathlib.Path, str | None]:
         """Pick this download's final name and hold it, in one locked step.
 
         Picking and claiming cannot be two steps: the file only appears on disk
@@ -1386,6 +1451,9 @@ class Download:
         Args:
             path_media_dst (pathlib.Path): The name the template produced.
             media_id (str): The item being downloaded, "" when it has no id.
+            owned_ids (set[str] | None): Every id a file of this item may carry
+                on disk, for a best-of-both member an older build filed under
+                the source edition's id.
 
         Returns:
             tuple[pathlib.Path, str | None]: The name to use and the claim to
@@ -1397,7 +1465,7 @@ class Download:
                 path_media_dst,
                 names_taken=self._names_unavailable_to(media_id),
                 check_disk=self.skip_existing,
-                is_own_copy=lambda candidate: self._is_own_copy(candidate, media_id),
+                is_own_copy=lambda candidate: self._is_own_copy(candidate, media_id, owned_ids),
             )
 
             if path_media_unique is None:
@@ -1413,25 +1481,33 @@ class Download:
         with self._names_reserved_lock:
             self._names_written[str(path_file)] = media_id
 
-    def _prepare_file_paths_and_skip_logic(
+    def _destination_path(
         self,
         media: Track | Video,
         file_template: str,
         quality_audio: Quality | None,
-        list_position: int,
-        list_total: int,
-    ) -> tuple[pathlib.Path, str, bool, bool]:
-        """Prepare file paths and determine skip logic.
+        list_position: int = 0,
+        list_total: int = 0,
+    ) -> tuple[pathlib.Path, str]:
+        """WHERE this item will be written: the destination file path (before
+        any same-name numbering) and the extension it was guessed with.
+
+        One method, so anything that needs to know the destination ahead of
+        the write asks the same question the write asks, and gets the same
+        answer: the same template, the same sanitizing, and the same choice
+        among the older spellings a library may already use
+        (_keep_existing_layout). A second copy of this decision elsewhere
+        would agree on a fresh library and drift on any other.
 
         Args:
             media (Track | Video): Media item.
             file_template (str): Template for file naming.
-            quality_audio (Quality | None): Audio quality setting.
+            quality_audio (Quality | None): Audio quality, for the extension.
             list_position (int): Position in list.
             list_total (int): Total items in list.
 
         Returns:
-            tuple[pathlib.Path, str, bool, bool]: (path_media_dst, file_extension_dummy, skip_file, skip_download)
+            tuple[pathlib.Path, str]: (path_media_dst, file_extension_dummy)
         """
         # Create file name and path
         metadata_tags = [] if isinstance(media, Video) else (media.media_metadata_tags or [])
@@ -1471,6 +1547,31 @@ class Download:
             build(True, self._illegal_replacement()),
             build(True),
             build(False),
+        )
+        return path_media_dst, file_extension_dummy
+
+    def _prepare_file_paths_and_skip_logic(
+        self,
+        media: Track | Video,
+        file_template: str,
+        quality_audio: Quality | None,
+        list_position: int,
+        list_total: int,
+    ) -> tuple[pathlib.Path, str, bool, bool]:
+        """Prepare file paths and determine skip logic.
+
+        Args:
+            media (Track | Video): Media item.
+            file_template (str): Template for file naming.
+            quality_audio (Quality | None): Audio quality setting.
+            list_position (int): Position in list.
+            list_total (int): Total items in list.
+
+        Returns:
+            tuple[pathlib.Path, str, bool, bool]: (path_media_dst, file_extension_dummy, skip_file, skip_download)
+        """
+        path_media_dst, file_extension_dummy = self._destination_path(
+            media, file_template, quality_audio, list_position, list_total
         )
 
         # Compute if and how downloads need to be skipped.
@@ -1742,11 +1843,16 @@ class Download:
                             FLAC extraction flag, and media stream object.
                             Returns TrackStreamInfo with None/empty values if fails.
         """
-        want_atmos = (
-            self.settings.data.download_dolby_atmos
-            and hasattr(media, "audio_modes")
-            and AudioMode.dolby_atmos.value in media.audio_modes
-        )
+        # The Atmos session serves two cases: the user asked for Atmos and the
+        # track has it, or the track has NOTHING ELSE (TIDAL lists the Atmos
+        # version as its own id with no stereo stream, so the normal session
+        # has no stream to offer). The second clause is what downloads an
+        # Atmos-only track when the setting is off, instead of skipping it and
+        # leaving a hole in the album.
+        modes = getattr(media, "audio_modes", None) or []
+        has_atmos = AudioMode.dolby_atmos.value in modes
+        atmos_only = bool(modes) and all(mode == AudioMode.dolby_atmos.value for mode in modes)
+        want_atmos = has_atmos and (self.settings.data.download_dolby_atmos or atmos_only)
 
         if want_atmos:
             if not self.tidal.switch_to_atmos_session():
@@ -1796,6 +1902,14 @@ class Download:
         from a download that failed. They are not the same news: a failure is
         something to retry, a refusal is TIDAL saying the item is gone, and
         nothing the app does will fetch it."""
+
+    def _note_progress_task(self, media: Track | Video, p_task: TaskID) -> None:
+        """The rich progress task this item's segments report into. A no-op
+        here; the GUI's tracked download overrides it so a queue row can follow
+        its own item's percentage. Task descriptions are display names cut to 30
+        characters, so every track of a release with a long artist credit
+        registers the identical description and they cannot tell each other
+        apart. The TaskID can."""
 
     def _finalize_plan(
         self,
@@ -1931,9 +2045,9 @@ class Download:
             # unique name BEFORE writing lyrics/cover so those sidecars align with the final
             # audio file.
             overwrite: bool = not self.skip_existing
-            media_id: str = str(getattr(media, "id", "") or "")
+            media_id: str = _waves_item_id(media)
             path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
-            path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id)
+            path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id, _waves_owned_ids(media))
 
             if name_reserved is None:
                 # Every numbered variant of this name is taken. Nothing is lost
@@ -2151,7 +2265,7 @@ class Download:
             # at somebody else's track.
             overwrite: bool = not self.skip_existing
             name_reserved: str | None = None
-            media_id: str = str(getattr(media, "id", "") or "")
+            media_id: str = _waves_item_id(media)
 
             if self.skip_existing:
                 path_media_found: pathlib.Path | None = (
@@ -2176,7 +2290,9 @@ class Download:
                 # The same claim the plain download path takes, for the same
                 # reason: a sibling track of this collection reaches this move
                 # on another thread and would otherwise pick the very same name.
-                path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id)
+                path_media_dst, name_reserved = self._claim_destination(
+                    path_media_dst, media_id, _waves_owned_ids(media)
+                )
 
                 if name_reserved is None:
                     # No free name in the track folder. The audio is safe where
@@ -2854,7 +2970,7 @@ class Download:
             bpm=track.bpm if track.bpm else 0,
             initial_key=format_initial_key(track.key, track.key_scale, self.settings.data.initial_key_format),
             release_type=release_type,
-            item_id=str(track.id),
+            item_id=_waves_item_id(track),
         )
 
         try:
@@ -2973,7 +3089,6 @@ class Download:
 
         # Download configuration
         is_album: bool = isinstance(media, Album)
-        sort_by_track_num: bool = bool("album_track_num" in file_name_relative or "list_pos" in file_name_relative)
         list_total: int = len(items)
 
         # Execute downloads
@@ -2991,19 +3106,45 @@ class Download:
             event_stop,
         )
 
-        # Create playlist file if requested. The landed paths carry the list's
-        # own track order, so the m3u plays back in TIDAL's order (issue #22);
-        # the directory set alone cannot say which track comes first.
-        if self.settings.data.playlist_create:
-            self.playlist_populate(
-                {p.parent for p in result_paths},
-                list_media_name,
-                is_album,
-                sort_by_track_num,
-                paths_ordered=result_paths,
-            )
+        # Create playlist file if requested.
+        self._playlist_for_collection(media, file_name_relative, result_paths)
 
         self.fn_logger.info(f"Finished list '{log_content(list_media_name)}'.")
+
+    def _playlist_for_collection(
+        self,
+        media: Album | Playlist | UserPlaylist | Mix,
+        file_template: str,
+        result_paths: list[pathlib.Path],
+    ) -> None:
+        """The last step of a collection download: the m3u8 the "Create .m3u8
+        playlist" setting promises, written from the landed paths.
+
+        ``items()`` ends with this, and so must any fan-out that stands in for
+        ``items()`` over an explicit track list (the best-of-both merge in the
+        Waves bridge): an album gets its playlist file the same way however its
+        tracks were sourced. Kept as one method so the two cannot drift on what
+        the file is called, whether it sorts by number, or what it lists.
+
+        The landed paths carry the list's own track order, so the m3u plays
+        back in TIDAL's order (issue #22); the directory set alone cannot say
+        which track comes first.
+
+        ``file_template`` may be the raw template or the collection-formatted
+        one: the item tokens the sort decision reads ({album_track_num},
+        {list_pos}) are only substituted per track, so both spellings answer
+        alike.
+        """
+        if not self.settings.data.playlist_create:
+            return
+
+        self.playlist_populate(
+            {p.parent for p in result_paths},
+            name_builder_title(media),
+            isinstance(media, Album),
+            bool("album_track_num" in file_template or "list_pos" in file_template),
+            paths_ordered=result_paths,
+        )
 
     def _setup_collection_download_context(
         self,
@@ -3022,6 +3163,11 @@ class Download:
             tuple[str, str, str, list, bool]: (file_name_relative, list_media_name, list_media_name_short, items, progress_stdout)
         """
 
+        # Get all items of the list. Fetched before the folder is chosen: the
+        # choice is made on where a real item of this collection would land
+        # (see below), and one of them has to be in hand to ask that.
+        items = items_results_all(media, videos_include=video_download)
+
         # Create file name and path. The collection's own folder is baked into
         # the template here, before any item is queued, so the pre-0.1.17
         # spelling has to be preferred at THIS level too: by the time an item
@@ -3039,22 +3185,46 @@ class Download:
                 illegal_map=mapping,
             )
 
+        # The same spelling, finished off by a real item of this collection.
+        # A collection answers only its own tokens, so the shipped album
+        # template's opening {artist_name} (a track's question) survives as
+        # literal text, and a folder tested with that in it never exists. The
+        # folders compared have to be the ones items actually land in.
+        sample = next((item for item in items if isinstance(item, Track | Video)), None)
+
+        def build_probe(tidy: bool, replacement: str = "", mapping: dict[str, str] | None = None) -> str:
+            return format_path_media(
+                build_collection(tidy, replacement, mapping),
+                sample,
+                self.settings.data.album_track_num_pad_min,
+                1,
+                len(items),
+                delimiter_artist=self.settings.data.filename_delimiter_artist,
+                delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
+                use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                tidy_spacing=tidy,
+                illegal_replacement=replacement,
+                illegal_map=mapping,
+            )
+
+        spellings: list[tuple[bool, str, dict[str, str] | None]] = [
+            (True, self._illegal_replacement(), self._illegal_map()),
+            (True, self._illegal_replacement(), None),
+            (True, "", None),
+            (False, "", None),
+        ]
+
         # Older spellings (most recent first) win when their folder exists,
         # exactly as in _keep_existing_layout; the stand-in settings only name
         # folders that do not exist yet.
         file_name_relative: str = self._keep_existing_collection_layout(
-            build_collection(True, self._illegal_replacement(), self._illegal_map()),
-            build_collection(True, self._illegal_replacement()),
-            build_collection(True),
-            build_collection(False),
+            *(build_collection(*spelling) for spelling in spellings),
+            probes=[build_probe(*spelling) for spelling in spellings] if sample is not None else None,
         )
 
         # Get the name of the list and check, if videos should be included.
         list_media_name: str = name_builder_title(media)
         list_media_name_short: str = list_media_name[:30]
-
-        # Get all items of the list.
-        items = items_results_all(media, videos_include=video_download)
 
         # Determine where to redirect the progress information.
         if self.progress_gui is None:
@@ -3190,25 +3360,41 @@ class Download:
             if not progress_stdout:
                 self.progress_gui.list_item.emit(progress.tasks[progress_task].percentage)
 
-        # Collect in submission order, not completion order. On abort the
-        # cancelled and still-running tail is skipped, exactly the items the
-        # as_completed loop above never reported either.
+        return self._landed_paths(futures_list)
+
+    @staticmethod
+    def _landed_paths(futures_list: list[futures.Future]) -> list[pathlib.Path]:
+        """The files a fan-out of ``item()`` futures produced, in SUBMISSION
+        order (the collection's own track order), one per item that produced a
+        file. This is what ``playlist_populate`` is handed as ``paths_ordered``;
+        the same rule serves any fan-out that stands in for ``items()``.
+
+        Submission order, not completion order. On abort the cancelled and
+        still-running tail is skipped, exactly the items a reporting loop over
+        ``as_completed`` never got to either. An item that crashed produced no
+        file, and its exception was either already raised by that loop or never
+        reported at all (an abort broke out of it first): re-raising here would
+        turn the user's Cancel into a job failure, which a Cancel must never
+        be. Only an item that reports success AND a path landed one: an
+        exclusion or a copy owned elsewhere answers ``(True, "")``, and a
+        refusal, a failed fetch, a stopped download or a name with no free
+        variant answers ``(False, <the path it was aiming for>)`` from before
+        anything was written there. Neither is a landed file, so neither hands
+        the playlist writer a folder this run did not fill; a first-time album
+        that lost every track used to fail on the playlist's own temp file in a
+        folder that was never created, and that error hid the real reason.
+        """
         result_paths: list[pathlib.Path] = []
 
         for future in futures_list:
             if future.cancelled() or not future.done():
                 continue
-            # An item that crashed produced no file, and its exception was
-            # either already raised by the loop above or never reported at all
-            # (an abort broke out of it first). Re-raising here would turn the
-            # user's Cancel into a job failure, which items() promises it never
-            # does for a per-item error.
             if future.exception() is not None:
                 continue
 
-            _status, result_path_file = future.result()
+            status, result_path_file = future.result()
 
-            if result_path_file:
+            if status and result_path_file:
                 result_paths.append(pathlib.Path(result_path_file))
 
         return result_paths
