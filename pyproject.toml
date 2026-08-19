@@ -4,8 +4,8 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.21"
-description = "Waves: a native desktop app for downloading from TIDAL"
+version = "0.1.22"
+description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
@@ -171,6 +171,7 @@ ignore = [
 "tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
 "tests/test_boot_handover_gate.py" = ["S603", "C901"]
 "tests/test_browse_card_library_state.py" = ["S603", "C901"]
+"tests/test_browse_strip_fits_the_card.py" = ["S603", "C901"]
 "tests/test_library_track_claim.py" = ["S603", "C901"]
 "tests/test_boot_version_drain_order.py" = ["S603", "C901"]
 "tests/test_boot_scroll_dressing_hidden.py" = ["S603", "C901"]
@@ -198,6 +199,18 @@ ignore = [
 "tests/test_video_card_date_no_overlap.py" = ["S603", "C901"]
 "tests/test_search_playlist_block.py" = ["S603", "C901"]
 "tests/test_playlist_selection_and_reset.py" = ["S603", "C901"]
+"tests/test_progress_matrix_stable_width.py" = ["S603", "C901"]
+"tests/test_progress_carved_percent.py" = ["S603", "C901"]
+"tests/test_queue_row_progress_density.py" = ["S603", "C901"]
+"tests/test_card_progress_outline.py" = ["S603", "C901"]
+"tests/test_queue_playlist_expands.py" = ["S603", "C901"]
+"tests/test_queue_expected_tier.py" = ["S603", "C901"]
+"tests/test_queue_in_library_row.py" = ["S603", "C901"]
+"tests/test_queue_ledger_cap.py" = ["S603", "C901"]
+"tests/test_queue_repeated_track_state.py" = ["S603", "C901"]
+"tests/test_queue_owned_prediction.py" = ["S603", "C901"]
+"tests/test_progress_jump_ramp.py" = ["S603", "C901"]
+"tests/test_progress_pad_cells.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
