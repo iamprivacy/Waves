@@ -22,6 +22,16 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.23 (2026-08-20)
+
+### 🔧 Changed
+
+- ⚙️ The "When an album has several editions" setting now spells out that only "Best of both" works on its own: the other three choices take effect only with "Most-complete edition only" switched on ([issue #26](https://github.com/iamprivacy/Waves/issues/26)).
+
+### 🐛 Fixed
+
+- 🔊 With "Download Dolby Atmos" switched off, "Download discography" no longer saves the Dolby Atmos edition of an album alongside the regular one ([issue #26](https://github.com/iamprivacy/Waves/issues/26)).
+
 ## 🗂️ v0.1.22 (2026-08-19)
 
 ### 🔧 Changed
