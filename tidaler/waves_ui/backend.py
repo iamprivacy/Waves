@@ -2150,6 +2150,35 @@ def _edition_base_key(album):
     return (_strip_edition_quals(_norm_title(name_builder_title(album))), _norm_artist(artist), _atmos_kind(album))
 
 
+def _drop_spatial_editions(own: list, guest: list) -> tuple[list, list, int]:
+    """With the Dolby Atmos setting off, leave a bulk sweep's Atmos editions
+    out, wherever the sweep also holds the same release in stereo.
+
+    _atmos_kind keys the Atmos edition apart so every collapse keeps both rows,
+    which is right for browsing (issue #26 is what happens when it is also the
+    last word for a discography: the sweep queues the Atmos edition beside its
+    stereo twin, every track of it is Atmos-only, and the engine's own
+    "nothing else to fetch" clause then downloads Atmos for a user who turned
+    it off). The setting means "prefer stereo where there is a choice", so the
+    sweep is where the choice gets made.
+
+    Paired on (base title, artist), the edition key without its Atmos kind, so
+    a "(Dolby Atmos)"-suffixed twin still meets its stereo edition. An Atmos
+    release with NO stereo twin anywhere in the sweep stays: dropping it would
+    leave a hole in the discography, the same hole the engine's clause exists
+    to prevent. An explicitly clicked Atmos row never passes through here."""
+    if not any(_atmos_only(a) for a in (*own, *guest)):
+        return own, guest, 0  # nothing spatial to pair, no keys to build
+    stereo = {_edition_base_key(a)[:2] for a in (*own, *guest) if not _atmos_only(a)}
+
+    def keep(a) -> bool:
+        return not (_atmos_only(a) and _edition_base_key(a)[:2] in stereo)
+
+    kept_own = [a for a in own if keep(a)]
+    kept_guest = [a for a in guest if keep(a)]
+    return kept_own, kept_guest, (len(own) - len(kept_own)) + (len(guest) - len(kept_guest))
+
+
 def _norm_track_title(name: str) -> str:
     """Normalised track title for cross-edition matching (feat./version/remaster
     qualifiers stripped, lowercased)."""
@@ -10064,6 +10093,12 @@ class WavesBridge(LibraryMixin, QObject):
                 self.downloadState.emit(artist_id, "")
                 self._set_status("Could not load the full discography, try again")
                 return
+            if not self.settings.data.download_dolby_atmos:
+                # The setting decides which of a release's two rows a bulk
+                # sweep downloads; see _drop_spatial_editions.
+                albums, guest, left_out = _drop_spatial_editions(albums, guest)
+                if left_out:
+                    devlog.event("artist_releases", atmos_editions_left_out=left_out)
             deduped = self._dedup_albums(albums)
             plans: list = []
             # 'Best of both' stands on its own; plain edition collapsing is the
@@ -11105,10 +11140,11 @@ class WavesBridge(LibraryMixin, QObject):
                         "'Best of both' builds one album from the most complete edition's track list, with each "
                         "shared song pulled from the highest-quality edition that has it (the exclusive bonus "
                         "tracks stay at the complete edition's quality). It works on its own, both when you save a "
-                        "single album and on 'Download discography'. The other three answer 'Most-complete edition "
-                        "only' when the most complete edition is a lower audio quality than a smaller one: 'Keep "
-                        "both' downloads both, 'Most complete' keeps the most complete, 'Highest quality' keeps the "
-                        "highest quality."
+                        "single album and on 'Download discography', whether or not 'Most-complete edition only' "
+                        "is on. The other three choices only take effect when 'Most-complete edition only' is on, "
+                        "and decide what happens when the most complete edition is a lower audio quality than a "
+                        "smaller one: 'Keep both' downloads both, 'Most complete' keeps the most complete, "
+                        "'Highest quality' keeps the highest quality."
                     ),
                     "type": "enum",
                     "value": self._waves_prefs.get("edition_conflict", "keep_both"),
