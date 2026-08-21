@@ -111,7 +111,9 @@ class _DiscoStub:
 
     def __init__(self, artist, video_download: bool):
         self._dl = object()
-        self.settings = SimpleNamespace(data=SimpleNamespace(video_download=video_download))
+        # download_dolby_atmos off on purpose: the sweep's Atmos filter runs
+        # (and must pass a spatial-free release list through untouched).
+        self.settings = SimpleNamespace(data=SimpleNamespace(video_download=video_download, download_dolby_atmos=False))
         self._artist = artist
         self._artist_groups: dict = {}
         self._artist_lock = Lock()
