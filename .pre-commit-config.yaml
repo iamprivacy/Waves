@@ -47,15 +47,6 @@ repos:
         types: [python]
         language: system
 
-  # Disabled du to conflicts with black and I like the style of black more.
-  #  - repo: local
-  #    hooks:
-  #      - id: isort
-  #        name: isort
-  #        entry: poetry run isort --settings-path pyproject.toml
-  #        types: [python]
-  #        language: system
-
   - repo: local
     hooks:
       - id: black
@@ -63,11 +54,3 @@ repos:
         entry: poetry run black --config pyproject.toml
         types: [python]
         language: system
-#  - repo: local
-#    hooks:
-#      - id: pyright
-#        name: pyright
-#        entry: poetry run pyright
-#        types: [python]
-#        language: system
-#        pass_filenames: false

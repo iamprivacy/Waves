@@ -4,14 +4,14 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to tidaler.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.23"
+version = "0.1.24"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 classifiers = [
   "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -20,8 +20,9 @@ requires-python = ">=3.12,<3.14"
 dynamic = ["dependencies"]
 
 [project.urls]
+homepage = "https://getwaves.dev"
 repository = "https://github.com/iamprivacy/Waves"
-documentation = "https://github.com/iamprivacy/Waves"
+documentation = "https://getwaves.dev"
 
 [tool.poetry]
 packages = [{ include = "tidaler" }]
@@ -32,7 +33,6 @@ mutagen = "^1.47.0"
 dataclasses-json = "^0.6.7"
 pathvalidate = "^3.3.1"
 m3u8 = "^6.0.0"
-coloredlogs = "^15.0.1"
 # Exact pin. PySide6 6.10.0 through 6.11.1 ship macOS binding libraries built
 # for macOS 15 despite their macosx_13_0 wheel tag, so on macOS this version
 # really requires Sequoia (dyld kills the app on anything older, issue #14).
@@ -49,7 +49,8 @@ toml = "^0.10.2"
 tidalapi = "^0.8.10"
 python-ffmpeg = "^2.0.12"
 pycryptodome = "^3.23.0"
-ansi2html = "^1.9.2"
+certifi = ">=2026.4.22"
+urllib3 = "^2.7.0"
 
 [project.optional-dependencies]
 gui = ["pyside6"]
@@ -60,28 +61,12 @@ optional = true
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.1"
 deptry = "^0.24.0"
-pyright = "^1.1.398"
 pre-commit = "^4.5.0"
 tox = "^4.32.0"
 pyupgrade = "^3.21.2"
-bandit = "^1.9.2"
-isort = { extras = ["colors"], version = "^7.0.0" }
-mypy-extensions = "^1.1.0"
-pydocstyle = "^6.3.0"
-pylint = "^4.0.4"
 pillow = "^12.0.0"
-pytest-cov = "^7.0.0"
 black = "^25.11.0"
 nuitka = "2.8.4"
-
-[tool.poetry.group.docs]
-optional = true
-
-[tool.poetry.group.docs.dependencies]
-mkdocs = "^1.6.1"
-mkdocs-material = "^9.5.44"
-mkdocstrings = { extras = ["python"], version = "^0.27.0" }
-griffe = "^1.5.1"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -168,6 +153,7 @@ ignore = [
 "tests/test_folder_back_navigation.py" = ["S603", "C901"]
 "tests/test_search_results_surface_steal.py" = ["S603", "C901"]
 "tests/test_search_scroll_reset.py" = ["S603", "C901"]
+"tests/test_search_top_result.py" = ["S603", "C901"]
 "tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
 "tests/test_boot_handover_gate.py" = ["S603", "C901"]
 "tests/test_browse_card_library_state.py" = ["S603", "C901"]
@@ -183,6 +169,7 @@ ignore = [
 "tests/test_queue_row_quality.py" = ["S603", "C901"]
 "tests/test_queue_unavailable_word.py" = ["S603", "C901"]
 "tests/test_queue_drawer_resize.py" = ["S603", "C901"]
+"tests/test_queue_delta_mirror.py" = ["S603", "C901"]
 "tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
 "tests/test_library_downloaded_state.py" = ["S603", "C901"]
 "tests/test_qml_loads.py" = ["S603", "C901"]
@@ -196,6 +183,8 @@ ignore = [
 "tests/test_browse_console_wayfinding.py" = ["S603", "C901"]
 "tests/test_browse_row_window.py" = ["S603", "C901"]
 "tests/test_video_grid_hover_dwell.py" = ["S603", "C901"]
+"tests/test_hover_prefetch_scenario.py" = ["S603", "C901"]
+"tests/test_offscreen_qt_is_usable.py" = ["S603"]
 "tests/test_video_card_date_no_overlap.py" = ["S603", "C901"]
 "tests/test_search_playlist_block.py" = ["S603", "C901"]
 "tests/test_playlist_selection_and_reset.py" = ["S603", "C901"]
@@ -251,81 +240,5 @@ exclude = '''
     | dist
     | env
     | venv
-    | site
-    | docs
-    | tidaler/ui/main.py
-    | tidaler/ui/dialog_version.py
 )/
 '''
-
-[tool.isort]
-# https://github.com/timothycrosley/isort/
-py_version = 312
-line_length = 120
-known_typing = [
-  "typing",
-  "types",
-  "typing_extensions",
-  "mypy",
-  "mypy_extensions",
-]
-sections = [
-  "FUTURE",
-  "TYPING",
-  "STDLIB",
-  "THIRDPARTY",
-  "FIRSTPARTY",
-  "LOCALFOLDER",
-]
-include_trailing_comma = true
-profile = "black"
-multi_line_output = 3
-indent = 4
-color_output = true
-known_third_party = [
-  "Crypto",
-  "PySide6",
-  "coloredlogs",
-  "dataclasses_json",
-  "ffmpeg",
-  "m3u8",
-  "mutagen",
-  "pathvalidate",
-  "requests",
-  "rich",
-  "tidalapi",
-  "toml",
-  "typer",
-]
-
-[tool.pyright]
-# https://microsoft.github.io/pyright/#/configuration
-include = ["tidaler"]
-pythonVersion = "3.12"
-typeCheckingMode = "standard"
-reportMissingImports = true
-reportMissingTypeStubs = false
-reportUnusedImport = true
-reportUnusedClass = true
-reportUnusedFunction = true
-reportUnusedVariable = true
-reportDuplicateImport = true
-reportUntypedFunctionDecorator = false
-reportUntypedClassDecorator = false
-reportUntypedBaseClass = true
-reportUntypedNamedTuple = true
-reportPrivateUsage = false
-reportConstantRedefinition = true
-reportIncompatibleMethodOverride = true
-reportIncompatibleVariableOverride = true
-reportInconsistentConstructor = true
-reportOverlappingOverload = true
-reportMissingSuperCall = false
-reportUninitializedInstanceVariable = false
-reportCallInDefaultInitializer = false
-reportImplicitStringConcatenation = false
-reportUnusedCallResult = false
-reportUnusedCoroutine = true
-reportUnusedExpression = false
-reportUnnecessaryTypeIgnoreComment = true
-reportMatchNotExhaustive = true
