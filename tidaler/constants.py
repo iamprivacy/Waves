@@ -8,6 +8,13 @@ REQUESTS_TIMEOUT_SEC: int = 45
 EXTENSION_LYRICS: str = ".lrc"
 UNIQUIFY_THRESHOLD: int = 99
 FILENAME_SANITIZE_PLACEHOLDER: str = "_"
+# What a path segment that is nothing but "." or ".." is written as. Neither
+# survives being a folder name: "." is what every platform calls "this folder",
+# so the segment evaporates in the join that builds the destination and the
+# album's tracks land loose in the artist folder (issue #29), and ".." walks up
+# out of the download folder. Fullwidth full stop for the same reason "?" takes
+# "？": the folder still reads as the release's own name.
+DOT_SEGMENT_STANDIN: str = "．"
 COVER_NAME: str = "cover.jpg"
 BLOCK_SIZE: int = 4096
 BLOCKS: int = 1024

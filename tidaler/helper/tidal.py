@@ -134,6 +134,12 @@ def search_results_all(session: Session, needle: str, types_media: SearchTypes =
 
         for key, value in tmp_result.items():
             if key == "top_hit":
+                # TIDAL names one best match for the query on the first page
+                # (an artist, album, track, video or playlist object, or
+                # None). Carried through untouched; the per-type lists below
+                # are what the paging accumulates.
+                if offset == 0:
+                    result[key] = value
                 continue
 
             # init the list

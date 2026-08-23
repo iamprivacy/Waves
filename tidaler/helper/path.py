@@ -19,6 +19,7 @@ from tidalapi.media import AudioExtensions
 
 from tidaler import __config_dirname__
 from tidaler.constants import (
+    DOT_SEGMENT_STANDIN,
     FILENAME_LENGTH_MAX,
     FILENAME_SANITIZE_PLACEHOLDER,
     FORMAT_TEMPLATE_EXPLICIT,
@@ -417,7 +418,8 @@ def format_path_media(
 
 
 def _drop_empty_segments(path_relative: str) -> str:
-    """Collapse empty components out of a formatted relative media path.
+    """Collapse empty components out of a formatted relative media path, and
+    give a component that is nothing but dots a name it can keep.
 
     A token whose value sanitizes to ``""`` is substituted blind, and both
     default templates open with ``{artist_name}``. An artist name that empties
@@ -432,8 +434,21 @@ def _drop_empty_segments(path_relative: str) -> str:
 
     Dropping empty components keeps the path relative and inside the base, and
     also tidies the doubled separator an emptied mid-template token leaves.
+
+    A component of exactly ``.`` or ``..`` is a different failure with the same
+    look. Nothing removes it: pathvalidate exempts both from its trailing-dot
+    rule, so ``.`` reaches the join intact and dies there, because ``.`` is what
+    every platform calls "this folder". An album titled ``.`` therefore got no
+    folder at all and dropped its tracks, its cover and its playlist file loose
+    into the artist folder (issue #29). ``_no_traversal`` was written for both,
+    but it runs over ``Path.parent.parts``, and pathlib has already swallowed
+    the ``.`` by then; it still catches ``..``, which pathlib keeps. Naming them
+    here, on the string, is the only place either can still be seen, and it
+    covers every segment a template can name: artist, album, playlist, mix.
     """
-    return "/".join(part for part in re.split(r"[\\/]+", path_relative) if part)
+    return "/".join(
+        DOT_SEGMENT_STANDIN if part in (".", "..") else part for part in re.split(r"[\\/]+", path_relative) if part
+    )
 
 
 def format_str_media(
