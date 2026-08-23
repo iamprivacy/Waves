@@ -465,6 +465,12 @@ class AppUpdater:
         self.current_version = current_version
         self.repo = (repo if repo is not None else REPO).strip().strip("/")
         self.os_key, self.arch = _os_arch()
+        # Windows: the result of an install whose detached swap helper is
+        # already waiting for this process to exit. A second install in the
+        # same session must not extract over the staged tree that helper will
+        # mirror, nor spawn a second helper to race the first over the same
+        # backup folder (either race ends with a copy of the app deleted).
+        self._armed_result: dict | None = None
 
     # ----- configuration / locations ------------------------------------- #
     def is_configured(self) -> bool:
@@ -597,6 +603,9 @@ class AppUpdater:
             raise UpdaterError("Updates aren't configured for this build.")
         if not is_frozen():
             raise UpdaterError("Self-update is only available in packaged builds, open the Releases page to update.")
+        if self._armed_result is not None:
+            _log("an update is already staged; restart to finish")
+            return dict(self._armed_result)
         channel = managed_channel()
         if channel:
             cmd = managed_upgrade_command(channel)
@@ -689,7 +698,10 @@ class AppUpdater:
 
         self._write_manifest(release)
         _log(f"installed {release.version}")
-        return {"ok": True, "version": release.version, "applied_to": str(applied_to), "relaunch": True}
+        result = {"ok": True, "version": release.version, "applied_to": str(applied_to), "relaunch": True}
+        if self.os_key == "windows":
+            self._armed_result = dict(result)
+        return result
 
     def _managed_upgrade(self, channel: str, cmd: list[str], progress_cb, log, abort: Event | None, session) -> dict:
         """Upgrade a package-manager-owned install by running the manager itself.
@@ -1108,34 +1120,45 @@ class AppUpdater:
         the new tree in for the install directory and relaunches.
 
         Crash-safe: the helper first renames the live install to ``.old`` (a fast
-        same-volume move), mirrors the new tree into place, and, if the mirror
-        fails, deletes the partial copy and restores ``.old`` before relaunching,
-        so a failed/partial update never leaves a broken install tree. If even the
-        initial backup rename fails, the live install is untouched and is simply
-        relaunched.
+        same-volume move), mirrors the new tree into place, and deletes the backup
+        ONLY once the mirrored folder holds the executable. A failed mirror, or a
+        mirror that copied nothing (an emptied staged tree, an antivirus that
+        quarantined the new exe), deletes the partial copy and restores ``.old``,
+        so no outcome leaves the user without a working copy. If even the initial
+        backup rename fails, the live install is untouched and simply relaunched.
+        The staged tree is checked for the executable before the helper is even
+        written, and while the app is still running the helper only waits, it
+        never starts a second instance.
 
         Only the app's own paths are interpolated (never the asset name), so there
         is no command injection. The per-OS swap is only fully verifiable against a
         real packaged build.
         """
+        new_exe = new_tree / target.name
+        if not new_exe.is_file() or new_exe.stat().st_size == 0:
+            raise UpdaterError(f"Refusing to install: the downloaded build has no {target.name}.")
         install_root = target.parent
         backup = install_root.with_name(install_root.name + ".old")
         pid = os.getpid()
         log_file = self.staging_dir / "update.log"
         # robocopy exit codes 0–7 are success (files copied / nothing to do); >=8
-        # means a real failure. Back up first, and only relaunch the new build when
-        # the mirror succeeded, otherwise restore the backup and relaunch that, so
-        # we never start the app against a half-mirrored, broken install tree.
-        # The initial rename is retried: the folder can stay locked for a moment
-        # after the process exits (AV scan, straggling handles). Every step logs
-        # to update.log so a failed swap in the field is diagnosable.
+        # means a real failure. Exit 0 also covers "source empty, nothing copied",
+        # so the executable is checked after the mirror too. Each branch is its
+        # own label: a cmd `if ... cmd1 & cmd2` binds cmd2 INTO the if, so the
+        # former one-line restore chain silently skipped the restore whenever
+        # the mirror had created no folder, and the script fell through to
+        # deleting the backup (an emptied install in the field). The initial
+        # rename is retried: the folder can stay locked for a moment after the
+        # process exits (AV scan, straggling handles). Every step logs to
+        # update.log so a failed swap in the field is diagnosable.
         cmd = (
             f"@echo off\r\n"
             f'echo helper start %date% %time% > "{log_file}"\r\n'
+            f'if not exist "{new_exe}" (echo staged build has no {target.name}, nothing applied >> "{log_file}" & goto done)\r\n'
             f"set tries=0\r\n"
             f":wait\r\n"
             f"set /a tries+=1\r\n"
-            f'if %tries% GTR 150 (echo gave up waiting for pid {pid} >> "{log_file}" & start "" "{target}" & del "%~f0" & exit /b 1)\r\n'
+            f"if %tries% GTR {self._HELPER_WAIT_TICKS} goto giveup\r\n"
             f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
             f'echo app exited after %tries% checks >> "{log_file}"\r\n'
             f'if exist "{backup}" rmdir /S /Q "{backup}" >> "{log_file}" 2>&1\r\n'
@@ -1145,20 +1168,37 @@ class AppUpdater:
             f'move "{install_root}" "{backup}" >> "{log_file}" 2>&1 && goto mirror\r\n'
             f"if %mtries% LSS 30 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n"
             f'echo backup rename failed, relaunching old build >> "{log_file}"\r\n'
-            f'start "" "{target}" & del "%~f0" & exit /b 1\r\n'
+            f"goto relaunch\r\n"
             f":mirror\r\n"
             f'robocopy "{new_tree}" "{install_root}" /MIR /MOVE >> "{log_file}" 2>&1\r\n'
-            f'if %ERRORLEVEL% GEQ 8 (echo robocopy failed %ERRORLEVEL%, restoring backup >> "{log_file}" & if exist "{install_root}" rmdir /S /Q "{install_root}" & move "{backup}" "{install_root}" >nul & start "" "{target}" & del "%~f0" & exit /b 1)\r\n'
+            f'if %ERRORLEVEL% GEQ 8 (echo robocopy failed %ERRORLEVEL% >> "{log_file}" & goto restore)\r\n'
+            f'if not exist "{target}" (echo mirror left no {target.name} >> "{log_file}" & goto restore)\r\n'
             f'echo mirror ok, cleaning up >> "{log_file}"\r\n'
             f'rmdir /S /Q "{backup}" >nul 2>&1\r\n'
-            f'start "" "{target}"\r\n'
-            f'echo relaunched >> "{log_file}"\r\n'
+            f"goto relaunch\r\n"
+            f":restore\r\n"
+            f'echo restoring backup >> "{log_file}"\r\n'
+            f'if exist "{install_root}" rmdir /S /Q "{install_root}" >> "{log_file}" 2>&1\r\n'
+            f'move "{backup}" "{install_root}" >> "{log_file}" 2>&1\r\n'
+            f":relaunch\r\n"
+            f'if exist "{target}" (start "" "{target}" & echo relaunched >> "{log_file}") else (echo nothing to relaunch >> "{log_file}")\r\n'
+            f"goto done\r\n"
+            f":giveup\r\n"
+            f'echo gave up waiting for pid {pid}, nothing applied >> "{log_file}"\r\n'
+            f":done\r\n"
             f'del "%~f0"\r\n'
         )
         helper = self.staging_dir / "apply_update.bat"
         helper.write_text(cmd, encoding="utf-8")
         self._spawn_helper(helper)
         return target
+
+    # How long (in ~1 s ticks) a Windows helper waits for the app to exit before
+    # giving up WITHOUT touching the install. The helper is armed at install
+    # time, not at "Restart now", so a user who reads on for an hour must still
+    # get the swap when they finally restart (the old 150 s cap then launched a
+    # second instance of the running app, and the later restart swapped nothing).
+    _HELPER_WAIT_TICKS = 4 * 60 * 60
 
     def _apply_macos(self, staged: Path, target: Path, log) -> Path:
         """Replace the running ``.app`` bundle, or fall back to a single file."""
@@ -1225,7 +1265,7 @@ class AppUpdater:
             f"set tries=0\r\n"
             f":wait\r\n"
             f"set /a tries+=1\r\n"
-            f'if %tries% GTR 150 (echo gave up waiting for pid {pid} >> "{log_file}" & start "" "{target}" & del "%~f0" & exit /b 1)\r\n'
+            f'if %tries% GTR {self._HELPER_WAIT_TICKS} (echo gave up waiting for pid {pid}, nothing applied >> "{log_file}" & del "%~f0" & exit /b 1)\r\n'
             f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
             f'echo app exited after %tries% checks >> "{log_file}"\r\n'
             f'if exist "{backup}" del /F /Q "{backup}" >nul 2>&1\r\n'
