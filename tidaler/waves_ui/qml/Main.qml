@@ -298,15 +298,23 @@ ApplicationWindow {
     readonly property bool hasResults: artistsModel.count > 0 || albumsModel.count > 0
                                        || tracksModel.count > 0 || videosModel.count > 0
                                        || playlistsModel.count > 0 || mixesModel.count > 0
+                                       || searchTop !== null
     // ---- Search results / artist page / My Tidal ------------------------
     // Result rows live in the *Model ListModels (declared further down) and
     // are replaced wholesale on each search; these hold the sort order and
     // per-page state around them.
-    property bool sortAsc: false
+    // Both halves of the sort control are pref-backed (search_sort by name,
+    // search_sort_asc), so a launch opens on the order last chosen.
+    property bool sortAsc: waves.wavesPref("search_sort_asc") === true
+    readonly property var sortKeys: ["relevance", "date", "name", "popularity"]
     property bool bioExpanded: false
     property var albumsRaw: []            // unsorted album dicts, re-sorted into albumsModel
     property var tracksRaw: []            // same, for tracksModel
     property var videosRaw: []            // same, for videosModel
+    // TIDAL's best match for the search (a row dict tagged with its kind:
+    // album, track, video or playlist), or null. Pinned above every section
+    // of the mixed All view; the item still sits in its own section below.
+    property var searchTop: null
     // Default "home": the first My Tidal press of a session lands there, and
     // later presses return to whichever category this last held (openLibrary).
     property string libraryCategory: "home"
@@ -722,7 +730,7 @@ ApplicationWindow {
     // drives the header badge.
     property int activeQueueCount: 0
 
-    // ---- Download-queue grouping (Completed / Downloading / Queued) ----------
+    // ---- Download-queue grouping (Completed / Failed / Stopped / Downloading / Queued)
     // A finished row lingers 5s with its ✓ DONE chip, then slides up into the
     // collapsible Completed group. These counts feed the sticky section headers;
     // compBump ticks on each promotion so the Completed header count can pulse.
@@ -735,6 +743,10 @@ ApplicationWindow {
     // Finished rows still lingering before their move to Completed; arms the
     // root lingerClock so the fold happens with the queue drawer closed too.
     property int lingerCount: 0
+    // The rows STOP ended get a section of their own (between Failed and
+    // Downloading) with the same RETRY ALL and CLEAR shape as Failed, so a
+    // stop never reads as an error and a failure is never lost in a stop.
+    property int stoppedCount: 0
     property int queuedCount: 0
     property int compBump: 0
     // Queue-row album expansion: which rows are open (by qid) and each row's
@@ -781,6 +793,11 @@ ApplicationWindow {
     // onBrowsePageLoaded fills browsePage.title in. Empty when the opener had
     // no title at hand; the trail then holds the crumb back entirely.
     property string browseTitleHint: ""
+    // The clicked card's own cover, kept the same way while the payload is
+    // in flight: the page hero paints it the frame the page is keyed (see
+    // Art.underUrl) instead of waiting on the whole track list. Empty when
+    // the opener had no cover at hand (a now-playing link, a video).
+    property string browseArtHint: ""
     // --- Browse landing build veil ---------------------------------------
     // Fresh landing shelves incubate through asynchronous Loaders so the GUI
     // thread never freezes mid tab-strike, but the page must never be WATCHED
@@ -1141,6 +1158,12 @@ ApplicationWindow {
     // the beginning. Same one-write-per-tick discipline as ledPulse; when
     // nothing is queued nothing binds it.
     property int marchTick: 0
+    // The blinking terminal cursor, shared. A whole page of track discs can be
+    // loading at once (the row window keeps ~70 alive), and one blink animation
+    // per disc is the per-vsync repaint trap above. One derived value off
+    // marchTick gives every mark the same 500ms on / 500ms off as the cover
+    // box's own cursor, evaluated once per tick instead of once per disc.
+    readonly property real termBlink: (marchTick % 20) < 10 ? 1 : 0
     // Presentation stall detector. When the window is fully covered (or
     // minimised/hidden), macOS stops asking it to render: frameSwapped goes
     // quiet while the media clock and every Timer keep running, so on
@@ -1332,21 +1355,27 @@ ApplicationWindow {
         }
     }
 
-    // Create-or-get the reactive holder for a media id (writers only). Cloning
-    // dlHolders on creation forces a change notification so any control already
-    // bound to dlPct(id)/dlSt(id) starts tracking the new holder; that O(N)
-    // rebind happens once per download start, not once per progress tick.
+    // Create-or-get the reactive holder for a media id (writers only). A new
+    // holder bumps dlHoldersGen, which dlPct()/dlSt() read, so any control
+    // already bound to them re-evaluates and starts tracking the new holder;
+    // that rebind happens once per download start, not once per progress
+    // tick. The map itself is only ever added to in place: it used to be
+    // cloned for the same notification, which made every new download cost
+    // a copy of every holder before it (a 10,000-album queue took 19 s of
+    // GUI thread just to be queued).
+    property int dlHoldersGen: 0
     function dlHolder(id) {
         var h = dlHolders[id]
         if (h === undefined) {
             h = dlHolderComp.createObject(root, { pct: -1, st: "" })
             if (h === null) return null
-            var m = Object.assign({}, dlHolders); m[id] = h; dlHolders = m
+            dlHolders[id] = h
+            dlHoldersGen += 1
         }
         return h
     }
-    function dlPct(id) { var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
-    function dlSt(id) { var h = dlHolders[id]; return h !== undefined ? h.st : "" }
+    function dlPct(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
+    function dlSt(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.st : "" }
     // The queue row a media id is waiting in, so a download button can cancel
     // its own wait without the queue drawer being opened. Walked on the click,
     // never bound: a queue of any size costs nothing until someone presses the
@@ -1675,7 +1704,7 @@ ApplicationWindow {
     // highlighted (fade), falling back to the artist page if there's no album
     // id. Each artist name links to its own page inline (see the bar itself).
     function nowOpenAlbum() {
-        if (previewNowAlbumId !== "") openAlbumPage(previewNowAlbumId, previewNowTrackId)
+        if (previewNowAlbumId !== "") openAlbumPage(previewNowAlbumId, previewNowTrackId, "", previewNowArt)
         else if (previewNowArtistId !== "") waves.loadArtist(previewNowArtistId)
     }
     // "M:SS" from milliseconds, for the scrubber time readout.
@@ -1755,7 +1784,8 @@ ApplicationWindow {
                                  scrollY: browsePageKey === "" ? browseLanding.contentY : browseDrill.contentY,
                                  label: browsePageKey === "" ? "Browse"
                                        : browsePage ? (browsePage.title || "Browse")
-                                       : (browseTitleHint !== "" ? browseTitleHint : "Browse") }
+                                       : (browseTitleHint !== "" ? browseTitleHint : "Browse"),
+                                 art: browsePageKey !== "" && !browsePage ? browseArtHint : "" }
         return { v: "search", label: "Search" }
     }
     function navPush() {
@@ -1855,6 +1885,7 @@ ApplicationWindow {
                 // same page) costs nothing and Back pays no teardown.
                 browsePageKey = ""
                 browseTitleHint = ""
+                browseArtHint = ""
                 browsePageLoading = false; browsePageError = false
             } else if (bkey === browsePageKey && browsePage) {
                 // The drilled page snapshotted is the one still loaded in
@@ -1871,9 +1902,12 @@ ApplicationWindow {
                 browseDrill.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
                 browsePageKey = bkey
                 browsePage = s.page || null
-                // A page snapshotted mid-load has no payload; its label is
-                // the best (and only) name for it until the user reloads it.
+                // A page snapshotted mid-load has no payload; its label and
+                // cover are the best (and only) face for it until the user
+                // reloads it: the header shows them as a skeleton, nothing is
+                // fetched (same as the blank pane before, with a face on it).
                 browseTitleHint = !s.page ? (s.label || "") : ""
+                browseArtHint = !s.page ? (s.art || "") : ""
                 browsePageLoading = false; browsePageError = false
             }
             if (root.signedIn && browseSections.length === 0 && !browseLoading) {
@@ -1963,6 +1997,7 @@ ApplicationWindow {
             browseStack = []
             browseHighlightId = ""
             browseTitleHint = ""
+            browseArtHint = ""
             browsePageLoading = false; browsePageError = false
             browsePageKey = ""
             artistOpen = false; settingsOpen = false; libraryOpen = false
@@ -2122,7 +2157,7 @@ ApplicationWindow {
         trackCache = ({}); expandedAlbums = ({})
         playlistTrackCache = ({}); expandedPlaylists = ({})
         _searchBuildStart(0)   // a mid-build blank must drop the veil with the cards
-        artistsModel.clear(); albumsRaw = []; tracksRaw = []; videosRaw = []; applySort()
+        artistsModel.clear(); albumsRaw = []; tracksRaw = []; videosRaw = []; searchTop = null; applySort()
         playlistsModel.clear(); mixesModel.clear()
         searchField.forceActiveFocus()
     }
@@ -2201,6 +2236,7 @@ ApplicationWindow {
         browseStack = []
         browsePageKey = ""
         browseTitleHint = ""   // the landing is "Browse", never the page we left
+        browseArtHint = ""
         browsePageLoading = false
         browsePageError = false
         browseHighlightId = ""
@@ -2229,6 +2265,7 @@ ApplicationWindow {
         browsePageKey = path
         browsePage = null
         browseTitleHint = title || ""   // names the crumb until the payload lands
+        browseArtHint = ""              // editorial pages have no hero
         browsePageError = false
         browsePageLoading = true
         waves.openBrowsePage(path, title)
@@ -2346,6 +2383,7 @@ ApplicationWindow {
         browsePageKey = key
         browsePage = null
         browseTitleHint = title || ""   // names the crumb until the payload lands
+        browseArtHint = ""              // a playlist grid has no hero
         browsePageError = false
         browsePageLoading = true
         waves.openBrowsePlaylists(path, title)
@@ -2435,7 +2473,9 @@ ApplicationWindow {
     // Open one playlist / mix / album as its own page inside Browse (art
     // header + track list). Drilling from an editorial page pushes it onto
     // browseStack so Back walks up one level at a time.
-    function openBrowseItem(kind, id, highlight, title) {
+    // `art` is the opener's own cover URL (a card's, a row's): the hero
+    // paints it at once, before the payload, see browseArtHint.
+    function openBrowseItem(kind, id, highlight, title, art) {
         if (browsePageKey === "item:" + kind + ":" + id) {
             // Already keyed to this page, nothing to fetch. But the key
             // survives leaving Browse via the nav tabs, so "already there"
@@ -2460,6 +2500,7 @@ ApplicationWindow {
         browsePageKey = "item:" + kind + ":" + id
         browsePage = null
         browseTitleHint = title || ""   // names the crumb until the payload lands
+        browseArtHint = art || ""       // faces the hero until the payload lands
         browsePageError = false
         browsePageLoading = true
         waves.openBrowseItem(kind, id)
@@ -2469,6 +2510,7 @@ ApplicationWindow {
         browsePageError = false
         browseHighlightId = ""
         browseTitleHint = ""
+        browseArtHint = ""
         if (browseStack.length > 0) {
             var s = browseStack.slice()
             var prev = s.pop()
@@ -2495,10 +2537,10 @@ ApplicationWindow {
     function onArtistPage(artistId) {
         return artistOpen && artistData && ("" + artistData.id) === ("" + artistId)
     }
-    function openAlbumPage(albumId, highlight, title) {
+    function openAlbumPage(albumId, highlight, title, art) {
         if (!albumId || onAlbumPage(albumId)) return
         markNav("browse")
-        openBrowseItem("album", albumId, highlight || "", title || "")   // snapshots the view being left
+        openBrowseItem("album", albumId, highlight || "", title || "", art || "")   // snapshots the view being left
         settingsOpen = false; artistOpen = false; libraryOpen = false
         browseOpen = true
         if (root.signedIn && browseSections.length === 0 && !browseLoading) {
@@ -2509,12 +2551,12 @@ ApplicationWindow {
     // Same page for a playlist from anywhere (My Tidal rows included): the
     // synthesized art-header + track-list browse page, switching the Browse
     // surface in just like openAlbumPage does for albums.
-    function openPlaylistPage(playlistId, title) {
+    function openPlaylistPage(playlistId, title, art) {
         if (!playlistId) return
         if (browseOpen && !artistOpen && !settingsOpen && !libraryOpen
             && browsePageKey === "item:playlist:" + playlistId) return
         markNav("browse")
-        openBrowseItem("playlist", playlistId, "", title || "")
+        openBrowseItem("playlist", playlistId, "", title || "", art || "")
         settingsOpen = false; artistOpen = false; libraryOpen = false
         browseOpen = true
         if (root.signedIn && browseSections.length === 0 && !browseLoading) {
@@ -2532,9 +2574,10 @@ ApplicationWindow {
         // so those branches return before the browse-surface flip below.
         if (kind === "artist") { waves.loadArtist(card.id); return }
         if (kind === "playlist" || kind === "mix" || kind === "album") {
-            openBrowseItem(kind, card.id, "", card.title || "")
+            openBrowseItem(kind, card.id, "", card.title || "", card.art || "")
         } else if (kind === "track") {
-            if (card.album_id) openBrowseItem("album", card.album_id, card.id, card.album || "")
+            // A track card's art is its album's cover (smaller), still the right face.
+            if (card.album_id) openBrowseItem("album", card.album_id, card.id, card.album || "", card.art || "")
             else { if (card.artist_id) waves.loadArtist(card.artist_id); return }
         } else return
         // This card is reused on My Tidal's Home shelves, which live in the
@@ -3060,6 +3103,10 @@ ApplicationWindow {
     // decoded pixels referenced in the pixmap cache, a rebuilt delegate with
     // the same url+sourceSize then paints instantly. LRU-capped; worst case
     // ~100 MB of RAM at typical tile sizes, usually far less.
+    // The track disc's decode size, in one place: PreviewArt asks for it and
+    // the prefetch handler warms at it, and the pool keys on the exact size,
+    // so two literals that drift apart would silently warm nothing.
+    readonly property int discDecode: 68
     property var _warmSeen: ({})   // "url@w" -> true; mutated in place (nothing binds to it)
     function warmArt(u, w, h) {
         if (!u || w <= 0) return
@@ -3090,11 +3137,83 @@ ApplicationWindow {
     }
 
     // ====================================================================
+    // Hover prefetch
+    // ====================================================================
+    // A pointer resting on a playlist / mix / album card is about to open
+    // it. After a short dwell the card's cover is warmed at the hero's
+    // decode size and the backend builds the page (prefetchBrowseItem,
+    // silent, one at a time), so the click that follows paints from the
+    // cache: no "Reading the wire…", no "art: GET". ONE shared timer and
+    // one pending target: 200 ms of unbroken hover, above the 90 ms tilt
+    // arm and for the same reason (a shelf sliding under a still cursor
+    // must not fetch every card it passes). Leaving the card before the
+    // dwell ends cancels it. Track rows ask for a longer dwell: clicking
+    // one opens its album page, but a pointer parked on a row while
+    // reading is not a click coming. Artist cards are not here: their page
+    // is a different, heavier path (loadArtist) with its own cache.
+    property string _hoverPrefetchKey: ""
+    property var _hoverPrefetchCard: null
+    function _cardPrefetchKey(card) {
+        if (!card) return ""
+        var kind = card.kind || ""
+        if (kind === "track") return card.album_id ? "album:" + card.album_id : ""
+        if (kind === "playlist" || kind === "mix" || kind === "album") return card.id ? kind + ":" + card.id : ""
+        // An album ROW (AlbumBlock): the click that follows expands it in
+        // place, so what is warmed is its inline track list, not its page.
+        if (kind === "album_tracks") return card.id && !root.trackCache[card.id] ? "album_tracks:" + card.id : ""
+        return ""
+    }
+    // dwell defaults to the card rest; a caller can ask for a longer one where
+    // the pointer sits by accident more often than on purpose (track rows).
+    function hoverPrefetch(card, dwell) {
+        if (!root.signedIn) return
+        var k = _cardPrefetchKey(card)
+        if (k === "" || root.browsePageKey === "item:" + k) return   // not a page, or already on it
+        _hoverPrefetchKey = k; _hoverPrefetchCard = card
+        hoverPrefetchTimer.interval = dwell > 0 ? dwell : 200
+        hoverPrefetchTimer.restart()
+    }
+    // By the card object, not its key: every track row of one album shares
+    // the album's key, and crossing between two adjacent rows delivers the
+    // entered row's arm before the left row's cancel, so a cancel keyed on
+    // the album killed the arm it did not own and reading down an album's
+    // rows never prefetched it. Each row's card is its own object.
+    function hoverPrefetchCancel(card) {
+        if (_hoverPrefetchCard !== null && _hoverPrefetchCard === card) {
+            hoverPrefetchTimer.stop(); _hoverPrefetchKey = ""; _hoverPrefetchCard = null
+        }
+    }
+    Timer {
+        id: hoverPrefetchTimer
+        interval: 200
+        onTriggered: {
+            var c = root._hoverPrefetchCard, k = root._hoverPrefetchKey
+            root._hoverPrefetchKey = ""; root._hoverPrefetchCard = null
+            if (!c || k === "") return
+            // The page hero is a 180px Art, decodeW 360: warm the card's
+            // cover at that size so the stand-in is a pixmap hit.
+            if (c.art) root.warmArt("" + c.art, 360, 360)
+            var cut = k.indexOf(":")
+            if (k.substring(0, cut) === "album_tracks") waves.prefetchAlbumTracks(k.substring(cut + 1))
+            else waves.prefetchBrowseItem(k.substring(0, cut), k.substring(cut + 1))
+        }
+    }
+
+    // ====================================================================
     // Reusable components
     // ====================================================================
     component Art: Rectangle {
         id: artRoot
         property string url: ""
+        // Optional stand-in painted BENEATH the cover: a smaller copy the
+        // caller already has on screen (the clicked card's thumbnail). It
+        // shows the frame this Art is shown, the full cover then fades in
+        // over it, and neither the grey box nor the "art: GET" placeholder
+        // ever appears while a stand-in is up. When it is the very same URL
+        // as `url` (the usual case, the page hero asks for the card size)
+        // the two share one decoded pixmap and the cover is simply there.
+        property string underUrl: ""
+        readonly property bool underReady: underUrl !== "" && underImg.status === Image.Ready
         // "loading" while the fetch is in flight, "failed" on a load error
         // (e.g. network down), "ready" once decoded, "none" when there is no
         // art URL at all (keeps the neutral ♪, absence isn't an error).
@@ -3299,6 +3418,22 @@ ApplicationWindow {
             onPointChanged: if (artRoot.fxArmed) artRoot._fxAim(point.position)
         }
         Image {
+            // The stand-in (see underUrl). Declared before artImg so it paints
+            // beneath; gone once the cover above it is fully opaque.
+            id: underImg
+            anchors.fill: parent
+            source: artRoot.everShown ? artRoot.underUrl : ""
+            fillMode: Image.PreserveAspectCrop
+            asynchronous: true
+            cache: true
+            visible: status === Image.Ready && artImg.opacity < 1
+            // Same decode size as the cover: one pool key, one pixmap when
+            // the URLs coincide.
+            sourceSize.width: artRoot.decodeW
+            sourceSize.height: artRoot.decodeW
+            onStatusChanged: if (status === Image.Ready) root.warmArt("" + source, sourceSize.width, sourceSize.height)
+        }
+        Image {
             id: artImg
             anchors.fill: parent
             source: artRoot.everShown ? artRoot.url : ""
@@ -3321,7 +3456,9 @@ ApplicationWindow {
         }
         Text {
             anchors.centerIn: parent
-            visible: artRoot.artState === "none"
+            // A stand-in on its way (url still empty while the page payload
+            // is in flight) must not flash the no-art glyph first.
+            visible: artRoot.artState === "none" && artRoot.underUrl === ""
             text: "≈"
             color: textDim
             font.family: root.mono; font.pixelSize: parent.width * 0.4
@@ -3340,7 +3477,11 @@ ApplicationWindow {
             // Loading face waits out the grace timer so quick loads (cache
             // hits, delegate rebuilds on page revisits) never flash the box;
             // a hard failure shows immediately.
-            opacity: ((artRoot.artState === "loading" && artRoot.artWaited) || artRoot.artState === "failed") ? 1 : 0
+            // A visible stand-in is never "waiting" (and a failed full cover
+            // over a good stand-in stays silent): the box only ever covers
+            // an empty frame.
+            opacity: (!artRoot.underReady
+                      && ((artRoot.artState === "loading" && artRoot.artWaited) || artRoot.artState === "failed")) ? 1 : 0
             visible: opacity > 0
             Behavior on opacity { enabled: artRoot.artWaited; NumberAnimation { duration: 300; easing.type: Easing.InQuad } }
             // Below this the "art: GET / ERR" labels are unreadable, collapse
@@ -4353,6 +4494,27 @@ ApplicationWindow {
         Component.onCompleted: if (visible) everShown = true
         onVisibleChanged: if (visible) everShown = true
 
+        // The same four load states as Art, so the disc can say which one it is
+        // in instead of showing one grey circle for all of them. Two
+        // differences from Art, both deliberate:
+        //   - "none" keys off url, not paImg.source: the retry below clears
+        //     source and rebinds it, and a disc mid-retry is loading, not
+        //     coverless.
+        //   - "failed" waits for the retries to run out, otherwise the mark
+        //     strobes red/green three times on the way there.
+        readonly property string artState: pa.url === "" ? "none"
+            : (paImg.status === Image.Error && paImg.retries >= 3) ? "failed"
+            : paImg.status === Image.Ready ? "ready" : "loading"
+        // Did this cover keep anyone waiting? A hit inside the grace window
+        // shows no mark and does not fade, so a warm page never flickers.
+        property bool artWaited: false
+        onUrlChanged: artWaited = false
+        Timer {
+            interval: 250
+            running: pa.artState === "loading" && pa.everShown
+            onTriggered: pa.artWaited = true
+        }
+
         // The same rest-armed hover tilt as Art (identical knobs, timings and
         // rest-before-tilt arming), so the track discs no longer sit flat in
         // lists whose every other cover tilts (reported from livetesting on
@@ -4410,14 +4572,87 @@ ApplicationWindow {
         // the search build's concurrent load burst left the disc grey forever, and
         // some rows lost that lottery at random. The progress ring and glyph are
         // separate siblings below and paint on top of this art.
+        // The still plate under the cover: the disc's own background and, on it,
+        // the same loading and failure marks every other cover in the app shows.
+        // It sits outside coverWrap because coverWrap spins with the buffering
+        // vinyl, and a spinning ">" is not a loading mark.
+        Item {
+            id: paPlate
+            anchors.centerIn: parent
+            width: 34; height: 34   // artR * 2, matching coverWrap
+            // Grey disc: the floor under everything, and all that shows once a
+            // cover has landed.
+            Rectangle { anchors.fill: parent; radius: width / 2; color: root.surface3 }
+            // Loading / failed mark, the compact form of the cover box's own
+            // terminal face (see Art's artTerm) shaped into the circle.
+            Rectangle {
+                id: paTerm
+                anchors.fill: parent
+                radius: width / 2
+                color: "#04140a"
+                border.width: 1
+                border.color: pa.artState === "failed" ? root.red : root.accentDim
+                Behavior on border.color { ColorAnimation { duration: 350 } }
+                opacity: ((pa.artState === "loading" && pa.artWaited) || pa.artState === "failed") ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { enabled: pa.artWaited; NumberAnimation { duration: 300; easing.type: Easing.InQuad } }
+                // loading face: prompt + cursor
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 1
+                    opacity: pa.artState === "failed" ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 250 } }
+                    Text {
+                        // Bigger prompt, slimmer cursor than the square box
+                        // uses: at 34px its ratios put a heavy block beside a
+                        // speck, and the pair has to read as a pair.
+                        textFormat: Text.PlainText; text: ">"
+                        font.family: root.mono; font.pixelSize: Math.max(1, Math.round(paPlate.width * 0.3))
+                        color: root.accent
+                    }
+                    Rectangle {
+                        width: paPlate.width * 0.12; height: paPlate.width * 0.21
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: root.accent
+                        // Shared blink (see root.termBlink). Gated on visible
+                        // first, so a settled disc's only dependency is
+                        // visible itself and it never reads the 20Hz tick.
+                        opacity: paTerm.visible ? root.termBlink : 1
+                    }
+                }
+                // failed face
+                Text {
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText; text: "x"
+                    font.family: root.mono; font.pixelSize: Math.max(1, Math.round(paPlate.width * 0.38))
+                    color: root.red
+                    opacity: pa.artState === "failed" ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 250 } }
+                }
+            }
+            // No cover at all (a track whose album has none): say so, the way
+            // Art does, instead of leaving a disc that reads as still loading.
+            Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText; text: "≈"
+                visible: pa.artState === "none"
+                color: root.textDim
+                font.family: root.mono; font.pixelSize: paPlate.width * 0.4
+            }
+        }
         Item {
             id: coverWrap
             anchors.centerIn: parent
             width: 34; height: 34   // artR * 2: a 34px circle centred in the 48px box
             rotation: paVinyl.rot   // buffering vinyl spins the cover itself
-            // Grey disc under the art: shows while a cover is still decoding and
-            // stays when there is no url, matching the old surface3 fill.
-            Rectangle { anchors.fill: parent; radius: width / 2; color: root.surface3 }
+            // The cover fades in over the plate instead of popping. On
+            // coverWrap, not on the Image: the Image is layered for the circle
+            // mask, and animating opacity on a layered item re-renders its
+            // texture every frame, times every disc on the page. coverWrap
+            // holds only the cover and its (invisible) mask, so its opacity is
+            // the cover's opacity.
+            opacity: pa.artState === "ready" ? 1 : 0
+            Behavior on opacity { enabled: pa.artWaited; NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
             Image {
                 id: paImg
                 anchors.fill: parent
@@ -4427,8 +4662,8 @@ ApplicationWindow {
                 cache: true
                 visible: status === Image.Ready
                 // Decode near display size (x2 for HiDPI crispness on the disc).
-                sourceSize.width: 68
-                sourceSize.height: 68
+                sourceSize.width: root.discDecode
+                sourceSize.height: root.discDecode
                 // Pin decoded pixels in the warm pool so a rebuilt row (tab switch,
                 // filter change, SHOW ALL) repaints without a re-decode. On a
                 // transient error, re-request a bounded number of times (the Canvas
@@ -5797,6 +6032,14 @@ ApplicationWindow {
         required property var model
         width: ListView.view.width; height: 64; radius: 10; color: root.surface; border.color: root.border1
         readonly property bool isFolder: model.kind === "folder"
+        // The whole row opens the playlist page: resting on it has the page
+        // ready before the click (see hoverPrefetch). Folders drill in
+        // locally and need nothing.
+        readonly property var prefetchCard: ({ kind: "playlist", id: "" + (model.id || ""), art: "" + (model.art || "") })
+        HoverHandler {
+            enabled: !plRow.isFolder
+            onHoveredChanged: hovered ? root.hoverPrefetch(plRow.prefetchCard) : root.hoverPrefetchCancel(plRow.prefetchCard)
+        }
         RowLayout {
             anchors.fill: parent; anchors.margins: 10; spacing: 13
             FolderTile { visible: plRow.isFolder }
@@ -5845,7 +6088,7 @@ ApplicationWindow {
             anchors.fill: parent; z: -1
             cursorShape: Qt.PointingHandCursor
             onClicked: plRow.isFolder ? root.openPlFolder(plRow.model.id, plRow.model.title)
-                                      : root.openPlaylistPage(plRow.model.id, plRow.model.title)
+                                      : root.openPlaylistPage(plRow.model.id, plRow.model.title, plRow.model.art)
         }
     }
 
@@ -7324,7 +7567,11 @@ ApplicationWindow {
                             enabled: !root.onAlbumPage(albumId)
                             hoverEnabled: enabled
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: root.openAlbumPage(albumId, "", title)
+                            onClicked: root.openAlbumPage(albumId, "", title, art)
+                            // Resting on the link: have the page ready (see hoverPrefetch).
+                            readonly property var prefetchCard: ({ kind: "album", id: ab.albumId, art: ab.art })
+                            onContainsMouseChanged: containsMouse ? root.hoverPrefetch(prefetchCard)
+                                                                  : root.hoverPrefetchCancel(prefetchCard)
                         }
                         AlbumPresencePill {
                             id: abRowPill
@@ -7357,7 +7604,18 @@ ApplicationWindow {
                     onTap: function(){ waves.downloadAlbum(albumId) }
                 }
             }
-            MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: -1; onClicked: toggle() }
+            MouseArea {
+                id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: -1
+                onClicked: toggle()
+                // Resting on the row: have its tracks fetched before the
+                // click expands it (see hoverPrefetch), so the panel opens on
+                // its rows instead of "Loading tracks…" and a pop-in. Only
+                // while collapsed with nothing cached; the key is empty
+                // otherwise and the arm is a no-op.
+                readonly property var prefetchCard: ({ kind: "album_tracks", id: ab.albumId })
+                onContainsMouseChanged: containsMouse && !ab.expanded ? root.hoverPrefetch(prefetchCard)
+                                                                     : root.hoverPrefetchCancel(prefetchCard)
+            }
         }
 
         // --- Expanded rich panel ---
@@ -7389,7 +7647,7 @@ ApplicationWindow {
                                 enabled: !root.onAlbumPage(albumId)
                                 hoverEnabled: enabled
                                 cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: root.openAlbumPage(albumId, "", title)
+                                onClicked: root.openAlbumPage(albumId, "", title, art)
                             }
                         }
                         ArtistLinks {
@@ -7568,7 +7826,11 @@ ApplicationWindow {
                             width: Math.min(parent.width, parent.implicitWidth)
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.openPlaylistPage(plId, title)
+                            onClicked: root.openPlaylistPage(plId, title, art)
+                            // Resting on the link: have the page ready (see hoverPrefetch).
+                            readonly property var prefetchCard: ({ kind: "playlist", id: pb.plId, art: pb.art })
+                            onContainsMouseChanged: containsMouse ? root.hoverPrefetch(prefetchCard)
+                                                                  : root.hoverPrefetchCancel(prefetchCard)
                         }
                     }
                     Text { textFormat: Text.PlainText; text: pb.subLabel; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -7606,7 +7868,7 @@ ApplicationWindow {
                                 width: Math.min(parent.width, parent.implicitWidth)
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.openPlaylistPage(plId, title)
+                                onClicked: root.openPlaylistPage(plId, title, art)
                             }
                         }
                         Text { textFormat: Text.PlainText; text: pb.subLabel; color: root.textLo; font.pixelSize: 14; width: parent.width; elide: Text.ElideRight }
@@ -7885,6 +8147,21 @@ ApplicationWindow {
         property string albumId: ""      // set -> the title links to the album page
         height: 62
         color: "transparent"
+        // A pointer that settles on a row is often about to open the album
+        // (the row, the title and the album link all go there). Longer dwell
+        // than a card: a row is also where a pointer parks while reading.
+        // A HoverHandler, not the row's MouseArea: the thumb, title and
+        // buttons stacked above it each take hover, so containsMouse would
+        // restart the dwell at every internal edge. No art is passed: a row's
+        // cover is the small size, and the page hero asks for the card size,
+        // so warming it here would pin a pixmap nobody asks for (the hero is
+        // warmed properly when the prefetch lands).
+        readonly property var prefetchCard: ({ kind: "album", id: trow.albumId, art: "" })
+        HoverHandler {
+            enabled: trow.kind !== "video" && trow.albumId !== ""
+            onHoveredChanged: hovered ? root.hoverPrefetch(trow.prefetchCard, 450)
+                                      : root.hoverPrefetchCancel(trow.prefetchCard)
+        }
         // Framed card row:
         // same surface/border/hover language as the album section, and the
         // same DownloadButton as everywhere else, labeled for the track.
@@ -7905,7 +8182,7 @@ ApplicationWindow {
                 acceptedButtons: linkable ? Qt.LeftButton : Qt.NoButton
                 cursorShape: linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: trow.kind === "video" ? root.openVideo(trow.tId, trow.title, trow.artistName)
-                                                 : root.openAlbumPage(trow.albumId, trow.tId, trow.album)
+                                                 : root.openAlbumPage(trow.albumId, trow.tId, trow.album, trow.art)
             }
             // Highlight = the "Fade" treatment: a green tint strongest at the
             // left, gone before the metadata columns so numbers and badges sit
@@ -7973,7 +8250,7 @@ ApplicationWindow {
                             hoverEnabled: enabled
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: trow.kind === "video" ? root.openVideo(trow.tId, trow.title, trow.artistName)
-                                                             : root.openAlbumPage(albumId, tId, trow.album)
+                                                             : root.openAlbumPage(albumId, tId, trow.album, trow.art)
                         }
                         // Declared after the title's MouseArea so the pill sits
                         // on top of it and takes its own click (reveal folder).
@@ -8162,6 +8439,12 @@ ApplicationWindow {
         // Only the artwork and the title open the card's page, the caption
         // handles its own artist link, and dead space stays inert.
         readonly property bool openable: bc.kind !== "track" || !!bc.card.artist_id
+        // Resting anywhere on the card has its page ready before the click
+        // (see hoverPrefetch). A handler of its own, not the Art's fxHover:
+        // that one is off when the user turns the cover tilt off.
+        HoverHandler {
+            onHoveredChanged: hovered ? root.hoverPrefetch(bc.card) : root.hoverPrefetchCancel(bc.card)
+        }
         // Everything the art view previews, previewable here too (videos have
         // no audio-preview path).
         readonly property bool previewable: bc.kind !== "video" && !!bc.card.id
@@ -8656,6 +8939,13 @@ ApplicationWindow {
         width: artSize
         height: hero ? artSize : artSize + 46
         readonly property bool openable: ac.kind !== "track" || !!ac.card.artist_id
+        // Prefetch arms from the whole card, title and caption included, the
+        // way BrowseCard's does. Its own handler: the artwork's acWrapHover
+        // also drives the hover strip and the corner icon, which must stay
+        // tied to the art alone.
+        HoverHandler {
+            onHoveredChanged: hovered ? root.hoverPrefetch(ac.card) : root.hoverPrefetchCancel(ac.card)
+        }
         // The library verdict this card carries, resolved ONCE per card. The
         // hover strip needs it to colour its download half and the pill needs
         // it to say what is held, and asking twice would be two QML->Python
@@ -8830,6 +9120,10 @@ ApplicationWindow {
             readonly property bool controlsOn: collection
                                                && (acWrapHover.hovered
                                                    || root.dlSt(ac.card.id || "") !== "" || root.pvSt(ac.kind, ac.card.id || "") !== "")
+            // The artwork's own hover: the strip, the percentage word and the
+            // corner icon follow it. Prefetch is NOT wired here, it rides the
+            // card-wide handler on ac, so moving the pointer from the art down
+            // to the title does not cancel a dwell that is still on the card.
             HoverHandler { id: acWrapHover }
             RiseIn {
                 id: acRiser
@@ -10046,27 +10340,15 @@ ApplicationWindow {
                 var mx = JSON.stringify(it.mix || [])
                 if (row.mixJson !== mx) m.setProperty(idx, "mixJson", mx)
                 // Keep a row that has already moved to Completed there; otherwise
-                // group by status: failed rows get their own section (with the
-                // RETRY ALL header), queued rows theirs, the rest ride Downloading.
-                var grp = row.moved ? "completed"
-                        : it.status === "failed" ? "failed"
-                        : it.status === "queued" ? "queued" : "downloading"
+                // group by status: failed rows and the rows STOP ended each get
+                // their own section (both with a RETRY ALL header), queued rows
+                // theirs, the rest ride Downloading.
+                var grp = row.moved ? "completed" : root.groupForStatus(it.status)
                 if (row.uiGroup !== grp) m.setProperty(idx, "uiGroup", grp)
             } else {
-                // EVERY field the drawer reads has to be named HERE, including
-                // ones that are empty on arrival: a ListModel fixes its roles
-                // from the first object appended, so a role missing here does
-                // not exist on any row, reads as undefined in the delegate, and
-                // fails silently (no warning, no binding error). `quality` was
-                // exactly that: the bridge set it on every row and the drawer
-                // never saw one, so a queued row could not state its tier.
-                m.append({ qid: it.qid, name: it.name, type: it.type, status: it.status,
-                           progress: it.progress, media_id: it.media_id, template: it.template,
-                           collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
-                           art: it.art || "", quality: it.quality || "", expected: it.expected || "",
-                           landed: it.landed || "", mixJson: JSON.stringify(it.mix || []),
-                           uiGroup: (it.status === "failed" ? "failed" : it.status === "queued" ? "queued" : "downloading"), moved: false,
-                           doneAt: (it.status === "done" ? Date.now() : 0), leaving: false })
+                // Every role the drawer reads, named in one place (see
+                // queueRowObject for why that matters).
+                m.append(queueRowObject(it))
             }
         }
         // A row that has left the queue takes its per-qid state with it: the
@@ -10095,13 +10377,15 @@ ApplicationWindow {
         updateQueueCounts()
     }
 
-    // Stable-partition the queue model into [completed, failed, downloading,
-    // queued], preserving each group's internal order. Only emits move()s when
-    // something is out of place (so a steady queue animates nothing). Failed
-    // sits above the active groups so retries are in reach, below Completed so
-    // the drawer still opens on the familiar collapsed header.
+    // Stable-partition the queue model into [completed, failed, stopped,
+    // downloading, queued], preserving each group's internal order. Only emits
+    // move()s when something is out of place (so a steady queue animates
+    // nothing). Failed and Stopped sit above the active groups so retries are
+    // in reach, below Completed so the drawer still opens on the familiar
+    // collapsed header; Failed first because a failure wants the eye before
+    // something the user ended on purpose.
     function queuePartition() {
-        var m = queueModel, w = 0, order = ["completed", "failed", "downloading", "queued"]
+        var m = queueModel, w = 0, order = ["completed", "failed", "stopped", "downloading", "queued"]
         for (var g = 0; g < order.length; ++g) {
             for (var i = w; i < m.count; ++i) {
                 if (m.get(i).uiGroup === order[g]) { if (i !== w) m.move(i, w, 1); w++ }
@@ -10113,22 +10397,204 @@ ApplicationWindow {
     // structural change already ends in one, so the map costs nothing extra).
     // See queueRowIndexOf for why it exists.
     property var queueRowIndex: ({})
+    // The inverse: the qid at each model index. Mutated in place, never
+    // bound. A move or removal shifts a run of rows, and this is how their
+    // index entries are corrected without asking the model for each row.
+    property var qidAt: []
+    // Finished rows waiting for their 5s linger (status done, not yet moved
+    // to Completed): the linger clock reads these, not the whole model.
+    property var lingerQids: []
 
     function updateQueueCounts() {
-        var m = queueModel, c = 0, f = 0, d = 0, q = 0, l = 0, idx = ({})
+        var m = queueModel, c = 0, f = 0, s = 0, d = 0, q = 0, a = 0, idx = ({}), at = [], ling = []
         for (var i = 0; i < m.count; ++i) {
             var row = m.get(i)
             idx[row.qid] = i
+            at.push(row.qid)
             var grp = row.uiGroup
             if (grp === "completed") c++
             else if (grp === "failed") f++
+            else if (grp === "stopped") s++
             else if (grp === "downloading") d++
             else q++
-            if (row.status === "done" && !row.moved) l++
+            if (row.status === "done" && !row.moved) ling.push(row.qid)
+            if (row.status === "queued" || row.status === "running") a++
         }
         root.queueRowIndex = idx
-        root.completedCount = c; root.failedCount = f; root.downloadingCount = d; root.queuedCount = q
-        root.lingerCount = l
+        root.qidAt = at
+        root.lingerQids = ling
+        root.completedCount = c; root.failedCount = f; root.stoppedCount = s; root.downloadingCount = d; root.queuedCount = q
+        root.lingerCount = ling.length
+        root.activeQueueCount = a
+    }
+
+    // ---- delta bookkeeping --------------------------------------------------
+    // The bridge reports what changed (rows added, rows whose fields moved,
+    // rows gone) and these apply it in place: the cost is the rows named,
+    // never a walk of the model. queueChanged (the whole queue) still lands
+    // in reconcileQueue for a full resync.
+    function queueGroupCount(grp) {
+        return grp === "completed" ? root.completedCount
+             : grp === "failed" ? root.failedCount
+             : grp === "stopped" ? root.stoppedCount
+             : grp === "downloading" ? root.downloadingCount : root.queuedCount
+    }
+    function queueGroupBump(grp, d) {
+        if (grp === "completed") root.completedCount += d
+        else if (grp === "failed") root.failedCount += d
+        else if (grp === "stopped") root.stoppedCount += d
+        else if (grp === "downloading") root.downloadingCount += d
+        else root.queuedCount += d
+    }
+    // Model index where a group begins: the groups sit in a fixed order and
+    // each is contiguous, so a boundary is a sum of counts.
+    function queueGroupStart(grp) {
+        var s = 0
+        if (grp === "completed") return 0
+        s += root.completedCount; if (grp === "failed") return s
+        s += root.failedCount; if (grp === "stopped") return s
+        s += root.stoppedCount; if (grp === "downloading") return s
+        return s + root.downloadingCount
+    }
+    // Re-point the index entries of model rows lo..hi after a shift.
+    function queueIndexFix(lo, hi) {
+        var at = root.qidAt, idx = root.queueRowIndex
+        for (var k = Math.max(0, lo); k <= hi; ++k) idx[at[k]] = k
+    }
+    function queueModelMove(from, to) {
+        if (from === to) return
+        queueModel.move(from, to, 1)
+        var at = root.qidAt, q = at.splice(from, 1)[0]
+        at.splice(to, 0, q)
+        queueIndexFix(Math.min(from, to), Math.max(from, to))
+    }
+    function queueActiveStatus(st) { return st === "queued" || st === "running" }
+    function queueLingerAdd(qid) {
+        if (root.lingerQids.indexOf(qid) < 0) { root.lingerQids.push(qid); root.lingerCount = root.lingerQids.length }
+    }
+    function queueLingerDrop(qid) {
+        var k = root.lingerQids.indexOf(qid)
+        if (k >= 0) { root.lingerQids.splice(k, 1); root.lingerCount = root.lingerQids.length }
+    }
+    // The row object the model holds for a bridge row. EVERY field the drawer
+    // reads has to be named here, including ones that are empty on arrival:
+    // a ListModel fixes its roles from the first object appended, so a role
+    // missing here does not exist on any row, reads as undefined in the
+    // delegate, and fails silently (no warning, no binding error). `quality`
+    // was exactly that: the bridge set it on every row and the drawer never
+    // saw one, so a queued row could not state its tier.
+    function queueRowObject(it) {
+        return { qid: it.qid, name: it.name, type: it.type, status: it.status,
+                 progress: it.progress, media_id: it.media_id, template: it.template,
+                 collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
+                 art: it.art || "", quality: it.quality || "", expected: it.expected || "",
+                 landed: it.landed || "", mixJson: JSON.stringify(it.mix || []),
+                 uiGroup: root.groupForStatus(it.status), moved: false,
+                 doneAt: (it.status === "done" ? Date.now() : 0), leaving: false }
+    }
+    // A row the bridge appended: it joins the end of its group (a queued row,
+    // the usual case, is the end of the model, so this is an append).
+    function queueRowAdd(it) {
+        var m = queueModel, row = queueRowObject(it), grp = row.uiGroup
+        var at = queueGroupStart(grp) + queueGroupCount(grp)
+        if (at >= m.count) {
+            m.append(row)
+            root.qidAt.push(row.qid)
+            root.queueRowIndex[row.qid] = m.count - 1
+        } else {
+            m.insert(at, row)
+            root.qidAt.splice(at, 0, row.qid)
+            queueIndexFix(at, m.count - 1)
+        }
+        queueGroupBump(grp, 1)
+        if (queueActiveStatus(row.status)) root.activeQueueCount += 1
+        if (row.status === "done") queueLingerAdd(row.qid)
+    }
+    // A row whose fields changed: the same field-by-field update the full
+    // reconcile does, then a move to its new group's end if the group moved.
+    function queueRowPatch(it) {
+        var m = queueModel, i = root.queueRowIndexOf(it.qid)
+        if (i < 0) { queueRowAdd(it); return }
+        var row = m.get(i)
+        var was = row.status, wasGrp = row.uiGroup
+        if (was !== it.status) {
+            m.setProperty(i, "status", it.status)
+            if (queueActiveStatus(was) !== queueActiveStatus(it.status))
+                root.activeQueueCount += queueActiveStatus(it.status) ? 1 : -1
+        }
+        // Wall-clock stamp of when the row finished: the root lingerClock
+        // promotes on doneAt+5s whether or not the queue drawer (and so this
+        // row's delegate) exists.
+        if (it.status === "done" && !row.moved && !row.doneAt) {
+            m.setProperty(i, "doneAt", Date.now())
+            queueLingerAdd(it.qid)
+        }
+        if (row.progress !== it.progress) m.setProperty(i, "progress", it.progress)
+        if (row.name !== it.name) m.setProperty(i, "name", it.name)
+        if (row.artist !== it.artist) m.setProperty(i, "artist", it.artist || "")
+        if (row.tracks !== it.tracks) m.setProperty(i, "tracks", it.tracks || 0)
+        var qv = it.quality || ""
+        if (row.quality !== qv) m.setProperty(i, "quality", qv)
+        var ex = it.expected || ""
+        if (row.expected !== ex) m.setProperty(i, "expected", ex)
+        var ld = it.landed || ""
+        if (row.landed !== ld) m.setProperty(i, "landed", ld)
+        var mx = JSON.stringify(it.mix || [])
+        if (row.mixJson !== mx) m.setProperty(i, "mixJson", mx)
+        var grp = row.moved ? "completed" : root.groupForStatus(it.status)
+        if (grp === wasGrp) return
+        m.setProperty(i, "uiGroup", grp)
+        // Leave the old group, land at the end of the new one: the position
+        // the stable partition would have given it.
+        // (Counts without this row give the index it lands on, which is what
+        // ListModel.move takes: the item's index after the move.)
+        queueGroupBump(wasGrp, -1)
+        var to = queueGroupStart(grp) + queueGroupCount(grp)
+        queueGroupBump(grp, 1)
+        queueModelMove(i, to)
+    }
+    // Rows gone from the bridge: removed highest index first (so the lower
+    // ones stay valid), then one pass re-points the rows that shifted.
+    function queueRowsDrop(qids) {
+        var m = queueModel, idxs = [], lo = m.count
+        for (var n = 0; n < qids.length; ++n) {
+            var i = root.queueRowIndexOf(qids[n])
+            if (i >= 0) idxs.push(i)
+        }
+        if (idxs.length === 0) return
+        idxs.sort(function (a, b) { return b - a })
+        var tracks = null, exp = null
+        for (var k = 0; k < idxs.length; ++k) {
+            var at = idxs[k], row = m.get(at), qid = row.qid
+            queueGroupBump(row.uiGroup, -1)
+            if (queueActiveStatus(row.status)) root.activeQueueCount -= 1
+            if (row.status === "done" && !row.moved) queueLingerDrop(qid)
+            // A row that has left the queue takes its per-qid state with it:
+            // the expanded track list AND the expansion flag itself (see
+            // reconcileQueue). One copy of each for the whole sweep.
+            if (root.queueTracks[qid] !== undefined) { if (!tracks) tracks = Object.assign({}, root.queueTracks); delete tracks[qid] }
+            if (root.queueExpanded[qid] !== undefined) { if (!exp) exp = Object.assign({}, root.queueExpanded); delete exp[qid] }
+            m.remove(at)
+            root.qidAt.splice(at, 1)
+            delete root.queueRowIndex[qid]
+            if (at < lo) lo = at
+        }
+        if (tracks) root.queueTracks = tracks
+        if (exp) root.queueExpanded = exp
+        queueIndexFix(lo, m.count - 1)
+    }
+
+    // The statuses a row's RETRY applies to: a failure, and a row STOP ended.
+    // Mirrors the bridge's _RETRYABLE. The two live in separate sections, so
+    // each header's RETRY ALL takes one of them, not both.
+    function retryableStatus(st) { return st === "failed" || st === "cancelled" }
+
+    // Which drawer section a row of this status files under (a row already
+    // moved to Completed stays there regardless; see reconcileQueue).
+    function groupForStatus(st) {
+        return st === "failed" ? "failed"
+             : st === "cancelled" ? "stopped"
+             : st === "queued" ? "queued" : "downloading"
     }
 
     // The model row holding a qid, without walking the model to find it.
@@ -10157,10 +10623,15 @@ ApplicationWindow {
         id: lingerClock
         interval: 1000; repeat: true; running: root.lingerCount > 0
         onTriggered: {
-            var m = queueModel, now = Date.now()
-            for (var i = m.count - 1; i >= 0; --i) {
+            // Only the rows waiting to fold, not the whole model: with a long
+            // backlog behind them a per-second walk of every row was a steady
+            // drain on the GUI thread for as long as anything was finishing.
+            var m = queueModel, now = Date.now(), waiting = root.lingerQids.slice()
+            for (var k = 0; k < waiting.length; ++k) {
+                var i = root.queueRowIndexOf(waiting[k])
+                if (i < 0) { queueLingerDrop(waiting[k]); continue }
                 var row = m.get(i)
-                if (row.status !== "done" || row.moved) continue
+                if (row.status !== "done" || row.moved) { queueLingerDrop(waiting[k]); continue }
                 if (!row.doneAt) { m.setProperty(i, "doneAt", now); continue }
                 var age = now - row.doneAt
                 if (age < 5000) continue
@@ -10185,12 +10656,15 @@ ApplicationWindow {
         // Land at the TOP of the Completed group (newest first, oldest at the
         // bottom); Completed is the first group, so that is model index 0. The
         // ListView move transition slides it up.
+        var wasGrp = m.get(i).uiGroup
         m.setProperty(i, "moved", true)
         m.setProperty(i, "uiGroup", "completed")
         m.setProperty(i, "leaving", false)
-        if (i !== 0) m.move(i, 0, 1)
+        queueGroupBump(wasGrp, -1)
+        queueGroupBump("completed", 1)
+        queueLingerDrop(qid)
+        queueModelMove(i, 0)
         root.compBump += 1
-        updateQueueCounts()
     }
 
     // Media rows carry an `artists` array (clickable per-artist); ListModel
@@ -10371,6 +10845,7 @@ ApplicationWindow {
             root.browsePage = null
             root.browsePageKey = ""
             root.browseTitleHint = ""
+            root.browseArtHint = ""
             root.browseStack = []
             root.browseError = false
             root.browsePageError = false
@@ -10437,6 +10912,17 @@ ApplicationWindow {
                 return
             }
             root.applyBrowseLanding(p)
+        }
+        // A hovered page is built: pull its covers into the warm pool at
+        // the exact sizes the page will ask for (hero Art decodeW 360, the
+        // 480 backdrop, the 68 px PreviewArt discs of the first rows), so
+        // the click paints them from the pixmap cache. A screenful at most,
+        // against the pool's 220 entries; warmArt dedupes.
+        function onBrowsePagePrefetched(p) {
+            if (p.art) { root.warmArt("" + p.art, 360, 360); root.warmArt("" + p.art, 480, 480) }
+            var arts = p.rowArts || []
+            for (var i = 0; i < arts.length && i < 16; ++i)
+                root.warmArt("" + arts[i], root.discDecode, root.discDecode)
         }
         function onBrowsePageLoaded(p) {
             if (p.key !== root.browsePageKey) return   // stale: user already left this page
@@ -10591,7 +11077,15 @@ ApplicationWindow {
             // ready ticks only ever arrive on later frames, never mid-fill.
             root._searchBuildStart((r.artists || []).length + (r.albums || []).length
                                  + (r.tracks || []).length + (r.videos || []).length
-                                 + (r.playlists || []).length + (r.mixes || []).length)
+                                 + (r.playlists || []).length + (r.mixes || []).length
+                                 + (r.top ? 1 : 0))
+            // The pinned row reads its clickable artists from the same side
+            // map the section rows fill (appendMedia); the same item lands
+            // there too, but register it here so the pin never depends on it.
+            root.searchTop = r.top || null
+            if (root.searchTop && root.searchTop.artists) {
+                var abm = root.artistsById; abm[root.searchTop.id] = root.searchTop.artists; root.artistsById = abm
+            }
             root.fill(artistsModel, r.artists)
             root.albumsRaw = r.albums || []
             root.tracksRaw = r.tracks || []
@@ -10660,12 +11154,14 @@ ApplicationWindow {
             root.fillMedia(artistTracksModel, p.tracks)
             root.fillMedia(artistVideosModel, p.videos || [])
         }
-        function onQueueChanged(q) {
-            root.reconcileQueue(q)
-            var n = 0
-            for (var i = 0; i < q.length; ++i) { var s = q[i].status; if (s === "queued" || s === "running") n++ }
-            root.activeQueueCount = n
-        }
+        // The whole queue (a full resync); updateQueueCounts, at the end of
+        // the reconcile, rebuilds every mirror and count from it.
+        function onQueueChanged(q) { root.reconcileQueue(q) }
+        // The delta protocol: only the rows concerned cross, and only they
+        // are touched here.
+        function onQueueRowsAdded(rows) { for (var i = 0; i < rows.length; ++i) root.queueRowAdd(rows[i]) }
+        function onQueueRowsChanged(rows) { for (var i = 0; i < rows.length; ++i) root.queueRowPatch(rows[i]) }
+        function onQueueRowsRemoved(qids) { root.queueRowsDrop(qids) }
         function onQueueItemProgress(qid, pct) {
             var i = root.queueRowIndexOf(qid)
             if (i >= 0) queueModel.setProperty(i, "progress", pct)
@@ -10998,6 +11494,17 @@ ApplicationWindow {
                                         searchField.clear()
                                         searchDecoder.submitPending = true
                                         searchField.paste()
+                                        // A paste of three characters or fewer is not a jump typing
+                                        // could not produce, so noteTextChanged starts no decode and
+                                        // the field's own disarm has already dropped the arm: the
+                                        // button pasted "U2" and then sat there (issue #28). A click
+                                        // here is explicit intent, not a guess, so run the decode on
+                                        // whatever actually landed. Nothing landing means an empty
+                                        // clipboard, which must stay inert.
+                                        if (!searchDecoder.decoding && searchField.text.length > 0) {
+                                            searchDecoder.submitPending = true
+                                            searchDecoder.run(searchField.text)
+                                        }
                                         // paste() inserts synchronously, so any decode this click
                                         // could start has already begun and latched the arm. An arm
                                         // still pending here had nothing to latch it (an empty
@@ -11013,8 +11520,9 @@ ApplicationWindow {
                         ComboBox {
                             id: sortBox
                             implicitHeight: 44; implicitWidth: 156
-                            model: ["Relevance", "Release date", "Name"]
-                            onActivated: root.applySort()
+                            model: ["Relevance", "Release date", "Name", "Popularity"]
+                            currentIndex: Math.max(0, root.sortKeys.indexOf(waves.wavesPref("search_sort")))
+                            onActivated: { waves.setWavesPref("search_sort", root.sortKeys[currentIndex]); root.applySort() }
                             background: Rectangle { radius: 8; color: root.surface2; border.color: sortBox.popup.visible ? root.accent : root.outline }
                             contentItem: Text {
                                 textFormat: Text.PlainText
@@ -11056,7 +11564,7 @@ ApplicationWindow {
                                 anchors.centerIn: parent; text: root.sortAsc ? "↑" : "↓"
                                 color: sortBox.currentIndex === 0 ? root.textDim : root.textHi; font.family: root.mono; font.pixelSize: 18
                             }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.sortAsc = !root.sortAsc; root.applySort() } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.sortAsc = !root.sortAsc; waves.setWavesPref("search_sort_asc", root.sortAsc); root.applySort() } }
                         }
                         // The audio-quality picker that used to sit here was a duplicate of
                         // the Quality setting in Settings; it set the same value but never
@@ -11182,18 +11690,12 @@ ApplicationWindow {
                     // floating above it.
                     x: 22; y: 8; width: browseLanding.width - 44; spacing: 8
 
-                    Text {
+                    // The shared loading hint (WireHint.qml owns the look).
+                    WireHint {
                         id: browseLandingHint
-                        visible: root.signedIn && (root.browseLoading || root.browseBuilding)
-                        width: parent.width; horizontalAlignment: Text.AlignHCenter
-                        text: "Reading the wire…"
-                        color: root.textLo; font.pixelSize: 22; topPadding: 96
-                        // same gentle breathing as the search empty state
-                        SequentialAnimation on opacity {
-                            running: browseLandingHint.visible; loops: Animation.Infinite
-                            NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
-                            NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
-                        }
+                        active: root.signedIn && (root.browseLoading || root.browseBuilding)
+                        width: parent.width; tint: root.textLo
+                        onScreen: root.onScreen
                     }
 
                     Column {
@@ -11427,17 +11929,54 @@ ApplicationWindow {
                     Rectangle {
                         id: browseItemHeader
                         readonly property var hd: root.browsePage && root.browsePage.header ? root.browsePage.header : null
-                        visible: hd !== null
+                        // The kind is in the key ("item:<kind>:<id>") before the
+                        // payload is, so the eyebrow can name the page at once.
+                        readonly property string keyKind: root.browsePageKey.indexOf("item:") === 0
+                                                          ? root.browsePageKey.split(":")[1] : ""
+                        readonly property string kind: hd ? ("" + (hd.kind || "")) : keyKind
+                        // Skeleton: the page is keyed and the opener gave it a
+                        // name or a cover, the payload is still on the wire.
+                        // The header paints those at once (the clicked card's
+                        // own title and art) and the facts fill in when the
+                        // list lands, instead of the whole strip waiting on
+                        // the slowest page of a long playlist. Held back for
+                        // highlight opens: those hide the whole column until
+                        // the row has centred itself (browseHighlightPending),
+                        // and a header that shows, vanishes and returns blinks.
+                        readonly property bool skeleton: hd === null && keyKind !== ""
+                                                         && root.browseHighlightId === ""
+                                                         && (root.browseTitleHint !== "" || root.browseArtHint !== "")
+                        visible: hd !== null || skeleton
                         width: parent.width; height: visible ? 224 : 0
                         radius: 14; clip: true
                         color: root.surface
                         border.color: root.border1
+                        // Backdrop, two layers: the card's cover (stand-in) under
+                        // the page's own, which fades up once decoded. One Image
+                        // whose source flipped would blank while the new one
+                        // loads. Square decode on both: the warm pool keys on an
+                        // exact size, so a pre-warmed cover is a hit here too.
                         Image {
+                            id: bihBgUnder
+                            anchors.fill: parent
+                            source: root.browseArtHint
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 480
+                            sourceSize.height: 480
+                            opacity: 0.30
+                            visible: bihBgMain.status !== Image.Ready
+                            asynchronous: true
+                            cache: true
+                        }
+                        Image {
+                            id: bihBgMain
                             anchors.fill: parent
                             source: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
                             fillMode: Image.PreserveAspectCrop
                             sourceSize.width: 480
-                            opacity: 0.30
+                            sourceSize.height: 480
+                            opacity: status === Image.Ready ? 0.30 : 0
+                            Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
                             asynchronous: true
                             cache: true
                         }
@@ -11457,12 +11996,15 @@ ApplicationWindow {
                             anchors.margins: 22
                             spacing: 24
                             Art {
+                                id: bihArt
                                 width: 180; height: 180; radius: 12
                                 hoverFx: true
                                 fxKind: browseItemHeader.hd ? ("" + (browseItemHeader.hd.kind || "")) : ""
                                 fxId: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
                                 anchors.verticalCenter: parent.verticalCenter
                                 url: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
+                                // The clicked card's cover, up from the first frame.
+                                underUrl: root.browseArtHint
                             }
                             Column {
                                 spacing: 7
@@ -11470,10 +12012,9 @@ ApplicationWindow {
                                 width: parent.width - 180 - 24
                                 Text {
                                     textFormat: Text.PlainText
-                                    text: browseItemHeader.hd
-                                          ? (browseItemHeader.hd.kind === "playlist" ? "PLAYLIST"
-                                             : browseItemHeader.hd.kind === "mix" ? "MIX" : "ALBUM")
-                                          : ""
+                                    text: browseItemHeader.kind === "playlist" ? "PLAYLIST"
+                                          : browseItemHeader.kind === "mix" ? "MIX"
+                                          : browseItemHeader.kind === "album" ? "ALBUM" : ""
                                     color: root.textDim; font.pixelSize: 11; font.family: root.uiFont
                                     font.bold: true; font.letterSpacing: 1.5
                                 }
@@ -11484,7 +12025,7 @@ ApplicationWindow {
                                     Text {
                                         id: bihTitle
                                         textFormat: Text.PlainText
-                                        text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : ""
+                                        text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : root.browseTitleHint
                                         color: root.textHi; font.pixelSize: 26; font.bold: true
                                         width: Math.min(implicitWidth,
                                                         parent.width - (bihPill.visible ? bihPill.width + 10 : 0))
@@ -11541,41 +12082,55 @@ ApplicationWindow {
                                     color: root.textDim; font.pixelSize: 12; font.family: root.mono
                                 }
                                 Item { width: 1; height: 3 }
-                                DownloadButton {
-                                    mediaId: browseItemHeader.hd ? (browseItemHeader.hd.id || "") : ""
-                                    label: browseItemHeader.hd
-                                           ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
-                                              : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
-                                           : ""
-                                    collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
-                                    // Album pages only (the header's artist/year facts are "" elsewhere,
-                                    // and a playlist must never wear an album's library state).
-                                    libAlbum: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
-                                              ? ({ artist: browseItemHeader.hd.artist || "", title: browseItemHeader.hd.title || "",
-                                                   year: "" + (browseItemHeader.hd.year || ""), tracks: browseItemHeader.hd.num_tracks || 0,
-                                                   duration_sec: browseItemHeader.hd.duration_sec || 0 })
-                                              : null
-                                    onTap: function() {
-                                        if (browseItemHeader.hd)
-                                            root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
+                                Row {
+                                    spacing: 12
+                                    // Nothing to download until the payload says what.
+                                    visible: browseItemHeader.hd !== null
+                                    DownloadButton {
+                                        mediaId: browseItemHeader.hd ? (browseItemHeader.hd.id || "") : ""
+                                        label: browseItemHeader.hd
+                                               ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
+                                                  : browseItemHeader.hd.kind === "mix" ? "Download mix" : "Download album")
+                                               : ""
+                                        collectionIds: root.collectionTrackIds(root.browsePage ? root.browsePage.sections : [])
+                                        // Album pages only (the header's artist/year facts are "" elsewhere,
+                                        // and a playlist must never wear an album's library state).
+                                        libAlbum: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
+                                                  ? ({ artist: browseItemHeader.hd.artist || "", title: browseItemHeader.hd.title || "",
+                                                       year: "" + (browseItemHeader.hd.year || ""), tracks: browseItemHeader.hd.num_tracks || 0,
+                                                       duration_sec: browseItemHeader.hd.duration_sec || 0 })
+                                                  : null
+                                        onTap: function() {
+                                            if (browseItemHeader.hd)
+                                                root.browseCardDownload({ kind: browseItemHeader.hd.kind, id: browseItemHeader.hd.id })
+                                        }
+                                    }
+                                    // Playlists only: the full source album of every track (issue #4).
+                                    // Its state lives under "albums:<id>", apart from the playlist button's.
+                                    DownloadButton {
+                                        visible: !!browseItemHeader.hd && browseItemHeader.hd.kind === "playlist"
+                                        mediaId: browseItemHeader.hd ? ("albums:" + (browseItemHeader.hd.id || "")) : ""
+                                        label: "Download full albums"
+                                        noun: "albums"
+                                        onTap: function() {
+                                            if (browseItemHeader.hd)
+                                                waves.downloadPlaylistAlbums(browseItemHeader.hd.id)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
 
-                    Text {
+                    // The shared loading hint (WireHint.qml owns the look).
+                    WireHint {
                         id: browseDrillHint
-                        visible: root.signedIn && root.browsePageLoading
-                        width: parent.width; horizontalAlignment: Text.AlignHCenter
-                        text: "Reading the wire…"
-                        color: root.textLo; font.pixelSize: 22; topPadding: 96
-                        // same gentle breathing as the search empty state
-                        SequentialAnimation on opacity {
-                            running: browseDrillHint.visible; loops: Animation.Infinite
-                            NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
-                            NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
-                        }
+                        active: root.signedIn && root.browsePageLoading
+                        width: parent.width; tint: root.textLo
+                        onScreen: root.onScreen
+                        // Under a skeleton header the hint belongs to the list
+                        // area just below it, not a screen's depth down.
+                        topPad: browseItemHeader.visible ? 40 : 96
                     }
 
                     Column {
@@ -11701,17 +12256,65 @@ ApplicationWindow {
                     }
                 }
 
-                Text {
+                // The shared loading hint (WireHint.qml owns the look).
+                WireHint {
                     id: searchBuildHint
-                    visible: root.signedIn && root.searchBuilding
-                    width: parent.width; horizontalAlignment: Text.AlignHCenter
-                    text: "Reading the wire…"
-                    color: root.textLo; font.pixelSize: 22; topPadding: 96
-                    // same gentle breathing as the empty state and the Browse hint
-                    SequentialAnimation on opacity {
-                        running: searchBuildHint.visible; loops: Animation.Infinite
-                        NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
+                    active: root.signedIn && root.searchBuilding
+                    width: parent.width; tint: root.textLo
+                    onScreen: root.onScreen
+                }
+
+                // TOP RESULT
+                // TIDAL names one best match in every search reply, and for a
+                // specific query ("this song by this artist") it is reliably
+                // the thing asked for. Pinned above every section of the
+                // mixed All view, so the answer is the first row rather than
+                // the first row under whichever artists shared a word with
+                // the query. Mixed view only: a filtered section is already
+                // in relevance order with the same item first. The row is the
+                // section's own delegate (AlbumBlock, TrackRow, PlaylistBlock),
+                // and the item keeps its place in its section below; this is
+                // a pointer, not a move. A one-item Repeater rather than a
+                // lone Loader so each search rebuilds the row and its build
+                // veil tick lands exactly once, like every section row.
+                SectionHeader { id: topHead; opacity: root.searchReveal; visible: root.filterType === "all" && root.searchTop !== null; label: "TOP RESULT" }
+                Repeater {
+                    model: root.searchTop ? [root.searchTop] : []
+                    delegate: Loader {
+                        id: topLd
+                        required property var modelData
+                        visible: root.filterType === "all"
+                        width: contentCol.width
+                        asynchronous: root.searchBuilding
+                        opacity: root.searchReveal
+                        onLoaded: root._searchBuildTick()
+                        sourceComponent: topLd.modelData.kind === "album" ? topAlbumComp
+                                       : topLd.modelData.kind === "playlist" ? topPlaylistComp : topTrackComp
+                        Component {
+                            id: topAlbumComp
+                            AlbumBlock {
+                                albumId: topLd.modelData.id; title: topLd.modelData.title; artistName: topLd.modelData.artist; artistId: topLd.modelData.artist_id || ""
+                                art: topLd.modelData.art; year: "" + (topLd.modelData.year || ""); releaseDate: topLd.modelData.date || ""; trackCount: topLd.modelData.tracks || 0
+                                durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
+                            }
+                        }
+                        Component {
+                            id: topTrackComp
+                            TrackRow {
+                                tId: topLd.modelData.id; kind: topLd.modelData.kind
+                                title: topLd.modelData.title; artistName: topLd.modelData.artist || ""; artistId: topLd.modelData.artist_id || ""
+                                album: topLd.modelData.album || ""; art: topLd.modelData.art || ""; year: "" + (topLd.modelData.year || ""); date: topLd.modelData.date || ""
+                                duration: topLd.modelData.duration || ""; durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
+                                albumId: topLd.modelData.album_id || ""
+                            }
+                        }
+                        Component {
+                            id: topPlaylistComp
+                            PlaylistBlock {
+                                plId: topLd.modelData.id; title: topLd.modelData.title; creator: topLd.modelData.creator || ""
+                                art: topLd.modelData.art; trackCount: topLd.modelData.tracks || 0
+                            }
+                        }
                     }
                 }
 
@@ -11765,15 +12368,18 @@ ApplicationWindow {
                 }
                 // Expanded (SHOW ALL) or the Artists filter: the fill grid. Cards
                 // stretch edge-to-edge and the column count snaps at whole-column
-                // boundaries (shared gridCols). A resize here re-fits the cards
-                // (the previous method), which the user opts into by expanding;
-                // the results Flickable anchors its scroll (see _resizeRatio) so
-                // the page below does not jump.
+                // boundaries. A resize here re-fits the cards (the previous
+                // method), which the user opts into by expanding; the results
+                // Flickable anchors its scroll (see _resizeRatio) so the page
+                // below does not jump. The column count is how many 190px
+                // cards FIT the width, never clamped to how many artists there
+                // are: a two-artist result used to get two half-window cards,
+                // posters so tall their buttons sat below the fold.
                 Flow {
                     id: artistFlow
                     visible: !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
                     width: parent.width; spacing: 12
-                    property int cols: root.gridCols(190, spacing, artistsModel.count, width)
+                    property int cols: Math.max(1, Math.floor((width + spacing) / (190 + spacing)))
                     property real cardW: (width - (cols - 1) * spacing) / cols
                     Repeater {
                         model: artistsModel
@@ -13240,14 +13846,19 @@ ApplicationWindow {
     // section that has the data: albums, tracks and videos all follow it.
     // Artists, playlists and mixes carry no date to sort by and stay in the
     // API's relevance order.
+    // Relevance is TIDAL's own order, kept as it arrived. It used to mean
+    // "popularity, most first", which buried exactly the result a specific
+    // search is after: a single released this week has a popularity of 0
+    // and sat under every older track that shared one word with the query,
+    // while TIDAL had ranked it first. Popularity is its own option now.
     function applySort() {
         var dir = root.sortAsc ? 1 : -1
         function ordered(raw, hasPop) {
             var arr = (raw || []).slice()
             if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.date || a.year || "").localeCompare(b.date || b.year || "")) })
             else if (sortBox.currentIndex === 2) arr.sort(function(a, b){ return dir * a.title.localeCompare(b.title) })
-            else if (hasPop) arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })  // Relevance = popularity
-            else if (root.sortAsc) arr.reverse()  // no popularity data: relevance is the API's order, the arrow flips it
+            else if (sortBox.currentIndex === 3 && hasPop) arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })
+            else if (root.sortAsc) arr.reverse()  // Relevance (or no popularity data): the API's order, the arrow flips it
             return arr
         }
         root.fillMedia(albumsModel, ordered(root.albumsRaw, true))
@@ -13285,9 +13896,12 @@ ApplicationWindow {
                     label: waves.paused ? "RESUME" : "PAUSE"
                     onClicked: waves.paused ? waves.resumeQueue() : waves.pauseQueue()
                 }
-                // Stop everything, abort running downloads + clear the queue
+                // Stop everything: abort running downloads and the queued
+                // ones; the rows stay, as Stopped, with RETRY (issue #27).
                 SpecBtn {
-                    visible: root.activeQueueCount > 0
+                    // Or a scan in flight: it has no row yet, and this is
+                    // the only control that ends it.
+                    visible: root.activeQueueCount > 0 || waves.scanning
                     danger: true; label: "STOP"
                     onClicked: waves.stopAll()
                 }
@@ -13298,7 +13912,7 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 0
                 model: queueModel; ScrollBar.vertical: ScrollBar {}
 
-                // Grouped sections: Completed (collapsible) · Downloading · Queued
+                // Grouped sections: Completed (collapsible) · Failed · Stopped · Downloading · Queued
                 section.property: "uiGroup"
                 section.criteria: ViewSection.FullString
                 section.delegate: Item {
@@ -13321,27 +13935,39 @@ ApplicationWindow {
                             id: secLbl
                             text: secItem.section === "completed" ? "COMPLETED · " + root.completedCount
                                 : secItem.section === "failed" ? "FAILED · " + root.failedCount
+                                : secItem.section === "stopped" ? "STOPPED · " + root.stoppedCount
                                 : secItem.section === "downloading" ? "DOWNLOADING · " + root.downloadingCount
                                 : "QUEUED · " + root.queuedCount
                             // Brightness tracks how live the section is: the work
                             // happening right now reads near-white, what is only
                             // waiting stays dim, so the eye lands on Downloading
                             // first when the drawer opens.
+                            // The three settled sections carry a colour each:
+                            // Completed the soft green, Failed the hot red,
+                            // Stopped the soft red, still red (work you ended,
+                            // not work that finished) but a step softer than
+                            // a failure so the two never read as one.
                             color: secItem.section === "completed" ? root.accentContTx
                                  : secItem.section === "failed" ? root.red
+                                 : secItem.section === "stopped" ? root.redContTx
                                  : secItem.section === "downloading" ? root.textHi : root.textDim
                             font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.4
                             Layout.alignment: Qt.AlignVCenter
                         }
                         Rectangle { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; height: 1; color: root.divider }
-                        // One-click retry of every failed row, riding the Failed
-                        // header itself so it appears exactly when it applies
-                        // and takes no room anywhere else (issue #18).
+                        // One-click retry of every row in the section, riding
+                        // the Failed and Stopped headers themselves so it appears
+                        // exactly when it applies and takes no room anywhere else
+                        // (issue #18; Stopped joined it in issue #27). Each header
+                        // retries its own section only.
                         SpecBtn {
                             compact: true; primary: true; label: "RETRY ALL"
-                            visible: secItem.section === "failed"
+                            visible: secItem.section === "failed" || secItem.section === "stopped"
                             Layout.alignment: Qt.AlignVCenter
-                            onClicked: waves.retryAllFailed()
+                            onClicked: {
+                                if (secItem.section === "failed") waves.retryAllFailed()
+                                else waves.retryAllStopped()
+                            }
                         }
                         // Every section clears itself. Riding the header means
                         // the scope needs no spelling out (it takes the section
@@ -13353,8 +13979,8 @@ ApplicationWindow {
                         SpecBtn {
                             compact: true
                             // Completed is tidy-up, so it takes the green
-                            // recipe; the other two discard work you asked for,
-                            // which is the danger red the exit prompt uses.
+                            // recipe; the other three discard work you asked
+                            // for, which is the danger red the exit prompt uses.
                             primary: secItem.section === "completed"
                             danger: secItem.section !== "completed"
                             label: "CLEAR"
@@ -13363,6 +13989,7 @@ ApplicationWindow {
                             onClicked: {
                                 if (secItem.section === "completed") waves.clearFinished()
                                 else if (secItem.section === "failed") waves.clearFailed()
+                                else if (secItem.section === "stopped") waves.clearStopped()
                                 else waves.clearQueued()
                             }
                         }
@@ -13538,13 +14165,14 @@ ApplicationWindow {
                                             var a = model.artist ? model.artist + " · " : ""
                                             if (qrow.st === "queued") return a + "Queued"
                                             if (qrow.st === "failed") return a + "Failed"
+                                            if (qrow.st === "cancelled") return a + "Stopped"
                                             if (model.collection && model.tracks > 0)
                                                 // Floor, not round: the roll-up now moves with the in-flight
                                                 // track, and 6.4 done of 12 must read "6/12", not "7/12".
                                                 // The epsilon absorbs float error at exact completions.
                                                 return a + (qrow.st === "done" ? model.tracks : Math.floor(model.progress / 100 * model.tracks + 1e-6)) + "/" + model.tracks + " tracks"
                                             if (qrow.st === "running") return a + Math.round(model.progress) + "%"
-                                            return a + (qrow.st === "done" ? "Done" : qrow.st === "cancelled" ? "Cancelled" : qrow.st)
+                                            return a + (qrow.st === "done" ? "Done" : qrow.st)
                                         }
                                         color: root.textLo; font.family: root.mono; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true
                                     }
@@ -13582,7 +14210,7 @@ ApplicationWindow {
                                     mix: qrow.tierMix
                                 }
                                 RetryMark {
-                                    Layout.alignment: Qt.AlignVCenter; visible: qrow.st === "failed"
+                                    Layout.alignment: Qt.AlignVCenter; visible: root.retryableStatus(qrow.st)
                                     color: root.accent; box: 16
                                     MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: waves.retryQueueItem(model.qid) }
                                 }
@@ -13789,7 +14417,7 @@ ApplicationWindow {
                                                     : td.status === "failed" ? "FAILED"
                                                     : td.status === "unavailable" ? "UNAVAILABLE"
                                                     : (td.status === "skipped" || td.status === "owned") ? "IN LIBRARY"
-                                                    : td.status === "cancelled" ? "CANCELLED"
+                                                    : td.status === "cancelled" ? "STOPPED"
                                                     : (td.status === "queued" || td.status === "pending") ? "QUEUED"
                                                     : td.status === "running" ? "" : "·"
                                                 // IN LIBRARY speaks in the download
@@ -13807,7 +14435,7 @@ ApplicationWindow {
                                                      : root.textDim
                                                 Behavior on color { ColorAnimation { duration: 260 } }
                                                 font.pixelSize: 10
-                                                font.bold: target !== "·" && target !== "QUEUED" && target !== "CANCELLED"
+                                                font.bold: target !== "·" && target !== "QUEUED" && target !== "STOPPED"
                                             }
                                             Item {
                                                 anchors.right: parent.right
