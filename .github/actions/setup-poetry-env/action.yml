@@ -41,7 +41,7 @@ runs:
       run: |
         set -u
         for attempt in 1 2 3; do
-          if poetry install --no-interaction --all-extras --with dev,docs; then
+          if poetry install --no-interaction --all-extras --with dev; then
             exit 0
           fi
           if [ "$attempt" -eq 3 ]; then

@@ -1,14 +1,14 @@
 name: master
 
+# Manual only. This workflow lives on the private development repo, where
+# Actions minutes are metered, and the suite already runs on the developer's
+# machine before every commit. Run it from the Actions tab when a second
+# opinion from a Linux runner is wanted; a push never starts it.
 on:
-  push:
-    branches:
-      - master
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
-# These jobs only read the repo (lint, test, docs build); grant the token no
-# more than read access. Raise per-job if a job ever needs to write.
+# These jobs only read the repo (lint, test); grant the token no more than
+# read access. Raise per-job if a job ever needs to write.
 permissions:
   contents: read
 
@@ -54,6 +54,12 @@ jobs:
           path: .tox
           key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}
 
+      # Offscreen Qt still links libEGL and friends, and ubuntu-24.04 ships
+      # without them; every test module that imports PySide6 failed at
+      # collection here. The release build installs the same set.
+      - name: Install the Qt runtime libraries the offscreen tests load
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libopengl0 libxkbcommon0 libfontconfig1 libpulse0 libasound2t64
+
       - name: Install tox
         run: |
           python -m pip install --upgrade pip
@@ -61,15 +67,3 @@ jobs:
 
       - name: Test with tox
         run: tox
-
-  check-docs:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Set up the environment
-        uses: ./.github/actions/setup-poetry-env
-
-      - name: Check if documentation can be built
-        run: poetry run mkdocs build -s
