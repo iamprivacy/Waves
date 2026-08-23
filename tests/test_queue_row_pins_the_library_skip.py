@@ -33,6 +33,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from _dispatch_stub import arm_dispatch
 from tidalapi.media import Quality
 
 from tidaler.waves_ui import backend
@@ -106,6 +107,7 @@ class _Stub:
         self.downloadState = _Signal()
         self.downloadProgress = _Signal()
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        arm_dispatch(self)
         self.built: list[dict] = []
 
     def _library_bulk_skip_on(self) -> bool:
@@ -373,7 +375,9 @@ def test_a_row_that_has_started_running_answers_as_it_did_queued():
 def test_neither_reader_consults_the_live_setting():
     """The audit guard. Both readers go through the row's pin; a new live read
     in either of them puts the drawer and the run back out of step."""
-    for name in ("_predict_skips", "_download"):
+    # The run's reader lives in _start_job now (the job body, built when the
+    # row's turn comes); the pin itself is still taken at _enqueue time.
+    for name in ("_predict_skips", "_start_job"):
         src = inspect.getsource(getattr(WavesBridge, name))
         assert "_job_library_skip(qid)" in src, f"{name} stopped reading the row's pin"
         assert "_library_bulk_skip_on" not in src, f"{name} went back to the live setting"

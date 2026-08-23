@@ -10,6 +10,7 @@ instead of showing a raw enum name.
 
 import datetime as _dt
 from types import SimpleNamespace
+from typing import ClassVar
 
 from tidaler.waves_ui.backend import WavesBridge, _video_spec
 
@@ -97,3 +98,42 @@ def test_same_titled_webisodes_minutes_apart_all_survive():
     b = _dedup_bridge()
     out = b._dedup_videos([_vid("Blasting Room", 257), _vid("Blasting Room", 219), _vid("Blasting Room", 385)])
     assert len(out) == 3
+
+
+# ---- the still is asked for at the size the surface draws -------------------
+
+
+class _Still:
+    """A video whose image() behaves like tidalapi's: a (width, height) PAIR,
+    only four of which exist, anything else raises."""
+
+    PAIRS: ClassVar = [(160, 107), (480, 320), (750, 500), (1080, 720)]
+
+    def __init__(self):
+        self.asked = []
+
+    def image(self, width=1080, height=720):
+        self.asked.append((width, height))
+        if (width, height) not in self.PAIRS:
+            raise ValueError(f"Invalid resolution {width} x {height}")
+        return f"https://img.test/v/{width}x{height}.jpg"
+
+
+def test_video_stills_are_asked_for_by_pair_not_by_square_dimension():
+    still = _Still()
+    row = _dict(_video(image=still.image))
+    # A square dimension (what _image asks for) is not a valid pair, so it
+    # raised and the fallback handed back the LARGEST still there is: every
+    # thumbnail in the app was a full-size download.
+    assert row["art"] == "https://img.test/v/160x107.jpg", "the 78px row thumb takes the smallest still"
+    assert row["art_big"] == "https://img.test/v/750x500.jpg", "the results grid takes the grid-sized still"
+    assert still.asked == [(160, 107), (750, 500)], still.asked
+    assert (1080, 720) not in still.asked, "no surface draws a video at 1080x720"
+
+
+def test_a_video_with_no_still_still_yields_a_payload():
+    def boom(width=1080, height=720):
+        raise AttributeError("No cover image")
+
+    row = _dict(_video(image=boom))
+    assert row["art"] == "" and row["art_big"] == ""

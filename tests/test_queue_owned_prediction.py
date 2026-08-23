@@ -281,6 +281,7 @@ def test_the_stores_are_dropped_with_the_queue_row():
     b._job_tracks = {1: {}, 2: {}}
     b._job_owned = {1: {}, 2: {}}
     b._job_fetched = {1: [], 2: []}
+    b._job_objs = {1: object(), 2: object()}  # the rows' kept live objects
     backend.WavesBridge._prune_job_tracks(b)
     assert set(b._job_owned) == {2} and set(b._job_fetched) == {2}
 

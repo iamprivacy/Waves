@@ -15,6 +15,8 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from _dispatch_stub import arm_queue
+
 from tidaler.waves_ui import updater as updater_mod
 from tidaler.waves_ui.backend import WavesBridge, _link_tiles_of
 
@@ -52,9 +54,14 @@ class _HeldPool:
 
 class _AlbumTracksStub:
     loadAlbumTracks = WavesBridge.loadAlbumTracks
+    _start_album_tracks_fetch = WavesBridge._start_album_tracks_fetch
+    _record_album_members = WavesBridge._record_album_members
 
     def __init__(self, session_album=None):
         self._album_tracks_cache = {}
+        self._prefetch_lock = Lock()
+        self._album_tracks_inflight: dict = {}
+        self._album_tracks_unrecorded: set = set()
         self._objs = {"album": {}, "track": {}}
         self.threadpool = _InlinePool()
         self.albumTracksLoaded = _Signal()
@@ -146,6 +153,10 @@ class _RetryStub:
     _on_queue_retry_refetched = WavesBridge._on_queue_retry_refetched
     _queue_item = WavesBridge._queue_item
     _reindex_queue = WavesBridge._reindex_queue
+    _remove_rows_where = WavesBridge._remove_rows_where
+    _remove_row = WavesBridge._remove_row
+    _row_object = WavesBridge._row_object
+    _start_retry = WavesBridge._start_retry
 
     def __init__(self, session_track=None):
         self._queue = [
@@ -173,6 +184,7 @@ class _RetryStub:
         self.tidal = SimpleNamespace(session=SimpleNamespace(track=session_track))
         # The GUI hop, inlined: emit dispatches straight to the handler.
         self._queueRetryRefetched = SimpleNamespace(emit=lambda *a: self._on_queue_retry_refetched(*a))
+        arm_queue(self)
 
     def _set_status(self, text):
         self.statuses.append(text)
@@ -364,6 +376,10 @@ class _BestOfBothStub:
         self._merge_plans = {}
         self._merge_scanned: set = set()
         self._scan_pool = _InlinePool()
+        self._scan_gen = 0  # the generation STOP bumps; never bumped here
+        self._scans_in_flight = 0
+        self._scan_count_lock = Lock()
+        self.scanningChanged = _Signal()
         self.downloadState = _Signal()
         self._albumsQueued = _Signal()
         self.statuses: list = []

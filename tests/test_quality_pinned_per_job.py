@@ -227,6 +227,7 @@ def test_the_row_records_the_setting_it_was_queued_at():
     stub._queue = []
     stub._queue_index = {}
     stub._queue_lock = Lock()
+    stub._qdirty_added = []  # _enqueue marks the new row for the delta flush
     stub._emit_queue = lambda: None
     stub._target_tier = lambda: "HI-RES"
     stub.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=Quality.hi_res_lossless))

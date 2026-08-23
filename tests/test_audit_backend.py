@@ -22,6 +22,7 @@ from __future__ import annotations
 from threading import Event, Lock
 
 import pytest
+from _dispatch_stub import arm_queue
 
 from tidaler.waves_ui.backend import WavesBridge
 
@@ -73,12 +74,17 @@ class _Stub:
         self._ffmpeg_user_path = ""
         # Fake signals
         self.queueChanged = _Signal()
+        self.queueRowsAdded = _Signal()
+        self.queueRowsChanged = _Signal()
+        self.queueRowsRemoved = _Signal()
+        self._queueFlushRequested = _Signal()
         self.pausedChanged = _Signal()
         self.downloadState = _Signal()
         self.queueItemProgress = _Signal()
+        arm_queue(self)
 
     # Stubs for collaborators the tested methods call but that aren't the SUT.
-    def _prune_job_tracks(self):
+    def _prune_job_tracks(self, qids=None):
         pass
 
     def _set_status(self, msg):
@@ -106,6 +112,24 @@ class _Stub:
 
     def _emit_queue(self):
         return WavesBridge._emit_queue(self)
+
+    def _flush_queue_changes(self):
+        return WavesBridge._flush_queue_changes(self)
+
+    def _queue_mark_changed(self, qid):
+        return WavesBridge._queue_mark_changed(self, qid)
+
+    def _remove_rows_where(self, pred):
+        return WavesBridge._remove_rows_where(self, pred)
+
+    def _remove_row(self, qid):
+        return WavesBridge._remove_row(self, qid)
+
+    def _row_object(self, item):
+        return WavesBridge._row_object(self, item)
+
+    def _start_retry(self, item, obj):
+        return WavesBridge._start_retry(self, item, obj)
 
     def _set_queue_status(self, qid, status):
         return WavesBridge._set_queue_status(self, qid, status)
@@ -145,14 +169,16 @@ def test_cancel_queue_item_missing_job_still_removes_row():
 
 
 # --------------------------------------------------------------------------- #
-# Finding 4: clearQueue must abort removed non-running items.
+# Finding 4: clearQueue must not let a removed queued row download invisibly.
+# A queued row is a spec waiting for its turn now, so the clear drops the
+# spec with the row (there is no pooled Worker to abort any more); the one
+# running job is left alone.
 # --------------------------------------------------------------------------- #
 def test_clear_queue_aborts_removed_queued_items():
     stub = _Stub()
     running = Event()
-    queued = Event()
-    done = Event()
-    stub._job_aborts = {1: running, 2: queued, 3: done}
+    stub._job_aborts = {1: running}
+    stub._job_specs = {2: object()}
     stub._seed_queue(
         [
             {"qid": 1, "status": "running"},
@@ -164,8 +190,7 @@ def test_clear_queue_aborts_removed_queued_items():
     _bind(stub, "clearQueue")()
 
     assert not running.is_set(), "a running job must keep going, not be aborted"
-    assert queued.is_set(), "a queued job's Worker must be aborted so it early-returns"
-    assert done.is_set(), "a finished/other row's job is aborted on clear"
+    assert stub._job_specs == {}, "a cleared queued row's spec goes with it, or it downloads unseen"
     assert [q["qid"] for q in stub._queue] == [1], "only running rows remain"
 
 
@@ -189,7 +214,18 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     stub._artist_cache = {"1": {}}
     stub._artist_loading = {"1"}
     stub._page_cache_path = "/nonexistent/page_cache.json"
+    # ...and the hover prefetch of item pages.
+    stub._prefetch_lock = Lock()
+    stub._prefetch_key = "item:playlist:p1"
+    stub._prefetch_claimed = True
+    stub._prefetch_unrecorded = {"item:playlist:p1"}
+    stub._album_tracks_inflight = {"a1": False}
+    stub._album_tracks_unrecorded = {"a1"}
+    stub._item_fetch_ts = {"item:playlist:p1": 1.0}
 
+    # logout() ends the downloads before it touches the session (issue #30);
+    # the stop itself is pinned in test_signout_stops_the_queue.
+    stub.stopAll = lambda: None
     # logout() touches self.tidal.logout/_reset_tidal_session; stub them.
     calls = {"logout": 0, "reset": 0}
     stub.tidal = type("T", (), {"logout": lambda self: calls.__setitem__("logout", 1)})()
@@ -202,6 +238,12 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     assert stub._lib_cache == {}, "cache cleared on logout"
     assert stub._lib_loading == set()
     assert stub._lib_gen == 6, "generation bumped so a stale in-flight load is dropped"
+    assert stub._prefetch_key is None and stub._prefetch_claimed is False, "no prefetch survives the account"
+    assert stub._prefetch_unrecorded == set(), "a hover-built page of the old account is never recorded for the new one"
+    assert (
+        stub._album_tracks_inflight == {} and stub._album_tracks_unrecorded == set()
+    ), "nor a hover-fetched album's rows"
+    assert stub._item_fetch_ts == {}, "the next account's pages revalidate from scratch"
 
 
 def test_stale_lib_gen_guards_cache_write_semantics():

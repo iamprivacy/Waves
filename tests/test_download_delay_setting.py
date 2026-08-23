@@ -29,6 +29,8 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from _dispatch_stub import arm_dispatch
+
 from tidaler.download import Download
 from tidaler.waves_ui import backend
 from tidaler.waves_ui.backend import WavesBridge
@@ -104,6 +106,7 @@ class _Stub:
         self.downloadProgress = _Signal()
         self.dl = _RecordingDownload()
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        arm_dispatch(self)
 
     def _download_gate(self) -> str:
         return "ok"
@@ -260,5 +263,7 @@ def test_every_engine_dispatch_forwards_the_delay():
         "silently ignores the user's setting in one direction or the other."
     )
 
-    for name in ("_download", "_download_merge_plan"):
+    # The dispatches live in _start_job (the job body, built when a row's
+    # turn comes) and the merge fan-out.
+    for name in ("_start_job", "_download_merge_plan"):
         assert "download_delay" in inspect.getsource(getattr(WavesBridge, name)), f"{name} stopped forwarding it"

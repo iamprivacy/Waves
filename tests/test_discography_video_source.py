@@ -120,6 +120,10 @@ class _DiscoStub:
         self._merge_scanned: set = set()
         self._merge_plans: dict = {}
         self._scan_pool = _InlinePool()
+        self._scan_gen = 0  # the generation STOP bumps; never bumped here
+        self._scans_in_flight = 0
+        self._scan_count_lock = Lock()
+        self.scanningChanged = _Signal()
         self.downloadProgress = _Signal()
         self.downloadState = _Signal()
         self._albumsQueued = _Signal()

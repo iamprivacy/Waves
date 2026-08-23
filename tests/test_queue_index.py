@@ -31,6 +31,17 @@ def _stub():
     stub._queue_lock = Lock()
     stub._queue_emit_suspended = False
     stub._emit_queue = lambda: None
+    # The delta protocol's dirty marks (what QML has not been told yet) and
+    # the per-row job state the remove path prunes.
+    stub._qdirty_added = []
+    stub._qdirty_changed = {}
+    stub._qdirty_removed = []
+    stub._qdirty_full = False
+    stub._job_specs = {}
+    stub._job_objs = {}
+    stub._job_tracks = {}
+    stub._job_owned = {}
+    stub._job_fetched = {}
     # A queued row states the tier its job will ask for; the setting behind
     # that word is not what these tests are about.
     stub._target_tier = lambda: "LOSSLESS"
@@ -48,9 +59,12 @@ def _stub():
         "_reindex_queue",
         "_queue_item",
         "_trim_queue_history",
+        "_remove_rows_where",
+        "_remove_row",
         "removeQueueItem",
         "clearFinished",
         "clearFailed",
+        "clearStopped",
         "clearQueued",
         "clearQueue",
     ):
@@ -81,9 +95,12 @@ def test_remove_reindexes():
 def test_each_section_clear_takes_only_its_own_section():
     # Every section clears itself and nothing else, and none of them ever
     # touches a running row: stopping a live transfer is the row's own control.
+    # A cancelled row is one STOP ended; it files under its own Stopped
+    # section, whose CLEAR is the only one that takes it (issue #27).
     for slot, gone in (
-        ("clearFinished", {"done", "cancelled"}),  # the Completed section
+        ("clearFinished", {"done"}),  # the Completed section
         ("clearFailed", {"failed"}),
+        ("clearStopped", {"cancelled"}),
         ("clearQueued", {"queued"}),
     ):
         stub = _stub()
@@ -109,18 +126,35 @@ def test_clear_all_empties_everything_except_the_running_row():
     assert _mirror_ok(stub)
 
 
-def test_retry_all_failed_retries_exactly_the_failed_rows():
+def _retry_all_stub():
     stub = _stub()
-    stub.retryAllFailed = _bind(stub, "retryAllFailed")
+    for name in ("retryAllFailed", "retryAllStopped", "_retry_all_with_status", "_row_object"):
+        setattr(stub, name, _bind(stub, name))
     retried = []
-    stub.retryQueueItem = retried.append
-    qids = [stub._enqueue(n, "track", media_id=n) for n in ("A", "B", "C", "D")]
-    stub._queue_item(qids[0])["status"] = "failed"
-    stub._queue_item(qids[1])["status"] = "running"
-    stub._queue_item(qids[2])["status"] = "failed"
-    stub._queue_item(qids[3])["status"] = "cancelled"
+    # RETRY ALL drops the rows in one pass and re-downloads each from the
+    # object the row kept; recording _start_retry sees exactly that set.
+    stub._start_retry = lambda item, obj: retried.append(item["qid"])
+    stub._retry_queue_refetch = lambda item: retried.append(("refetch", item["qid"]))
+    qids = [stub._enqueue(n, "track", media_id=n) for n in ("A", "B", "C", "D", "E", "F")]
+    for qid, st in zip(qids, ("failed", "running", "failed", "cancelled", "done", "cancelled"), strict=False):
+        stub._queue_item(qid)["status"] = st
+        stub._job_objs[qid] = object()  # the row's kept live object
+    return stub, qids, retried
+
+
+def test_retry_all_failed_retries_exactly_the_failed_rows():
+    # RETRY ALL on the Failed header takes the failed rows and nothing else:
+    # not the rows STOP ended (they have their own header, issue #27), never a
+    # live or finished row.
+    stub, qids, retried = _retry_all_stub()
     stub.retryAllFailed()
     assert retried == [qids[0], qids[2]]
+
+
+def test_retry_all_stopped_retries_exactly_the_stopped_rows_in_order():
+    stub, qids, retried = _retry_all_stub()
+    stub.retryAllStopped()
+    assert retried == [qids[3], qids[5]]
 
 
 def test_clear_queue_reindexes():
@@ -176,11 +210,16 @@ def test_settled_rows_past_the_cap_go_oldest_first():
     assert _mirror_ok(stub)
 
 
-def test_a_cancelled_row_settles_too():
+def test_a_stopped_row_is_never_trimmed_either():
+    # A cancelled row is one STOP ended and kept for RETRY (issue #27): the
+    # same record a failed row is, so the cap passes over it the same way.
     stub = _stub()
-    stub._queue_item(_settled_queue(stub, done=stub._QUEUE_HISTORY_MAX + 1)[0])["status"] = "cancelled"
+    qids = _settled_queue(stub, done=stub._QUEUE_HISTORY_MAX + 1)
+    stub._queue_item(qids[0])["status"] = "cancelled"
     stub._trim_queue_history()
     assert len(stub._queue) == stub._QUEUE_HISTORY_MAX
+    assert stub._queue_item(qids[0]) is not None, "the stopped row went with the history"
+    assert stub._queue_item(qids[1]) is None, "the oldest done row is what should have gone"
 
 
 def test_failed_rows_are_never_trimmed():

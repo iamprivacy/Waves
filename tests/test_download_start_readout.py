@@ -28,6 +28,8 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from _dispatch_stub import arm_dispatch
+
 from tidaler.waves_ui import backend
 from tidaler.waves_ui.backend import WavesBridge
 
@@ -75,6 +77,7 @@ class _Stub:
         self.dl_pool = _InlinePool()
         self.downloadState = _Recorder("state", log)
         self.downloadProgress = _Recorder("progress", log)
+        arm_dispatch(self)
         self.statuses: list[tuple[int, str]] = []
         self.status_line: list[str] = []
 

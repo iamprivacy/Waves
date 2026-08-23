@@ -58,10 +58,16 @@ def _calls_in_body_excluding_nested(node: ast.FunctionDef) -> set[str]:
     return names
 
 
-def _calls_inside(node: ast.FunctionDef, nested_name: str) -> set[str]:
-    nested = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == nested_name)
+def _calls_inside_workers(node: ast.FunctionDef) -> set[str]:
+    """Attribute-call names made inside ANY nested function of the slot: the
+    worker itself, or a sibling it delegates to (downloadArtist's work() wraps
+    scan() so a STOP mid-scan has one place to land)."""
     return {
-        sub.func.attr for sub in ast.walk(nested) if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+        sub.func.attr
+        for nested in node.body
+        if isinstance(nested, ast.FunctionDef)
+        for sub in ast.walk(nested)
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
     }
 
 
@@ -76,7 +82,7 @@ def test_preview_and_download_artist_resolve_off_the_gui_thread():
             f"{slot} resolves the artist on the GUI thread; on an _objs miss that is a "
             "synchronous, untimed network request and the window freezes"
         )
-        assert "_get_artist" in _calls_inside(node, "work"), f"{slot} no longer resolves the artist at all"
+        assert "_get_artist" in _calls_inside_workers(node), f"{slot} no longer resolves the artist at all"
 
 
 def test_no_slot_resolves_media_objects_on_the_gui_thread():

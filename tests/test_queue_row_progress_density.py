@@ -112,10 +112,10 @@ def _scenario() -> int:
         return booted
     _root, q, settle, bridge = booted
     qid = bridge._enqueue("Density Row", "track", media_id="lab-density", artist="Lab", tracks=0)
-    item = bridge._queue_item(qid)
-    item["status"] = "running"
-    item["progress"] = 37
-    bridge._emit_queue()
+    # Through the real mutators: a poked field is invisible to the delta
+    # protocol (nothing marks it), so the row would stay queued on screen.
+    bridge._set_queue_status(qid, "running")
+    bridge._set_queue_progress(qid, 37)
     settle(120)
     q("queueDrawer.open()")
     settle(900)  # past the slot's 300ms grow and the drawer's slide
@@ -185,10 +185,9 @@ def _idle_scenario() -> int:
         return 78
     idle_mats, idle_cells = (int(v) for v in str(got).split(","))
 
-    item = bridge._queue_item(bridge._enqueue("Running", "track", media_id="idle-run", artist="Lab", tracks=0))
-    item["status"] = "running"
-    item["progress"] = 50
-    bridge._emit_queue()
+    run_qid = bridge._enqueue("Running", "track", media_id="idle-run", artist="Lab", tracks=0)
+    bridge._set_queue_status(run_qid, "running")
+    bridge._set_queue_progress(run_qid, 50)
     settle(900)
     run_mats = int(q("(function(){" + _COUNT + " return mats(queueDrawer.contentItem) })()") or 0)
 

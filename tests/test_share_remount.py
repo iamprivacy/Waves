@@ -15,6 +15,8 @@ import sys
 import types
 from threading import Lock
 
+from _dispatch_stub import arm_queue
+
 import tidaler.waves_ui.backend as backend_mod
 from tidaler.waves_ui import netmount
 from tidaler.waves_ui.backend import WavesBridge
@@ -260,9 +262,19 @@ def _midflight_bridge(monkeypatch, verdict, remounted=False):
     b._pending_lock = Lock()
     b._queue = [{"qid": 7, "status": "running"}]
     b._queue_lock = Lock()
+    b._queue_index = {7: b._queue[0]}
     b._job_tracks = {7: {}}
+    arm_queue(b)
     b._emitted_queue = 0
-    b._emit_queue = lambda: setattr(b, "_emitted_queue", b._emitted_queue + 1)
+
+    def _emit():
+        # The counter, plus what the real flush does with rows just removed:
+        # their per-row stores go with them (the withdrawn-row assertions
+        # below are about exactly that).
+        b._emitted_queue += 1
+        backend_mod.WavesBridge._prune_job_tracks(b)
+
+    b._emit_queue = _emit
     b.statuses = []
     b._set_status = b.statuses.append
     b._states = []

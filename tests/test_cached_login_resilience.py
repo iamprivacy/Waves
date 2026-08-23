@@ -156,3 +156,71 @@ def test_no_stored_sign_in_is_a_noop(tmp_path):
     wt, token_file = _bare(tmp_path, returns=True, has_token=False)
     assert wt.login_token() is False
     assert token_file.exists(), "with nothing stored the file is never touched"
+
+
+# --- A client probe is not the user's sign-in (issue #30) -------------------
+#
+# Fetching Dolby Atmos swaps the client id and re-authenticates mid-download to
+# prove the swap took, and that goes through login_token. A refusal there is the
+# Atmos client being turned away; it says nothing about the saved sign-in, yet
+# it used to delete it from under a running queue, on a worker thread, while the
+# window still said signed in. The loss only showed at the next launch.
+
+
+def _probe_capable(wt):
+    """The attributes ``_reauthenticate_current_client`` and the Atmos swap read."""
+    wt.is_pkce = True
+    wt.is_atmos_session = False
+    wt.original_client_id = "orig-id"
+    wt.original_client_secret = "orig-secret"  # noqa: S105
+    wt.original_client_id_pkce = "orig-pkce-id"
+    wt.original_client_secret_pkce = "orig-pkce-secret"  # noqa: S105
+    wt.settings = types.SimpleNamespace(data=types.SimpleNamespace(quality_audio="LOSSLESS"))
+    wt.session.config = types.SimpleNamespace(
+        client_id="orig-id",
+        client_secret="orig-secret",  # noqa: S106
+        client_id_pkce="orig-pkce-id",
+        client_secret_pkce="orig-pkce-secret",  # noqa: S106
+    )
+    wt.session.audio_quality = "LOSSLESS"
+    wt.session.refresh_token = "saved-refresh-credential"  # noqa: S105
+    wt.session.token_refresh = lambda _credential: True
+    return wt
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_client_probe_keeps_the_saved_sign_in(tmp_path, status):
+    wt, saved = _bare(tmp_path, raises=_http_error(status))
+    _probe_capable(wt)
+
+    assert wt._reauthenticate_current_client() is False
+    assert saved.exists(), f"a {status} while proving a client says nothing about the sign-in"
+
+
+def test_a_refused_atmos_swap_keeps_the_saved_sign_in(tmp_path):
+    """The whole reported chain, end to end: the swap is what calls the probe."""
+    wt, saved = _bare(tmp_path, raises=_http_error(401))
+    _probe_capable(wt)
+
+    assert wt.switch_to_atmos_session() is False
+    assert wt.is_atmos_session is False
+    assert saved.exists(), "an Atmos track must never cost the user their sign-in"
+
+
+def test_the_guard_is_released_after_the_probe(tmp_path):
+    """One probe must not disarm the launch-time deletion for the rest of the run."""
+    wt, saved = _bare(tmp_path, raises=_http_error(401))
+    _probe_capable(wt)
+    wt._reauthenticate_current_client()
+
+    assert wt.login_token() is False
+    assert not saved.exists(), "a refusal outside a probe still means TIDAL refused the sign-in"
+
+
+def test_a_probe_refused_without_an_answer_still_keeps_it(tmp_path):
+    """The ordinary keep-it path is unchanged inside a probe."""
+    wt, saved = _bare(tmp_path, raises=requests.exceptions.ConnectionError("offline"))
+    _probe_capable(wt)
+
+    assert wt._reauthenticate_current_client() is False
+    assert saved.exists()

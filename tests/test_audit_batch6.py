@@ -58,6 +58,8 @@ class _LogoutStub:
 
     def __init__(self):
         self.events: list = []
+        # logout() ends the downloads before it touches the session (issue #30).
+        self.stopAll = lambda: self.events.append("stopAll")
         self.tidal = SimpleNamespace(logout=lambda: None)
         self._reset_tidal_session = lambda: None
         self._lib_cache: dict = {}
@@ -73,6 +75,13 @@ class _LogoutStub:
         self._category_pl: dict = {}
         self._browse_gen = 0
         self._browse_reval_ts = 1.0
+        self._prefetch_lock = Lock()
+        self._prefetch_key = None
+        self._prefetch_claimed = False
+        self._prefetch_unrecorded: set = set()
+        self._album_tracks_inflight: dict = {}
+        self._album_tracks_unrecorded: set = set()
+        self._item_fetch_ts: dict = {}
         self._artist_cache: dict = {}
         self._artist_loading: set = set()
         self._album_tracks_cache: dict = {}

@@ -219,9 +219,14 @@ class _OwnershipSpy:
 
 class _AlbumTracksStub:
     loadAlbumTracks = WavesBridge.loadAlbumTracks
+    _start_album_tracks_fetch = WavesBridge._start_album_tracks_fetch
+    _record_album_members = WavesBridge._record_album_members
 
     def __init__(self, album):
         self._album_tracks_cache: dict = {}
+        self._prefetch_lock = Lock()
+        self._album_tracks_inflight: dict = {}
+        self._album_tracks_unrecorded: set = set()
         self._objs = {"album": {"alb1": album}, "track": {}}
         self.threadpool = _InlinePool()
         self._ownership = _OwnershipSpy()
@@ -430,6 +435,10 @@ class _DownloadArtistStub:
         self._artist_lock = Lock()
         self.threadpool = _InlinePool()
         self._scan_pool = _InlinePool()
+        self._scan_gen = 0  # the generation STOP bumps; never bumped here
+        self._scans_in_flight = 0
+        self._scan_count_lock = Lock()
+        self.scanningChanged = _Signal()
         self.downloadProgress = _Signal()
         self.downloadState = _Signal()
         self.ffmpegMissingBlocked = _Signal()

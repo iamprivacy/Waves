@@ -208,6 +208,7 @@ def test_apply_windows_tree_helper_backs_up_and_restores(tmp_path, monkeypatch):
     target = install_root / "Waves.exe"
     new_tree = tmp_path / "staging" / "Waves.dist"
     new_tree.mkdir(parents=True)
+    (new_tree / "Waves.exe").write_text("NEW")
 
     up._apply_windows_tree(new_tree, target, lambda *a, **k: None)
 
@@ -216,6 +217,102 @@ def test_apply_windows_tree_helper_backs_up_and_restores(tmp_path, monkeypatch):
     assert f'move "{install_root}" "{backup}"' in script  # back the install up
     assert f'move "{backup}" "{install_root}"' in script  # restore on failure
     assert "GEQ 8" in script  # only restore/abort on a real robocopy failure
+
+
+def _tree_helper_script(tmp_path, monkeypatch, *, exe_bytes=b"NEW"):
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    up.staging_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(u.subprocess, "Popen", lambda *a, **k: None)
+    install_root = tmp_path / "Waves"
+    install_root.mkdir(exist_ok=True)
+    target = install_root / "Waves.exe"
+    new_tree = tmp_path / "staging" / "Waves"
+    new_tree.mkdir(parents=True, exist_ok=True)
+    if exe_bytes is not None:
+        (new_tree / "Waves.exe").write_bytes(exe_bytes)
+    up._apply_windows_tree(new_tree, target, lambda *a, **k: None)
+    return up, install_root, target, new_tree, (up.staging_dir / "apply_update.bat").read_text()
+
+
+def test_apply_windows_tree_refuses_a_staged_tree_without_the_exe(tmp_path, monkeypatch):
+    """Field report: an update left the install folder empty. A staged tree with
+    no executable (or an empty one, the antivirus having eaten it) must be
+    refused before any helper is written, never mirrored over the live install."""
+    with pytest.raises(UpdaterError, match="no Waves.exe"):
+        _tree_helper_script(tmp_path, monkeypatch, exe_bytes=None)
+    with pytest.raises(UpdaterError, match="no Waves.exe"):
+        _tree_helper_script(tmp_path, monkeypatch, exe_bytes=b"")
+    assert not (tmp_path / "updates" / "apply_update.bat").exists()
+
+
+def test_apply_windows_tree_helper_never_deletes_the_last_good_copy(tmp_path, monkeypatch):
+    """The helper may delete the .old backup only after the mirrored folder
+    holds the executable (robocopy exits 0 for 'source empty, nothing copied'),
+    and every failure path restores the backup on its own labelled branch. The
+    old one-line `if ... & move & start & exit` chain bound the restore INTO the
+    `if exist`, so a mirror that created no folder fell through to deleting the
+    backup: that is the empty install folder seen in the field."""
+    _, install_root, target, new_tree, script = _tree_helper_script(tmp_path, monkeypatch)
+    backup = install_root.with_name(install_root.name + ".old")
+    lines = script.replace("\r\n", "\n").split("\n")
+    # exe checked before the swap and after the mirror
+    assert f'if not exist "{new_tree / "Waves.exe"}"' in script
+    assert f'if not exist "{target}" (echo mirror left no Waves.exe' in script
+    # the backup is deleted on exactly one line, and only after the exe check
+    deletes = [i for i, ln in enumerate(lines) if ln.startswith(f'rmdir /S /Q "{backup}"')]
+    assert len(deletes) == 1
+    exe_check = next(i for i, ln in enumerate(lines) if f'if not exist "{target}"' in ln)
+    assert exe_check < deletes[0]
+    # the restore is a plain sequence, not a consequent of `if exist`
+    assert any(ln.startswith(f'move "{backup}" "{install_root}"') for ln in lines)
+    assert ":restore" in lines and "goto restore" in script
+    # relaunch only what exists; no `start` anywhere else
+    starts = [ln for ln in lines if 'start ""' in ln]
+    assert starts == [
+        f'if exist "{target}" (start "" "{target}" & echo relaunched >> "{tmp_path / "updates" / "update.log"}") else (echo nothing to relaunch >> "{tmp_path / "updates" / "update.log"}")'
+    ]
+
+
+def test_windows_helpers_never_start_a_second_instance_on_giveup(tmp_path, monkeypatch):
+    """The helper is armed at install time, not at Restart: if the user keeps
+    the app open past the wait, giving up must not `start` a duplicate of the
+    still-running app (the old 150 s cap did, and the later restart then swapped
+    nothing). It waits hours and, when it does give up, only exits."""
+    _, _, _, _, tree_script = _tree_helper_script(tmp_path, monkeypatch)
+    giveup = tree_script[tree_script.index("\n:giveup") :]
+    assert 'start ""' not in giveup
+    assert f"GTR {AppUpdater._HELPER_WAIT_TICKS}" in tree_script
+    assert AppUpdater._HELPER_WAIT_TICKS >= 3600
+
+    up = AppUpdater(tmp_path / "single", "1.0.0", repo="owner/Waves")
+    up.staging_dir.mkdir(parents=True)
+    install = tmp_path / "single" / "app"
+    install.mkdir(parents=True)
+    staged = tmp_path / "single" / "staging" / "Waves.exe"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("NEW")
+    up._apply_windows(staged, install / "Waves.exe", lambda *a, **k: None)
+    single = (up.staging_dir / "apply_update.bat").read_text()
+    giveup_line = next(ln for ln in single.replace("\r\n", "\n").split("\n") if "gave up waiting" in ln)
+    assert 'start ""' not in giveup_line
+    assert f"GTR {AppUpdater._HELPER_WAIT_TICKS}" in single
+
+
+def test_install_with_an_armed_windows_helper_does_not_stage_twice(tmp_path, monkeypatch):
+    """Once a Windows helper is waiting for this process to exit, a second
+    install in the same session must return the staged result untouched: a
+    second helper would race the first over the same .old folder and staged
+    tree, and a re-extraction would empty the tree the first one mirrors."""
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    up.os_key = "windows"
+    monkeypatch.setattr(u, "is_frozen", lambda: True)
+    calls = []
+    monkeypatch.setattr(up, "latest", lambda *a, **k: calls.append("latest"))
+    up._armed_result = {"ok": True, "version": "v2.0.0", "applied_to": "x", "relaunch": True}
+    logs = []
+    assert up.install(log_cb=logs.append) == up._armed_result
+    assert calls == []  # no network, no download, no extraction, no helper
+    assert any("already staged" in m for m in logs)
 
 
 # ---- version parse / compare ------------------------------------------------

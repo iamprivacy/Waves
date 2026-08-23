@@ -211,6 +211,10 @@ def _clicking_bridge(session, album):
     bridge._merge_plans = {}
     bridge._merge_scanned = {"a1"}
     bridge._scan_pool = _InlinePool()
+    bridge._scan_gen = 0  # the generation STOP bumps; never bumped here
+    bridge._scans_in_flight = 0
+    bridge._scan_count_lock = Lock()
+    bridge.scanningChanged = _Signal()
     bridge._waves_prefs = {"explicit_mode": "explicit"}
     bridge.downloadState = _Signal()
     bridge._albumsQueued = _Signal()

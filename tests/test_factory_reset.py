@@ -249,3 +249,80 @@ def test_factory_reset_freeze_blocks_pref_saves(tmp_path):
     stub._waves_prefs = {"explicit_mode": "explicit"}
     _bind(stub, "_save_waves_prefs")()
     assert not os.path.exists(stub._waves_prefs_path), "no pref file may re-appear after the wipe"
+
+
+# --------------------------------------------------------------------------- #
+# The cover cache: up to 1 GB of Qt-named files that no name allowlist can
+# list, so the wipe empties it through Qt (clear() removes only the entries
+# Qt wrote) and then lets the known tree fall by os.rmdir like every other
+# subdir. The dialog promises "caches" go; this is the one that did not.
+# --------------------------------------------------------------------------- #
+def _fill_art_cache(art):
+    import importlib
+
+    importlib.import_module("PySide6")
+    from PySide6.QtCore import QUrl
+    from PySide6.QtNetwork import QNetworkCacheMetaData, QNetworkDiskCache
+
+    cache = QNetworkDiskCache()
+    cache.setCacheDirectory(str(art))
+    for i in range(3):
+        md = QNetworkCacheMetaData()
+        md.setUrl(QUrl(f"https://img.test/{i}/320x320.jpg"))
+        md.setSaveToDisk(True)
+        dev = cache.prepare(md)
+        dev.write(b"x" * 64)
+        cache.insert(dev)
+    entries = list(art.rglob("*.d"))
+    assert len(entries) == 3, "the real cache laid down its entries"
+    return entries
+
+
+def test_factory_reset_empties_the_cover_cache(tmp_path, monkeypatch):
+    base = tmp_path / "cfg"
+    base.mkdir()
+    (base / "settings.json").write_text("{}")
+    entries = _fill_art_cache(base / "art_cache")
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert not any(p.exists() for p in entries), "every cover Qt wrote is gone"
+    assert not (base / "art_cache").exists(), "and the emptied tree falls with it"
+    assert os.listdir(base) == [], "nothing of Waves' is left"
+
+
+def test_factory_reset_leaves_a_foreign_file_in_the_cover_cache_alone(tmp_path, monkeypatch):
+    base = tmp_path / "cfg"
+    base.mkdir()
+    art = base / "art_cache"
+    entries = _fill_art_cache(art)
+    bucket = entries[0].parent
+    foreign = bucket / "my-notes.txt"
+    foreign.write_text("mine")
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert not any(p.exists() for p in entries), "Qt's own entries still go"
+    assert foreign.read_text() == "mine", "a file Qt did not write is never touched"
+    assert bucket.is_dir() and art.is_dir(), "and it keeps its directories alive"
+
+
+def test_factory_reset_never_deletes_through_a_symlinked_cover_cache(tmp_path, monkeypatch):
+    base = tmp_path / "cfg"
+    base.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    entries = _fill_art_cache(elsewhere)
+    os.symlink(str(elsewhere), str(base / "art_cache"))
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert all(p.exists() for p in entries), "a linked-in tree is foreign, nothing behind it is touched"
+
+
+def test_art_cache_wipe_has_no_recursive_delete():
+    """The names the wipe's bytecode touches, docstring and comments aside:
+    rmdir is the only removal primitive, Qt does the file removes."""
+    names = set(backend_mod._factory_wipe_art_cache.__code__.co_names)
+    assert "rmdir" in names
+    assert not names & {"rmtree", "walk", "remove", "unlink", "rglob", "iterdir", "scandir"}, sorted(names)

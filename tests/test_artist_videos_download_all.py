@@ -64,6 +64,10 @@ class _Stub:
         self._artist_groups: dict = {}
         self._artist_lock = Lock()
         self._scan_pool = _InlinePool()
+        self._scan_gen = 0  # the generation STOP bumps; never bumped here
+        self._scans_in_flight = 0
+        self._scan_count_lock = Lock()
+        self.scanningChanged = _Signal()
         self.downloadProgress = _Signal()
         self.downloadState = _Signal()
         self._videosQueued = _Signal()

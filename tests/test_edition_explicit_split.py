@@ -32,6 +32,7 @@ The group is now split before planning. What is pinned here:
 
 from __future__ import annotations
 
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -363,7 +364,8 @@ class _Signal:
         self.emits = []
 
     def emit(self, *a):
-        self.emits.append(a if len(a) > 1 else a[0])
+        # Zero args is a real emit too (scanningChanged carries none).
+        self.emits.append(a[0] if len(a) == 1 else a)
 
 
 def _twin_group():
@@ -439,6 +441,10 @@ class _ClickStub:
         self._merge_plans = {}
         self._merge_scanned: set = set()
         self._scan_pool = _InlinePool()
+        self._scan_gen = 0  # the generation STOP bumps; never bumped here
+        self._scans_in_flight = 0
+        self._scan_count_lock = Lock()
+        self.scanningChanged = _Signal()
         self._waves_prefs = {"explicit_mode": mode}
         self.downloadState = _Signal()
         self._albumsQueued = _Signal()

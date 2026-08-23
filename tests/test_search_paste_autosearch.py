@@ -13,6 +13,9 @@ behaviors must hold:
    unless it is a TIDAL link (that auto-search predates the glyph arm).
 3. The arm is one-shot and disarmed by any non-decode text change, so a
    stale arm (empty clipboard at click time) cannot fire on a later paste.
+4. A glyph paste of three characters or fewer searches too (issue #28). The
+   decoder reads a paste off a >=4-char jump, which a short one cannot make,
+   so the handler runs the decode itself rather than waiting for a guess.
 
 The scenario never touches the OS clipboard: a paste, to the decoder, is a
 multi-char text jump typing can't produce, so the test assigns the field's
@@ -174,12 +177,40 @@ def _run_scenario() -> int:
     settle(decode_ms)
     empty_glyph_inert = bool(q("_searchSeq === -99"))
 
+    # 5. The REAL glyph handler with a SHORT term on the clipboard (issue #28).
+    #    Three characters or fewer is not a jump typing could not produce, so
+    #    the decoder's own heuristic starts nothing and the field's disarm drops
+    #    the arm: the button pasted the term and then sat there. The handler has
+    #    to run the decode itself. Checked at 1, 2 and 3 characters, since the
+    #    threshold is a >=4 jump.
+    short_searched = True
+    for term in ("U2", "a", "MIA"):
+        QGuiApplication.clipboard().setText(term)
+        q("_searchSeq = -99")
+        q("searchField.clear()")
+        q("pasteGlyph.clicked()")
+        settle(decode_ms)
+        landed = q("searchField.text") == term and bool(q("_searchSeq === _navSeq"))
+        short_searched = short_searched and landed
+        if not landed:
+            print(f"short paste {term!r} did not search: text={q('searchField.text')!r}", file=sys.stderr)
+
+    # 5b. That new path must not have re-armed the stale case: a bare Ctrl+V
+    #     after a short glyph paste is still only a fill.
+    q("_searchSeq = -99")
+    q("searchField.clear()")
+    paste("still just filling the box")
+    settle(decode_ms)
+    short_left_no_arm = bool(q("_searchSeq === -99"))
+
     ok = armed_searched and plain_inert and url_searched and disarmed and stale_inert
     ok = ok and glyph_disarmed and empty_glyph_inert
+    ok = ok and short_searched and short_left_no_arm
     print(
         f"armed_searched={armed_searched} plain_inert={plain_inert} url_searched={url_searched} "
         f"disarmed={disarmed} stale_inert={stale_inert} "
-        f"glyph_disarmed={glyph_disarmed} empty_glyph_inert={empty_glyph_inert}",
+        f"glyph_disarmed={glyph_disarmed} empty_glyph_inert={empty_glyph_inert} "
+        f"short_searched={short_searched} short_left_no_arm={short_left_no_arm}",
         flush=True,
     )
     return _EXIT_OK if ok else _EXIT_REGRESSED

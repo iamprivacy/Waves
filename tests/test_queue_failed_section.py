@@ -9,6 +9,11 @@ rows into [Completed, Failed, Downloading, Queued], the Failed section header
 carries a RETRY ALL control driven by root.failedCount, and a retried row
 leaves the section the moment its status changes.
 
+Issue #27 added a Stopped section for the rows STOP ends (status
+``cancelled``), between Failed and Downloading, with its own RETRY ALL and
+CLEAR driven by root.stoppedCount: a stop is not an error, so it never shares
+Failed's red header, and a failure is never lost among stopped rows.
+
 The scenario drives root.reconcileQueue() with hand-built rows (the same
 payload shape the bridge emits) and asserts on the model's uiGroup order and
 the counts, all pure QML facts, offline.
@@ -112,30 +117,83 @@ def _run_scenario() -> int:
             % (qid, qid, status, qid)
         )
 
-    # One row per state: the partition must land [failed, downloading(running +
-    # cancelled), queued] with Completed empty (nothing has moved there).
+    # One row per state: the partition must land [failed, failed, stopped,
+    # downloading, queued] with Completed empty (nothing has moved there).
+    # The stopped row counts in stoppedCount alone, never in failedCount.
     rows = ", ".join([row(1, "queued"), row(2, "failed"), row(3, "running"), row(4, "failed"), row(5, "cancelled")])
     q(f"reconcileQueue([{rows}])")
     settle(60)
     groups = [q(f"queueModel.get({i}).uiGroup") for i in range(int(q("queueModel.count")))]
-    partitioned = groups == ["failed", "failed", "downloading", "downloading", "queued"]
-    counted = int(q("failedCount")) == 2 and int(q("downloadingCount")) == 2 and int(q("queuedCount")) == 1
+    partitioned = groups == ["failed", "failed", "stopped", "downloading", "queued"]
+    counted = (
+        int(q("failedCount")) == 2
+        and int(q("stoppedCount")) == 1
+        and int(q("downloadingCount")) == 1
+        and int(q("queuedCount")) == 1
+    )
 
-    # A retried row leaves the Failed section as soon as its status changes.
-    rows2 = ", ".join([row(1, "queued"), row(2, "queued"), row(3, "running"), row(4, "failed"), row(5, "cancelled")])
+    # A retried row leaves its section as soon as its status changes, whether
+    # it was failed or stopped.
+    rows2 = ", ".join([row(1, "queued"), row(2, "queued"), row(3, "running"), row(4, "failed"), row(5, "queued")])
     q(f"reconcileQueue([{rows2}])")
     settle(60)
     groups2 = [q(f"queueModel.get({i}).uiGroup") for i in range(int(q("queueModel.count")))]
-    regrouped = groups2 == ["failed", "downloading", "downloading", "queued", "queued"]
-    recounted = int(q("failedCount")) == 1
+    regrouped = groups2 == ["failed", "downloading", "queued", "queued", "queued"]
+    recounted = int(q("failedCount")) == 1 and int(q("stoppedCount")) == 0
 
-    # The retry-all entry point the header calls must exist on the bridge.
-    has_slot = bool(q("typeof waves.retryAllFailed === 'function'"))
+    # A queue of nothing but stopped rows (the usual sight right after STOP)
+    # is one Stopped section and no Failed section at all.
+    rows3 = ", ".join([row(1, "cancelled"), row(2, "cancelled")])
+    q(f"reconcileQueue([{rows3}])")
+    settle(60)
+    groups3 = [q(f"queueModel.get({i}).uiGroup") for i in range(int(q("queueModel.count")))]
+    all_stopped = groups3 == ["stopped", "stopped"] and int(q("failedCount")) == 0 and int(q("stoppedCount")) == 2
 
-    ok = partitioned and counted and regrouped and recounted and has_slot
+    # The bulk entry points each header calls must exist on the bridge.
+    has_slot = all(
+        bool(q(f"typeof waves.{name} === 'function'"))
+        for name in ("retryAllFailed", "retryAllStopped", "clearFailed", "clearStopped")
+    )
+
+    # The headers as RENDERED: open the drawer on a mixed queue and read the
+    # section labels the list actually instantiated. The Stopped header is
+    # the soft red (a step under Failed's hot red), bold, and counts its own
+    # rows; nothing else in the suite ever rendered a section header, so
+    # the label chain and the colour chain were unpinned.
+    from PySide6.QtCore import QObject
+
+    q(f"reconcileQueue([{rows}])")
+    q("queueDrawer.open()")
+    settle(400)
+    labels = {}
+    for obj in root.findChildren(QObject):
+        text = obj.property("text")
+        if (
+            isinstance(text, str)
+            and " · " in text
+            and text.split(" · ")[0] in ("COMPLETED", "FAILED", "STOPPED", "DOWNLOADING", "QUEUED")
+        ):
+            labels[text.split(" · ")[0]] = obj
+    stopped = labels.get("STOPPED")
+    failed = labels.get("FAILED")
+    headers_rendered = stopped is not None and failed is not None
+    stopped_header_ok = False
+    if headers_rendered:
+        stopped_header_ok = (
+            stopped.property("text") == "STOPPED · 1"
+            and failed.property("text") == "FAILED · 2"
+            and stopped.property("color").name() == q("root.redContTx").name()
+            and failed.property("color").name() == q("root.red").name()
+            and stopped.property("color").name() != failed.property("color").name()
+            and stopped.property("font").bold()
+        )
+
+    ok = partitioned and counted and regrouped and recounted and all_stopped and has_slot and stopped_header_ok
     print(
         f"partitioned={partitioned} counted={counted} regrouped={regrouped} "
-        f"recounted={recounted} has_slot={has_slot} groups={groups} groups2={groups2}",
+        f"recounted={recounted} all_stopped={all_stopped} has_slot={has_slot} "
+        f"headers_rendered={headers_rendered} stopped_header_ok={stopped_header_ok} "
+        f"labels={sorted(labels)} groups={groups} groups2={groups2}",
         flush=True,
     )
     return _EXIT_OK if ok else _EXIT_REGRESSED
