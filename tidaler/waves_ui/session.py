@@ -55,7 +55,32 @@ class WavesTidal(Tidal):
     The asymmetry is the whole argument. Keeping a sign-in that really is dead
     costs nothing: the user signs in again and ``save()`` atomically replaces the
     file. Deleting a live one cannot be undone.
+
+    The same asymmetry rules out ever deleting during a client probe. Fetching
+    Dolby Atmos swaps the client id and re-authenticates mid-download to prove
+    the swap took, and that goes through this very method. A refusal there is
+    the Atmos client being turned away, which says nothing about the user's own
+    sign-in, yet it deleted the credential from under a running queue while the
+    window still said signed in (issue #30). It reaches this method through
+    ``_reauthenticate_current_client``, so the probe is marked there.
     """
+
+    # False only for the span of a client-swap probe, where a refusal is about
+    # the client being tried, not about the saved sign-in.
+    _sign_in_at_stake: bool = True
+
+    def _reauthenticate_current_client(self) -> bool:
+        """Prove the client credentials that are set right now.
+
+        Same work as upstream; the difference is that a refusal cannot cost the
+        user their sign-in. An Atmos swap happens mid-run on a worker thread,
+        so the deletion it used to trigger was invisible until the next launch.
+        """
+        self._sign_in_at_stake = False
+        try:
+            return super()._reauthenticate_current_client()
+        finally:
+            self._sign_in_at_stake = True
 
     def login_token(self, do_pkce: bool = True) -> bool:
         result = False
@@ -73,7 +98,9 @@ class WavesTidal(Tidal):
             except Exception as exc:
                 result = False
                 status = _answered_status(exc)
-                if status in _SIGN_IN_REFUSED:
+                if status in _SIGN_IN_REFUSED and not self._sign_in_at_stake:
+                    logger.info("A client probe was refused (%s); the saved sign-in is not the subject", status)
+                elif status in _SIGN_IN_REFUSED:
                     logger.info("TIDAL refused the saved sign-in (%s); removing it", status)
                     if os.path.exists(self.file_path):
                         os.remove(self.file_path)

@@ -13,54 +13,86 @@ feature.
 
 ## Session and status
 
-| Signal                      | Fires when                                                             |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `loggedInChanged`           | Login/logout completes (property `loggedIn`)                           |
-| `sessionResolvedChanged`    | The restored session finishes resolving (property `sessionResolved`)   |
-| `statusChanged`             | The status-bar text changes                                            |
-| `busyChanged`               | A blocking operation starts/ends                                       |
-| `loginUrlReady(url)`        | The browser-login URL is ready to open                                 |
-| `backRequested`             | The platform back gesture (macOS trackpad swipe) asks to navigate back |
-| `motionBgChanged`           | The motion-background preference flipped; Main.qml re-reads it         |
-| `diagnosticsExported(path)` | A diagnostics export finished (`""` = failed)                          |
+| Signal                                                                 | Fires when                                                                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `loggedInChanged`                                                      | Login/logout completes (property `loggedIn`)                                                            |
+| `sessionResolvedChanged`                                               | The restored session finishes resolving (property `sessionResolved`)                                    |
+| `statusChanged`                                                        | The status-bar text changes                                                                             |
+| `busyChanged`                                                          | A blocking operation starts/ends                                                                        |
+| `loginUrlReady(url)`                                                   | The browser-login URL is ready to open                                                                  |
+| `backRequested`                                                        | The platform back gesture (macOS trackpad swipe) asks to navigate back                                  |
+| `motionBgChanged`                                                      | The motion-background preference flipped; Main.qml re-reads it                                          |
+| `confirmCategoryDlChanged`                                             | The "confirm DOWNLOAD ALL on a Browse category" preference flipped (property `confirmCategoryDl`)       |
+| `settingsPersistedExternally`                                          | Settings were saved by something other than the Settings page (a dialog, a recovery); the page re-reads |
+| `forwardRequested`                                                     | The mouse forward button asks to navigate forward (the back button fires `backRequested`)               |
+| `hoverMotionChanged` / `artHoverTiltChanged` / `videoHoverPeekChanged` | The matching motion preference flipped (`setWavesPref`); the surfaces re-read it                        |
+| `diagnosticsExported(path)`                                            | A diagnostics export finished (`""` = failed)                                                           |
 
 ## Search, artist pages, library
 
-| Signal                                    | Fires when                                                                            |
-| ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| `searchResults(payload)`                  | A search or pasted-link resolve finishes; payload holds per-kind lists of plain dicts |
-| `albumTracksLoaded(albumId, tracks)`      | An album's ordered track list arrives (album expansion)                               |
-| `artistLoaded(payload)`                   | An artist page (bio, discography, top tracks) is ready                                |
-| `artistMetaLoaded(artistId, popularity)`  | Late-arriving artist metadata                                                         |
-| `libraryLoaded(category, items, hasMore)` | First page of a My Tidal category (replace)                                           |
-| `libraryMore(category, items, hasMore)`   | Next page (append, infinite scroll)                                                   |
-| `homeLoaded(sections)`                    | My Tidal's Home landing (Browse-shaped shelves, account-scoped)                       |
+| Signal                                                     | Fires when                                                                                                        |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `searchResults(payload)`                                   | A search or pasted-link resolve finishes; payload holds per-kind lists of plain dicts                             |
+| `albumTracksLoaded(albumId, tracks)`                       | An album's ordered track list arrives (album expansion)                                                           |
+| `artistLoaded(payload)`                                    | An artist page (bio, discography, top tracks) is ready                                                            |
+| `artistMetaLoaded(artistId, popularity)`                   | Late-arriving artist metadata                                                                                     |
+| `playlistTracksLoaded(playlistId, tracks)`                 | A playlist's ordered track list arrives (playlist expansion); empty on failure                                    |
+| `artistLoadFailed(artistId)`                               | An artist page could not load and nothing is cached; clears the Back-restore latch so history recording continues |
+| `libraryLoaded(category, items, hasMore)`                  | First page of a My Tidal category (replace)                                                                       |
+| `libraryMore(category, items, hasMore)`                    | Next page (append, infinite scroll)                                                                               |
+| `homeLoaded(sections)`                                     | My Tidal's Home landing (Browse-shaped shelves, account-scoped)                                                   |
+| `playlistCategoryResolved(apiPath, title, count, firstId)` | A Browse playlist category's members are known, so DOWNLOAD ALL can confirm with a count                          |
+| `playlistFolderLoaded(folderId, rows, path)`               | A My Tidal playlist folder's contents arrive (issue #11); empty rows and path on failure                          |
 
 ## Browse (editorial pages)
 
-| Signal                         | Fires when                                                          |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `browseLoaded(payload)`        | The Browse landing page (sections + genre/mood/decade chips)        |
-| `browsePageLoaded(payload)`    | One drilled-into page, keyed by its TIDAL api path                  |
-| `browseSectionMore(payload)`   | A section's "load more" page                                        |
-| `browseTileArt(apiPath, urls)` | Cover mosaic for one genre/mood/decade tile, streamed progressively |
+| Signal                          | Fires when                                                                                                              |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `browseLoaded(payload)`         | The Browse landing page (sections + genre/mood/decade chips)                                                            |
+| `browsePageLoaded(payload)`     | One drilled-into page, keyed by its TIDAL api path                                                                      |
+| `browseSectionMore(payload)`    | A section's "load more" page                                                                                            |
+| `browseTileArt(apiPath, urls)`  | Cover mosaic for one genre/mood/decade tile, streamed progressively                                                     |
+| `browsePagePrefetched(payload)` | A hover-armed prefetch finished building a page; carries that page's art summary so the card can paint its hero at once |
+
+`prefetchBrowseItem(kind, mediaId)` is the hover half of the same family: a
+dwell on a card (or on a track row, for the album behind it) builds the page
+on a worker before any click, so the open that follows is served from the page
+cache. Exactly one prefetch is in flight at a time, it is dropped on a logout
+generation bump, and the click that catches up to it claims the result rather
+than rebuilding. It shares `_build_browse_item` with a real open, so it is not
+side-effect free: that builder ends by recording the page's member track ids
+(`record_members_replace`) and emitting `collectionMembershipChanged`, which
+the hovered card answers by re-querying its ownership rollup. A hover
+therefore costs what an open costs on that path.
 
 ## Download queue
 
-| Signal                                                             | Fires when                                                                       |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| `queueChanged(rows)`                                               | Any queue mutation; carries the whole queue as dicts                             |
-| `queueItemProgress(qid, pct)`                                      | A queued item's aggregate progress ticks                                         |
-| `queueTracksLoaded(qid, tracks)`                                   | Full per-track snapshot for an expanded queue row                                |
-| `queueTrackState(qid, row)`                                        | One track's lifecycle change inside a job                                        |
-| `queueTrackPct(qid, map)`                                          | Batched live percentages for downloading tracks                                  |
-| `pausedChanged`                                                    | Global pause/resume toggled                                                      |
-| `downloadProgress(mediaId, pct)` / `downloadState(mediaId, state)` | Per-media progress/state, drives the buttons and card controls outside the queue |
-| `ownershipChanged(trackId)`                                        | A track's ownership or delivered quality changed; QML re-queries `ownershipOf`   |
-| `collectionMembershipChanged(id)`                                  | A collection learned its member track ids; QML re-queries `collectionMemberIds`  |
-| `downloadFolderMissing` / `downloadFolderDefault`                  | The download folder is invalid (blocking) / still the historical default (nudge) |
-| `downloadFolderUnreachable(path)`                                  | The folder is an unreachable network share; queued work held for "Try again"     |
-| `ffmpegMissingBlocked`                                             | A download would come out degraded without FFmpeg; a blocking choice is shown    |
+| Signal                                                                       | Fires when                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `queueChanged(rows)`                                                         | Full resync: the whole queue as dicts (initial state, wholesale rebuilds, and any change touching most rows at once)                       |
+| `queueRowsAdded(rows)` / `queueRowsChanged(rows)` / `queueRowsRemoved(qids)` | The delta protocol: most mutations cross as just the rows concerned (complete row dicts; removals as qids), coalesced per GUI-thread flush |
+| `queueItemProgress(qid, pct)`                                                | A queued item's aggregate progress ticks                                                                                                   |
+| `queueTracksLoaded(qid, tracks)`                                             | Full per-track snapshot for an expanded queue row                                                                                          |
+| `queueTrackState(qid, row)`                                                  | One track's lifecycle change inside a job                                                                                                  |
+| `queueTrackPct(qid, map)`                                                    | Batched live percentages for downloading tracks                                                                                            |
+| `pausedChanged`                                                              | Global pause/resume toggled                                                                                                                |
+| `folderRemaining(folderId, remaining, total)`                                | A playlist-folder job's member count ticks as members complete or fail; drives its badge                                                   |
+| `scanningChanged`                                                            | A discography, videos, editions or playlist scan starts or ends (property `scanning`); keeps STOP visible                                  |
+| `downloadProgress(mediaId, pct)` / `downloadState(mediaId, state)`           | Per-media progress/state, drives the buttons and card controls outside the queue                                                           |
+| `ownershipChanged(trackId)`                                                  | A track's ownership or delivered quality changed; QML re-queries `ownershipOf`                                                             |
+| `ownershipChangedBatch(ids)`                                                 | First ownership answers, collected for a moment and announced once; `ids` is `,id,id,`-delimited so QML can `indexOf("," + id + ",")`      |
+| `collectionMembershipChanged(id)`                                            | A collection learned its member track ids; QML re-queries `collectionMemberIds`                                                            |
+| `downloadFolderMissing` / `downloadFolderDefault`                            | The download folder is invalid (blocking) / still the historical default (nudge)                                                           |
+| `downloadFolderUnreachable(path)`                                            | The folder is an unreachable network share; queued work held for "Try again"                                                               |
+| `downloadFolderRecovered`                                                    | The unreachable share came back (own remount or "Try again"); held work replays                                                            |
+| `ffmpegMissingBlocked`                                                       | A download would come out degraded without FFmpeg; a blocking choice is shown                                                              |
+
+STOP partitions the queue rather than emptying it (issue #27): every row it
+ends keeps its place in a Stopped section, so alongside the Failed section's
+controls the queue exposes `clearStopped()` and `retryAllStopped()`, the same
+shape as their Failed counterparts. `downloadPlaylistAlbums(playlistId)`
+(issue #4) resolves the source album of every track on a playlist, dedupes
+them, and enqueues the set under one `albums:` rollup id.
 
 ## Local library presence (the "in your library" badge)
 
@@ -118,7 +150,9 @@ configuration.
 Bulk claim gate (`library_bulk_skip`, on by default, inert while the master
 switch is off): bulk downloads leave out what the scan claims. A discography
 drops fully claimed albums and guest tracks before queueing
-(`_library_claims_album` / `_library_claims_track`); a collection job gets a
+(`_library_claims_album` / `_library_claims_track`), and a playlist's
+`downloadPlaylistAlbums` (issue #4) runs the identical album-grained gate over
+the albums its tracks came from; a collection job gets a
 `library_claim` callable injected into the engine, consulted per track only
 after the exact-id ownership gate declines and never for a merge-plan member
 (`_claim_verdict`). Single-item jobs never get the callable, and
@@ -136,12 +170,13 @@ asked for.
 
 ## Preview and video playback
 
-| Signal                          | Fires when                                                       |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `previewState(kind, id, state)` | Resolve lifecycle for a preview, addressed by (kind, id)         |
-| `previewReady(kind, id, url)`   | A streamable URL for QML's shared MediaPlayer                    |
-| `previewMeta(...)`              | Now-playing metadata (title, artist(s), art, ids for navigation) |
-| `videoReady(payload)`           | A video stream URL resolved for the overlay player               |
+| Signal                          | Fires when                                                         |
+| ------------------------------- | ------------------------------------------------------------------ |
+| `previewState(kind, id, state)` | Resolve lifecycle for a preview, addressed by (kind, id)           |
+| `previewReady(kind, id, url)`   | A streamable URL for QML's shared MediaPlayer                      |
+| `previewMeta(...)`              | Now-playing metadata (title, artist(s), art, ids for navigation)   |
+| `videoReady(payload)`           | A video stream URL resolved for the overlay player                 |
+| `videoPeekReady(payload)`       | A hover-peek stream for a video card resolved (or carries `error`) |
 
 The preview state model: exactly one preview plays at a time. `kind` is
 what the user clicked ("track", "artist", "album", "playlist", "mix");

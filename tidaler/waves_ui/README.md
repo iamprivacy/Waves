@@ -36,8 +36,8 @@ dependencies. Audio quality follows your tidaler settings, up to HiRes Lossless.
   one-click "download discography".
 - **My Tidal**, your favourites (albums, tracks, artists, videos, playlists,
   mixes) with virtualised infinite scroll, so large libraries stay smooth.
-- **Download queue**, grouped into **Completed**, **Downloading**, and
-  **Queued** sections. Active rows show live per-track progress on an LED
+- **Download queue**, grouped into **Completed**, **Failed**, **Stopped**,
+  **Downloading**, and **Queued** sections. Active rows show live per-track progress on an LED
   dot-matrix bar (`artist · done/total tracks`); a finished row shows a ✓ DONE
   chip, then settles into the collapsible Completed group. Pause/resume, stop
   all, per-item cancel, and retry are all supported.

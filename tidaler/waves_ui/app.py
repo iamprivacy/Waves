@@ -28,7 +28,7 @@ from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 from tidaler.config import Tidal
 
 from . import diagnostics, proc
-from .backend import WavesBridge
+from .backend import _ART_CACHE_DIR, WavesBridge
 
 _QML_MAIN = Path(__file__).parent / "qml" / "Main.qml"
 _FONT_DIR = Path(__file__).parent / "fonts"
@@ -92,9 +92,9 @@ class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
     cover it showed. A disk cache plus the cache-first policy (see
     :class:`_CacheFirstNAM`) makes search results, browse shelves and tile
     mosaics paint from local storage on every launch after the first, spending
-    zero network on repeat art. The cache is sized to hold a whole browsing
-    session's covers so they do not evict (and re-download) each other, small
-    thumbnails at ~tens of KB each fit thousands in 256 MB."""
+    zero network on repeat art. The cache is sized to hold far more than one
+    browsing session's covers so they do not evict (and re-download) each
+    other, small thumbnails at ~tens of KB each fit tens of thousands in 1 GB."""
 
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
@@ -104,10 +104,14 @@ class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
         nam = _CacheFirstNAM(parent)
         cache = QNetworkDiskCache(nam)
         cache.setCacheDirectory(self._cache_dir)
-        # ~256 MB. Covers are tens of KB each, so this holds several thousand:
-        # a big browse session's shelves no longer evict earlier covers (which
-        # would re-download, and re-flash the placeholder, on the next launch).
-        cache.setMaximumCacheSize(256 * 1024 * 1024)
+        # ~1 GB. Covers are tens of KB each, so this holds tens of thousands:
+        # a season of browsing rather than one session. Measured at the old
+        # 256 MB the cache ran full (9,233 covers) and had already evicted
+        # nearly half the covers of pages the user had visited, so those pages
+        # went back to the network (and back to the placeholder) on the next
+        # visit. This is disk only: the in-memory warm pool that keeps recently
+        # shown covers decoded is a separate, much smaller budget (Main.qml).
+        cache.setMaximumCacheSize(1024 * 1024 * 1024)
         nam.setCache(cache)
         return nam
 
@@ -464,7 +468,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine = QQmlApplicationEngine()
     bridge = WavesBridge(tidal=tidal)
     # HTTP disk cache for artwork (must be installed before the QML loads).
-    art_cache = _ArtCacheFactory(os.path.join(os.path.dirname(bridge.settings.file_path), "art_cache"))
+    art_cache = _ArtCacheFactory(os.path.join(os.path.dirname(bridge.settings.file_path), _ART_CACHE_DIR))
     engine.setNetworkAccessManagerFactory(art_cache)
     app._waves_art_cache = art_cache  # type: ignore[attr-defined]  # keep alive
     engine.rootContext().setContextProperty("waves", bridge)
