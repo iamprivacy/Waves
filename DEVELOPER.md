@@ -18,8 +18,8 @@ Ten minutes here saves an afternoon of reverse-engineering.
 │        │       in the bridge_library.py mixin)                          │
 │        │                                                                │
 │        ├── threadpool (QThreadPool): search, artist pages, metadata     │
-│        └── dl_pool   (QThreadPool): downloads, sized by the             │
-│                                     "concurrent downloads" setting      │
+│        └── dl_pool   (QThreadPool, 1 thread): the ONE download job in   │
+│                                     flight; queued rows wait as specs   │
 └────────┼────────────────────────────────────────────────────────────────┘
          ▼ imports, unchanged
    tidaler engine ── Settings, Tidal (auth/session), Download
@@ -43,11 +43,17 @@ user-facing state is fully separated (config lives in its own `Waves` folder:
 ## Threading model
 
 - The **GUI thread** runs Qt's event loop, all QML, and every signal
-  handler. Bridge state (`_queue`, `_objs`, caches) is only mutated here.
+  handler. Bridge state (`_objs`, caches) is only mutated here; `_queue`
+  rows are also touched by download workers under `_queue_lock`, and QML
+  hears about it through the coalesced GUI-thread flush
+  (`_flush_queue_changes`).
 - **`threadpool`** runs short blocking work: login, search, album tracks,
   artist pages, browse pages.
-- **`dl_pool`** runs downloads so a long album can never starve the UI of
-  worker threads.
+- **`dl_pool`** runs the one download job in flight (queue items are
+  serial; track-level parallelism lives inside the engine's per-collection
+  executor, sized by the "concurrent downloads" setting). Rows behind it
+  wait as lightweight specs until `_pump_queue` builds their job, so a
+  backlog of any size holds no Workers, no Download objects and no relays.
 
 The pattern for anything slow, used by every slot in `backend.py`:
 

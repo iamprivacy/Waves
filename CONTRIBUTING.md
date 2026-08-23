@@ -71,9 +71,12 @@ pyenv local <x.y.z>
 Then, install and activate the environment with:
 
 ```bash
-poetry install
+poetry install --with dev
 poetry env activate
 ```
+
+(The `dev` group is optional in `pyproject.toml`, so a bare `poetry install`
+leaves out pytest, pre-commit and the linters the steps below rely on.)
 
 4. Install pre-commit to run linters/formatters at commit time:
 
