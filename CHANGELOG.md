@@ -22,6 +22,43 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.24 (2026-08-23)
+
+### ✨ Added
+
+- 💿 Playlist pages have a "Download full albums" button that saves the complete album each song comes from, one copy per album ([issue #4](https://github.com/iamprivacy/Waves/issues/4)).
+- 🎯 Search for a specific song, album, video or playlist and it appears as a Top result above everything else on the All page, so the thing you typed is the first row rather than the first row under the artists.
+- 📈 Search results can be sorted by Popularity again, alongside Relevance, Release date and Name.
+- 🔁 The search sort you pick (and its direction) is remembered, so Waves opens on it next time.
+
+### 🔧 Changed
+
+- ⏹️ STOP keeps what it stopped: every queued or running download stays in the queue, in a new Stopped section you can retry or clear. It used to empty the queue ([issue #27](https://github.com/iamprivacy/Waves/issues/27)).
+- ⚙️ On "Download discography", "Best of both" and the other edition choices now follow "Most-complete edition only": with that switched off, every edition of an album is saved as it is. Saving a single album with "Best of both" is unchanged ([issue #27](https://github.com/iamprivacy/Waves/issues/27)).
+- 🖼️ Open a playlist, album or mix from its card and its cover and title are on screen at once, while the songs are still on their way. They used to appear only once the whole page was ready.
+- ⚡ Rest the pointer on a playlist, album or mix card for a moment and the click that follows opens the page at once, covers included. Resting on a song does the same for the album it comes from.
+- 🖼️ An artist's page shows their picture straight away when you open it from a card that already shows it.
+- ⚡ Rest the pointer on an album row for a moment and the click that expands it shows its songs at once, instead of the list popping in after the panel has opened.
+- 🖼️ The round cover on a song row shows a loading mark until it arrives, and says so when a song has no cover at all. It used to be a blank grey circle in both cases.
+- 💾 Waves keeps four times as many covers on your computer, so pages you have opened before come back faster.
+- ⏳ While a page loads, a light travels along a row of cells under the "Reading the wire…" line.
+
+### 🐛 Fixed
+
+- 🐢 The window no longer gets slower and slower as a long download session piles up waiting, failed and stopped rows: with thousands of items in the queue it stays as quick as with ten, so a session that runs day and night does not need a restart to feel right again ([issue #30](https://github.com/iamprivacy/Waves/issues/30)).
+- ⏳ RETRY ALL and STOP over thousands of rows act at once instead of freezing the window, and downloads waiting in the queue take almost no memory until their turn comes, so you can queue tens of thousands of songs and albums ([issue #30](https://github.com/iamprivacy/Waves/issues/30)).
+- 🔁 RETRY on a failed or stopped download always works straight away, even after later searches: the queue keeps what it needs to try again, instead of asking TIDAL for the album all over again first.
+- ⏹️ STOP now ends a discography, videos or editions download that has not reached the queue yet, and stays on screen while Waves works out what to download. Those songs used to arrive in the queue after the press, with no STOP left to press ([issue #27](https://github.com/iamprivacy/Waves/issues/27)).
+- 🎬 Pages full of videos (search results, an artist's videos, your saved videos) fill in faster and use much less data.
+- 📋 The Paste button in the search bar searches short terms too. Pasting three characters or fewer put the text in the box and then did nothing at all ([issue #28](https://github.com/iamprivacy/Waves/issues/28)).
+- 📁 An album whose title is nothing but a dot gets a folder of its own, named ．. Its songs used to be saved loose in the artist's folder, mixed in with every other album that landed there. Songs you already saved the old way stay where they are ([issue #29](https://github.com/iamprivacy/Waves/issues/29)).
+- 🔑 A Dolby Atmos song can no longer cost you your sign-in. If TIDAL turned the Atmos request away mid-download, Waves quietly dropped your saved sign-in and you had to sign in again the next time you opened it ([issue #30](https://github.com/iamprivacy/Waves/issues/30)).
+- 🧹 "Reset Waves completely" now removes the saved cover pictures too.
+- ⏹️ Signing out stops the downloads first, leaving them in the queue's Stopped section. They used to carry on against the account you had just left, failing one by one ([issue #30](https://github.com/iamprivacy/Waves/issues/30)).
+- 🪟 Updating Waves on Windows can no longer leave the Waves folder empty: if the update does not arrive whole, the version you already have is kept and started instead. An update you put off restarting for is still applied whenever you do restart.
+- 🧑‍🎤 A search's Artists view keeps its cards at their normal size when only one or two artists match. They used to stretch to fill the window, so tall that their buttons sat below the fold.
+- 🔎 Sorting search results by Relevance keeps TIDAL's order, so a song or album you searched for by name and artist comes first even if it came out this week. Relevance used to order by popularity, which put a brand-new single under older songs that shared a word with your search.
+
 ## 🗂️ v0.1.23 (2026-08-20)
 
 ### 🔧 Changed
