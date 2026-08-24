@@ -22,6 +22,17 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.25 (2026-08-24)
+
+### 🐛 Fixed
+
+- 💾 Albums whose best available quality is below your audio quality setting no longer download again on every run: Waves now recognizes that the copy you have is the best TIDAL offers and skips it ([issue #31](https://github.com/iamprivacy/Waves/issues/31)).
+- 🔁 REDOWNLOAD now applies to the download it forces and to its retries; once that download finishes, later downloads of the same item skip what you already have again.
+- 🧹 Clearing or cancelling queued albums out of a discography download no longer leaves the artist's progress bar stuck and the button unclickable until a restart ([issue #32](https://github.com/iamprivacy/Waves/issues/32)).
+- 🛑 Pressing STOP right as a discography finishes scanning no longer queues the whole discography behind the press or leaves the artist button lit.
+- 🧯 A discography scan that fails partway now hands the button back and says so, instead of showing a scan that never ends.
+- 📄 Queueing an item that is already waiting or downloading at the same quality no longer adds a second copy of it to the queue.
+
 ## 🗂️ v0.1.24 (2026-08-23)
 
 ### ✨ Added
