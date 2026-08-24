@@ -59,6 +59,7 @@ def _stub(session_video):
     stub._artist_lock = Lock()
     stub._folder_groups = {}
     stub._folder_lock = Lock()
+    stub._scan_gen = 0
     stub._bump_download_groups = _bind(stub, "_bump_download_groups")
     stub._bump_artist_group = _bind(stub, "_bump_artist_group")
     stub._bump_folder_group = _bind(stub, "_bump_folder_group")

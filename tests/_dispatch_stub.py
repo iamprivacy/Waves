@@ -18,6 +18,16 @@ from types import SimpleNamespace
 from tidaler.waves_ui.backend import WavesBridge
 
 
+class _RecordingSignal:
+    """Minimal stand-in for a Qt signal: records every emit."""
+
+    def __init__(self):
+        self.emits: list = []
+
+    def emit(self, *args):
+        self.emits.append(args if len(args) != 1 else args[0])
+
+
 def arm_queue(stub) -> None:
     """The queue's dirty marks (what QML has not been told yet) and the
     per-row stores the remove path prunes: any stand-in that binds the real
@@ -36,6 +46,37 @@ def arm_queue(stub) -> None:
         stub._queue_lock = Lock()
     if not hasattr(stub, "_queue_mark_changed"):
         stub._queue_mark_changed = WavesBridge._queue_mark_changed.__get__(stub, type(stub))
+    _arm_rollups(stub)
+
+
+def _arm_rollups(stub) -> None:
+    """The rollup fields and methods the withdrawal slots now touch (issue
+    #32: a cleared or cancelled queued row credits its discography/folder
+    rollups, and every slot sweeps for stranded groups afterwards). Stubs
+    with their own richer versions keep them."""
+    from threading import Lock as _Lock
+
+    for field, default in (
+        ("_artist_groups", dict),
+        ("_folder_groups", dict),
+        ("_stranded_once", set),
+        ("_scan_gen", int),
+        ("_scans_in_flight", int),
+    ):
+        if not hasattr(stub, field):
+            setattr(stub, field, default())
+    for lock in ("_artist_lock", "_folder_lock"):
+        if not hasattr(stub, lock):
+            setattr(stub, lock, _Lock())
+    for sig in ("downloadState", "downloadProgress", "folderRemaining"):
+        if not hasattr(stub, sig):
+            setattr(stub, sig, _RecordingSignal())
+    for name in ("_bump_download_groups", "_bump_artist_group", "_bump_folder_group", "_reap_stranded_groups"):
+        if not hasattr(stub, name):
+            setattr(stub, name, getattr(WavesBridge, name).__get__(stub, type(stub)))
+    # _download's duplicate-row refusal reads the pinned quality of a fresh row.
+    if not hasattr(stub, "_queued_quality_value"):
+        stub._queued_quality_value = lambda: "LOSSLESS"
 
 
 def arm_dispatch(stub) -> None:

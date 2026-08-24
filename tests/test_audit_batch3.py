@@ -40,6 +40,7 @@ class _ArtistBumpStub:
     def __init__(self, groups: dict):
         self._artist_groups = groups
         self._artist_lock = Lock()
+        self._scan_gen = 0
         self.downloadProgress = _Signal()
         self.downloadState = _Signal()
 

@@ -103,7 +103,7 @@ def test_it_queues_every_video_and_nothing_else():
     artist = _Artist([SimpleNamespace(id="v1"), SimpleNamespace(id="v2")])
     stub = _Stub(artist)
     stub.downloadArtistVideos("art1")
-    assert stub._videosQueued.emits == [["v1", "v2"]]
+    assert stub._videosQueued.emits == [(0, ["v1", "v2"])]
     assert stub.remembered == [("video", "v1"), ("video", "v2")]
     assert any("2 videos" in s for s in stub.statuses)
 
@@ -114,7 +114,7 @@ def test_it_works_with_the_discography_video_toggle_off():
     artist = _Artist([SimpleNamespace(id="v1")])
     stub = _Stub(artist, video_download=False)
     stub.downloadArtistVideos("art1")
-    assert stub._videosQueued.emits == [["v1"]]
+    assert stub._videosQueued.emits == [(0, ["v1"])]
 
 
 def test_the_group_is_namespaced_away_from_the_discography_button():
@@ -133,7 +133,7 @@ def test_a_long_videography_is_paged_through_not_truncated():
     artist = _Artist([SimpleNamespace(id=f"v{i}") for i in range(count)])
     stub = _Stub(artist)
     stub.downloadArtistVideos("art1")
-    queued = stub._videosQueued.emits[0]
+    queued = stub._videosQueued.emits[0][1]
     assert len(queued) == count, "the scan stopped at the first window"
     assert queued[-1] == f"v{count - 1}"
 

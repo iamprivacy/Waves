@@ -44,6 +44,7 @@ class _BumpStub:
         self._folder_groups = {"fold1": group}
         self._folder_groups.update(extra or {})
         self._folder_lock = Lock()
+        self._scan_gen = 0
         self.downloadProgress = _Signal()
         self.downloadState = _Signal()
         self.folderRemaining = _Signal()
@@ -149,6 +150,7 @@ class _DownloadFolderStub:
         self.ffmpegMissingBlocked = _Signal()
         self._folder_groups = {}
         self._folder_lock = Lock()
+        self._scan_gen = 0
         self._objs = {"playlist": {}}
         self._pending_lock = Lock()
         self._pending_downloads: list = []

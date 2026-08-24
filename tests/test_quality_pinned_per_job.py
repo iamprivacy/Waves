@@ -156,6 +156,7 @@ def _run(pinned, session, media_list, *, setting=Quality.hi_res_lossless, dl_out
     if dl_out is not None:
         dl_out.append(dl)
     dl._pinned_quality = pinned
+    dl._target_rank = -1
     dl._delivered = {}
     dl._delivered_lock = Lock()
     dl.tidal = _SwitchingTidal(session, setting)
@@ -314,6 +315,7 @@ def _stereo_after_atmos(pinned, setting, relogin_script):
     session = _Session(ATMOS_REQUEST_QUALITY)
     dl = backend._TrackedDownload.__new__(backend._TrackedDownload)
     dl._pinned_quality = pinned
+    dl._target_rank = -1
     dl._delivered = {}
     dl._delivered_lock = Lock()
     dl.tidal = _FlakyRestoreTidal(session, setting, relogin_script)

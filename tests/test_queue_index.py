@@ -11,6 +11,7 @@ after each kind of mutation.
 from __future__ import annotations
 
 from threading import Lock
+from types import SimpleNamespace
 
 from tidaler.waves_ui.backend import WavesBridge
 
@@ -52,6 +53,18 @@ def _stub():
     # test_queue_row_pins_the_library_skip.py).
     stub._library_bulk_skip_on = lambda: True
     stub._job_aborts = {}
+    # The withdrawal slots credit rollups and sweep for stranded groups now
+    # (issue #32); these tests are about the index, so the groups stay empty.
+    stub._artist_groups = {}
+    stub._folder_groups = {}
+    stub._artist_lock = Lock()
+    stub._folder_lock = Lock()
+    stub._stranded_once = set()
+    stub._scan_gen = 0
+    stub._scans_in_flight = 0
+    stub.downloadState = SimpleNamespace(emit=lambda *a: None)
+    stub.downloadProgress = SimpleNamespace(emit=lambda *a: None)
+    stub.folderRemaining = SimpleNamespace(emit=lambda *a: None)
     stub._QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
     stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX
     for name in (
@@ -67,6 +80,10 @@ def _stub():
         "clearStopped",
         "clearQueued",
         "clearQueue",
+        "_bump_download_groups",
+        "_bump_artist_group",
+        "_bump_folder_group",
+        "_reap_stranded_groups",
     ):
         setattr(stub, name, _bind(stub, name))
     return stub

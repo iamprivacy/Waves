@@ -192,7 +192,7 @@ def test_discography_queues_videos_when_the_source_is_on():
     artist = _Artist([SimpleNamespace(id="v1"), SimpleNamespace(id="v2")])
     stub = _DiscoStub(artist, video_download=True)
     stub.downloadArtist("art1")
-    assert stub._videosQueued.emits == [["v1", "v2"]]
+    assert stub._videosQueued.emits == [(0, ["v1", "v2"])]
     assert ("video", "v1") in stub.remembered and ("video", "v2") in stub.remembered
     # The videos roll up into the artist button's aggregate, like albums do.
     assert stub._artist_groups["art1"]["keys"] == {"al1", "v1", "v2"}
@@ -207,7 +207,7 @@ def test_a_long_videography_is_paged_through_not_truncated():
     artist = _Artist([SimpleNamespace(id=f"v{i}") for i in range(count)])
     stub = _DiscoStub(artist, video_download=True)
     stub.downloadArtist("art1")
-    queued = stub._videosQueued.emits[0]
+    queued = stub._videosQueued.emits[0][1]
     assert len(queued) == count, "the scan stopped at the first window"
     assert queued[-1] == f"v{count - 1}"
     assert artist.video_calls == 3, "one call per window, then a short page ends it"
@@ -321,7 +321,7 @@ def test_discography_leaves_out_claimed_albums():
     stub._library_bulk_skip_on = lambda: True
     stub._library_claims_album = lambda a: a is owned
     stub.downloadArtist("art1")
-    assert stub._albumsQueued.emits == [["al1"]]
+    assert stub._albumsQueued.emits == [(0, ["al1"])]
     assert stub._artist_groups["art1"]["keys"] == {"al1"}
     assert any("(1 already in your library)" in s for s in stub.statuses)
 

@@ -475,7 +475,7 @@ def test_clicking_the_clean_twin_never_returns_the_explicit_merge():
     stub = _ClickStub(clean, [std, deluxe, clean], recs, mode="explicit")
     stub.downloadAlbumBestOfBoth("x")
     assert stub._merge_plans == {}, "clicking the clean edition queued an explicit merge"
-    assert stub._albumsQueued.emits == ["x"] or stub._albumsQueued.emits == [["x"]]
+    assert stub._albumsQueued.emits == [(0, ["x"])]
     assert any("clean or explicit twin" in s for s in stub.statuses), stub.statuses
 
 

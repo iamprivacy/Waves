@@ -380,7 +380,7 @@ def test_a_genuinely_single_edition_album_still_says_so_and_downloads():
     bridge.downloadAlbumBestOfBoth("a1")
 
     assert bridge.statusChanged.texts[-1] == "Only one edition of this album; downloading it"
-    assert bridge._albumsQueued.emits == [(["a1"],)]
+    assert bridge._albumsQueued.emits == [(0, ["a1"])]
     assert bridge.downloadState.emits == [("a1", "preparing")]
     assert session.calls == [ARTIST_ID]
     assert artist.asked == ["get_albums", "get_ep_singles", "get_other"]
