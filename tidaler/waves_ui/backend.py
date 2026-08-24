@@ -955,7 +955,28 @@ def _record_is_atmos(rec) -> bool:
     return str((rec or {}).get("audio_mode") or "").upper() == _ATMOS_MODE.upper()
 
 
-def _copy_is_current(rec, target_rank: int, wants_atmos: bool) -> bool:
+def _advertised_ceiling(media) -> int | None:
+    """Best quality rank TIDAL advertises for this media right now, or None when
+    unknown. Feeds _copy_is_current's target cap, so it only trusts the explicit
+    media_metadata_tags: capping on a guess (audio_quality is unreliable on
+    partially parsed objects, see _quality_rank's fallback story) could wrongly
+    freeze a genuine upgrade forever. Tags below the lossless line never cap;
+    the only question a ceiling answers is "does a better master than plain
+    lossless exist for this item"."""
+    try:
+        # Raw JSON strings in practice, but tag enums compare by repr under
+        # str(), so unwrap .value when present.
+        tags = {str(getattr(t, "value", t)) for t in getattr(media, "media_metadata_tags", None) or []}
+    except Exception:
+        return None
+    if "HIRES_LOSSLESS" in tags:
+        return quality_rank("HI_RES_LOSSLESS")
+    if "LOSSLESS" in tags:
+        return quality_rank("LOSSLESS")
+    return None
+
+
+def _copy_is_current(rec, target_rank: int, wants_atmos: bool, ceiling_rank: int | None = None) -> bool:
     """Is the copy already on disk as good as what a download queued now would
     write, so that fetching it again would achieve nothing?
 
@@ -991,13 +1012,39 @@ def _copy_is_current(rec, target_rank: int, wants_atmos: bool) -> bool:
     thing today. Redownload is the way out meanwhile. Do not "fix" it by making
     an Atmos-wanting job read any record as current: that makes a below-target
     stereo copy read as current too, and splits the gate from the button
-    permanently."""
+    permanently.
+
+    The tier comparison itself converges at each track's achievable ceiling
+    (issue #31): a release TIDAL has no hi-res master for delivers LOSSLESS
+    however high the setting asks, so ranking that copy against the raw target
+    forced a re-download of the identical file on every run, forever, exactly
+    the loop the Atmos clause above closes for its own arm. ``ceiling_rank``
+    is the best rank TIDAL advertises for the item RIGHT NOW (pass None when
+    unknown, never a guess): a known ceiling caps the target, so owning the
+    best that exists counts as current. And a copy served by a run that
+    already ASKED at this target or better (the record's requested_rank)
+    counts as current even without a live ceiling, unless the advertised
+    ceiling has risen past what that run saw (the record's ceiling_rank), in
+    which case a genuinely better master exists and the upgrade reopens. That
+    second clause is what lets a ceiling-blind caller (ownershipOf holds only
+    an id) settle off the stored ranks instead of flashing an upgrade forever."""
     if wants_atmos and _record_is_atmos(rec):
         return True
     # Rank -1 means no quality concept (a video's tier-less record): nothing to
     # upgrade to, so a surviving copy is simply current.
     rank = int((rec or {}).get("quality_rank", -1))
-    return rank < 0 or rank >= target_rank
+    if rank < 0:
+        return True
+    target = int(target_rank)
+    if ceiling_rank is not None and 0 <= int(ceiling_rank) < target:
+        target = int(ceiling_rank)
+    if rank >= target:
+        return True
+    requested = (rec or {}).get("requested_rank")
+    requested = int(requested) if requested is not None else -1
+    stored_ceiling = (rec or {}).get("ceiling_rank")
+    stored_ceiling = int(stored_ceiling) if stored_ceiling is not None else -1
+    return requested >= target and (ceiling_rank is None or int(ceiling_rank) <= stored_ceiling)
 
 
 class _TrackedDownload(Download):
@@ -1238,8 +1285,17 @@ class _TrackedDownload(Download):
                     self.session.audio_quality = prev
         mid = getattr(media, "id", None)
         if mid is not None and getattr(info, "media_stream", None) is not None:
+            quality = _stream_quality(info)
+            # What this run asked for and the best TIDAL advertised right now
+            # ride along to the ownership record, so the gate can later tell
+            # "a better master does not exist" (skip) from "we never tried at
+            # this quality" (force). An Atmos fetch asks at its own fixed tier
+            # the pin does not govern, so it stamps no requested rank.
+            quality["requested_rank"] = -1 if self._wants_atmos(media) else self._target_rank
+            ceiling = _advertised_ceiling(media)
+            quality["ceiling_rank"] = -1 if ceiling is None else ceiling
             with self._delivered_lock:
-                self._delivered[str(mid)] = _stream_quality(info)
+                self._delivered[str(mid)] = quality
         return info
 
     def _wants_atmos(self, media) -> bool:
@@ -1312,7 +1368,7 @@ class _TrackedDownload(Download):
         # fetch" clause, so the copy is ranked on the scale the next fetch
         # would really deliver on. This is what used to need a separate
         # exclusion mirror, back when the engine skipped such a track outright.
-        current = _copy_is_current(rec, self._target_rank, self._wants_atmos(media))
+        current = _copy_is_current(rec, self._target_rank, self._wants_atmos(media), _advertised_ceiling(media))
         return ("skip" if current else "force"), rec
 
     def _destination_dir(self, media, file_template: str | None, placement: dict | None = None) -> pathlib.Path | None:
@@ -1456,6 +1512,21 @@ class _TrackedDownload(Download):
                 "fpct": float(frac),
             }
         )
+
+    def _note_skipped_after_stream(self, media) -> None:
+        """Engine hook (download.py): the post-stream existing-file check kept
+        the file already on disk, so the stream whose quality was captured in
+        _get_track_stream_info was never written. Drop that snapshot: item()
+        must report this completion with no delivered quality and no freshly
+        recorded ownership, the same face a pre-stream skip wears (see
+        _stream_quality's contract: a skipped file never records a quality it
+        did not actually deliver). Without this, the record claimed the OLD
+        file on disk carried the NEW stream's tier, and a genuine later
+        upgrade run would wrongly skip it."""
+        if media is None or getattr(media, "id", None) is None:
+            return
+        with self._delivered_lock:
+            self._delivered.pop(str(media.id), None)
 
     def _note_delivered(self, media) -> None:
         """Engine hook (download.py): the file and its sidecars are on disk,
@@ -2918,13 +2989,13 @@ class WavesBridge(LibraryMixin, QObject):
     # (_ProgressSignals) gets GUI-thread affinity and per-track ticks are
     # delivered, and (b) the queue appears in a single update instead of
     # trickling in album-by-album (which read as a sudden 0 → N jump).
-    _albumsQueued = Signal("QVariantList")
+    _albumsQueued = Signal(int, "QVariantList")
     # Internal: same batch marshalling for individual tracks (an artist's guest
     # appearances on other artists' releases).
-    _tracksQueued = Signal("QVariantList")
+    _tracksQueued = Signal(int, "QVariantList")
     # Internal: same batch marshalling for an artist's music videos (queued by
     # 'Download discography' when the Music videos source is on).
-    _videosQueued = Signal("QVariantList")
+    _videosQueued = Signal(int, "QVariantList")
     # Internal: a download was requested for an id whose live object had been
     # evicted from _objs (a new search clears every bucket). The object is
     # re-fetched by id on a worker, then this queued hop re-dispatches the
@@ -3035,6 +3106,9 @@ class WavesBridge(LibraryMixin, QObject):
         # folder_id -> {keys, done, failed, prog, weights, total}. Progress is
         # track-weighted; done/failed drive the badge countdown signal.
         self._folder_groups: dict[str, dict] = {}
+        # Rollup groups seen stranded (no live member row) on the last sweep:
+        # _reap_stranded_groups reaps on the second consecutive sighting.
+        self._stranded_once: set[str] = set()
         self._folder_lock = Lock()
         # In-app FFmpeg manager: downloads/updates a trusted static ffmpeg into
         # the app data dir so users don't have to install one manually.
@@ -6801,13 +6875,22 @@ class WavesBridge(LibraryMixin, QObject):
         if patches:
             self.queueRowsChanged.emit(patches)
 
-    def _enqueue_albums(self, keys) -> None:
+    def _enqueue_albums(self, gen: int, keys) -> None:
         """Enqueue a batch of album downloads as a single queue update.
 
         Runs on the GUI thread (via the queued ``_albumsQueued`` signal), so
         each album's progress relay keeps GUI-thread affinity. Per-item
         ``queueChanged`` emits are coalesced into one so the whole discography
-        appears at once rather than the queue visibly jumping 0 → N."""
+        appears at once rather than the queue visibly jumping 0 → N.
+
+        ``gen`` is the scan generation the ordering scan captured: a batch
+        posted before STOP can be DELIVERED after it, and used to queue the
+        whole discography behind the press (issue #32). A stale batch queues
+        nothing and resets any button the scan lit for its keys."""
+        if gen != self._scan_gen:
+            for key in keys:
+                self.downloadState.emit(str(key), "")
+            return
         self._queue_emit_suspended = True
         try:
             for key in keys:
@@ -6816,10 +6899,14 @@ class WavesBridge(LibraryMixin, QObject):
             self._queue_emit_suspended = False
         self._emit_queue()
 
-    def _enqueue_tracks(self, keys) -> None:
+    def _enqueue_tracks(self, gen: int, keys) -> None:
         """Batch counterpart of _enqueue_albums for individual tracks (guest
-        appearances from a discography download). Same GUI-thread affinity and
-        coalesced queueChanged rationale."""
+        appearances from a discography download). Same GUI-thread affinity,
+        coalesced queueChanged, and stale-generation refusal rationale."""
+        if gen != self._scan_gen:
+            for key in keys:
+                self.downloadState.emit(str(key), "")
+            return
         self._queue_emit_suspended = True
         try:
             for key in keys:
@@ -6828,10 +6915,15 @@ class WavesBridge(LibraryMixin, QObject):
             self._queue_emit_suspended = False
         self._emit_queue()
 
-    def _enqueue_videos(self, keys) -> None:
+    def _enqueue_videos(self, gen: int, keys) -> None:
         """Batch counterpart of _enqueue_albums for an artist's music videos
         (queued by a discography download when the Music videos source is on).
-        Same GUI-thread affinity and coalesced queueChanged rationale."""
+        Same GUI-thread affinity, coalesced queueChanged, and stale-generation
+        refusal rationale."""
+        if gen != self._scan_gen:
+            for key in keys:
+                self.downloadState.emit(str(key), "")
+            return
         self._queue_emit_suspended = True
         try:
             for key in keys:
@@ -7146,6 +7238,8 @@ class WavesBridge(LibraryMixin, QObject):
                 bit_depth=quality.get("bit_depth"),
                 sample_rate=quality.get("sample_rate"),
                 codecs=quality.get("codecs"),
+                requested_rank=int(quality.get("requested_rank", -1)),
+                ceiling_rank=int(quality.get("ceiling_rank", -1)),
             )
             # The file was written this instant, so assert the cache entry
             # directly (no stat needed) and let QML flip the button now. The
@@ -7160,6 +7254,8 @@ class WavesBridge(LibraryMixin, QObject):
                 "bit_depth": quality.get("bit_depth"),
                 "sample_rate": quality.get("sample_rate"),
                 "codecs": quality.get("codecs"),
+                "requested_rank": int(quality.get("requested_rank", -1)),
+                "ceiling_rank": int(quality.get("ceiling_rank", -1)),
             }
             with self._own_lock:
                 self._own_cache[str(ev.get("id"))] = (time.monotonic(), rec)
@@ -7555,7 +7651,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # whatever the setting says, the same answer the gate gives:
                 # the drawer must not promise an upgrade the run will not
                 # perform.
-                if _copy_is_current(rec, target, _delivers_atmos(tr, atmos_on)):
+                if _copy_is_current(rec, target, _delivers_atmos(tr, atmos_on), _advertised_ceiling(tr)):
                     marks[tid] = {
                         "kind": "own",
                         "tier": _delivered_word(rec.get("quality_tier"), rec.get("audio_mode")),
@@ -9074,6 +9170,29 @@ class WavesBridge(LibraryMixin, QObject):
             lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
         ):
             return
+        # An identical row already waiting or running makes a second one pure
+        # duplication: the same item, at the same pinned quality, into the same
+        # folder, downloaded twice (a re-clicked discography overlapping a
+        # RETRY ALL kept re-adding whole albums, issue #32). A different pinned
+        # quality is NOT a duplicate: that click is an upgrade or downgrade
+        # request and keeps its own row. Terminal rows (done, failed, stopped)
+        # never block a fresh ask.
+        if media_id:
+            ask = self._queued_quality_value()
+            with self._queue_lock:
+                dup = any(
+                    it.get("media_id") == media_id
+                    and it.get("type") == type_media
+                    and it.get("status") in ("queued", "running")
+                    and it.get("template") == file_template
+                    and it.get("askQuality") == ask
+                    for it in self._queue
+                )
+            if dup:
+                # Acknowledge the click the same way a fresh row would: the
+                # work it asked for is already on its way.
+                self.downloadState.emit(media_id, "queued")
+                return
         # Artist + total track count for the queue row label. Collections report
         # their track total; a single track/video counts as one.
         artist = _primary_artist_name(obj)
@@ -9143,6 +9262,7 @@ class WavesBridge(LibraryMixin, QObject):
         if len(self._pct_last) > 4096:
             self._pct_last.clear()
         self._pump_queue()
+        self._reap_stranded_groups()
 
     def _start_job(self, qid: int, spec: _JobSpec) -> None:
         """Build a queued row's download and hand it to the pool."""
@@ -9300,6 +9420,11 @@ class WavesBridge(LibraryMixin, QObject):
                     # retry) is no longer needed; drop it now.
                     if merge_plan is not None:
                         self._merge_plans.pop(media_id, None)
+                    # A REDOWNLOAD mark is one job's force, not a standing
+                    # policy: the job it forced has finished, so a later click
+                    # on the same item meets the normal owned gate again. Kept
+                    # on failure and cancel, so a retry stays forced.
+                    self._redownload_overrides.discard(media_id)
                     self.downloadProgress.emit(media_id, 100.0)
                     self._set_queue_progress(qid, 100.0)
                     self.downloadState.emit(media_id, "done")
@@ -9461,6 +9586,9 @@ class WavesBridge(LibraryMixin, QObject):
         finished, never deleted, its button stuck at "running"."""
         if not self._folder_groups:
             return
+        # Same stale-emit guard as _bump_artist_group: a bump that raced a
+        # STOP keeps its arithmetic but must not re-light a swept button.
+        gen = self._scan_gen
         updates: list[tuple] = []
         with self._folder_lock:
             for fid in [f for f, g in self._folder_groups.items() if media_id in g["keys"]]:
@@ -9480,6 +9608,8 @@ class WavesBridge(LibraryMixin, QObject):
                 updates.append((fid, remaining, grp["total"], agg, finished, bool(grp["failed"])))
                 if finished:
                     del self._folder_groups[fid]
+        if self._scan_gen != gen:
+            return
         for fid, remaining, total, agg, finished, any_failed in updates:
             if state in ("done", "failed"):
                 self.folderRemaining.emit(fid, remaining, total)
@@ -9507,6 +9637,12 @@ class WavesBridge(LibraryMixin, QObject):
         stuck at "running"."""
         if not self._artist_groups:
             return
+        # A worker's bump can be mid-flight while stopAll sweeps the groups and
+        # resets their buttons; its emits would then land AFTER the reset and
+        # re-light a button nothing can ever settle again (the group is gone).
+        # The generation captured here goes stale the instant STOP is pressed,
+        # and a stale bump keeps its arithmetic but drops its emits.
+        gen = self._scan_gen
         updates: list[tuple] = []
         with self._artist_lock:
             for aid in [a for a, g in self._artist_groups.items() if media_id in g["keys"]]:
@@ -9525,6 +9661,8 @@ class WavesBridge(LibraryMixin, QObject):
                 updates.append((aid, agg, finished, bool(grp["failed"])))
                 if finished:
                     del self._artist_groups[aid]
+        if self._scan_gen != gen:
+            return
         for aid, agg, finished, any_failed in updates:
             if finished:
                 if any_failed:
@@ -9535,6 +9673,48 @@ class WavesBridge(LibraryMixin, QObject):
             else:
                 self.downloadProgress.emit(aid, float(agg))
                 self.downloadState.emit(aid, "running")
+
+    def _reap_stranded_groups(self) -> None:
+        """Safety net for the rollups: delete any group none of whose members
+        has a live queue row, and hand its button back to idle.
+
+        The bumps above only ever run from download workers, so a group whose
+        remaining members were withdrawn before starting can no longer settle
+        by itself: nothing will ever credit them, `finished` can never come
+        true, and the button re-reads "running" on every later tick, with only
+        a restart left to clear it (issue #32). The known withdrawal paths now
+        credit the rollup themselves; this sweep is the net under them, healing
+        any stranding path nobody has found yet within two quiet ticks.
+
+        Two strikes before reaping, because registration and enqueueing are
+        not atomic: a scan registers its group, posts the batch enqueue to the
+        GUI thread and only then drops the scans-in-flight count, so a single
+        look can catch a healthy group while its rows are still one posted
+        event away. Reaping only what two consecutive sweeps (GUI events, with
+        the posted queue events draining between them) both saw stranded keeps
+        the net from eating a group mid-birth. GUI thread only, like the slots
+        and _on_job_finished that call it."""
+        if self._scans_in_flight:
+            self._stranded_once.clear()
+            return
+        if not self._artist_groups and not self._folder_groups:
+            self._stranded_once.clear()
+            return
+        with self._queue_lock:
+            live = {str(it.get("media_id", "")) for it in self._queue if it.get("status") in ("queued", "running")}
+        reset: list[str] = []
+        marks: set[str] = set()
+        for lock, groups in ((self._artist_lock, self._artist_groups), (self._folder_lock, self._folder_groups)):
+            with lock:
+                for gid in [g for g, grp in groups.items() if not (grp["keys"] & live)]:
+                    if gid in self._stranded_once:
+                        del groups[gid]
+                        reset.append(gid)
+                    else:
+                        marks.add(gid)
+        self._stranded_once = marks
+        for gid in reset:
+            self.downloadState.emit(gid, "")
 
     def _preview_source(self, track, whole: bool = False) -> str:
         """Produce a small, **seekable** local ``.m4a`` for ``track`` and return
@@ -10311,6 +10491,7 @@ class WavesBridge(LibraryMixin, QObject):
         # download while the scan still queues the merge, into two directories.
         self.downloadState.emit(album_id, "preparing")
         stop_check = _stop_check_for(self)
+        gen = self._scan_gen
 
         def work() -> None:
             try:
@@ -10371,11 +10552,11 @@ class WavesBridge(LibraryMixin, QObject):
                     # the clicked button back to idle or it strands at
                     # "running" forever (nothing ever ticks album_id again).
                     self.downloadState.emit(album_id, "")
-                self._albumsQueued.emit([key])
+                self._albumsQueued.emit(gen, [key])
                 devlog.event("merge_album", "queued", id=key, editions=len(group), tracks=len(plan))
                 self._set_status(f"Best of both: {name_builder_title(identity)}")
             else:
-                self._albumsQueued.emit([album_id])
+                self._albumsQueued.emit(gen, [album_id])
                 devlog.event("merge_album", "declined", id=album_id, editions=scanned, reason=reason)
                 # Say which of these happened. "No richer edition found" was
                 # printed for all of them, including when a richer edition WAS
@@ -10827,6 +11008,7 @@ class WavesBridge(LibraryMixin, QObject):
         # Captured at click time, so a STOP between the click and the scan's
         # first request already counts as stopping this scan.
         stop_check = _stop_check_for(self)
+        gen = self._scan_gen
 
         def scan() -> None:
             # Bail before the (network-heavy) discography scan if the folder is
@@ -10998,6 +11180,11 @@ class WavesBridge(LibraryMixin, QObject):
             # button's bar (see _bump_artist_group); it flips to done when all
             # members finish.
             with self._artist_lock:
+                # Checked under the same lock stopAll's sweep takes: a scan
+                # that lost the race to STOP must not register a group behind
+                # the sweep (it would strand at "running" with nothing left to
+                # settle it, issue #32).
+                stop_check()
                 self._artist_groups[artist_id] = {
                     "keys": set(keys) | set(track_keys) | set(video_keys),
                     "done": set(),
@@ -11018,11 +11205,11 @@ class WavesBridge(LibraryMixin, QObject):
                 # exit by a path that never bumps the artist rollup, leaving the
                 # artist button stuck at "running" for the session.
                 self._merge_scanned.update(keys)
-                self._albumsQueued.emit(keys)
+                self._albumsQueued.emit(gen, keys)
             if track_keys:
-                self._tracksQueued.emit(track_keys)
+                self._tracksQueued.emit(gen, track_keys)
             if video_keys:
-                self._videosQueued.emit(video_keys)
+                self._videosQueued.emit(gen, video_keys)
             parts = []
             if keys:
                 parts.append(f"{len(keys)} albums")
@@ -11032,16 +11219,29 @@ class WavesBridge(LibraryMixin, QObject):
                 parts.append(f"{len(video_keys)} videos")
             note = f" ({skipped} already in your library)" if skipped else ""
             self._set_status("Downloading " + " + ".join(parts) + "…" + note)
+            # The scan's LAST word: if STOP landed anywhere in this tail, the
+            # raise routes to the handler below, whose "" is posted after any
+            # stale "running" above and therefore wins the button back.
+            stop_check()
 
         def work() -> None:
             try:
                 scan()
             except _ScanStopped:
-                # Nothing was queued and no group was registered, so the only
+                # Nothing this scan queued or registered survives a stop (a
+                # stale batch is refused by its generation, and stopAll's
+                # sweep already covers a group that did land), so the only
                 # thing left of this scan is the button stopAll could not
                 # reach. Hand it back; the next click is a fresh scan.
                 self.downloadState.emit(artist_id, "")
                 devlog.event("artist_releases", stopped=True)
+            except Exception:
+                # A scan that dies any other way (a network flap mid-fetch, a
+                # parse hole) used to leave the button lit at "running" for
+                # the whole session, with nothing left to reset it (issue #32).
+                logger.exception("Discography scan failed")
+                self.downloadState.emit(artist_id, "")
+                self._set_status("Could not load the full discography, try again")
 
         # Serialised scan pool: queueing several artists scans them one at a time
         # rather than racing on the shared tidalapi session and caches.
@@ -11074,6 +11274,7 @@ class WavesBridge(LibraryMixin, QObject):
         self.downloadProgress.emit(gid, 0.0)
         self.downloadState.emit(gid, "running")
         stop_check = _stop_check_for(self)
+        gen = self._scan_gen
 
         def scan() -> None:
             # Same worker-side ordering as downloadArtist, for the same
@@ -11115,6 +11316,8 @@ class WavesBridge(LibraryMixin, QObject):
                 self._set_status("No videos to download")
                 return
             with self._artist_lock:
+                # Same STOP-race guard as downloadArtist's registration.
+                stop_check()
                 self._artist_groups[gid] = {
                     "keys": set(video_keys),
                     "done": set(),
@@ -11123,9 +11326,11 @@ class WavesBridge(LibraryMixin, QObject):
                 }
             self.downloadProgress.emit(gid, 0.0)
             self.downloadState.emit(gid, "running")
-            self._videosQueued.emit(video_keys)
+            self._videosQueued.emit(gen, video_keys)
             devlog.event("artist_videos_all", videos=len(video_keys))
             self._set_status(f"Downloading {len(video_keys)} videos…")
+            # The scan's last word, same rationale as downloadArtist's.
+            stop_check()
 
         def work() -> None:
             try:
@@ -11133,6 +11338,10 @@ class WavesBridge(LibraryMixin, QObject):
             except _ScanStopped:
                 self.downloadState.emit(gid, "")
                 devlog.event("artist_videos_all", stopped=True)
+            except Exception:
+                logger.exception("Artist videos scan failed")
+                self.downloadState.emit(gid, "")
+                self._set_status("Could not load the artist's videos, try again")
 
         self._scan_pool.start(Worker(_counted_scan(self, work)))
 
@@ -11166,6 +11375,7 @@ class WavesBridge(LibraryMixin, QObject):
         self.downloadProgress.emit(gid, 0.0)
         self.downloadState.emit(gid, "running")
         stop_check = _stop_check_for(self)
+        gen = self._scan_gen
 
         def fetch_album(album_id: str):
             obj = self._objs["album"].get(album_id)
@@ -11276,6 +11486,8 @@ class WavesBridge(LibraryMixin, QObject):
                 self._set_status("No albums to download" + note)
                 return
             with self._artist_lock:
+                # Same STOP-race guard as downloadArtist's registration.
+                stop_check()
                 self._artist_groups[gid] = {
                     "keys": set(keys),
                     "done": set(),
@@ -11287,10 +11499,12 @@ class WavesBridge(LibraryMixin, QObject):
             # Edition handling already ran; exempt these from downloadAlbum's
             # own scan, for the same rollup reason downloadArtist documents.
             self._merge_scanned.update(keys)
-            self._albumsQueued.emit(keys)
+            self._albumsQueued.emit(gen, keys)
             devlog.event("playlist_albums", albums=len(keys), skipped=skipped)
             note = f" ({skipped} already in your library)" if skipped else ""
             self._set_status(f"Downloading {len(keys)} albums…" + note)
+            # The scan's last word, same rationale as downloadArtist's.
+            stop_check()
 
         def work() -> None:
             try:
@@ -11298,6 +11512,10 @@ class WavesBridge(LibraryMixin, QObject):
             except _ScanStopped:
                 self.downloadState.emit(gid, "")
                 devlog.event("playlist_albums", stopped=True)
+            except Exception:
+                logger.exception("Playlist albums scan failed")
+                self.downloadState.emit(gid, "")
+                self._set_status("Could not load the playlist's albums, try again")
 
         self._scan_pool.start(Worker(_counted_scan(self, work)))
 
@@ -11793,7 +12011,15 @@ class WavesBridge(LibraryMixin, QObject):
         item = self._queue_item(qid)
         if item is not None:
             self.downloadState.emit(str(item.get("media_id", "")), "")
+        # A row withdrawn before it ever started has no worker to credit its
+        # rollups: settle them here, or a discography holding it can never
+        # finish and its button re-reads "running" forever (issue #32). A
+        # running row's own worker does this when the abort lands.
+        withdrawn = item is not None and item.get("status") == "queued"
         self._remove_row(qid)
+        if withdrawn:
+            self._bump_download_groups(str(item.get("media_id", "")), None, "failed")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot()
@@ -11806,6 +12032,7 @@ class WavesBridge(LibraryMixin, QObject):
         their own CLEAR, so dismissing a failure or a STOP is always
         something the user aimed at."""
         self._remove_rows_where(lambda q: q["status"] == "done")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot()
@@ -11813,6 +12040,7 @@ class WavesBridge(LibraryMixin, QObject):
         """Clear the Failed section: failed rows only. Terminal rows, so no
         Worker to abort. Stopped rows have their own section and CLEAR."""
         self._remove_rows_where(lambda q: q["status"] == "failed")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot()
@@ -11823,6 +12051,7 @@ class WavesBridge(LibraryMixin, QObject):
         so there is nothing to abort here. Failed rows are not touched, so a
         stop is dismissed without losing a failure beside it."""
         self._remove_rows_where(lambda q: q["status"] == "cancelled")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot()
@@ -11833,8 +12062,15 @@ class WavesBridge(LibraryMixin, QObject):
         with the row is what keeps the download from going ahead invisibly
         with no row left to show or stop it (the same reasoning as
         clearQueue). The one job in flight is not queued and is left alone."""
+        with self._queue_lock:
+            withdrawn = [str(q.get("media_id", "")) for q in self._queue if q["status"] == "queued"]
         for qid in self._remove_rows_where(lambda q: q["status"] == "queued"):
             self._job_specs.pop(qid, None)
+        # Withdrawn before starting: no worker will ever credit these rows to
+        # their rollups, so settle the rollups here (issue #32).
+        for mid in withdrawn:
+            self._bump_download_groups(mid, None, "failed")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot()
@@ -11887,14 +12123,28 @@ class WavesBridge(LibraryMixin, QObject):
         Rows still writing bytes are spared and keep going: killing a transfer
         mid-write is per-row CANCEL's job, not a bulk button's. A queued row
         goes with its spec, so nothing downloads invisibly behind the clear."""
+        with self._queue_lock:
+            withdrawn = [str(q.get("media_id", "")) for q in self._queue if q["status"] == "queued"]
         for qid in self._remove_rows_where(lambda q: q["status"] != "running"):
             self._job_specs.pop(qid, None)
+        # Only the rows that never started need crediting here: done, failed
+        # and stopped rows were already settled by their workers (issue #32).
+        for mid in withdrawn:
+            self._bump_download_groups(mid, None, "failed")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     @Slot(int)
     def removeQueueItem(self, qid: int) -> None:
+        item = self._queue_item(qid)
+        withdrawn = item is not None and item.get("status") == "queued"
         self._job_specs.pop(qid, None)
         self._remove_row(qid)
+        # Same rollup settlement as cancelQueueItem: a row removed before it
+        # ever started has no worker left to credit it (issue #32).
+        if withdrawn:
+            self._bump_download_groups(str(item.get("media_id", "")), None, "failed")
+        self._reap_stranded_groups()
         self._emit_queue()
 
     def _row_object(self, item: dict):
