@@ -1701,6 +1701,12 @@ class Download:
             if path_media_found is not None:
                 self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_found}'")
 
+                # This skip happens AFTER the stream was fetched, so a caller
+                # capturing delivered quality per stream must be told nothing
+                # was written for it (the earlier pre-stream skip never
+                # captured anything to begin with).
+                self._note_skipped_after_stream(media)
+
                 # The path the caller records, so it must be the file that IS
                 # this track, which may be a numbered variant of the base name.
                 return True, path_media_found
@@ -1889,6 +1895,13 @@ class Download:
         destination all still run. A no-op here; the GUI's tracked download
         overrides it to fill the queue row's FINISHING word. Called at step
         boundaries, so the fill moves in honest jumps, not a fake glide."""
+
+    def _note_skipped_after_stream(self, media: Track | Video) -> None:
+        """The post-stream existing-file check kept an already-downloaded file:
+        a stream WAS fetched, but nothing was written. A no-op here; the GUI's
+        tracked download overrides it to drop the delivered-quality snapshot it
+        captured for that stream, so a skipped file never records a quality it
+        did not actually deliver."""
 
     def _note_delivered(self, media: Track | Video) -> None:
         """The item's file and sidecars are fully on disk; only post-processing

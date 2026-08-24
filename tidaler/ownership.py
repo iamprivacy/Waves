@@ -51,6 +51,14 @@ _ADDED_COLUMNS = (
     ("codecs", "TEXT"),
     ("user_id", "TEXT"),
     ("recorded_at", "INTEGER NOT NULL DEFAULT 0"),
+    # The quality rank this download RUN asked for, and the best rank TIDAL
+    # advertised for the track at that moment. Together they let the upgrade
+    # gate converge: "we already asked at this quality or better, and this is
+    # what was served" is a skip, not an endless re-download (a track whose
+    # best available master sits below the user's target would otherwise be
+    # re-fetched on every run, forever).
+    ("requested_rank", "INTEGER NOT NULL DEFAULT -1"),
+    ("ceiling_rank", "INTEGER NOT NULL DEFAULT -1"),
 )
 
 
@@ -93,6 +101,8 @@ class OwnershipStore:
                        codecs       TEXT,
                        user_id      TEXT,
                        recorded_at  INTEGER NOT NULL DEFAULT 0,
+                       requested_rank INTEGER NOT NULL DEFAULT -1,
+                       ceiling_rank   INTEGER NOT NULL DEFAULT -1,
                        PRIMARY KEY (track_id, path)
                    )""")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_track ON downloads(track_id)")
@@ -125,12 +135,18 @@ class OwnershipStore:
         sample_rate: int | None = None,
         codecs: str | None = None,
         user_id: str | None = None,
+        requested_rank: int = -1,
+        ceiling_rank: int = -1,
     ) -> None:
         """Record that ``track_id`` was written to ``path`` at ``quality_tier``.
 
         Upserts on (track_id, path): re-recording the same file updates its
         quality and timestamp in place; a different path for the same track adds
         a row, so every known copy survives for the live ownership check.
+        ``requested_rank`` is the quality rank the run asked for and
+        ``ceiling_rank`` the best rank TIDAL advertised at the time (both -1
+        when unknown); see backend's _copy_is_current for how they stop a
+        forever-upgrade loop.
         """
         tier = (quality_tier or "").upper() or None
         row = (
@@ -144,13 +160,16 @@ class OwnershipStore:
             codecs,
             user_id,
             int(time.time()),
+            int(requested_rank),
+            int(ceiling_rank),
         )
         with self._lock:
             self._conn.execute(
                 """INSERT INTO downloads
                        (track_id, path, quality_tier, quality_rank, audio_mode,
-                        bit_depth, sample_rate, codecs, user_id, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bit_depth, sample_rate, codecs, user_id, recorded_at,
+                        requested_rank, ceiling_rank)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(track_id, path) DO UPDATE SET
                        quality_tier = excluded.quality_tier,
                        quality_rank = excluded.quality_rank,
@@ -159,7 +178,9 @@ class OwnershipStore:
                        sample_rate  = excluded.sample_rate,
                        codecs       = excluded.codecs,
                        user_id      = excluded.user_id,
-                       recorded_at  = excluded.recorded_at""",
+                       recorded_at  = excluded.recorded_at,
+                       requested_rank = excluded.requested_rank,
+                       ceiling_rank   = excluded.ceiling_rank""",
                 row,
             )
             self._conn.commit()
@@ -240,7 +261,7 @@ class OwnershipStore:
             if user_id is None:
                 rows = self._conn.execute(
                     """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at
+                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank
                        FROM downloads WHERE track_id = ?
                        ORDER BY quality_rank DESC, recorded_at DESC""",
                     (str(track_id),),
@@ -248,7 +269,7 @@ class OwnershipStore:
             else:
                 rows = self._conn.execute(
                     """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at
+                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank
                        FROM downloads WHERE track_id = ? AND user_id = ?
                        ORDER BY quality_rank DESC, recorded_at DESC""",
                     (str(track_id), str(user_id)),
@@ -257,7 +278,7 @@ class OwnershipStore:
         # and a read must never hold up a worker-thread write behind it. A
         # zero-byte survivor is a truncation artifact, not a copy: skip it (not
         # removed, like a deleted path) so the track reads as wanted again.
-        for path, tier, rank, mode, depth, rate, codecs, recorded_at in rows:
+        for path, tier, rank, mode, depth, rate, codecs, recorded_at, requested, ceiling in rows:
             if path and _nonempty_file(path):
                 return {
                     "owned": True,
@@ -269,6 +290,8 @@ class OwnershipStore:
                     "sample_rate": rate,
                     "codecs": codecs,
                     "recorded_at": recorded_at,
+                    "requested_rank": requested,
+                    "ceiling_rank": ceiling,
                 }
         return None
 
