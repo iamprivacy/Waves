@@ -292,6 +292,11 @@ ApplicationWindow {
             browseLoading = true
             waves.loadBrowse()
         }
+        // An update staged in an earlier session that never got applied (the
+        // swap helper gives up after a few hours, and a shutdown never wakes
+        // it at all). No-ops unless something really is waiting; the answer
+        // comes back on appUpdatePending.
+        waves.resumePendingUpdate()
     }
     // True once a search has populated any result model. Gates the filter chips
     // and the empty-state hint, so the chips materialize only after a search.
@@ -1078,7 +1083,10 @@ ApplicationWindow {
                 easing.type: root.bootContentShown === 0 ? Easing.InCubic : Easing.InOutSine
             }
         }
-        source: motionOn ? Qt.resolvedUrl("assets/wave_loop.mp4") : ""
+        // The bridge serves a local cached copy of the bundled loop when one
+        // exists (motionVideoUrl): streaming off the install volume during
+        // boot starved the decoder and the water visibly stuttered.
+        source: motionOn ? waves.motionVideoUrl() : ""
         loops: MediaPlayer.Infinite
         muted: true
         fillMode: VideoOutput.PreserveAspectCrop
@@ -1777,6 +1785,15 @@ ApplicationWindow {
         if (libraryOpen) return { v: "library", cat: libraryCategory, label: "My Tidal" }
         if (artistOpen) return { v: "artist", id: artistData ? "" + artistData.id : "",
                                  label: artistData ? (artistData.name || "Artist") : "Artist",
+                                 // Which of the artist's TWO pages this is. My
+                                 // Tidal opens a library-scoped one through the
+                                 // same signal, with the same id, holding only
+                                 // the favourites; without this the restore
+                                 // below reads them as one page and a Back off
+                                 // the scoped page is a dead press that eats
+                                 // its history entry. Same collision openSearch
+                                 // and onArtistLoaded already guard against.
+                                 scoped: !!(artistData && artistData.libraryScoped),
                                  scrollY: artistView.contentY, ex: expandedAlbums,
                                  bio: bioExpanded }
         if (browseOpen) return { v: "browse", key: browsePageKey, page: browsePage,
@@ -1848,7 +1865,8 @@ ApplicationWindow {
             libraryOpen = true; settingsOpen = false; artistOpen = false
             if (libraryCategory !== s.cat) loadLib(s.cat)
         } else if (s.v === "artist") {
-            if (artistData && ("" + artistData.id) === s.id) {
+            if (artistData && ("" + artistData.id) === s.id
+                    && !!artistData.libraryScoped === !!s.scoped) {
                 artistOpen = true; settingsOpen = false; libraryOpen = false
                 // The page's content is still loaded; put back the state other
                 // tabs may have clobbered (loadLib clears expandedAlbums), and
@@ -1868,7 +1886,12 @@ ApplicationWindow {
                 artistView.pendingRestoreKey = s.id
                 artistView.pendingRestoreY = (s.scrollY !== undefined ? s.scrollY : -1)
                 _artistRestoreState = { id: s.id, ex: s.ex, bio: s.bio }
-                waves.loadArtist(s.id); return   // flag cleared in onArtistLoaded
+                // Back to the page that was actually saved: the two share an
+                // id and a signal, so loading the wrong one puts the other
+                // artist page up under this one's history entry.
+                if (s.scoped) waves.loadArtistLibrary(s.id)
+                else waves.loadArtist(s.id)
+                return   // flag cleared in onArtistLoaded
             }
         } else if (s.v === "browse") {
             browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
@@ -2125,7 +2148,34 @@ ApplicationWindow {
                 // rule as openLibrary).
                 var s = searchSaved
                 if (s && s.artistData && s.artistData.id) {
+                    // The four section models are SHARED with every other
+                    // tab's artist page, so another tab may have refilled them
+                    // with a different artist since the snapshot was taken.
+                    // Only the header reads artistData; putting it back on its
+                    // own gave one artist's name, photo and DOWNLOAD
+                    // DISCOGRAPHY button over another artist's albums and top
+                    // tracks. The payload the page was built from IS the
+                    // snapshot, so the sections are refilled from it: no
+                    // refetch, and nothing to go wrong offline.
+                    // The id alone does not identify a page. My Tidal opens a
+                    // LIBRARY-SCOPED page of the same artist (loadArtistLibrary,
+                    // same id, same signal) whose payload carries only the
+                    // favourited albums, EPs and tracks and no videos at all,
+                    // and it fills these same four models. Matching ids there
+                    // meant the refill was skipped and the full page's header
+                    // and DOWNLOAD DISCOGRAPHY button stood over the
+                    // favourites subset, so the scope has to agree too. It is
+                    // the same-id collision the refresh path already guards
+                    // against in onArtistLoaded.
+                    var pageLoaded = artistData && ("" + artistData.id) === ("" + s.artistData.id)
+                        && !!artistData.libraryScoped === !!s.artistData.libraryScoped
                     artistData = s.artistData
+                    if (!pageLoaded) {
+                        fillMedia(artistAlbumsModel, s.artistData.albums || [])
+                        fillMedia(artistEpModel, s.artistData.eps || [])
+                        fillMedia(artistTracksModel, s.artistData.tracks || [])
+                        fillMedia(artistVideosModel, s.artistData.videos || [])
+                    }
                     expandedAlbums = s.expandedAlbums || ({})
                     bioExpanded = !!s.bio
                     artistOpen = true
@@ -4428,7 +4478,7 @@ ApplicationWindow {
         Item {
             id: diGridMask
             anchors.fill: parent; anchors.margins: root.btnBorderW
-            visible: false
+            visible: enabled
             Rectangle { anchors.fill: parent; radius: root.btnRad - root.btnBorderW; color: "#ffffff" }
         }
         Text {
@@ -10322,6 +10372,13 @@ ApplicationWindow {
                     m.setProperty(idx, "doneAt", Date.now())
                 if (row.progress !== it.progress) m.setProperty(idx, "progress", it.progress)
                 if (row.name !== it.name) m.setProperty(idx, "name", it.name)
+                // Why a settled row ended the way it did. Patched here as well
+                // as in queueRowPatch, because this is a SEPARATE writer: a
+                // resync is what a rebuild and a big STOP deliver, and a field
+                // only the delta path carries is stale for every row a resync
+                // touches.
+                var rsn = it.reason || ""
+                if (row.reason !== rsn) m.setProperty(idx, "reason", rsn)
                 if (row.artist !== it.artist) m.setProperty(idx, "artist", it.artist || "")
                 if (row.tracks !== it.tracks) m.setProperty(idx, "tracks", it.tracks || 0)
                 var q = it.quality || ""
@@ -10336,8 +10393,10 @@ ApplicationWindow {
                 // role given a JS array turns it into a nested ListModel, and
                 // the delegate wants the array back. A string role also gives
                 // the badge a stable value to bind against, so it rebuilds when
-                // the mix really changes and not on every tick.
-                var mx = JSON.stringify(it.mix || [])
+                // the mix really changes and not on every tick. The bridge
+                // pre-serializes it (mixJson) once per change; the stringify
+                // fallback covers rows built by labs and tests.
+                var mx = it.mixJson || JSON.stringify(it.mix || [])
                 if (row.mixJson !== mx) m.setProperty(idx, "mixJson", mx)
                 // Keep a row that has already moved to Completed there; otherwise
                 // group by status: failed rows and the rows STOP ended each get
@@ -10352,12 +10411,11 @@ ApplicationWindow {
             }
         }
         // A row that has left the queue takes its per-qid state with it: the
-        // expanded track list AND the expansion flag itself. queueTracks is
-        // copied wholesale on every live tick, so a session's worth of finished
-        // albums would make each tick cost more than the one before it;
-        // queueExpanded is only copied on a click, but it is the same row's
-        // state and outliving its row is the same leak. One copy of each for
-        // the whole sweep, not one per row.
+        // expanded track list AND the expansion flag itself. Live ticks update
+        // queueTracks in place now, but an entry outliving its row is still a
+        // leak a session of finished albums would grow forever; queueExpanded
+        // is the same row's state. One copy of each for the whole sweep (drops
+        // are rare), not one per row.
         var dropped = []
         for (var k = m.count - 1; k >= 0; --k) {
             var gone = m.get(k).qid
@@ -10485,10 +10543,11 @@ ApplicationWindow {
     // saw one, so a queued row could not state its tier.
     function queueRowObject(it) {
         return { qid: it.qid, name: it.name, type: it.type, status: it.status,
+                 reason: it.reason || "",
                  progress: it.progress, media_id: it.media_id, template: it.template,
                  collection: it.collection, artist: it.artist || "", tracks: it.tracks || 0,
                  art: it.art || "", quality: it.quality || "", expected: it.expected || "",
-                 landed: it.landed || "", mixJson: JSON.stringify(it.mix || []),
+                 landed: it.landed || "", mixJson: it.mixJson || JSON.stringify(it.mix || []),
                  uiGroup: root.groupForStatus(it.status), moved: false,
                  doneAt: (it.status === "done" ? Date.now() : 0), leaving: false }
     }
@@ -10529,6 +10588,8 @@ ApplicationWindow {
             m.setProperty(i, "doneAt", Date.now())
             queueLingerAdd(it.qid)
         }
+        var rsn = it.reason || ""
+        if (row.reason !== rsn) m.setProperty(i, "reason", rsn)
         if (row.progress !== it.progress) m.setProperty(i, "progress", it.progress)
         if (row.name !== it.name) m.setProperty(i, "name", it.name)
         if (row.artist !== it.artist) m.setProperty(i, "artist", it.artist || "")
@@ -10539,7 +10600,7 @@ ApplicationWindow {
         if (row.expected !== ex) m.setProperty(i, "expected", ex)
         var ld = it.landed || ""
         if (row.landed !== ld) m.setProperty(i, "landed", ld)
-        var mx = JSON.stringify(it.mix || [])
+        var mx = it.mixJson || JSON.stringify(it.mix || [])
         if (row.mixJson !== mx) m.setProperty(i, "mixJson", mx)
         var grp = row.moved ? "completed" : root.groupForStatus(it.status)
         if (grp === wasGrp) return
@@ -10911,6 +10972,19 @@ ApplicationWindow {
                 root._browseParked = p
                 return
             }
+            // The first build has the mirror problem at the other end of the
+            // boot: on a warm cache the payload lands ~1.5s in, mid wordmark
+            // fade (bootIntro), and even the async build's section shells cost
+            // a real frame gap, so the fade visibly hitched (reported from
+            // livetesting). Park it until the fade completes; bootIntro's
+            // onFinished applies it, still a good second clear of the
+            // handover's incubation wait, so the reveal is not delayed. An
+            // error payload goes straight through: it has no sections to
+            // build, and the boot's error path must not sit on the wordmark.
+            if (bootIntro.running && !p.error && root.browseSections.length === 0) {
+                root._browseParked = p
+                return
+            }
             root.applyBrowseLanding(p)
         }
         // A hovered page is built: pull its covers into the warm pool at
@@ -11069,6 +11143,11 @@ ApplicationWindow {
             // would show yesterday's tracks with no refetch to correct them.
             root.playlistTrackCache = ({})
             root.expandedPlaylists = ({})
+            // The type chip is a filter on ONE set of results, not a mode: left
+            // sticky, an earlier Albums click hid the ARTISTS section of every
+            // later search (an artist could not be found at all). Reset here,
+            // where new results land, so it also covers cache-served searches.
+            root.filterType = "all"
             // A section a user expanded stays expanded on the next search
             // (searchArtistsExpanded and the list-section flags are pref-backed),
             // so nothing is reset here.
@@ -11167,8 +11246,22 @@ ApplicationWindow {
             if (i >= 0) queueModel.setProperty(i, "progress", pct)
         }
         // ---- queue-row album expansion: per-track snapshot + live updates ----
+        // These three land per track EVENT (state changes, and a pct batch
+        // twice a second while an album downloads), so the map is updated in
+        // place with an explicit change signal: cloning the whole map per
+        // event (Object.assign) made every tick cost a copy of every finished
+        // album's ledger too, growing for the life of the session. Bindings
+        // depend on the change signal, not on object identity, so they
+        // re-evaluate exactly as they did under the reassignment.
         function onQueueTracksLoaded(qid, tracks) {
-            var m = Object.assign({}, root.queueTracks); m[qid] = tracks; root.queueTracks = m
+            // A row that has left takes its track list with it (queueRowsDrop),
+            // so a list that arrives after it went is dropped rather than
+            // stored: nothing would ever show it, and nothing would free it.
+            if (root.queueRowIndexOf(qid) < 0) return
+            // Stored in place (one signal, no wholesale copy): this arrives on
+            // every expansion and on live ticks, where copying the whole map
+            // made each tick cost more than the one before it.
+            root.queueTracks[qid] = tracks; root.queueTracksChanged()
         }
         function onQueueTrackState(qid, row) {
             var arr = root.queueTracks[qid]
@@ -11196,7 +11289,7 @@ ApplicationWindow {
                                     duration: row.duration, status: row.status, pct: row.pct,
                                     fpct: row.fpct || 0, quality: row.quality, expected: row.expected || "",
                                     owned: row.owned || "" })
-            var m = Object.assign({}, root.queueTracks); m[qid] = copy; root.queueTracks = m
+            root.queueTracks[qid] = copy; root.queueTracksChanged()
         }
         function onQueueTrackPct(qid, ticks) {
             var arr = root.queueTracks[qid]
@@ -11207,7 +11300,7 @@ ApplicationWindow {
                 if (p !== undefined) { copy[i] = Object.assign({}, copy[i], { pct: p }); hit = true }
             }
             if (!hit) return
-            var m = Object.assign({}, root.queueTracks); m[qid] = copy; root.queueTracks = m
+            root.queueTracks[qid] = copy; root.queueTracksChanged()
         }
         function onDownloadProgress(id, pct) { var h = root.dlHolder(id); if (h) h.pct = pct }
         function onDownloadState(id, st) { var h = root.dlHolder(id); if (h) h.st = st }
@@ -12398,12 +12491,19 @@ ApplicationWindow {
                     }
                 }
                 ShowAllLabel {
+                    objectName: "artistsShowAll"
                     opacity: root.searchReveal
                     sectionTop: artistsHead
                     // Offer SHOW ALL only when the strip overflows (there is more
                     // to reveal than fits); SHOW LESS collapses the grid back to
                     // the strip. Mixed (All) view only.
-                    visible: root.filterType === "all" && (root.searchArtistsExpanded || artistStrip.contentWidth > artistStrip.width + 1)
+                    // The count gate is what the strip and the grid get from
+                    // sectionVisible(): without it, the expanded flag alone kept
+                    // this label on screen, and that flag is pref-backed, so a
+                    // launch with no search at all drew a lone SHOW LESS over an
+                    // empty page.
+                    visible: root.filterType === "all" && artistsModel.count > 0
+                             && (root.searchArtistsExpanded || artistStrip.contentWidth > artistStrip.width + 1)
                     expanded: root.searchArtistsExpanded
                     count: artistsModel.count
                     onToggled: root.toggleSearchSection("artists")
@@ -13906,7 +14006,7 @@ ApplicationWindow {
                     onClicked: waves.stopAll()
                 }
             }
-            Text { textFormat: Text.PlainText; text: queueModel.count + " items"; color: root.textLo; font.family: root.mono; font.pixelSize: 12 }
+            Text { textFormat: Text.PlainText; text: queueModel.count + (queueModel.count === 1 ? " item" : " items"); color: root.textLo; font.family: root.mono; font.pixelSize: 12 }
             ListView {
                 id: queueList
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 0
@@ -14164,7 +14264,13 @@ ApplicationWindow {
                                         text: {
                                             var a = model.artist ? model.artist + " · " : ""
                                             if (qrow.st === "queued") return a + "Queued"
-                                            if (qrow.st === "failed") return a + "Failed"
+                                            // A failure states WHAT failed when the job
+                                            // knows ("6 of 501 tracks failed"): on a long
+                                            // playlist the collapsed row is the whole
+                                            // diagnosis, and the bare word could not tell
+                                            // a run that saved 495 songs from one that
+                                            // saved none.
+                                            if (qrow.st === "failed") return a + (model.reason ? model.reason : "Failed")
                                             if (qrow.st === "cancelled") return a + "Stopped"
                                             if (model.collection && model.tracks > 0)
                                                 // Floor, not round: the roll-up now moves with the in-flight
@@ -14306,7 +14412,7 @@ ApplicationWindow {
                                 Repeater {
                                     // The count, not the array: every live tick
                                     // (queueTrackState/Pct, 2 a second while an album
-                                    // downloads) reassigns root.queueTracks wholesale,
+                                    // downloads) signals a change on root.queueTracks,
                                     // and an array model tears down and rebuilds every
                                     // row per tick. Each rebuild costs a layout-settle
                                     // frame, which reads as the open sliver vibrating
@@ -15283,8 +15389,32 @@ ApplicationWindow {
         function offer(v) {
             if (setupSettings.updateToastDismissed === v) return
             var st = waves.appUpdateStatus()
+            // An update already staged and waiting for a restart outranks any
+            // offer. install() deliberately refuses to stage a second one over
+            // an armed helper (the two would race the same backup folder), so
+            // it hands the STAGED result back whatever release it was asked
+            // for: the toast offered the newer version, INSTALL reported that
+            // newer version installed, and the restart landed the older one.
+            // The staged version is what the next restart gives, so it is what
+            // the pill goes on saying; the newer release is offered again by
+            // the check that follows the restart.
+            if (st && st.pending_restart === true) return
             selfInstall = st && (st.can_self_install === true || st.can_managed_install === true)
             version = v; pct = 0; phase = "offer"
+        }
+        // What a restart will actually land, whenever the app knows it: the
+        // toast's own idea of the version is what it was asked to offer, and
+        // an install that took over a staged swap never went near that release.
+        function landedVersion() {
+            var st = waves.appUpdateStatus()
+            // The staged version comes straight off the release tag, which in
+            // this project is spelled "v0.1.26", while everything the label
+            // puts a "v" in front of has been through update_available()'s
+            // strip. Unstripped it renders "Waves vv0.1.26 installed", on the
+            // ordinary install too: every successful Windows install arms a
+            // pending restart, so this is the usual path, not the rare one.
+            var staged = st ? ("" + (st.pending_version || "")).replace(/^[vV]/, "") : ""
+            return staged !== "" ? staged : version
         }
         function dismiss() {   // remembered for this version
             setupSettings.updateToastDismissed = version
@@ -15297,6 +15427,15 @@ ApplicationWindow {
         Connections {
             target: waves
             function onAppUpdateProgress(p) { if (updateToast.phase === "installing") updateToast.pct = p }
+            // Staged in an earlier session and re-armed at this launch: show
+            // the restart pill outright. Not an offer, so the per-version
+            // dismissal does not apply, it is already downloaded and verified.
+            function onAppUpdatePending(v) {
+                updateToast.version = v
+                updateToast.pct = 100
+                updateToast.selfInstall = true
+                updateToast.phase = "ready"
+            }
             function onAppUpdateStateChanged(state, message) {
                 if (updateToast.phase === "") return
                 if (state === "downloading") {
@@ -15346,7 +15485,7 @@ ApplicationWindow {
                 visible: updateToast.face !== "installing"
                 Layout.alignment: Qt.AlignBaseline
                 textFormat: Text.PlainText
-                text: updateToast.face === "ready" ? "Waves v" + updateToast.version + " installed"
+                text: updateToast.face === "ready" ? "Waves v" + updateToast.landedVersion() + " installed"
                     : updateToast.face === "failed" ? "Install failed: " + updateToast.error
                     : "Waves v" + updateToast.version + " is available"
                 color: updateToast.face === "failed" ? root.red : root.textHi
@@ -15730,12 +15869,19 @@ ApplicationWindow {
                     // which is also the evidence the identity was proven from.
                     // The owned mode is a different conversation: a record of
                     // a download Waves made, not a guess to be judged.
+                    // Each promise below is conditional because the behaviour
+                    // is: with "Skip existing" on nothing on disk is ever
+                    // replaced, with it off a same-named file of the same
+                    // track is (that is what the setting asks for). Either
+                    // way a Dolby Atmos file is never replaced by a stereo
+                    // download; the engine steps aside to a numbered name.
                     text: libraryClaimGate.isOwned
                         ? ((libraryClaimGate.albumTitle !== ""
                               ? "Waves downloaded “" + libraryClaimGate.albumTitle + "” itself, so this is a record, not a guess."
                               : "Waves downloaded this itself, so this is a record, not a guess.")
-                           + " Redownloading fetches every track fresh and replaces the copies Waves wrote;"
-                           + " nothing else on disk is touched.")
+                           + " Redownloading fetches every track fresh and replaces the copies Waves wrote,"
+                           + " including a same-named file it cannot tell apart from its own."
+                           + " A Dolby Atmos file is never replaced by a stereo download; that lands beside it.")
                         : ((libraryClaimGate.isTrack
                             ? (libraryClaimGate.albumTitle !== ""
                                 ? "A file in your music library matches “" + libraryClaimGate.albumTitle + "”."
@@ -15743,8 +15889,13 @@ ApplicationWindow {
                             : (libraryClaimGate.albumTitle !== ""
                                 ? "A folder in your music library matches “" + libraryClaimGate.albumTitle + "”."
                                 : "A folder in your music library matches this album."))
-                           + " The match is made from tags, so it can be wrong. Downloading again makes a"
-                           + " second copy; your existing files are never touched either way.")
+                           + " The match is made from tags, so it can be wrong."
+                           + (waves.skipExistingFiles
+                                ? " Downloading again never replaces a file already on disk: a track already"
+                                  + " sitting at its exact name is kept, anything else gets its own copy beside it."
+                                : " With “Skip existing” turned off, downloading again replaces a same-named file"
+                                  + " unless Waves can tell it is a different track. A Dolby Atmos file is never"
+                                  + " replaced by a stereo download."))
                 }
                 // The evidence, so the user can judge the match rather than
                 // take the button's word for it.
@@ -15998,9 +16149,14 @@ ApplicationWindow {
         // full-volume audio, and the hand cursor roamed over buttons nobody
         // could see (issue #13). Eats clicks, hover, and wheel, and keeps the
         // plain arrow cursor, until the reveal starts painting the content.
+        // Visibility-gated as well: a MouseArea claims the cursor even while
+        // disabled (the library pill's scar), so a boot that never reaches
+        // done would otherwise cost every button its pointing hand for the
+        // whole session; an invisible one claims nothing.
         MouseArea {
             id: bootShield
             anchors.fill: parent
+            visible: enabled
             enabled: root.bootContentShown === 0
             hoverEnabled: enabled
             acceptedButtons: Qt.AllButtons
@@ -16066,10 +16222,67 @@ ApplicationWindow {
             // livetesting).
             if (root.signedIn && root.browseSections.length === 0 && !root.browseError
                     && !handoverCap.expired) { handoverHeld = true; return }
-            if (root.browseBuilding && !handoverCap.expired) { handoverHeld = true; return }
+            if (root.browseBuilding && !handoverCap.expired) {
+                // Shelves going up again after the count went quiet make that
+                // quiet stale: neither they nor their cards were in it, so the
+                // third leg has to be shown quiet once more, for THIS build.
+                incubationQuietPoll.quietRuns = 0
+                handoverHeld = true
+                return
+            }
+            // Third leg: the incubation controller's own count. Boot-paced
+            // incubation (app.py's _BootPacedIncubation, added because the
+            // full-speed build froze the boot water for ~300 ms stretches)
+            // completes the landing's CARD loaders after the veil count has
+            // already settled, so browseBuilding alone no longer promises a
+            // finished page. The controller's count covers everything still
+            // assembling, but one reading of it decides nothing: it blips to
+            // zero between batches, and a reading taken HERE is the least
+            // trustworthy of all. This leg is normally reached from the veil
+            // falling, which happens inside the last counted loader's `loaded`
+            // handler, after the engine has already dropped that loader from
+            // the count and before the shelves' card loaders exist to join it,
+            // so a zero at this instant is exactly what a page that has not
+            // begun its cards looks like: the leg used to read it and reveal
+            // onto the cards popping in. So the count is not read on this path
+            // at all. The hold is taken, and only the poll below, quiet on two
+            // readings in a row, can lift it; the cap the other legs answer to
+            // ends the hold regardless of what the count ever says.
+            if (root.signedIn && !root.browseError && !incubationQuietPoll.settled
+                    && !handoverCap.expired) {
+                handoverHeld = true
+                // A poll already counting is left running: ITS readings are the
+                // consecutive ones. Re-arming on every re-entry (each payload,
+                // each veil edge) would keep resetting the count instead.
+                if (!incubationQuietPoll.running) {
+                    incubationQuietPoll.quietRuns = 0
+                    incubationQuietPoll.restart()
+                }
+                return
+            }
             handoverHeld = false
             handoverCap.stop()
+            incubationQuietPoll.stop()
             bootHandover.start()
+        }
+        // The one place the incubation count is read: on a fixed cadence, and
+        // only while the third leg holds. Two consecutive quiet readings is
+        // the bar because a single zero can be the gap between batches (the
+        // next one registers within a pacing tick or two), while a gap wide
+        // enough to swallow two readings 200 ms apart is not a gap, it is a
+        // finished page. quietRuns IS that record, so it is what a later build
+        // resets (see the second leg), and `settled` is only ever read by the
+        // leg it releases.
+        Timer {
+            id: incubationQuietPoll
+            property int quietRuns: 0
+            readonly property bool settled: quietRuns >= 2
+            interval: 200; repeat: true
+            onTriggered: {
+                if (!bootOverlay.handoverHeld || bootOverlay.done) { stop(); return }
+                if (waves.bootIncubationBusy()) { quietRuns = 0; return }
+                if (++quietRuns >= 2) { stop(); bootOverlay.handover() }
+            }
         }
         Timer {
             id: handoverCap
@@ -16090,42 +16303,62 @@ ApplicationWindow {
             property real zoom: 1
             anchors.fill: parent
             scale: bootTitle.zoom
-            Text {
+            // One Text per glyph, tracked by Row spacing rather than
+            // font.letterSpacing: no trailing space means centerIn really
+            // centres the glyph run, and the W (which the mono face
+            // compresses to fit its fixed cell) can be stretched back out
+            // on its own without touching its advance.
+            Row {
                 anchors.centerIn: parent; anchors.verticalCenterOffset: 2
-                textFormat: Text.PlainText; text: "WAVES"
-                font.family: root.mono; font.pixelSize: 112; font.bold: true; font.letterSpacing: 26
-                color: "#0a160d"; opacity: 0.9 * bootTitle.shown   // shadow
+                spacing: 28
+                Repeater {
+                    model: ["W", "A", "V", "E", "S"]
+                    Text {
+                        id: gs
+                        textFormat: Text.PlainText; text: modelData
+                        font.family: root.mono; font.pixelSize: 126; font.bold: true
+                        color: "#0a160d"; opacity: 0.9 * bootTitle.shown   // shadow
+                        transform: Scale { origin.x: gs.width / 2; xScale: gs.text === "W" ? 1.08 : 1 }
+                    }
+                }
             }
-            Text {
+            Row {
+                id: bootMark
                 anchors.centerIn: parent
-                textFormat: Text.PlainText; text: "WAVES"
-                font.family: root.mono; font.pixelSize: 112; font.bold: true; font.letterSpacing: 26
-                color: root.textHi; opacity: bootTitle.shown
+                spacing: 28
+                Repeater {
+                    model: ["W", "A", "V", "E", "S"]
+                    Text {
+                        id: gf
+                        textFormat: Text.PlainText; text: modelData
+                        font.family: root.mono; font.pixelSize: 126; font.bold: true
+                        // Softened off flat white: full textHi at this size
+                        // read harsh against the dark water.
+                        color: root.textHi; opacity: 0.85 * bootTitle.shown
+                        transform: Scale { origin.x: gf.width / 2; xScale: gf.text === "W" ? 1.08 : 1 }
+                    }
+                }
             }
         }
 
         // ---- version readout: read once at launch (set and forget) --------
         // Outside bootTitle so it never scales with the zoom; tucked at the
         // bottom-right of the wordmark with slight padding.
-        TextMetrics {
-            id: bootTm
-            font.family: root.mono; font.pixelSize: 112; font.bold: true; font.letterSpacing: 26
-            text: "WAVES"
-        }
         Text {
             id: bootVer
             property real shown: 0   // faded up by bootIntro, with the wordmark
             textFormat: Text.PlainText
             text: "v" + waves.appVersion
-            font.family: root.mono; font.pixelSize: 14; font.bold: true; font.letterSpacing: 6
+            font.family: root.mono; font.pixelSize: 16; font.bold: true; font.letterSpacing: 7
             color: root.accent
-            // Right edge aligned under the S (minus the trailing letterSpacing).
-            x: bootOverlay.width / 2 + bootTm.width / 2 - 26 - width
+            // Right edge aligned under the S: the per-glyph Row carries no
+            // trailing spacing, so its right edge IS the S's right edge.
+            x: bootOverlay.width / 2 + bootMark.width / 2 - width
             // Tucked just under the wordmark's baseline. The metrics box runs
             // a descender's worth below the caps, and "WAVES" has none, so
             // sitting at its bottom edge left the readout stranded well clear
             // of the glyphs; pull back up to hug them.
-            y: bootOverlay.height / 2 + bootTm.height / 2 - 24
+            y: bootOverlay.height / 2 + bootMark.height / 2 - 27
             opacity: 0.85 * shown
         }
 
@@ -16183,12 +16416,28 @@ ApplicationWindow {
                 target: bootVer; property: "shown"; from: 0; to: 1
                 duration: 900; easing.type: Easing.OutCubic
             }
+            // A first landing that arrived mid-fade waits here (see
+            // onBrowseLoaded): applying it during the fade cost the fade its
+            // frames. The composed mark is now still, so the async build gets
+            // the calm stretch before the handover to itself.
+            onFinished: {
+                if (root._browseParked && root.browseSections.length === 0) {
+                    var parked = root._browseParked
+                    root._browseParked = null
+                    root.applyBrowseLanding(parked)
+                }
+            }
         }
 
         SequentialAnimation {
             id: bootSeq
             // Long enough for the fade-up (~0.9s) to finish and the composed
-            // frame to settle before anything starts leaving.
+            // frame to settle before anything starts leaving. A MINIMUM by
+            // design, not a wait to shave: users sit here long enough to see
+            // the whole animation and read the version for a beat (user
+            // decision, 2026-08-27, reversing a briefly shipped 1.1s warm
+            // hold); only waits BEYOND this minimum are load-dependent (the
+            // handover gate below).
             PauseAnimation { duration: 1900 }   // hold the opening frame; the water fades in under it
             // Any wait for the landing happens HERE, on the opening frame with
             // the wordmark and version still up, never after the version has
@@ -16228,6 +16477,10 @@ ApplicationWindow {
                     root.bootScrimLevel = 0.93
                     root.bootContentShown = 1
                     bootOverlay.done = true
+                    // The launch look is over: open the incubation throttle
+                    // that kept the boot water smooth while the landing
+                    // assembled (app.py's _BootPacedIncubation).
+                    waves.bootRevealed()
                     // A revalidate that landed during the reveal waited here.
                     // Applied now, with done set, it takes the ordinary
                     // in-place refresh path: no veil, nothing to watch.

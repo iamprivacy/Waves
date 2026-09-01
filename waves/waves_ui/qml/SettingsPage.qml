@@ -166,7 +166,18 @@ Item {
     property bool auUpToDate: false      // transient "✓ up to date" after a check
     readonly property bool auBusy: auState === "downloading" || auState === "verifying" || auState === "installing"
     readonly property bool auDone: auState === "done"
-    function auRefresh() { page.appUp = waves.appUpdateStatus() }
+    function auRefresh() {
+        page.appUp = waves.appUpdateStatus()
+        // A swap staged in an earlier session and re-armed at launch is the
+        // same "restart to finish" state as one installed a minute ago, so the
+        // card shows it whenever Settings is opened, not only on the signal.
+        if (page.appUp.pending_restart === true && page.auState === "") {
+            page.auState = "done"
+            page.auMsg = (page.appUp.pending_version
+                          ? "Update to " + page.appUp.pending_version + " is ready. "
+                          : "An update is ready. ") + "Restart to finish."
+        }
+    }
 
     // ---- Diagnostics export state ----
     property bool diagBusy: false        // an export is being written
@@ -499,6 +510,10 @@ Item {
         }
         function onAppUpdateProgress(pct) { page.auPct = pct }
         function onAppUpdateStatusChanged() { page.auRefresh() }
+        function onAppUpdatePending(v) {
+            page.auState = "done"
+            page.auMsg = "Update to " + v + " is ready. Restart to finish."
+        }
         function onAppUpdateChecked(available, current, latest) {
             var wasManual = page.auChecking
             page.auChecking = false
@@ -1797,10 +1812,25 @@ Item {
                         Column {
                             id: inner
                             x: 15; y: 12; width: parent.width - 30; spacing: 10
-                            opacity: card.open ? 1 : 0
                             // Fade in quickly on open; on close, outlast the height
                             // collapse (220ms) so content doesn't vanish early.
-                            Behavior on opacity { NumberAnimation { duration: card.open ? 160 : 220; easing.type: Easing.OutQuad } }
+                            // States, not a Behavior: a Behavior whose duration
+                            // binding also reads card.open captures the OLD value
+                            // when the flip triggers it, so the two swapped and
+                            // every close faded the content out in 160ms under a
+                            // 220ms collapse: content vanishing early, the exact
+                            // artifact the asymmetry exists to prevent. (Measured
+                            // on HoverSwell in Main.qml, which is a Transition for
+                            // this reason.)
+                            opacity: 0
+                            states: State { name: "open"; when: card.open
+                                PropertyChanges { target: inner; opacity: 1 } }
+                            transitions: [
+                                Transition { to: "open"
+                                    NumberAnimation { property: "opacity"; duration: 160; easing.type: Easing.OutQuad } },
+                                Transition { from: "open"
+                                    NumberAnimation { property: "opacity"; duration: 220; easing.type: Easing.OutQuad } }
+                            ]
 
                             // FFmpeg manager card, Processing section only.
                             Loader {

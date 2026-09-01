@@ -48,10 +48,21 @@ Item {
 
     // The cross-fade. Slightly slower in than out, so the hint arrives calmly
     // and gets out of the finished page's way promptly.
-    property real shown: active ? 1 : 0
-    Behavior on shown {
-        NumberAnimation { duration: hint.active ? 260 : 190; easing.type: Easing.InOutSine }
-    }
+    // States, not a Behavior: a Behavior whose duration binding also reads the
+    // flag that drives it captures the OLD value when the flip triggers it,
+    // which swaps the two durations (measured on HoverSwell in Main.qml, where
+    // this same pattern ran 262ms in and 98ms out, exactly reversed). Every
+    // appearance was therefore taking the prompt exit timing and every exit the
+    // calm arrival one. A transition is picked by direction and cannot race.
+    property real shown: 0
+    states: State { name: "up"; when: hint.active
+        PropertyChanges { target: hint; shown: 1 } }
+    transitions: [
+        Transition { to: "up"
+            NumberAnimation { property: "shown"; duration: 260; easing.type: Easing.InOutSine } },
+        Transition { from: "up"
+            NumberAnimation { property: "shown"; duration: 190; easing.type: Easing.InOutSine } }
+    ]
 
     // The stepped clock the swell derives its motion from. Restarted whenever
     // the hint appears, so each load begins at the top of the animation rather
