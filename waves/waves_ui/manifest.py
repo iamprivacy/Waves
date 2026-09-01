@@ -19,9 +19,9 @@ Re-deriving the correct count from the manifest turns the download loop's
 blanket last-segment leniency into an exact decision: a failed final segment
 is harmless if and only if it is over-generated padding.
 
-This lives in ``waves_ui`` rather than ``download.py`` so a future
-tidal-dl-ng bump merges the shared files cleanly (the backend rework's
-patchability constraint).
+This lives in ``waves_ui`` rather than ``download.py`` per the engine/UI seam
+discipline: engine modules keep their inherited shape, corrections that exist
+for the UI's benefit live with the UI.
 """
 
 from __future__ import annotations
