@@ -22,23 +22,25 @@ Ten minutes here saves an afternoon of reverse-engineering.
 │                                     flight; queued rows wait as specs   │
 └────────┼────────────────────────────────────────────────────────────────┘
          ▼ imports, unchanged
-   tidaler engine ── Settings, Tidal (auth/session), Download
+   waves engine ──── Settings, Tidal (auth/session), Download
                      (streaming, FLAC extraction, tagging)
 ```
 
 One process, one window, one bridge object. QML never talks to TIDAL and
 Python never builds UI.
 
-## Why is the internal package still named `tidaler`?
+## Package layout and the engine/UI seam
 
-Waves is a fork of Tidaler that
-replaces the GUI and keeps the download engine. The Python package keeps the
-upstream name so engine bug fixes merge in cleanly (the merge is one-way,
-upstream to Waves). Everything Waves-specific lives in `tidaler/waves_ui/`;
-user-facing state is fully separated (config lives in its own `Waves` folder:
-`~/.config/Waves` on Linux, `~/Library/Application Support/Waves` on macOS,
+Waves began as a fork of Tidaler and now maintains its own engine: the
+download engine modules at the top of the `waves` package descend from the
+upstream code (with many fixes of our own), and everything UI-specific lives
+in `waves/waves_ui/`. The engine/UI split is a hard seam: engine modules stay
+close to their inherited shape and UI-owned behavior lands in `waves_ui`
+subclasses and helpers, which keeps the engine easy to audit. User-facing
+state lives in its own `Waves` folder, independent of the package name
+(`~/.config/Waves` on Linux, `~/Library/Application Support/Waves` on macOS,
 `%APPDATA%\Waves` on Windows; see `__config_dirname__` in
-`tidaler/__init__.py`).
+`waves/__init__.py`).
 
 ## Threading model
 
@@ -72,12 +74,12 @@ QML-facing state.
 
 ## Where state lives
 
-| State                                                     | Owner                                                                     | Why                                                |
-| --------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------- |
-| View routing, filters, scroll positions, preview UI state | `Main.qml` root properties                                                | UI transients; die with the window                 |
-| Download queue, live tidalapi objects, page caches        | `WavesBridge` (see its class docstring)                                   | Must survive view switches and feed multiple views |
-| User preferences                                          | tidaler `Settings` (`settings.json`) plus `waves.json` for GUI-only prefs | Persisted across runs                              |
-| Login token                                               | tidaler `Tidal` (`token.json`)                                            | Owned by the engine                                |
+| State                                                     | Owner                                                                    | Why                                                |
+| --------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------- |
+| View routing, filters, scroll positions, preview UI state | `Main.qml` root properties                                               | UI transients; die with the window                 |
+| Download queue, live tidalapi objects, page caches        | `WavesBridge` (see its class docstring)                                  | Must survive view switches and feed multiple views |
+| User preferences                                          | engine `Settings` (`settings.json`) plus `waves.json` for GUI-only prefs | Persisted across runs                              |
+| Login token                                               | engine `Tidal` (`token.json`)                                            | Owned by the engine                                |
 
 ## Worked example: adding a feature end to end
 
@@ -87,7 +89,7 @@ Say you want a "share link" action on album cards:
 album_id)`, look the album up in `self._objs["album"]`, do the work on
    `self.threadpool` via `Worker`, emit a new signal with the result.
 2. **Signal**: declare it near the other signals with a comment saying what
-   it carries and when it fires (see `BRIDGE.md` in `tidaler/waves_ui/`).
+   it carries and when it fires (see `BRIDGE.md` in `waves/waves_ui/`).
 3. **QML**: add a `function onShareAlbum(...)` handler inside Main.qml's
    `Connections { target: waves }` block, and call `waves.shareAlbum(id)`
    from the card's control line.
@@ -99,17 +101,24 @@ album_id)`, look the album up in `self._objs["album"]`, do the work on
 ## Testing and verification
 
 ```bash
-poetry run pytest                       # unit tests, incl. the QML guards
-poetry run python -m tidaler.waves_ui   # run the app from source
-make gui-waves                          # Nuitka build -> dist/waves.app
+poetry run pytest                     # unit tests, incl. the QML guards
+poetry run python -m waves.waves_ui   # run the app from source
+make gui-waves                        # Nuitka build -> dist/waves.app
 ```
+
+Updating a checkout across the package rename (`tidaler/` to `waves/`)? Run
+`pip uninstall tidaler` in the old venv, then re-run `poetry install` (or
+`pip install -e ".[gui]"`). A stale editable install keeps `import tidaler`
+resolving against dead code, and without the `waves` distribution installed
+the app treats the run as a dev environment and opens against the separate
+`Waves-dev` config folder, which looks like being signed out.
 
 The QML plain-text guard test fails if any dynamic `Text` in Main.qml can
 render rich text (remote strings must never inject markup).
 
 ## More detail
 
-- `tidaler/waves_ui/README.md`: layout, key concepts, architecture notes.
-- `tidaler/waves_ui/BRIDGE.md`: reference for every bridge signal and slot
+- `waves/waves_ui/README.md`: layout, key concepts, architecture notes.
+- `waves/waves_ui/BRIDGE.md`: reference for every bridge signal and slot
   pattern.
 - `WavesBridge`'s class docstring in `backend.py`: the state model.

@@ -10,7 +10,7 @@
      lines into a row, but other renderers (the mirror frontends among them)
      treat each source line as its own line and stack the badges vertically. -->
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a> <a href="#install"><img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-informational" alt="Platforms"></a> <a href="#install"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python"></a> <a href="https://github.com/maya-doshi/tidaler"><img src="https://img.shields.io/badge/built%20on-Tidaler-2dd4bf" alt="Built on Tidaler"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a> <a href="#install"><img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-informational" alt="Platforms"></a> <a href="#install"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python"></a>
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@
   <em>Search anything, preview an artist in place, and save a whole discography for offline listening.</em>
 </p>
 
-Waves is a brand‑new graphical front end for the proven Tidal‑DL‑NG engine (actively maintained as [**Tidaler**](https://github.com/maya-doshi/tidaler)). It keeps that engine intact and wraps it in a from‑scratch, native desktop UI for macOS, Windows, and Linux (Intel/AMD and Apple‑silicon/ARM).
+Waves is a from‑scratch, native desktop app for macOS, Windows, and Linux (Intel/AMD and Apple‑silicon/ARM). Its download engine descends from the proven Tidal‑DL‑NG project (continued by the community as [**Tidaler**](https://github.com/maya-doshi/tidaler)) and is maintained and improved here; see [Standing on the shoulders of others](#standing-on-the-shoulders-of-others) for the full lineage.
 
 > A paid TIDAL plan is required. Waves saves from **your own** account, for your personal, non‑commercial use, and can only save what your account can play, up to HiRes Lossless / TIDAL MAX (24‑bit, 192 kHz) and Dolby Atmos where available.
 
@@ -51,7 +51,7 @@ Waves exists because of a chain of people who built and kept alive a tool a lot 
 
 - **exislow** created Tidal‑DL‑NG, the project everything here descends from. The original repository and account disappeared from GitHub, and as far as I know exislow never returned. The work was, and is, excellent. Thank you.
 - After that, members of the community picked it up and kept it running. Some of those forks were taken down too, or wound down over time. Everyone who spent their own hours keeping this alive has my gratitude.
-- Today it lives on as **[Tidaler](https://github.com/maya-doshi/tidaler)**, maintained by **[maya-doshi](https://github.com/maya-doshi/)** in their spare time. Waves is built directly on Tidaler: its backend _is_ Tidaler's backend (more on that below). Thank you, maya‑doshi, for keeping the lights on.
+- Today it lives on as **[Tidaler](https://github.com/maya-doshi/tidaler)**, maintained by **[maya-doshi](https://github.com/maya-doshi/)** in their spare time. Waves began as a front end built directly on Tidaler, and its engine descends from Tidaler's (more on that below). Thank you, maya‑doshi, for keeping the lights on.
 - And underneath all of it sits **[tidalapi](https://github.com/tamland/python-tidal)**, the Python TIDAL client the rest of the stack is built on. It's the layer at the very bottom: every search, every login, and every track that arrives happens because tidalapi is quietly speaking to TIDAL on Waves' behalf. Tidal‑DL‑NG began by wrapping it, and Tidaler and Waves rest on it still; none of them could exist without it. Most people will never see it, which is the sign of a good foundation. Thank you to everyone who has built and maintained it.
 
 I'm a sucker for a beautiful graphical interface and tend to avoid the command line, but I seem to be in the minority, so the GUI side of tools like Tidaler doesn't get as much attention as the engine underneath. Waves is my way of giving back in a way that's genuinely useful (and, honestly, scratches my own itch): a polished, native GUI that doesn't touch what already works so well.
@@ -62,11 +62,11 @@ I'm a sucker for a beautiful graphical interface and tend to avoid the command l
 
 ## A new face, and an engine kept sharp
 
-The single most important design rule of Waves: **don't break what works, but never stop improving what can be.** Both halves carry equal weight. The parts that already earned their keep in Tidal‑DL‑NG (and live on in Tidaler), TIDAL authentication, the multithreaded / multi‑chunk transfer engine, metadata tagging, quality handling, and configuration, are that upstream code, used as‑is wherever it still does its job well. The other half is just as deliberate: where that same code hit a real limit (a slow write to a network drive, a handshake storm pegging the CPU, a file that could be left half‑written), Waves improves it in place rather than leaving it be. Nothing is rewritten for its own sake, and nothing that meets a genuine problem is left untouched just because it came from upstream.
+The single most important design rule of Waves: **don't break what works, but never stop improving what can be.** Both halves carry equal weight. The parts that already earned their keep in Tidal‑DL‑NG (and live on in Tidaler), TIDAL authentication, the multithreaded / multi‑chunk transfer engine, metadata tagging, quality handling, and configuration, descend from that upstream code, used as‑is wherever it still does its job well. The other half is just as deliberate: where that same code hit a real limit (a slow write to a network drive, a handshake storm pegging the CPU, a file that could be left half‑written), Waves improves it in place rather than leaving it be. Nothing is rewritten for its own sake, and nothing that meets a genuine problem is left untouched just because it came from upstream.
 
-Concretely, Waves is a self‑contained UI package (`tidaler/waves_ui/`) that _imports_ Tidaler's existing objects (`Settings`, `Tidal`, `Download`, search) and presents them through a Qt Quick interface. The backend code is the upstream Tidaler code, kept intact apart from **a handful of small, surgical changes**: a six‑line tweak so an in‑progress segment can be aborted mid‑chunk (Waves stops/quits instantly instead of waiting on a network read); an optional `keep_album` flag on the per‑track download so the "best of both" edition merge can tag a borrowed track under a chosen edition, together with writing that file's item id as the edition it was filed under rather than the one it streamed from, so a later save recognizes Waves' own file instead of writing a duplicate beside it; a hardened final move that swaps each finished file into place atomically, so an interrupted download can never leave a half‑written file in your library; pooled, reused connections so track segments stop paying a fresh encrypted handshake each (the fix for downloads pegging the CPU); a post‑download container repair so segmented tracks report their real length in strict players; large batched writes with retry, so a network drive sees a few big writes per track instead of hundreds of tiny ones; and some defensive security hardening. Everything else is used as‑is.
+Concretely, Waves is a self‑contained UI package (`waves/waves_ui/`) that _imports_ the engine's objects (`Settings`, `Tidal`, `Download`, search) and presents them through a Qt Quick interface. The engine code descends from the upstream Tidaler code, kept intact apart from **a handful of small, surgical changes**: a six‑line tweak so an in‑progress segment can be aborted mid‑chunk (Waves stops/quits instantly instead of waiting on a network read); an optional `keep_album` flag on the per‑track download so the "best of both" edition merge can tag a borrowed track under a chosen edition, together with writing that file's item id as the edition it was filed under rather than the one it streamed from, so a later save recognizes Waves' own file instead of writing a duplicate beside it; a hardened final move that swaps each finished file into place atomically, so an interrupted download can never leave a half‑written file in your library; pooled, reused connections so track segments stop paying a fresh encrypted handshake each (the fix for downloads pegging the CPU); a post‑download container repair so segmented tracks report their real length in strict players; large batched writes with retry, so a network drive sees a few big writes per track instead of hundreds of tiny ones; a rate‑limit pause that does what its settings say (after every N songs, for the set number of seconds), so a long run paces itself instead of asking TIDAL for too much at once; a playlist run that finishes what it can, skipping and counting a song TIDAL has taken down, waiting out a slow‑down request instead of failing the song, and carrying on past one song that goes wrong so the rest still arrive; and some defensive security hardening. Everything else is used as‑is.
 
-To be just as plain about what is new: it's mine. I wrote the interface, the in-app updater, the managed ffmpeg install, and the packaging that ships it all as a signed desktop app, and that comes to about two thirds of the code in this repository. The rest is the engine that Tidal-DL-NG built and Tidaler keeps alive, carrying the surgical improvements described above.
+To be just as plain about what is new: it's mine. I wrote the interface, the in-app updater, the managed ffmpeg install, and the packaging that ships it all as a signed desktop app, and that comes to about two thirds of the code in this repository. The rest is the engine that Tidal-DL-NG built and Tidaler carried forward, now maintained here, with the surgical improvements described above.
 
 ---
 
@@ -86,7 +86,7 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - **Smart whole‑artist saving**: per‑source toggles (albums, EPs & singles, features, compilations, music videos), keeping just the **most complete edition** of each album by default while preserving genuinely different releases like remasters and live takes. Features and compilations pull only the tracks the artist actually appears on, never another artist's whole album.
 - **Most complete, highest‑quality albums, automatically**: when one edition has the bonus tracks and another the better quality, saving the album quietly builds a _best of both_: a single album that takes each song at its best. Matching is strict (ISRC first), so nothing is dropped or swapped. On by default, tunable in Settings.
 - **A real library layout by default**: saved music lands in `Artist/[Year] Album/Disc-Track. Artist - Title`, the structure Plex reads natively, instead of flat `Albums/` and `Tracks/` bins. Paths stay fully customizable in Settings, where each path field shows a live example of the exact folders and file name it produces as you type, typos in `{tokens}` are highlighted, and a built-in reference lists every available token with a description, an example value, and a one-click copy. The characters a filesystem refuses (`:` `/` `?` `"`) are yours to decide about: set one stand‑in for all of them, or give each its own, so `AC/DC` files as `AC-DC`, a playlist called `Chill: Night` files as `Chill · Night` rather than losing the break entirely, and an album titled `?` still gets a folder of its own instead of spilling its tracks loose. Names are then fitted to what your operating system actually allows, measured in bytes rather than characters (so long titles in Japanese, Chinese, Cyrillic or emoji land intact) and inside Windows' 260‑character path limit, shortened only as much as it takes and never at the cost of the file extension. Anything already in your library keeps the name and the place it has.
-- **Library‑friendly tagging**: a "clean album‑artist" mode (on by default) writes only the primary artist to the album‑artist tag, so Plex won't mis‑read or split multi‑artist albums. ReplayGain tags are written by default too, so players that support them level volume across your library without touching the audio; tracks TIDAL never measured are left untagged rather than stamped with a wrong level.
+- **Library‑friendly tagging**: a "clean album‑artist" mode (on by default) writes only the primary artist to the album‑artist tag, so Plex won't mis‑read or split multi‑artist albums. ReplayGain tags are written by default too, so players that support them level volume across your library without touching the audio; tracks TIDAL never measured are left untagged rather than stamped with a wrong level. Saved songs also carry the TIDAL id of every artist they credit, written beside the artist names players already read: groundwork for keeping two artists who share a name out of one folder.
 - **Real lyrics, saved right**: with lyrics enabled, Waves asks [LRCLIB](https://lrclib.net) (the open community synced‑lyrics database behind LRCGet) first and falls back to TIDAL, sidestepping the machine‑transcribed, often badly wrong lyrics TIDAL serves for many newer track IDs. Timed lyrics save as `.lrc`, untimed ones as `.txt` (never a fake `.lrc`), and a nested option saves lyrics files only when they are timed.
 - **Explicit, clean, or both**: when a release comes in both explicit and clean versions, keep whichever you prefer, or both side by side.
 - **Instant navigation**: pages and cover art you've already seen render instantly from a persistent local cache and quietly refresh in the background. Even a fresh launch paints right away. Pages you have already opened are kept alive rather than rebuilt, so Back and Forward land on a finished page in a few milliseconds, rows, scroll position and expanded albums intact, instead of assembling themselves on screen. Tabs remember where you were, too: Search and My TIDAL reopen on the exact page you left, expanded albums, scroll position and all. Settings does the same: it reopens exactly where you left it, and the sections you open or close stay that way across visits and launches. A breadcrumb trail shows every step of how you got here as clickable pills; click any crumb to jump straight back to that spot, scroll position and expanded albums included. The mouse side buttons walk the same history, back and forward.
@@ -112,7 +112,7 @@ Everything below is **new in Waves**, layered on top of the Tidal‑DL‑NG engi
 - With lyrics enabled (off by default), each track you save also asks [LRCLIB](https://lrclib.net), an open community lyrics database, for that track's lyrics. The request carries only the track's artist, title, album and length, never anything about you or your account, and the "Prefer LRCLIB lyrics" switch in Settings turns it off.
 - With the library scan's MusicBrainz check on (off by default), an album the scan cannot settle on its own is asked about at [MusicBrainz](https://musicbrainz.org), the open music encyclopedia. The request carries only that artist and album title, never anything about you or your account; requests go out at most one per second, and answers are cached locally.
 
-Your credentials and your saved music stay on your machine. The same principle carries into the optional diagnostic logger below: nothing leaves your machine unless you export a report yourself.
+Your credentials and your saved music stay on your machine, and on macOS and Linux the files Waves keeps for itself (your settings, your sign‑in and its caches) are created readable by your account only, not by every account on the machine. The same principle carries into the optional diagnostic logger below: nothing leaves your machine unless you export a report yourself.
 
 ---
 
@@ -170,7 +170,7 @@ Prefer to run from source?
 # from a clone of this repository
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[gui]"     # the [gui] extra pulls in PySide6 / Qt
-python -m tidaler.waves_ui
+python -m waves.waves_ui
 ```
 
 Waves is GUI‑first and does not ship a command‑line interface. If you prefer the command line, use the upstream **[Tidaler](https://github.com/maya-doshi/tidaler)** project directly; it provides a maintained, CLI‑focused build (`tidaler` / `tdn`) of the same engine Waves is built on.
@@ -206,9 +206,9 @@ None of that changes the welcome. If something breaks, behaves oddly, or just fe
 
 Waves is only possible because of a lot of excellent open‑source work.
 
-**The project it forks**
+**The project Waves descends from**
 
-- [**Tidaler**](https://github.com/maya-doshi/tidaler) by [maya-doshi](https://github.com/maya-doshi/), the backend Waves is built on.
+- [**Tidaler**](https://github.com/maya-doshi/tidaler) by [maya-doshi](https://github.com/maya-doshi/), the project Waves' engine descends from.
 - **Tidal‑DL‑NG** by exislow (where it all started), and everyone who maintained it in between.
 
 **Core libraries** (all credit to their authors and maintainers)
@@ -234,11 +234,11 @@ Waves is only possible because of a lot of excellent open‑source work.
 
 **Type**
 
-- [JetBrains Mono](https://www.jetbrains.com/lp/mono/) is bundled for the interface, under the [SIL Open Font License](tidaler/waves_ui/fonts/OFL.txt).
+- [JetBrains Mono](https://www.jetbrains.com/lp/mono/) is bundled for the interface, under the [SIL Open Font License](waves/waves_ui/fonts/OFL.txt).
 
 **Icons**
 
-- [Phosphor Icons](https://phosphoricons.com): the interface glyphs (play, pause, download, search, and the rest) are bundled from Phosphor, under the [MIT License](tidaler/waves_ui/qml/PHOSPHOR-LICENSE.txt).
+- [Phosphor Icons](https://phosphoricons.com): the interface glyphs (play, pause, download, search, and the rest) are bundled from Phosphor, under the [MIT License](waves/waves_ui/qml/PHOSPHOR-LICENSE.txt).
 
 If I've missed anyone, it's an oversight, not an intent. Please open an issue and I'll fix the credit.
 
