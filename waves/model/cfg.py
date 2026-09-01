@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from dataclasses_json import dataclass_json
 from tidalapi import Quality
 
-from tidaler.constants import CoverDimensions, DownsampleTarget, InitialKey, MetadataTargetUPC, QualityVideo
+from waves.constants import CoverDimensions, DownsampleTarget, InitialKey, MetadataTargetUPC, QualityVideo
 
 
 @dataclass_json
@@ -119,6 +119,13 @@ class Settings:
     # equal to the OLD default is rewritten; a customized template is left
     # exactly as the user wrote it.
     format_playlist_folder_migrated: bool = False
+    # Internal upgrade marker (not a user setting): records the one-time reset
+    # of the two api_rate_limit fields. They were editable in Advanced while
+    # nothing read them, so any value on disk was a guess that never took
+    # effect and never had a chance to be judged; now that they do take effect,
+    # an old guess of, say, 60 seconds would silently add half an hour to a
+    # long playlist. Set once, then the user's own choice stands.
+    api_rate_limit_wired_migrated: bool = False
     # DOWNLOAD ALL on a Browse playlist category asks before queueing the
     # whole set; the dialog's "Don't ask again" flips this off.
     confirm_category_download: bool = True
@@ -146,9 +153,11 @@ class Settings:
     # applying it. A brand-new install starts with it (_FIRST_RUN_OVERRIDES).
     filename_illegal_map: dict[str, str] = field(default_factory=dict)
     metadata_target_upc: MetadataTargetUPC = MetadataTargetUPC.UPC
-    # Rate limiting for API calls (tweaking variables)
-    api_rate_limit_batch_size: int = 20  # Number of albums to process before applying rate limit delay
-    api_rate_limit_delay_sec: float = 3.0  # Delay in seconds between batches to avoid rate limiting
+    # Rate limiting for API calls (tweaking variables). See
+    # Download._rate_limit_pause: the count is SONGS taken to the API, which is
+    # where a long list earns its 429s. Either value at 0 turns the pause off.
+    api_rate_limit_batch_size: int = 20  # Songs to download before pausing to stay under TIDAL's rate limit
+    api_rate_limit_delay_sec: float = 3.0  # Length of that pause, in seconds
     initial_key_format: InitialKey = InitialKey.ALPHANUMERIC
 
 
@@ -261,8 +270,10 @@ class HelpSettings:
     metadata_target_upc: str = (
         "Select the target metadata tag ('UPC', 'BARCODE', 'EAN') where to write the UPC information to. Default: 'UPC'."
     )
-    api_rate_limit_batch_size: str = "Number of albums to process before applying rate limit delay (tweaking variable)."
-    api_rate_limit_delay_sec: str = "Delay in seconds between batches to avoid API rate limiting (tweaking variable)."
+    api_rate_limit_batch_size: str = (
+        "How many songs to download before pausing, so a long playlist does not ask TIDAL too much at once. 0 never pauses."
+    )
+    api_rate_limit_delay_sec: str = "How long that pause lasts, in seconds. 0 never pauses."
     initial_key_format: str = "Format for Initial Key metadata tag: 'alphanumeric' (default) or 'classic'."
 
 

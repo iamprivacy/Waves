@@ -16,6 +16,7 @@ import random
 import shutil
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent import futures
 from threading import Event, Lock
@@ -25,11 +26,12 @@ import certifi
 import m3u8
 import requests
 from ffmpeg import FFmpeg
+from mutagen import MutagenError
 from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
 from pathvalidate import sanitize_filename
 from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import HTTPError
-from rich.progress import Progress, TaskID
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
 from tidalapi.exceptions import AssetNotAvailable, ObjectNotFound, StreamNotAvailable, TooManyRequests
 from tidalapi.media import (
@@ -43,8 +45,8 @@ from tidalapi.media import (
 )
 from urllib3.util.ssl_ import create_urllib3_context
 
-from tidaler.config import Settings, Tidal
-from tidaler.constants import (
+from waves.config import ApiCallStopped, Settings, Tidal, api_waits_wake_for
+from waves.constants import (
     CHUNK_SIZE,
     COVER_NAME,
     EXTENSION_LYRICS,
@@ -63,9 +65,9 @@ from tidaler.constants import (
     MetadataTargetUPC,
     QualityVideo,
 )
-from tidaler.helper.camelot import format_initial_key
-from tidaler.helper.exceptions import MediaMissing
-from tidaler.helper.path import (
+from waves.helper.camelot import format_initial_key
+from waves.helper.exceptions import MediaMissing
+from waves.helper.path import (
     PATH_LENGTH_MAX,
     check_file_exists,
     format_path_media,
@@ -80,19 +82,22 @@ from tidaler.helper.path import (
     unique_variant_name,
     url_to_filename,
 )
-from tidaler.helper.tidal import (
+from waves.helper.tidal import (
+    get_album_artist_ids,
     get_album_artists,
     instantiate_media,
     items_results_all,
     name_builder_item,
     name_builder_title,
 )
-from tidaler.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
-from tidaler.metadata import Metadata, MetadataUnreadable, read_item_id
-from tidaler.model.downloader import DownloadSegmentResult, TrackStreamInfo
-from tidaler.model.gui_data import ProgressBars
-from tidaler.waves_ui.diagnostics import content as log_content
-from tidaler.waves_ui.manifest import overgenerated_tail_urls
+from waves.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
+from waves.metadata import Metadata, MetadataUnreadable, read_item_id
+from waves.model.downloader import DownloadSegmentResult, TrackStreamInfo
+from waves.model.gui_data import ProgressBars
+from waves.poolgauge import PoolGauge
+from waves.progress import Progress, TaskID
+from waves.waves_ui.diagnostics import content as log_content
+from waves.waves_ui.manifest import overgenerated_tail_urls
 
 # Characters _stage_and_swap adds around the destination name: a leading dot,
 # a dot-separated uuid4 (36) and the ".tmp" suffix.
@@ -113,6 +118,14 @@ _PATH_LENGTH_MAX: int = PATH_LENGTH_MAX
 # Child of "waves", so it inherits the app's handlers and its INFO records join
 # the always-on breadcrumb ring crash reports are stitched from.
 logger = logging.getLogger("waves.download")
+
+# The engine's two fan-outs, as gauges for the verbose perf sampler: the
+# executors themselves are job-scoped (segments) or built per fan-out (items),
+# so what registers in backend.py is a stable in-flight counter per pool kind,
+# the same pattern as the library scanner's gauges. The initial maxima are the
+# defaults; limit() records each job's real cap when its pool is built.
+SEGMENT_GAUGE = PoolGauge(10)
+COLLECTION_GAUGE = PoolGauge(3)
 
 # TIDAL's subStatus family for "your session, not the content": 11001 user not
 # authorised, 11002 invalid token, 11003 expired token. A 401 carrying one of
@@ -199,14 +212,17 @@ def _staging_path(path_destination: pathlib.Path) -> pathlib.Path:
     unique: str = str(uuid4())
 
     # A parent so deep that even a bare ".<uuid>.tmp" overflows the cap: the
-    # readable part is already gone, so the uuid itself gives ground, down to
-    # its first 10 hex characters. Ten of them still take a concurrent-staging
-    # collision out of the realm of the possible, and the alternative was every
-    # staging attempt failing identically past the cap while the destination
-    # itself fit. Below even that there is nothing left to shrink; the
-    # destination's own name barely fits such a parent.
+    # readable part is already gone, so the unique part gives ground too, as
+    # far as the cap actually leaves room for. The floor used to be ten hex
+    # characters whatever the arithmetic said, which for parents in the last
+    # ten characters before the cap was still over it: every staging attempt
+    # failed identically while the destination itself fit (issue #17's band,
+    # one step deeper). One character is the floor now, because a name with
+    # nothing unique in it is shared by every track in the folder; at the very
+    # deepest parent the sanitizer can reach, that one character is the only
+    # thing still over the cap, where it used to be thirty-six.
     if not base_name and budget_path < 0:
-        unique = unique.replace("-", "")[: max(10, len(unique.replace("-", "")) + budget_path)]
+        unique = unique.replace("-", "")[: max(1, len(unique.replace("-", "")) + budget_path)]
 
     return path_destination.with_name(f".{base_name}.{unique}.tmp")
 
@@ -236,6 +252,35 @@ def _is_truncated_leftover(path_file: pathlib.Path) -> bool:
         return False
 
 
+def _os_error_text(error: BaseException | None) -> str:
+    """An OSError in the words a log line may carry.
+
+    ``str(OSError)`` appends the filename it failed on, and inside a download
+    that filename is ``<library>/<Artist>/<Album>/.<track title>.<uuid>.tmp``.
+    So a line that carefully wrapped its own paths in :func:`log_content` put
+    the artist, album and title straight back in the clear one field later,
+    past the "also hide titles and searches" export switch:
+
+        File operation failed after retries (move «#f7778869» -> «#9303200a»):
+        [Errno 13] Permission denied: '/…/Some Artist/Some Album/.Song.m4a.…tmp'
+
+    Same message, same errno, every filename wrapped like every other path.
+
+    Args:
+        error (BaseException | None): The error to render.
+
+    Returns:
+        str: The message, with any filenames it carries marked as content.
+    """
+    if not isinstance(error, OSError):
+        return str(error)
+    if error.strerror is None and error.filename is None:
+        return str(error)  # a bare OSError("something"): nothing to take apart
+    head = f"[Errno {error.errno}] {error.strerror}" if error.errno is not None else str(error.strerror)
+    names = [log_content(name) for name in (error.filename, error.filename2) if name]
+    return f"{head}: {' -> '.join(names)}" if names else head
+
+
 def _waves_item_id(media) -> str:
     """The id a downloaded file is filed under, which is not always ``media.id``.
 
@@ -254,6 +299,24 @@ def _waves_item_id(media) -> str:
         str: The identity id when the item carries one, else its own id, else "".
     """
     return str(getattr(media, "waves_identity_id", "") or getattr(media, "id", "") or "")
+
+
+def _artist_ids(media) -> list[str]:
+    """TIDAL ids for the artists credited on ``media``, in credited order.
+
+    The identity half of the artist NAMES written beside them. Two artists can
+    share a name, so a file tagged only with the name cannot later say which of
+    them it belongs to (and neither can the folder it sits in). Id-less stubs
+    are dropped rather than written blank: a missing id means unknown, and
+    unknown must never read as somebody else.
+
+    Args:
+        media: The track or video being written.
+
+    Returns:
+        list[str]: The credited artists' ids, possibly empty.
+    """
+    return [str(a.id) for a in getattr(media, "artists", None) or [] if getattr(a, "id", None)]
 
 
 def _waves_owned_ids(media) -> set[str]:
@@ -275,6 +338,35 @@ def _waves_owned_ids(media) -> set[str]:
     """
     ids = (getattr(media, "waves_identity_id", ""), getattr(media, "id", ""))
     return {str(i) for i in ids if i}
+
+
+def _file_audio_mode_is_atmos(path_file: pathlib.Path) -> bool | None:
+    """Whether the audio file at this path is a Dolby Atmos copy.
+
+    Read off the disk, not out of any ledger, so a user's own Atmos file is
+    recognised the same as one Waves wrote. Only an MP4 container can hold
+    Atmos (E-AC-3 JOC or AC-4, the two codings TIDAL delivers it in); every
+    other extension is stereo by construction, answered without opening the
+    file. TIDAL's stereo AAC shares the .m4a extension, which is exactly why
+    the two can collide on one name and the codec has to be asked.
+
+    Args:
+        path_file (pathlib.Path): The file to inspect.
+
+    Returns:
+        bool | None: True for an Atmos file, False for anything else, None
+            when the file cannot be read. Callers treat None as "unknown"
+            and keep their historical answer rather than guessing.
+    """
+    if path_file.suffix.lower() not in (AudioExtensions.M4A, AudioExtensions.MP4):
+        return False
+
+    try:
+        codec: str = str(getattr(MP4(path_file).info, "codec", "") or "")
+    except Exception:
+        return None
+
+    return codec.startswith(("ec-3", "ac-4"))
 
 
 # TODO: Set appropriate client string and use it for video download.
@@ -373,6 +465,13 @@ class Download:
     _FILE_OPERATION_RETRIES: int = 5
     _FILE_OPERATION_RETRY_DELAY_SEC: float = 0.5
 
+    # The batch pause's shared bookkeeping, defaulted on the CLASS so a Download
+    # reached without __init__ (a stand-in) reads "no pause in force" rather
+    # than raising. Every real instance gets its own in __init__; what the two
+    # of them promise is written out at _rate_limit_pause.
+    _pace_holds: int = 0
+    _pace_until: float = 0.0
+
     # Process-wide keep-alive HTTP session (see the comment in __init__): all
     # Download instances share one warm connection pool so an album start does
     # not pay a burst of TLS handshakes on a cold per-instance pool.
@@ -434,8 +533,8 @@ class Download:
             fn_logger (Callable): Logger function or object.
             skip_existing (bool, optional): Whether to skip existing files. Defaults to False.
             progress_gui (ProgressBars | None, optional): GUI progress bars. Defaults to None.
-            progress (Progress | None, optional): Rich progress bar. Defaults to None.
-            progress_overall (Progress | None, optional): Overall progress bar. Defaults to None.
+            progress (Progress | None, optional): Progress task table. Defaults to None.
+            progress_overall (Progress | None, optional): Overall progress table. Defaults to None.
             event_abort (Event | None, optional): Abort event. Defaults to None.
             event_run (Event | None, optional): Run event. Defaults to None.
         """
@@ -460,6 +559,18 @@ class Download:
         # calls per album. See _ensure_directory.
         self._dirs_ensured: set[str] = set()
 
+        # Cover art fetched once per job, not once per track: cover URLs are
+        # content-addressed (the requested size is part of the path), and
+        # within one queued item every track of an album asks for the same one
+        # or two of them, so tagging a 20-track album fetched the identical
+        # JPEG 20 times. The cache dies with the job (one instance = one
+        # queued item), so a re-uploaded cover is picked up by the next job.
+        # Bounded so a playlist crossing many albums evicts oldest-first.
+        self._cover_cache: OrderedDict[str, bytes] = OrderedDict()
+        self._cover_cache_lock = Lock()
+        self._cover_cache_hits = 0
+        self._cover_cache_fetches = 0
+
         # Final destination names claimed by a download that is between picking
         # its unique name and moving the file there. Nothing is on disk for that
         # stretch (metadata, the lyrics fetch and the cover all run first), so
@@ -469,7 +580,17 @@ class Download:
         # track workers (`items` fans `self.item` across the pool), and the GUI
         # runs one queued item at a time, so instance scope covers every
         # in-process collision.
-        self._names_reserved: set[str] = set()
+        #
+        # Held per NAME against the item that holds it, and counted: a
+        # collection may list the SAME track twice (TIDAL allows it), both
+        # occurrences run at once, and an ownerless claim made the second one
+        # step aside onto "X_01" for a file that is its own. That left two
+        # identical files tagged with one item id, the twin orphaned forever
+        # (the app never deletes user files) and skipped past by every later
+        # run. An item never has to make way for itself: both occurrences aim
+        # at one name, and the post-stream existing-file check settles which
+        # one actually writes it.
+        self._names_reserved: dict[str, tuple[str, int]] = {}
         # Final destination names this run has already WRITTEN, against the item
         # each one now holds. A claim covers only the stretch between picking a
         # name and moving the file there, which is the whole answer while the
@@ -481,6 +602,48 @@ class Download:
         # said, and it is never released.
         self._names_written: dict[str, str] = {}
         self._names_reserved_lock: Lock = Lock()
+
+        # Directories this run actually put a file into, and nothing else.
+        # The m3u writer's scope: it REPLACES the playlist file a directory
+        # already holds (and deliberately retargets an older _<Name>.m3u
+        # spelling to do it), so it may only ever be pointed at a directory
+        # this run filled. A run that found every track already on disk filled
+        # none, and must leave every playlist file it finds exactly as it was.
+        # Kept apart from _names_written above: that ledger arbitrates name
+        # COLLISIONS, and teaching it about symlinks or reading it for scope
+        # would make each purpose able to break the other silently.
+        self._dirs_filled: set[pathlib.Path] = set()
+        self._dirs_filled_lock: Lock = Lock()
+
+        # Items this instance has taken to the API, for the rate-limit pause
+        # (see _rate_limit_pause). Instance scope is the right scope: one
+        # instance is one queued item, so the count is a collection's own run
+        # and a single-track job never reaches its first batch boundary.
+        self._paced_items: int = 0
+        self._pace_lock: Lock = Lock()
+        # Open except while a pause is being taken. A pause is a promise to
+        # TIDAL, not a rest for one worker: the collection fan-out runs several
+        # at once, so while one slept the others kept asking and the request
+        # rate barely dipped (the setting looked inert at anything but one
+        # concurrent download, which is the complaint it was wired for).
+        self._pace_gate: Event = Event()
+        self._pace_gate.set()
+        # How many pauses are in force, and when the last of them is due to be
+        # over. The gate alone could only ever describe ONE pause: every due
+        # worker cleared it and set it again on its way out, so with a batch
+        # size below the worker count a second worker reached a boundary while
+        # the first was still standing back, and the first one's wake-up threw
+        # the gate open for everybody in the middle of the second one's pause.
+        # The run went straight back to full API traffic during a pause it was
+        # still taking, which is the partial pause the gate exists to prevent.
+        # Counted, the gate reopens when the LAST pause ends.
+        #
+        # The deadline is the backstop on that promise, never the promise
+        # itself: a hold that never comes back (a worker dying mid-pause) would
+        # otherwise hold every other worker for the rest of the run, so a waiter
+        # walks once the latest pause is over by the clock.
+        self._pace_holds: int = 0
+        self._pace_until: float = 0.0
 
         # One pooled, keep-alive HTTP session shared by every segment download.
         # The old code built a fresh requests.Session() per segment, which forced
@@ -501,6 +664,15 @@ class Download:
         # connection shares one preloaded SSLContext, capping the worst-case
         # TLS setup burst at download start to a blip.
         self._http = self._shared_http()
+
+        # ONE segment executor per Download instance (one instance = one
+        # queued job), built lazily by _segment_pool and shut down by the
+        # bridge's job-finally (close_segment_pool). _download_segments used
+        # to build and tear down a ThreadPoolExecutor PER TRACK: thread spawn
+        # and join for every track of every album, for workers that mostly
+        # parked in the connection pool's queue anyway.
+        self._segment_executor: futures.ThreadPoolExecutor | None = None
+        self._segment_executor_lock: Lock = Lock()
 
         if not self.settings.data.path_binary_ffmpeg:
             self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
@@ -607,6 +779,46 @@ class Download:
         )
         return p_task, progress_total, block_size
 
+    def _segment_pool(self) -> futures.ThreadPoolExecutor:
+        """The job's one segment executor, built on first use.
+
+        Clamped to the shared connection pool: workers beyond
+        _HTTP_POOL_MAXSIZE can never hold a socket (pool_block=True), they
+        just sit blocked, so extra workers add threads and RAM with exactly
+        zero throughput. The old per-track default of 20 workers x 3
+        concurrent items produced 60 threads for 10 usable connections (a
+        live session was caught at 118 process threads and 1.6 GB RSS
+        mid-burst).
+        """
+        with self._segment_executor_lock:
+            if self._segment_executor is None:
+                workers_max: int = max(
+                    1, min(self.settings.data.downloads_simultaneous_per_track_max, self._HTTP_POOL_MAXSIZE)
+                )
+                SEGMENT_GAUGE.limit(workers_max)
+                self._segment_executor = futures.ThreadPoolExecutor(
+                    max_workers=workers_max, thread_name_prefix="segment"
+                )
+            return self._segment_executor
+
+    def close_segment_pool(self) -> None:
+        """Shut the job's segment executor down; the bridge's job-finally calls this.
+
+        Idempotent: an abort path may run it before the finally does. Does not
+        wait: the job body has already consumed its segment futures by the
+        time it ends, and a wedged socket must not hold the queue's next row
+        hostage.
+        """
+        with self._segment_executor_lock:
+            pool, self._segment_executor = self._segment_executor, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _download_segment_gauged(self, *args) -> DownloadSegmentResult:
+        """One segment, counted in SEGMENT_GAUGE for the verbose perf sampler."""
+        with SEGMENT_GAUGE.working():
+            return self._download_segment(*args)
+
     def _download_segments(
         self,
         urls: list[str],
@@ -645,65 +857,68 @@ class Download:
         # progress bar zero times, so `finished` (completed >= total) never flips
         # and the loop re-downloaded the whole track forever. Success is derived
         # from the per-segment results below, not from the progress counter.
-        # Clamp the per-track fan-out to the shared connection pool: workers
-        # beyond _HTTP_POOL_MAXSIZE can never hold a socket (pool_block=True),
-        # they just sit blocked, so extra workers add threads and RAM with
-        # exactly zero throughput. The old default of 20 workers x 3 concurrent
-        # items produced 60 threads for 10 usable connections (a live session
-        # was caught at 118 process threads and 1.6 GB RSS mid-burst).
-        workers_max: int = max(1, min(self.settings.data.downloads_simultaneous_per_track_max, self._HTTP_POOL_MAXSIZE))
-        with futures.ThreadPoolExecutor(max_workers=workers_max) as executor:
-            # Dispatch all download tasks to worker threads
-            l_futures: list[futures.Future] = [
-                executor.submit(
-                    self._download_segment, url, path_base, block_size, p_task, progress_to_stdout, event_stop
+        # The fan-out runs on the job-scoped shared executor (_segment_pool):
+        # one pool serves every track of the job instead of a fresh pool being
+        # spawned and joined per track.
+        executor = self._segment_pool()
+        # Dispatch all download tasks to worker threads
+        l_futures: list[futures.Future] = [
+            executor.submit(
+                self._download_segment_gauged, url, path_base, block_size, p_task, progress_to_stdout, event_stop
+            )
+            for url in urls
+        ]
+
+        # Report results as they become available
+        for future in futures.as_completed(l_futures):
+            # Retrieve result
+            result_dl_segment: DownloadSegmentResult = future.result()
+
+            dl_segment_results.append(result_dl_segment)
+
+            # Check for a link that failed.
+            if not result_dl_segment.result:
+                # On very short tracks (< 8 seconds or so) the *last* URL of a MULTI-segment
+                # track is a spurious tail (HTTP Error 500) that isn't needed; the file won't
+                # be corrupt. That is tidalapi's segment-count arithmetic over-generating one
+                # URL past the end of the audio (see waves_ui/manifest.py), so when the
+                # manifest was parseable, n_tail_spurious says exactly whether the final URL
+                # is padding (> 0) or required audio (0): a required final segment failing is
+                # a REAL failure (a silently truncated file), not a tolerable quirk. Only when
+                # the manifest proved nothing (None) does the legacy blanket leniency apply.
+                # A single-URL (BTS) track has exactly one required segment which also happens
+                # to be `urls[-1]`, so a failure there is a real failure and must NOT be
+                # exempted, otherwise a fully failed GET (expired link, 403/500, network
+                # failure) would masquerade as success.
+                is_spurious_tail: bool = (
+                    len(urls) > 1
+                    and result_dl_segment.url is urls[-1]
+                    and (n_tail_spurious is None or n_tail_spurious > 0)
                 )
-                for url in urls
-            ]
 
-            # Report results as they become available
-            for future in futures.as_completed(l_futures):
-                # Retrieve result
-                result_dl_segment: DownloadSegmentResult = future.result()
+                if not is_spurious_tail:
+                    result_segments = False
 
-                dl_segment_results.append(result_dl_segment)
+                    # A deliberate Stop/Cancel makes every in-flight segment
+                    # return failed by design, that's a cancellation, not
+                    # corruption, so don't scream "corrupt" once per segment.
+                    if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
+                        self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
 
-                # Check for a link that failed.
-                if not result_dl_segment.result:
-                    # On very short tracks (< 8 seconds or so) the *last* URL of a MULTI-segment
-                    # track is a spurious tail (HTTP Error 500) that isn't needed; the file won't
-                    # be corrupt. That is tidalapi's segment-count arithmetic over-generating one
-                    # URL past the end of the audio (see waves_ui/manifest.py), so when the
-                    # manifest was parseable, n_tail_spurious says exactly whether the final URL
-                    # is padding (> 0) or required audio (0): a required final segment failing is
-                    # a REAL failure (a silently truncated file), not a tolerable quirk. Only when
-                    # the manifest proved nothing (None) does the legacy blanket leniency apply.
-                    # A single-URL (BTS) track has exactly one required segment which also happens
-                    # to be `urls[-1]`, so a failure there is a real failure and must NOT be
-                    # exempted, otherwise a fully failed GET (expired link, 403/500, network
-                    # failure) would masquerade as success.
-                    is_spurious_tail: bool = (
-                        len(urls) > 1
-                        and result_dl_segment.url is urls[-1]
-                        and (n_tail_spurious is None or n_tail_spurious > 0)
-                    )
+            # If app is terminated (CTRL+C) or item stopped
+            if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                # Cancel all not yet started tasks
+                for f in l_futures:
+                    f.cancel()
 
-                    if not is_spurious_tail:
-                        result_segments = False
-
-                        # A deliberate Stop/Cancel makes every in-flight segment
-                        # return failed by design, that's a cancellation, not
-                        # corruption, so don't scream "corrupt" once per segment.
-                        if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
-                            self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
-
-                # If app is terminated (CTRL+C) or item stopped
-                if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                    # Cancel all not yet started tasks
-                    for f in l_futures:
-                        f.cancel()
-
-                    return False, dl_segment_results
+                # The per-track `with` block this fan-out replaced shut its
+                # executor down right here, which WAITED for the in-flight
+                # segments; the caller's failure path may delete segment files
+                # and relies on nothing still writing them. Keep that barrier
+                # (cancelled futures settle instantly, running ones see the
+                # event and stop), just without the pool teardown.
+                futures.wait(l_futures)
+                return False, dl_segment_results
 
         # The progress total is only an estimate (segment count, or HEAD
         # content-length / block size) and can exceed the number of chunks
@@ -846,6 +1061,11 @@ class Download:
             bool: True if merge succeeded, False otherwise.
         """
         result: bool = True
+        # Bound before the try, because the handler reads it: the target file
+        # can refuse to open before the loop has run once, and the handler then
+        # raised NameError of its own, throwing away the real errno and the
+        # clean corrupt-file verdict with it.
+        dl_segment_result: DownloadSegmentResult | None = None
 
         # Copy the content of all segments into one file.
         try:
@@ -866,6 +1086,7 @@ class Download:
             # failure on the sole segment of a single-URL (BTS) track is a real failure.
             is_spurious_tail: bool = (
                 len(dl_segment_results) > 1
+                and dl_segment_result is not None
                 and dl_segment_result is dl_segment_results[-1]
                 and (n_tail_spurious is None or n_tail_spurious > 0)
             )
@@ -1014,6 +1235,17 @@ class Download:
 
         return result
 
+    def _item_gauged(self, **kwargs) -> tuple[bool, pathlib.Path | str]:
+        """``item()``, counted in COLLECTION_GAUGE for the verbose perf sampler.
+
+        ``items`` submits through this so the sampler sees how many list items
+        are genuinely in flight rather than a dead per-fan-out executor. The
+        bridge's merge-plan fan-out gauges at its own call site instead, so
+        the engine protocol it drives stays just ``item()``.
+        """
+        with COLLECTION_GAUGE.working():
+            return self.item(**kwargs)
+
     def item(
         self,
         file_template: str,
@@ -1055,6 +1287,23 @@ class Download:
         if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
             return False, ""
 
+        # Every catalog call from here on is this job's, so a retry wait inside
+        # the shared session can be cut short by this job's own stop.
+        api_waits_wake_for(event_stop or self.event_abort)
+
+        # Stand back from the API every so often, as the rate-limit settings
+        # promise. Here and not in the collection fan-out: the API traffic
+        # starts on the very next line, and an item the caller skips before
+        # ever asking us (an owned copy, which the bridge settles above this
+        # method) costs TIDAL nothing and must not be paced for.
+        self._rate_limit_pause(event_stop)
+
+        # Asked again, because the pause above is a place a STOP lands: the
+        # workers waiting one out all wake together, and without this each of
+        # them would fire one more catalog request on its way out.
+        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+            return False, ""
+
         # Step 1: Validate and prepare media
         validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download, keep_album)
         if validated_media is None or not isinstance(validated_media, Track | Video):
@@ -1082,7 +1331,7 @@ class Download:
         )
 
         if skip_file:
-            self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_dst}'")
+            self.fn_logger.debug(f"Download skipped, since file exists: '{log_content(path_media_dst)}'")
 
             return True, path_media_dst
 
@@ -1144,42 +1393,40 @@ class Download:
             Track | Video | Album | Playlist | UserPlaylist | Mix | None: Prepared media instance or None if invalid.
         """
         try:
-            if media_id and media_type:
-                # If no media instance is provided, we need to create the media instance.
-                # Throws `tidalapi.exceptions.ObjectNotFound` if item is not available anymore.
-                media = instantiate_media(self.session, media_type, media_id)
-            elif isinstance(media, Track | Video):
-                # Deliberately NOT gated on media.allow_streaming here. That flag
-                # is a false negative for our client: TIDAL serves editions like
-                # "ALICIA (With Commentary)" with allowStreaming=false on every
-                # track, yet the official apps and our own account still play
-                # most of them, and the ones it truly withholds answer the
-                # playback request with a 401 (issue #25). So availability is
-                # decided where it is authoritative, when the stream is actually
-                # fetched (_get_stream_info), and a real refusal becomes the
-                # UNAVAILABLE outcome there. Gating on the flag here refused
-                # tracks the account could play and painted whole albums red.
-                if isinstance(media, Track) and not keep_album:
-                    # Re-create media instance with full album information.
-                    # Skipped when keep_album is set: a best-of-both merge passes a
-                    # track deliberately re-tagged under another edition's album and
-                    # numbering, which this re-fetch would otherwise clobber.
-                    media = self.session.track(str(media.id), with_album=True)
-            elif isinstance(media, Album):
-                # An album whose own allowStreaming is false is a different case
-                # from the per-track flag above: the collection itself is gone,
-                # so there is nothing to enumerate. (efc2549 added this for
-                # region-locked albums.) Individual tracks are still let through
-                # and settled at stream time.
-                if not media.allow_streaming:
-                    self._note_unavailable(media)
-                    self.fn_logger.info(
-                        f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_title(media))}"
-                    )
-                    return None
-            elif not media:
-                self._raise_media_missing()
-        except (MediaMissing, Exception):
+            media = self._resolve_media(media, media_id, media_type, keep_album)
+            if media is None:
+                return None
+        except MediaMissing:
+            return None
+        except (ObjectNotFound, StreamNotAvailable, AssetNotAvailable):
+            # TIDAL no longer carries this item, so the re-fetch above 404s.
+            # That is a refusal, not a failure of ours, and it has to be
+            # recorded as one HERE: this gate runs before any stream is
+            # fetched, so _get_stream_info's identical rule (issue #25) never
+            # gets the chance. Counting it as a plain failure is what made one
+            # delisted entry fail a whole 500-track playlist, permanently: the
+            # shortfall reappeared on every retry and the row could never
+            # settle green (issue #35).
+            self._note_unavailable_item(media)
+            self.fn_logger.info(
+                f"This item is not available for listening anymore on TIDAL. Skipping: "
+                f"{log_content(self._media_label(media, media_id))}"
+            )
+            return None
+        except ApiCallStopped:
+            # The retry ladder refused another call because this job was
+            # stopped; the caller's abort check says the same thing.
+            self.fn_logger.debug("Item preparation abandoned: the download was stopped")
+            return None
+        except Exception:
+            # Anything else really is a failure, and a silent one until now:
+            # the blanket catch logged nothing at all, so a rate limit, a
+            # dropped session or a server fault vanished without a trace even
+            # in verbose diagnostics, leaving a red collection row with no
+            # explanation anywhere.
+            self.fn_logger.exception(
+                f"Could not prepare item for download: {log_content(self._media_label(media, media_id))}"
+            )
             return None
 
         # If video download is not allowed and this is a video, return None
@@ -1191,12 +1438,267 @@ class Download:
 
         return media
 
+    def _resolve_media(
+        self,
+        media: Track | Video | Album | Playlist | UserPlaylist | Mix | None,
+        media_id: str | None,
+        media_type: MediaType | None,
+        keep_album: bool,
+    ) -> Track | Video | Album | Playlist | UserPlaylist | Mix | None:
+        """The instance this download will actually work from, or None when
+        TIDAL itself says there is nothing to work from.
+
+        Split out of _validate_and_prepare_media so the fetching sits apart
+        from the reading of what a failure to fetch MEANS: the two are answered
+        by quite different rules (see the caller's handlers) and neither is
+        easy to follow while it is wrapped around the other.
+        """
+        if media_id and media_type:
+            # If no media instance is provided, we need to create the media instance.
+            # Throws `tidalapi.exceptions.ObjectNotFound` if item is not available anymore.
+            return instantiate_media(self.session, media_type, media_id)
+        if isinstance(media, Track | Video):
+            # Deliberately NOT gated on media.allow_streaming here. That flag
+            # is a false negative for our client: TIDAL serves editions like
+            # "ALICIA (With Commentary)" with allowStreaming=false on every
+            # track, yet the official apps and our own account still play
+            # most of them, and the ones it truly withholds answer the
+            # playback request with a 401 (issue #25). So availability is
+            # decided where it is authoritative, when the stream is actually
+            # fetched (_get_stream_info), and a real refusal becomes the
+            # UNAVAILABLE outcome there. Gating on the flag here refused
+            # tracks the account could play and painted whole albums red.
+            if isinstance(media, Track) and not keep_album:
+                # Re-create media instance with full album information.
+                # Skipped when keep_album is set: a best-of-both merge passes a
+                # track deliberately re-tagged under another edition's album and
+                # numbering, which this re-fetch would otherwise clobber.
+                return self._track_with_album(media)
+            return media
+        if isinstance(media, Album):
+            # An album whose own allowStreaming is false is a different case
+            # from the per-track flag above: the collection itself is gone,
+            # so there is nothing to enumerate. (efc2549 added this for
+            # region-locked albums.) Individual tracks are still let through
+            # and settled at stream time.
+            if not media.allow_streaming:
+                self._note_unavailable(media)
+                self.fn_logger.info(
+                    f"This item is not available for listening anymore on TIDAL. Skipping: {log_content(name_builder_title(media))}"
+                )
+                return None
+            return media
+        if not media:
+            self._raise_media_missing()
+        return media
+
+    def _rate_limit_policy(self) -> tuple[int, float]:
+        """How many items to take to the API before standing back, and for how
+        long. Either value at zero means never.
+
+        Read on every item (the app runs for weeks, so a settings change takes
+        effect on the next download rather than the next restart) and
+        best-effort like the other per-download settings reads: a value that
+        cannot be read means no pause, never a download that will not start.
+        """
+        try:
+            every = int(self.settings.data.api_rate_limit_batch_size or 0)
+            seconds = float(self.settings.data.api_rate_limit_delay_sec or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            return 0, 0.0
+        return max(0, every), max(0.0, seconds)
+
+    def _rate_limit_pause(self, event_stop: Event | None = None) -> None:
+        """Hold this item back if it opens a new batch.
+
+        A sustained run of catalog calls is what TIDAL answers with a 429, and
+        a long list is the only thing that produces one: every item costs a
+        lookup plus a playback request, so a 500-track playlist asks some 1500
+        questions in a row where an album asks 30. The two settings that say
+        so were shipped as Advanced fields and read by nothing at all, so a
+        user meeting rate limits could turn them and change nothing
+        (issue #35).
+
+        The pause belongs to the item, taken by the worker that picked it up:
+        a thread pool has no batch boundary of its own, and this is the moment
+        the item's own API traffic begins. A list shorter than one batch never
+        pauses, and neither does a single-item download.
+
+        Every OTHER worker stands back with it. One worker sleeping while its
+        siblings carry on is not a pause at all: with the default three, the
+        rate dropped by about a third where the setting says the app pauses.
+
+        Two pauses can be in force at once (a batch smaller than the worker
+        count puts a second worker on a boundary while the first is still
+        standing back), so they are counted and the run resumes when the LAST
+        of them is over, never when the first one happens to wake. The worker
+        that took a pause is bound by that too: it waits the others out on its
+        way back, or the promise held everybody except the one who made it.
+
+        The pause is logged at INFO, so it reaches the breadcrumb ring and a
+        support bundle rather than a verbose run only. It is a deliberate
+        multi-second stall of the only running job, which is exactly what a
+        user reports as "long playlists hang periodically": with nothing
+        naming the throttle, the trail shows silent gaps between items and
+        reads like a network fault. It fires once per batch, twenty-five times
+        in a 500-track playlist at the defaults, so it floods nothing.
+        """
+        every, seconds = self._rate_limit_policy()
+        if not every or seconds <= 0:
+            return
+        with self._pace_lock:
+            self._paced_items += 1
+            due = self._paced_items > 1 and (self._paced_items - 1) % every == 0
+            if due:
+                # Counted and dated in the same locked step that shuts the gate,
+                # so a boundary reached while a pause is already running EXTENDS
+                # the stand-back instead of quietly replacing it. A batch size
+                # below the worker count makes that the ordinary case, not a
+                # corner: the workers a pause holds each open a new batch of
+                # their own the moment they are let go.
+                self._pace_holds += 1
+                self._pace_until = max(self._pace_until, time.monotonic() + seconds)
+                self._pace_gate.clear()
+        if not due:
+            self._wait_for_pace_gate(event_stop)
+            return
+        self.fn_logger.info(f"Standing back from the API for {seconds} seconds after {every} items.")
+        try:
+            self._sleep_politely(seconds, event_stop)
+        finally:
+            self._end_pace_hold()
+        # This worker's own pause is done; the run's may not be. A pauser that
+        # walked out here while a sibling was still standing back was the same
+        # partial pause the counting above prevents, one level in: the gate held
+        # every OTHER worker and let the one that happened to wake first go
+        # straight back to the API. Free the moment nothing is in force (the
+        # ordinary case: this worker was the last hold and just opened the gate),
+        # and it wakes for a STOP and for the pause's own deadline like any other
+        # waiter, so neither can be stranded here.
+        self._wait_for_pace_gate(event_stop)
+
+    def _end_pace_hold(self) -> None:
+        """Hand this worker's pause back, opening the gate only for the last one.
+
+        Opening it while a sibling is still standing back would put the whole
+        run back on the API mid-pause, which is what a single Event could not
+        express (see _rate_limit_pause). A pause the user cut short with a STOP
+        has ended like any other, so the stop still releases everyone at once
+        rather than leaving them on the clock.
+        """
+        with self._pace_lock:
+            self._pace_holds = max(0, self._pace_holds - 1)
+
+            if self._pace_holds:
+                return
+
+            self._pace_until = 0.0
+            self._pace_gate.set()
+
+    def _pace_pause_is_over(self) -> bool:
+        """Whether the latest pause in force is past its own end by the clock.
+
+        Read only as a backstop by the waiters. Nothing dated means no pause
+        this method can speak for (an Event held shut by something other than a
+        pause), and it says no rather than guessing.
+        """
+        with self._pace_lock:
+            return bool(self._pace_until) and time.monotonic() >= self._pace_until
+
+    def _wait_for_pace_gate(self, event_stop: Event | None = None) -> None:
+        """Hold this worker while a sibling takes the batch pause.
+
+        Polled rather than waited outright so a STOP still lands promptly: the
+        worker taking the pause opens the gate when it wakes, but a stop that
+        arrives for THIS worker must not wait for that.
+
+        The clock is the second way out, and only ever a backstop: a pause that
+        is over by its own deadline has nothing left to promise TIDAL, so a
+        worker that never sees the gate reopen (a pauser that died before it
+        could hand its hold back) walks on instead of waiting out the run.
+        """
+        while not self._pace_gate.wait(0.2):
+            if (self.event_abort is not None and self.event_abort.is_set()) or (event_stop and event_stop.is_set()):
+                return
+            if self._pace_pause_is_over():
+                return
+
+    def _sleep_politely(self, seconds: float, event_stop: Event | None = None) -> None:
+        """Wait, but wake for a Stop or a Cancel.
+
+        Every deliberate pause in a download is one the user may want to cut
+        short, so all of them wait on the stop event rather than on the clock.
+        """
+        if seconds <= 0:
+            return
+        if event_stop is not None:
+            event_stop.wait(seconds)
+        elif self.event_abort is not None:
+            self.event_abort.wait(seconds)
+        else:
+            time.sleep(seconds)
+
     def _raise_media_missing(self) -> None:
         """Raise MediaMissing exception.
 
         Helper method to abstract raise statement as per TRY301.
         """
         raise MediaMissing
+
+    def _track_with_album(self, media: Track) -> Track:
+        """The track, re-fetched with its full album, or with whatever album is
+        still to be had.
+
+        ``session.track(id, with_album=True)`` is TWO requests: the track, then
+        its album. Either can 404, and they mean quite different things. The
+        track being gone is TIDAL saying it no longer carries the song. The
+        ALBUM being gone (pulled, region-locked, or a one-off from an edge
+        node) says nothing about the song, which usually still streams
+        perfectly well, so letting the compound 404 stand would quietly skip a
+        song this app could have saved, and count the collection complete
+        without it.
+
+        The fallback keeps the album the caller already had: a collection's
+        tracks arrive carrying an album summary, and the tagger tolerates even
+        a missing one.
+        """
+        try:
+            return self.session.track(str(media.id), with_album=True)
+        except ObjectNotFound:
+            bare = self.session.track(str(media.id))  # re-raises if the TRACK is the one that is gone
+        self.fn_logger.info(
+            f"Album details are unavailable, tagging from what is known: {log_content(name_builder_item(media))}"
+        )
+        if getattr(bare, "album", None) is None:
+            bare.album = getattr(media, "album", None)
+        return bare
+
+    def _note_unavailable_item(self, media) -> None:
+        """Record a refused ITEM, and never a refused collection.
+
+        ``_note_unavailable`` reads the object it is handed to tell one item
+        apart from a whole list, and the preparation gate can be holding
+        nothing at all (a download asked for by bare id). Marking the job's
+        list as refused on that evidence would settle every sibling track as
+        refused too, so a missing object records nothing instead.
+        """
+        if isinstance(media, Track | Video):
+            self._note_unavailable(media)
+
+    @staticmethod
+    def _media_label(media, media_id: str | None = None) -> str:
+        """The best name a log line can give ``media``, whatever survived.
+
+        The preparation gate fails on half-built items (the re-fetch raised,
+        so only the caller's object is in hand) and on items that are still
+        just an id, and a log line about a track the user asked for is worth
+        nothing if it cannot say which track.
+        """
+        if isinstance(media, Track | Video):
+            return name_builder_item(media)
+        if media is not None and (getattr(media, "name", None) or getattr(media, "title", None)):
+            return name_builder_title(media)
+        return f"id {media_id}" if media_id else "unknown item"
 
     def _illegal_replacement(self) -> str:
         """The user's illegal-character replacement, laundered for use.
@@ -1385,7 +1887,7 @@ class Download:
 
             if not sibling_id:
                 self.fn_logger.debug(
-                    f"Skipping as already downloaded: '{sibling}' carries no item id, so it may be this track."
+                    f"Skipping as already downloaded: '{log_content(sibling)}' carries no item id, so it may be this track."
                 )
 
                 return sibling
@@ -1408,11 +1910,17 @@ class Download:
         lands on its own file, which is what the setting asks for, and what it
         has always done.
         """
-        return self._names_reserved | {
+        return {name for name, (owner, _holds) in self._names_reserved.items() if owner != media_id or not media_id} | {
             name for name, owner in self._names_written.items() if not media_id or owner != media_id
         }
 
-    def _is_own_copy(self, path_file: pathlib.Path, media_id: str, owned_ids: set[str] | None = None) -> bool:
+    def _is_own_copy(
+        self,
+        path_file: pathlib.Path,
+        media_id: str,
+        owned_ids: set[str] | None = None,
+        fetch_is_atmos: bool | None = None,
+    ) -> bool:
         """Whether the file already at this name is this item's own to replace.
 
         Asked only with skipping off, where an existing file is exactly what
@@ -1423,11 +1931,27 @@ class Download:
         the very library the user asked to refresh. A file carrying a
         different item's id is a different song, and replacing it loses it.
 
+        A file in a DIFFERENT audio mode is never its own to replace, same id
+        or not. A Dolby Atmos copy and a stereo one of the same track are two
+        deliberately kept things (the ledger files them as two rows), yet
+        Atmos shares stereo AAC's .m4a name, so without this check turning
+        Atmos off and redownloading silently replaced the Atmos file with a
+        320k stereo one. Asked before the id, so an untagged Atmos file is
+        protected too; an unreadable file keeps the historical id-only answer.
+
         ``owned_ids`` widens "its own" to every id this item may have been
         written under (see :func:`_waves_owned_ids`), which is what lets a
         best-of-both member replace the copy an older Waves filed under the
-        source edition's id.
+        source edition's id. ``fetch_is_atmos`` is what THIS download is
+        bringing; None means the caller cannot say, and the mode gate stands
+        down.
         """
+        if fetch_is_atmos is not None:
+            occupant_is_atmos: bool | None = _file_audio_mode_is_atmos(path_file)
+
+            if occupant_is_atmos is not None and occupant_is_atmos != fetch_is_atmos:
+                return False
+
         if not media_id:
             return True
 
@@ -1435,8 +1959,156 @@ class Download:
 
         return not occupant or occupant == media_id or occupant in (owned_ids or set())
 
+    def _already_landed_here(self, path_media_dst: pathlib.Path, media: Track | Video) -> pathlib.Path | None:
+        """The file this item was about to write, if a twin of it has already
+        landed there during this same run.
+
+        A collection may list the SAME item twice (a playlist or a mix naming
+        one song in two places). Both occurrences get past every earlier skip
+        check, because the folder was still empty when each of them looked and
+        the file only appears at the move; by the time the second one resolves
+        its name, the first has landed it. The claim cannot see that on its
+        own: with skipping on, its disk arm reads any occupied name as somebody
+        else's and steps the second occurrence aside to a numbered name, so the
+        run left a byte-identical "_01" copy carrying the same item id, listed
+        twice in the playlist file and never cleaned up by anything (this app
+        does not delete user files).
+
+        Returns the path the item already occupies, or None to carry on and
+        write. Skipping off (which is also what a forced redownload turns on
+        for its own thread) always answers None: replacing the copy in place is
+        the whole point of that force.
+
+        The id must match POSITIVELY, which is why this does not reuse
+        _existing_same_item_at. That helper answers "identity unknown, treat as
+        this item" for a file whose id it cannot read, which is the right
+        answer for the pre-write skip check: a mystery file is not evidence of
+        a DIFFERENT item, and skipping is the safe side there. It is the wrong
+        answer HERE. At this point the bytes are already fetched and the only
+        question is whether this run has itself just landed them, so an
+        untagged stranger sitting on the name is not a twin, it is exactly the
+        collision the claim below exists to step around. Reading unknown as
+        "mine" made a distinct track skip instead of uniquifying (its sidecars
+        with it), and an absent destination reads unknown too, so every
+        download in the run skipped and nothing was ever written.
+
+        A tag on the base name is not the only positive evidence there is, and
+        on its own it misses two twins it has to catch: one that landed at a
+        NUMBERED variant (the claim stepped it aside from a stranger holding the
+        base name) and one whose file carries no readable id at all (a raw .ts
+        video writes no tag atoms). Both read as a stranger there, and the
+        second occurrence wrote the byte-identical copy this guard exists to
+        prevent. So the run's OWN ledger of names written is asked first: it is
+        positive evidence of the strongest kind, since this run put the file
+        there itself, and it says nothing about a file it did not write.
+        """
+        if not self.skip_existing:
+            return None
+
+        media_id: str = _waves_item_id(media)
+
+        if not media_id:
+            return None
+
+        owned_ids: set[str] = _waves_owned_ids(media)
+        # Asked before the existence check below, and not folded into it: the
+        # twin may be sitting at a numbered variant with the base name empty or
+        # holding somebody else entirely.
+        path_landed: pathlib.Path | None = self._landed_by_this_run(path_media_dst, media_id, owned_ids)
+
+        if path_landed is not None:
+            self.fn_logger.debug(f"Download skipped, since this item already landed at '{log_content(path_landed)}'.")
+
+            return path_landed
+
+        if not check_file_exists(path_media_dst, extension_ignore=False):
+            return None
+
+        occupant_id: str = read_item_id(path_media_dst) or ""
+
+        if not occupant_id or occupant_id not in owned_ids:
+            return None
+
+        self.fn_logger.debug(f"Download skipped, since this item already landed at '{log_content(path_media_dst)}'.")
+
+        return path_media_dst
+
+    def _landed_by_this_run(
+        self, path_media_dst: pathlib.Path, media_id: str, owned_ids: set[str]
+    ) -> pathlib.Path | None:
+        """Where THIS RUN has already written this item at this destination: the
+        base name, one of its numbered variants, or None for neither.
+
+        The ledger, not the disk, answers here. An entry is only made after a
+        move actually succeeded (_record_name_written), so it cannot mistake a
+        stranger for a twin the way reading an unreadable file can, and it
+        recognises a twin the tag cannot speak for: one written under a numbered
+        name, and one written with no id in it at all.
+
+        Only this destination's own name family counts. The same track listed
+        twice under a template that spells the two occurrences differently
+        (a playlist's {list_pos} prefix) is two files by the user's own naming,
+        and must stay two, so a name written elsewhere is no answer to this
+        question.
+
+        The disk is still consulted for one thing, that the file is really
+        there: a ledger entry for a file the user has since moved away is not
+        something to skip onto, and check_file_exists reads an interrupted
+        0-byte write as nothing at all.
+
+        Args:
+            path_media_dst (pathlib.Path): The name this download is aiming at.
+            media_id (str): The item being downloaded, never "" (the caller
+                has nothing to match on then).
+            owned_ids (set[str]): Every id a file of this item may carry.
+
+        Returns:
+            pathlib.Path | None: The path this run wrote for the item, or None.
+        """
+        with self._names_reserved_lock:
+            names_written: dict[str, str] = {
+                name_comparison_key(name): name
+                for name, owner in self._names_written.items()
+                if owner and (owner == media_id or owner in owned_ids)
+            }
+
+        # Nothing written for this item yet, which is every ordinary download:
+        # answered before a single name is spelled out.
+        if not names_written:
+            return None
+
+        threshold_zfill: int = len(str(UNIQUIFY_THRESHOLD))
+        # The base name, then its numbered variants in the order the writer
+        # would have taken them. Variant names are spelled through the same
+        # trimming that wrote them (see unique_variant_name), never by raw
+        # concatenation: a stem at the byte cap gives up bytes to the suffix, so
+        # the concatenation is a name that cannot exist.
+        candidates: list[pathlib.Path] = [path_media_dst]
+
+        candidates.extend(
+            path_media_dst.parent / unique_variant_name(path_media_dst, "_" + str(count).zfill(threshold_zfill))
+            for count in range(1, UNIQUIFY_THRESHOLD + 1)
+        )
+
+        for candidate in candidates:
+            name_on_disk: str | None = names_written.get(name_comparison_key(str(candidate)))
+
+            if name_on_disk is None:
+                continue
+
+            path_written: pathlib.Path = pathlib.Path(name_on_disk)
+
+            if check_file_exists(path_written, extension_ignore=False):
+                return path_written
+
+        return None
+
     def _claim_destination(
-        self, path_media_dst: pathlib.Path, media_id: str, owned_ids: set[str] | None = None
+        self,
+        path_media_dst: pathlib.Path,
+        media_id: str,
+        owned_ids: set[str] | None = None,
+        fetch_is_atmos: bool | None = None,
     ) -> tuple[pathlib.Path, str | None]:
         """Pick this download's final name and hold it, in one locked step.
 
@@ -1454,6 +2126,10 @@ class Download:
             owned_ids (set[str] | None): Every id a file of this item may carry
                 on disk, for a best-of-both member an older build filed under
                 the source edition's id.
+            fetch_is_atmos (bool | None): Whether this download delivers Dolby
+                Atmos, so a name held by a file in the other mode is treated
+                as taken rather than replaceable (see :func:`_is_own_copy`).
+                None when the caller cannot say.
 
         Returns:
             tuple[pathlib.Path, str | None]: The name to use and the claim to
@@ -1465,21 +2141,59 @@ class Download:
                 path_media_dst,
                 names_taken=self._names_unavailable_to(media_id),
                 check_disk=self.skip_existing,
-                is_own_copy=lambda candidate: self._is_own_copy(candidate, media_id, owned_ids),
+                is_own_copy=lambda candidate: self._is_own_copy(candidate, media_id, owned_ids, fetch_is_atmos),
             )
 
             if path_media_unique is None:
                 return path_media_dst, None
 
             name_reserved: str = str(path_media_unique)
-            self._names_reserved.add(name_reserved)
+            owner, holds = self._names_reserved.get(name_reserved, (media_id, 0))
+            # Counted, not just set: two workers of one item can hold the same
+            # name, and the first to finish must not hand it to a stranger
+            # while the second is still writing there.
+            self._names_reserved[name_reserved] = (owner, holds + 1)
 
             return path_media_unique, name_reserved
+
+    def _release_name(self, name_reserved: str) -> None:
+        """Let go of one hold on a claimed name (see _claim_destination)."""
+        with self._names_reserved_lock:
+            owner, holds = self._names_reserved.get(name_reserved, ("", 0))
+
+            if holds > 1:
+                self._names_reserved[name_reserved] = (owner, holds - 1)
+            else:
+                self._names_reserved.pop(name_reserved, None)
 
     def _record_name_written(self, path_file: pathlib.Path, media_id: str) -> None:
         """Note that this item's file now occupies this name."""
         with self._names_reserved_lock:
             self._names_written[str(path_file)] = media_id
+
+    def _note_dir_filled(self, path_file: pathlib.Path) -> None:
+        """Note that this run just created ``path_file``.
+
+        Positive evidence only, recorded where the file is actually made, so
+        the answer cannot drift from the disk: inferring it from the skip flags
+        instead would miss the symlink a skipped download still leaves behind,
+        and would mislabel a file written on a first pass and skipped on the
+        retry pass that follows it.
+        """
+        with self._dirs_filled_lock:
+            self._dirs_filled.add(path_file.parent)
+
+    def _dirs_this_run_filled(self, paths: list[pathlib.Path]) -> set[pathlib.Path]:
+        """Of the directories holding ``paths``, the ones this run put a file in.
+
+        Where landed parts from skipped: ``paths`` is every path the fan-out
+        reported, and an item already on disk reports the file it found there
+        (see :func:`_landed_paths`). Intersecting with what was actually
+        written keeps a directory that only pre-dates this run out of the m3u
+        writer's reach, and keeps a track folder this run symlinked into out of
+        it too (no result path lives there).
+        """
+        return {path.parent for path in paths} & self._dirs_filled
 
     def _destination_path(
         self,
@@ -1699,7 +2413,7 @@ class Download:
             path_media_found = self._existing_same_item_at(path_media_dst, media)
 
             if path_media_found is not None:
-                self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_found}'")
+                self.fn_logger.debug(f"Download skipped, since file exists: '{log_content(path_media_found)}'")
 
                 # This skip happens AFTER the stream was fetched, so a caller
                 # capturing delivered quality per stream must be told nothing
@@ -1797,45 +2511,58 @@ class Download:
                     self.fn_logger.error(f"Unknown media type for stream info: {type(media)}")
                     return None, "", False, None
 
-            except TooManyRequests:
-                self.fn_logger.exception(
-                    f"Too many requests against TIDAL backend. Skipping '{log_content(name_builder_item(media))}'. "
-                    f"Consider to activate delay between downloads."
-                )
-                return None, "", False, None
-
-            except (StreamNotAvailable, ObjectNotFound, AssetNotAvailable):
-                # TIDAL knows the track but will not serve a stream for it: the
-                # 404 / "no stream" answer for an asset that is genuinely gone.
-                # A refusal, not a failure, so mark it UNAVAILABLE (issue #25).
-                self._note_unavailable(media)
-                self.fn_logger.info(
-                    f"This item is not available for listening anymore on TIDAL. Skipping: "
-                    f"{log_content(name_builder_item(media))}"
-                )
-                return None, "", False, None
-
-            except HTTPError as error:
-                # A 401/403 whose body says the asset itself is withheld (e.g.
-                # subStatus 4005 "Asset is not ready for playback") is TIDAL
-                # refusing the content, not our session, so it is UNAVAILABLE
-                # too. Anything else (a dead session, a 5xx, a network error) is
-                # a real failure and keeps the old "something went wrong" path.
-                if _tidal_refuses_asset(error) is not None:
-                    self._note_unavailable(media)
-                    self.fn_logger.info(
-                        f"This item is not available for listening anymore on TIDAL. Skipping: "
-                        f"{log_content(name_builder_item(media))}"
-                    )
-                    return None, "", False, None
-                self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
-                return None, "", False, None
-
-            except Exception:
-                self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
+            except Exception as error:
+                # Every arm ends the same way (the fetch produced nothing and
+                # the caller is told so identically); only what gets recorded
+                # about it differs, so the deciding lives in one place.
+                self._note_stream_info_failure(media, error)
                 return None, "", False, None
 
         return stream_manifest, file_extension, do_flac_extract, media_stream
+
+    def _note_stream_info_failure(self, media: Track | Video, error: Exception) -> None:
+        """Log, and where appropriate mark, a stream-info fetch that produced
+        nothing. Called from inside the handler, so ``.exception`` still has
+        the live traceback.
+
+        Args:
+            media (Track | Video): The item whose stream could not be fetched.
+            error (Exception): What the fetch raised.
+        """
+        if isinstance(error, ApiCallStopped):
+            # The retry ladder refused another call because this job was
+            # stopped (see config._ApiRetry.sleep). Not a failure and not worth
+            # a traceback: the caller's own abort check reaches the same
+            # conclusion on the next line.
+            self.fn_logger.debug("Catalog call abandoned: the download was stopped")
+            return
+
+        if isinstance(error, TooManyRequests):
+            self.fn_logger.exception(
+                f"Too many requests against TIDAL backend. Skipping '{log_content(name_builder_item(media))}'. "
+                f"Consider to activate delay between downloads."
+            )
+            return
+
+        # TIDAL knows the track but will not serve a stream for it: the 404 /
+        # "no stream" answer for an asset that is genuinely gone, or a 401/403
+        # whose body says the asset itself is withheld (e.g. subStatus 4005
+        # "Asset is not ready for playback"), which is TIDAL refusing the
+        # content and not our session. A refusal, not a failure, so mark it
+        # UNAVAILABLE (issue #25). Anything else (a dead session, a 5xx, a
+        # network error) keeps the "something went wrong" path.
+        refused = isinstance(error, StreamNotAvailable | ObjectNotFound | AssetNotAvailable) or (
+            isinstance(error, HTTPError) and _tidal_refuses_asset(error) is not None
+        )
+        if refused:
+            self._note_unavailable(media)
+            self.fn_logger.info(
+                f"This item is not available for listening anymore on TIDAL. Skipping: "
+                f"{log_content(name_builder_item(media))}"
+            )
+            return
+
+        self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
 
     def _get_track_stream_info(self, media: Track) -> TrackStreamInfo:
         """
@@ -1916,8 +2643,16 @@ class Download:
         something to retry, a refusal is TIDAL saying the item is gone, and
         nothing the app does will fetch it."""
 
+    def _note_item_crashed(self) -> None:
+        """An item of a collection raised instead of answering ok/not ok. A
+        no-op here; the GUI's tracked download overrides it to tally the item
+        as a failure. items() catches the raise so the rest of the list still
+        finishes, and the tally is what keeps the outcome honest: without it a
+        crashed item would be missing from every counter and a list that lost
+        one track would report a clean done."""
+
     def _note_progress_task(self, media: Track | Video, p_task: TaskID) -> None:
-        """The rich progress task this item's segments report into. A no-op
+        """The progress task this item's segments report into. A no-op
         here; the GUI's tracked download overrides it so a queue row can follow
         its own item's percentage. Task descriptions are display names cut to 30
         characters, so every track of a release with a long artist credit
@@ -1968,7 +2703,7 @@ class Download:
             cum[step_name] = 100.0 * acc / total_weight
         return cum
 
-    def _perform_actual_download(
+    def _perform_actual_download(  # noqa: C901 - one linear pipeline, see below
         self,
         media: Track | Video,
         path_media_dst: pathlib.Path,
@@ -1991,6 +2726,16 @@ class Download:
 
         Returns:
             tuple[bool, pathlib.Path]: (Whether download was successful, the final destination path).
+
+        Kept whole (C901 exempted above) rather than split: this is one linear
+        pipeline over a single temp file, fetch, convert, extract, downsample,
+        remux, claim a name, tag, move, and each stage's condition reads as a
+        step of that sequence. Its branch count is the number of optional
+        stages, not tangled logic, and every stage rebinds the same
+        tmp_path_file, so splitting it would hand that variable back and forth
+        across helpers for no gain in readability. The genuinely separable
+        decisions have already been lifted out (_already_landed_here,
+        _claim_destination, _handle_metadata_and_extras, _finalize_plan).
         """
         # Create a temp directory and file.
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
@@ -2060,13 +2805,45 @@ class Download:
             overwrite: bool = not self.skip_existing
             media_id: str = _waves_item_id(media)
             path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
-            path_media_dst, name_reserved = self._claim_destination(path_media_dst, media_id, _waves_owned_ids(media))
+            path_media_own: pathlib.Path | None = self._already_landed_here(path_media_dst, media)
+
+            if path_media_own is not None:
+                # Nothing was written for this pass, so the caller must not
+                # record a delivered quality for it (the twin that really
+                # landed the file recorded its own).
+                self._note_skipped_after_stream(media)
+
+                return True, path_media_own
+            # What THIS fetch delivers, off the stream's own word. A missing or
+            # empty audio_mode reads stereo, which errs the safe way: a stereo
+            # verdict can only make the claim step aside from an Atmos file,
+            # never replace one.
+            fetch_is_atmos: bool = str(getattr(media_stream, "audio_mode", "") or "") == AudioMode.dolby_atmos.value
+            path_media_asked: pathlib.Path = path_media_dst
+            path_media_dst, name_reserved = self._claim_destination(
+                path_media_dst, media_id, _waves_owned_ids(media), fetch_is_atmos
+            )
 
             if name_reserved is None:
-                # Every numbered variant of this name is taken. Nothing is lost
-                # here, but the download has nowhere to land and must say so:
-                # the old code took the last occupied candidate and the move
-                # then refused it as somebody else's file.
+                # Every numbered variant of this name is taken. One of them can
+                # be this item's OWN twin: the claim counts a file on disk as
+                # occupied whoever wrote it (deliberately, and pinned), so a
+                # folder already full of colliding names plus a twin that landed
+                # in the window above exhausts the family and this occurrence is
+                # left with nowhere to go. It has somewhere to go, its own file,
+                # and the same positive-evidence question finds it. Asked before
+                # the error, so an expected step-aside is not reported as a lost
+                # download.
+                path_media_own = self._already_landed_here(path_media_dst, media)
+
+                if path_media_own is not None:
+                    self._note_skipped_after_stream(media)
+
+                    return True, path_media_own
+
+                # Nothing is lost here, but the download has nowhere to land and
+                # must say so: the old code took the last occupied candidate and
+                # the move then refused it as somebody else's file.
                 self.fn_logger.error(
                     f"No free name left for '{log_content(path_media_dst.name)}': "
                     f"the name and all {UNIQUIFY_THRESHOLD} of its numbered copies are taken."
@@ -2075,6 +2852,25 @@ class Download:
                 return False, path_media_dst
 
             try:
+                if path_media_dst != path_media_asked:
+                    # Stepped aside, so something took the name between the
+                    # guard above and this claim. A twin of this very item is
+                    # the one writer that can do that: it holds the same claim
+                    # by design (an item never makes way for itself), and its
+                    # move lands in exactly that window. Asked again, on the
+                    # name that was asked for, or the second occurrence writes
+                    # the byte-identical numbered copy the guard above exists to
+                    # prevent. The question is the same one, so a stranger on
+                    # the name is still a stranger and this still steps aside
+                    # for it: only a state CHANGE inside the window can answer
+                    # yes here, since the same question answered no moments ago.
+                    path_media_own = self._already_landed_here(path_media_asked, media)
+
+                    if path_media_own is not None:
+                        self._note_skipped_after_stream(media)
+
+                        return True, path_media_own
+
                 # Tag the temp file and hold the sidecars it produced.
                 extras = self._handle_metadata_and_extras(
                     media, tmp_path_file, path_media_dst, is_parent_album, media_stream
@@ -2084,14 +2880,48 @@ class Download:
 
                 self._note_stage(media, cum["tag"])
 
+                # The move refuses a destination it may not overwrite, and that
+                # refusal is right: nothing here may replace a file. The VERDICT
+                # was wrong for one occupant. Both occurrences of a twice-listed
+                # track hold ONE claim on one name (an item never makes way for
+                # itself), so the slower of them arrives at a name its own twin
+                # has just filled, and reporting that as a failure painted a
+                # whole playlist red over a track sitting correctly on disk with
+                # its sidecars beside it.
+                #
+                # Asked at the refusal itself rather than after it, so the one
+                # answer settles both the log level down there and the verdict
+                # up here: asking twice could read a stranger while the move
+                # reported a twin, which is the very mismatch this closes. The
+                # question is the same positive-evidence one the late skip asks,
+                # so a foreign occupant, and every other reason a move can fail,
+                # still fails the item.
+                path_media_landed: pathlib.Path | None = None
+
+                def _occupant_is_this_items_own(path_occupied: pathlib.Path) -> bool:
+                    nonlocal path_media_landed
+                    path_media_landed = self._already_landed_here(path_occupied, media)
+
+                    return path_media_landed is not None
+
                 # Move final file to the configured destination directory.
-                moved: bool = self._move_file(tmp_path_file, path_media_dst, overwrite=overwrite)
+                moved: bool = self._move_file(
+                    tmp_path_file,
+                    path_media_dst,
+                    overwrite=overwrite,
+                    occupant_is_own=_occupant_is_this_items_own,
+                )
 
                 if moved:
                     self._note_stage(media, cum["move"])
                     # Recorded before the claim is released below, so the name is
                     # never momentarily free between the two.
                     self._record_name_written(path_media_dst, media_id)
+                    self._note_dir_filled(path_media_dst)
+                elif path_media_landed is not None:
+                    self._note_skipped_after_stream(media)
+
+                    return True, path_media_landed
 
                 # Sidecars only once the audio is really there. Landing them
                 # first left a cover.jpg and a .lrc in the library for a track
@@ -2105,8 +2935,7 @@ class Download:
                 # Released either way: on success the file now answers for itself on disk,
                 # on failure the name was never used and must go back to the pool.
                 if name_reserved is not None:
-                    with self._names_reserved_lock:
-                        self._names_reserved.discard(name_reserved)
+                    self._release_name(name_reserved)
 
     def _handle_metadata_and_extras(
         self,
@@ -2226,13 +3055,7 @@ class Download:
 
             self.fn_logger.debug(f"Next download will start in {time_sleep} seconds.")
 
-            # Use event_stop or event_abort for interruptible sleep
-            if event_stop:
-                event_stop.wait(time_sleep)
-            elif self.event_abort:
-                self.event_abort.wait(time_sleep)
-            else:
-                time.sleep(time_sleep)
+            self._sleep_politely(time_sleep, event_stop)
 
     def media_move_and_symlink(
         self, media: Track | Video, path_media_src: pathlib.Path, file_extension: str
@@ -2303,8 +3126,11 @@ class Download:
                 # The same claim the plain download path takes, for the same
                 # reason: a sibling track of this collection reaches this move
                 # on another thread and would otherwise pick the very same name.
+                # The mode of the fetch IS the mode of the file being moved, so
+                # ask the file itself: this claim runs long after the stream
+                # object is gone.
                 path_media_dst, name_reserved = self._claim_destination(
-                    path_media_dst, media_id, _waves_owned_ids(media)
+                    path_media_dst, media_id, _waves_owned_ids(media), _file_audio_mode_is_atmos(path_media_src)
                 )
 
                 if name_reserved is None:
@@ -2325,8 +3151,7 @@ class Download:
                     self._record_name_written(path_media_dst, media_id)
             finally:
                 if name_reserved is not None:
-                    with self._names_reserved_lock:
-                        self._names_reserved.discard(name_reserved)
+                    self._release_name(name_reserved)
 
         return path_media_dst
 
@@ -2351,7 +3176,7 @@ class Download:
         moved: bool = skip_file
 
         if not skip_file:
-            self.fn_logger.debug(f"Move: {path_media_src} -> {path_media_dst}")
+            self.fn_logger.debug(f"Move: {log_content(path_media_src)} -> {log_content(path_media_dst)}")
             moved = self._move_file(path_media_src, path_media_dst, overwrite=overwrite)
 
         # Only replace the source with a symlink once the destination actually exists, otherwise a failed
@@ -2359,7 +3184,7 @@ class Download:
         if not moved or skip_symlink:
             return
 
-        self.fn_logger.debug(f"Symlink: {path_media_src} -> {path_media_dst}")
+        self.fn_logger.debug(f"Symlink: {log_content(path_media_src)} -> {log_content(path_media_dst)}")
         path_media_dst_relative: pathlib.Path = path_media_dst.relative_to(path_media_src.parent, walk_up=True)
 
         # The playlist directory may not exist yet: when the track was
@@ -2373,11 +3198,17 @@ class Download:
             self._ensure_directory(path_media_src.parent)
             if self._unlink_with_retry(path_media_src):
                 path_media_src.symlink_to(path_media_dst_relative)
+                # A file this run made, even when the audio behind it was
+                # already on disk: the playlist folder really was filled here,
+                # and its m3u is the one this symlink belongs in.
+                self._note_dir_filled(path_media_src)
             else:
-                self.fn_logger.error(f"Unable to replace source with symlink: {path_media_src}")
+                self.fn_logger.error(f"Unable to replace source with symlink: {log_content(path_media_src)}")
         except OSError as error:
             # fn_logger may be a plain callable wrapper without .exception
-            self.fn_logger.error(f"Unable to create playlist symlink {path_media_src}: {error}")  # noqa: TRY400
+            self.fn_logger.error(  # noqa: TRY400
+                f"Unable to create playlist symlink {log_content(path_media_src)}: {_os_error_text(error)}"
+            )
 
     def adjust_quality_audio(self, quality: Quality) -> Quality:
         """Temporarily set audio quality and return the previous value.
@@ -2440,10 +3271,12 @@ class Download:
                 if attempt == self._FILE_OPERATION_RETRIES - 1:
                     break
                 delay_sec: float = self._file_operation_retry_delay(attempt)
-                self.fn_logger.debug(f"File operation failed ({description}); retrying in {delay_sec:.1f}s: {error}")
+                self.fn_logger.debug(
+                    f"File operation failed ({description}); retrying in {delay_sec:.1f}s: {_os_error_text(error)}"
+                )
                 time.sleep(delay_sec)
 
-        self.fn_logger.error(f"File operation failed after retries ({description}): {error_last}")
+        self.fn_logger.error(f"File operation failed after retries ({description}): {_os_error_text(error_last)}")
         return False
 
     def _unlink_with_retry(self, path_file: pathlib.Path) -> bool:
@@ -2460,7 +3293,7 @@ class Download:
             path_file.unlink(missing_ok=True)
             return True
 
-        return self._retry_file_operation(operation, f"unlink {path_file}")
+        return self._retry_file_operation(operation, f"unlink {log_content(path_file)}")
 
     def _makedirs_with_retry(self, path_dir: pathlib.Path) -> None:
         """Create a destination directory, retrying transient failures.
@@ -2484,7 +3317,9 @@ class Download:
                 if attempt == self._FILE_OPERATION_RETRIES - 1:
                     break
                 delay_sec: float = self._file_operation_retry_delay(attempt)
-                self.fn_logger.debug(f"Could not create directory ({path_dir}); retrying in {delay_sec:.1f}s: {error}")
+                self.fn_logger.debug(
+                    f"Could not create directory ({log_content(path_dir)}); retrying in {delay_sec:.1f}s: {_os_error_text(error)}"
+                )
                 time.sleep(delay_sec)
             else:
                 return
@@ -2545,6 +3380,7 @@ class Download:
         path_file_destination: str | pathlib.Path,
         overwrite: bool = True,
         skip_if_exists: bool = False,
+        occupant_is_own: Callable[[pathlib.Path], bool] | None = None,
     ) -> bool:
         """Move a file from source to destination.
 
@@ -2553,9 +3389,16 @@ class Download:
             path_file_destination (str | pathlib.Path): Destination file path.
             overwrite (bool): Whether to overwrite an existing destination file.
             skip_if_exists (bool): Whether an existing destination should be treated as success.
+            occupant_is_own (Callable[[pathlib.Path], bool] | None): Asked, when an
+                occupied destination has to be refused, whether the file sitting
+                there is this download's own copy after all. That is not a loss
+                and must not be reported as one (see the refusal below).
+                Defaults to None, which reads every occupant as a stranger.
 
         Returns:
-            bool: True if moved, False otherwise.
+            bool: True if moved, False otherwise. False for an occupied
+                destination either way: this never replaces a file, and the
+                caller decides what an occupant of its own means for the item.
         """
         path_destination: pathlib.Path = pathlib.Path(path_file_destination)
 
@@ -2577,13 +3420,25 @@ class Download:
                 if not overwrite and not _is_truncated_leftover(path_destination):
                     # Nothing raised, so the retry wrapper has nothing to log: say it here or
                     # a finished download disappears without a word (issue #15 follow-up).
-                    # In-process collisions cannot reach this any more (the name was claimed
-                    # before the metadata step), so this means another writer, and guessing a
-                    # new name would strand the lyrics and cover already written for this one.
-                    self.fn_logger.error(
-                        f"Destination is already occupied by another writer, "
-                        f"leaving the download out of the library: '{path_destination}'"
-                    )
+                    # Guessing a new name instead would strand the lyrics and cover already
+                    # written for this one.
+                    #
+                    # ONE in-process collision does reach this: a collection may list the same
+                    # item twice, both occurrences hold the one name their item claimed, and
+                    # the slower of them arrives to find its own twin's file here. Nothing is
+                    # left out of the library then, so saying so at ERROR turned an expected
+                    # step-aside into a support bundle's only sign of a lost download, and made
+                    # a real foreign occupant unreadable next to it.
+                    if occupant_is_own is not None and occupant_is_own(path_destination):
+                        self.fn_logger.debug(
+                            f"Destination already holds this item's own copy, so this pass wrote "
+                            f"nothing: '{log_content(path_destination)}'"
+                        )
+                    else:
+                        self.fn_logger.error(
+                            f"Destination is already occupied by another writer, "
+                            f"leaving the download out of the library: '{log_content(path_destination)}'"
+                        )
 
                     return False
                 return self._stage_and_swap(path_file_source, path_destination, skip_if_exists)
@@ -2599,9 +3454,11 @@ class Download:
             # for a finished download and skip.
             #
             # replace() overwrites whatever appeared since the exists() check above.
-            # No download of ours can be there (colliding names are claimed before the
-            # metadata step), so that window is another writer's, and it is not one
-            # this process can close on a network mount.
+            # No download of a DIFFERENT item can be there (colliding names are claimed
+            # before the metadata step), so that window is another writer's, and it is not
+            # one this process can close on a network mount. The one download of ours that
+            # can land in it is this item's own twin, carrying the same bytes of the same
+            # song, so the file the caller ends up with is the file it asked for.
             try:
                 path_file_source.replace(path_destination)
             except OSError as error:
@@ -2622,7 +3479,9 @@ class Download:
 
             return self._stage_and_swap(path_file_source, path_destination, skip_if_exists)
 
-        moved: bool = self._retry_file_operation(operation, f"move {path_file_source} -> {path_destination}")
+        moved: bool = self._retry_file_operation(
+            operation, f"move {log_content(path_file_source)} -> {log_content(path_destination)}"
+        )
 
         # The file is in place; drop the xattrs macOS attached on creation so
         # WebDAV-backed destinations do not keep a ._ AppleDouble ghost per file.
@@ -2660,7 +3519,17 @@ class Download:
         try:
             self._copy_file_contents(path_file_source, path_destination_tmp)
             path_destination_tmp.replace(path_destination)
-            path_file_source.unlink(missing_ok=True)
+            # Past the swap, the track has landed and nothing may unmake that.
+            # A source that will not go away this instant (a Windows scanner
+            # holding the temp for a moment, the exact lock the retry helpers
+            # exist for) used to re-raise here, and the retry then found the
+            # destination occupied by "another writer" and reported the landed
+            # track FAILED: red row, misleading log, and its .lrc and cover
+            # never moved, with a re-run skipping it as existing so the
+            # sidecars never arrived at all. The source sits in this item's own
+            # temp directory, which is cleared when the item finishes.
+            with contextlib.suppress(OSError):
+                path_file_source.unlink(missing_ok=True)
         except OSError as error:
             if isinstance(error, FileNotFoundError):
                 self._dirs_ensured.discard(str(path_destination.parent))
@@ -2802,6 +3671,30 @@ class Download:
 
         return result
 
+    _COVER_CACHE_MAX = 16
+
+    def cover_data_cached(self, url: str | None) -> str | bytes:
+        """cover_data through the per-job cache (see __init__). Counters only;
+        the URL itself is never logged. Concurrent first asks for the same URL
+        may both fetch (the lock is not held over the network), which only
+        costs one duplicate GET on a job's opening beat."""
+        if not url:
+            return ""
+        with self._cover_cache_lock:
+            data = self._cover_cache.get(url)
+            if data is not None:
+                self._cover_cache.move_to_end(url)
+                self._cover_cache_hits += 1
+                return data
+        fetched = self.cover_data(url=url)
+        if fetched:
+            with self._cover_cache_lock:
+                self._cover_cache_fetches += 1
+                self._cover_cache[url] = fetched
+                while len(self._cover_cache) > self._COVER_CACHE_MAX:
+                    self._cover_cache.popitem(last=False)
+        return fetched
+
     @staticmethod
     def _want_cover_file(save_cover: bool, is_parent_album: bool, single_track: bool) -> bool:
         """Whether to write the separate cover.jpg. The master toggle (save_cover)
@@ -2826,10 +3719,10 @@ class Download:
         """Cover bytes for the separate cover.jpg at ``file_dim``, reusing the
         already-fetched embedded bytes when the two sizes match (no re-download)."""
         if file_dim == CoverDimensions.PxORIGIN:
-            return self.cover_data(url=track.album.image(CoverDimensions.PxORIGIN))
+            return self.cover_data_cached(track.album.image(CoverDimensions.PxORIGIN))
         if file_dim == embedded_dim:
             return embedded_data
-        return self.cover_data(url=track.album.image(int(file_dim)))
+        return self.cover_data_cached(track.album.image(int(file_dim)))
 
     def _retrieve_lyrics(self, track: Track) -> tuple[str, str, str]:
         """Fetch lyrics for a track, LRCLIB first, TIDAL as the fallback.
@@ -2896,10 +3789,17 @@ class Download:
         path_lyrics: pathlib.Path | None = None
         lyrics_suffix: str = EXTENSION_LYRICS
         path_cover: pathlib.Path | None = None
+        # A track can reach here with no album at all: TIDAL's playlist pages
+        # carry entries whose album block is absent, and the re-fetch only
+        # replaces an album it already found one to replace. The rest of this
+        # method has always guarded for that (see the `if track.album` tests
+        # below); these two spellings did not, and on a playlist that meant an
+        # AttributeError per unlucky track (issue #35).
+        album = getattr(track, "album", None)
         release_date: str = (
-            track.album.available_release_date.strftime("%Y-%m-%d")
-            if track.album.available_release_date
-            else track.album.release_date.strftime("%Y-%m-%d") if track.album.release_date else ""
+            album.available_release_date.strftime("%Y-%m-%d")
+            if album and album.available_release_date
+            else album.release_date.strftime("%Y-%m-%d") if album and album.release_date else ""
         )
         copy_right: str = track.copyright if hasattr(track, "copyright") and track.copyright else ""
         isrc: str = track.isrc if hasattr(track, "isrc") and track.isrc else ""
@@ -2935,12 +3835,12 @@ class Download:
             getattr(self.settings.data, "cover_single_track_file", False),
         )
 
-        if self.settings.data.metadata_cover_embed or want_cover_file:
+        if album is not None and (self.settings.data.metadata_cover_embed or want_cover_file):
             # Do not write CoverDimensions.PxORIGIN to metadata, since it can exceed max metadata file size (>16Mb)
-            url_cover = track.album.image(
+            url_cover = album.image(
                 int(cover_dimension) if cover_dimension != CoverDimensions.PxORIGIN else int(CoverDimensions.Px1280)
             )
-            cover_data = self.cover_data(url=url_cover)
+            cover_data = self.cover_data_cached(url_cover)
 
         if cover_data and want_cover_file:
             cover_data_album_file = self._album_cover_file_data(
@@ -2955,36 +3855,61 @@ class Download:
         title += METADATA_EXPLICIT if explicit and self.settings.data.mark_explicit else ""
 
         # `None` values are not allowed.
-        m: Metadata = Metadata(
-            path_file=path_media,
-            target_upc=target_upc,
-            lyrics=lyrics_synced,
-            lyrics_unsynced=lyrics_unsynced,
-            copy_right=copy_right,
-            title=title,
-            artists=[a.name for a in track.artists],
-            album=track.album.name if track.album else "",
-            tracknumber=track.track_num,
-            date=release_date,
-            isrc=isrc,
-            albumartist=get_album_artists(track),
-            totaltrack=track.album.num_tracks if track.album and track.album.num_tracks else 1,
-            totaldisc=track.album.num_volumes if track.album and track.album.num_volumes else 1,
-            discnumber=track.volume_num if track.volume_num else 1,
-            cover_data=cover_data if self.settings.data.metadata_cover_embed else None,
-            album_replay_gain=media_stream.album_replay_gain,
-            album_peak_amplitude=media_stream.album_peak_amplitude,
-            track_replay_gain=media_stream.track_replay_gain,
-            track_peak_amplitude=media_stream.track_peak_amplitude,
-            url_share=track.share_url if track.share_url and self.settings.data.metadata_write_url else "",
-            replay_gain_write=self.settings.data.metadata_replay_gain,
-            upc=track.album.upc if track.album and track.album.upc else "",
-            explicit=explicit,
-            bpm=track.bpm if track.bpm else 0,
-            initial_key=format_initial_key(track.key, track.key_scale, self.settings.data.initial_key_format),
-            release_type=release_type,
-            item_id=_waves_item_id(track),
-        )
+        #
+        # The construction is guarded, and deliberately guarded APART from the
+        # save below. Metadata.__init__ OPENS the file through mutagen, which
+        # answers a header-intact but malformed container with a MutagenError
+        # rather than the None that becomes MetadataUnreadable, and can raise
+        # OSError on the read; unguarded, a file this app cannot read escaped a
+        # method whose whole point is that a track it cannot tag fails alone.
+        # A failure to WRITE keeps its old, narrow handling: that one is the
+        # disk saying no, and it is not for this method to decide the track was
+        # fine (the collection loop counts the raise as that track's failure).
+        try:
+            m: Metadata = Metadata(
+                path_file=path_media,
+                target_upc=target_upc,
+                lyrics=lyrics_synced,
+                lyrics_unsynced=lyrics_unsynced,
+                copy_right=copy_right,
+                title=title,
+                artists=[a.name for a in track.artists],
+                album=album.name if album else "",
+                tracknumber=track.track_num,
+                date=release_date,
+                isrc=isrc,
+                albumartist=get_album_artists(track),
+                # An album fetched through the 404 fallback carries no track
+                # count, and "of 1" beside a real track number is a claim the
+                # data does not support (the naming rule for the same unknown,
+                # in helper/path.py, writes nothing rather than a made-up one).
+                # 0 is how both containers spell "unknown".
+                totaltrack=album.num_tracks if album and album.num_tracks else 0,
+                totaldisc=album.num_volumes if album and album.num_volumes else 1,
+                discnumber=track.volume_num if track.volume_num else 1,
+                cover_data=cover_data if self.settings.data.metadata_cover_embed else None,
+                album_replay_gain=media_stream.album_replay_gain,
+                album_peak_amplitude=media_stream.album_peak_amplitude,
+                track_replay_gain=media_stream.track_replay_gain,
+                track_peak_amplitude=media_stream.track_peak_amplitude,
+                url_share=track.share_url if track.share_url and self.settings.data.metadata_write_url else "",
+                replay_gain_write=self.settings.data.metadata_replay_gain,
+                upc=album.upc if album and album.upc else "",
+                explicit=explicit,
+                bpm=track.bpm if track.bpm else 0,
+                initial_key=format_initial_key(track.key, track.key_scale, self.settings.data.initial_key_format),
+                release_type=release_type,
+                item_id=_waves_item_id(track),
+                artist_ids=_artist_ids(track),
+                album_artist_ids=get_album_artist_ids(track),
+            )
+        except (MetadataUnreadable, MutagenError, OSError):
+            # A truncated/unidentifiable file (e.g. a failed download) can't be tagged.
+            # Fail only this item's tagging instead of aborting the whole collection.
+            self.fn_logger.exception(
+                f"Could not write metadata; file is unreadable: {log_content(name_builder_item(track))}"
+            )
+            return False, path_lyrics, lyrics_suffix, path_cover
 
         try:
             m.save()
@@ -3013,6 +3938,17 @@ class Download:
         artists: list[str] = [a.name for a in getattr(video, "artists", None) or []]
         primary = getattr(video, "artist", None)
         albumartist: list[str] = [primary.name] if primary is not None and getattr(primary, "name", "") else artists[:1]
+        # ONE artist object decides both the name and the id, so the two can
+        # never name different people. A choice that carries no id writes no id
+        # at all rather than the next artist's: a missing id means unknown, and
+        # unknown must never read as somebody else, which is the whole reason
+        # this tag exists.
+        credited = getattr(video, "artists", None) or []
+        album_artist = primary if primary is not None and getattr(primary, "name", "") else next(iter(credited), None)
+        artist_ids: list[str] = _artist_ids(video)
+        album_artist_ids: list[str] = (
+            [str(album_artist.id)] if album_artist is not None and getattr(album_artist, "id", None) else []
+        )
         # A video's album is usually an unparsed placeholder; only a real
         # name is worth writing.
         album_name: str = getattr(getattr(video, "album", None), "name", "") or ""
@@ -3021,7 +3957,7 @@ class Download:
         if self.settings.data.metadata_cover_embed and getattr(video, "cover", None):
             try:
                 # 1080x720 is the largest thumbnail TIDAL serves for videos.
-                cover_data = self.cover_data(url=video.image(1080, 720))
+                cover_data = self.cover_data_cached(video.image(1080, 720))
             except Exception:
                 self.fn_logger.debug(f"No usable thumbnail for video {video.id}; tagging without a cover.")
 
@@ -3042,6 +3978,8 @@ class Download:
             explicit=explicit,
             is_video=True,
             item_id=str(video.id),
+            artist_ids=artist_ids,
+            album_artist_ids=album_artist_ids,
         )
 
         try:
@@ -3083,6 +4021,13 @@ class Download:
             quality_video (QualityVideo | None, optional): Video quality. Defaults to None.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
         """
+        # Enumerating a collection is API traffic of its own (a 500-track
+        # playlist pages through the whole list before a single item starts),
+        # and it runs on the job's own thread, which the pool hands out again
+        # after the job: so this thread's retry waits are claimed here too,
+        # not left pointing at whatever ran on it last.
+        api_waits_wake_for(event_stop or self.event_abort)
+
         # Validate and prepare media collection
         validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download)
         if validated_media is None or not isinstance(validated_media, Album | Playlist | UserPlaylist | Mix):
@@ -3104,6 +4049,8 @@ class Download:
         is_album: bool = isinstance(media, Album)
         list_total: int = len(items)
 
+        self._note_list_size(list_total)
+
         # Execute downloads
         result_paths: list[pathlib.Path] = self._execute_collection_downloads(
             items,
@@ -3122,7 +4069,22 @@ class Download:
         # Create playlist file if requested.
         self._playlist_for_collection(media, file_name_relative, result_paths)
 
+        if self._cover_cache_hits or self._cover_cache_fetches:
+            self.fn_logger.debug(
+                f"Cover cache for this list: {self._cover_cache_hits} hits, {self._cover_cache_fetches} fetches."
+            )
         self.fn_logger.info(f"Finished list '{log_content(list_media_name)}'.")
+
+    def _note_list_size(self, count: int) -> None:
+        """Hook: how many items this collection turned out to hold, known only
+        once the enumeration has paged through it.
+
+        A caller judging the outcome from the tallies cannot otherwise tell an
+        EMPTY collection (a freshly made playlist, or one holding nothing but
+        videos, which the item list strips) from one whose every stream was
+        refused: both arrive with every counter at zero, and the second is a
+        real failure. Base engine: nothing to report to.
+        """
 
     def _playlist_for_collection(
         self,
@@ -3139,9 +4101,16 @@ class Download:
         tracks were sourced. Kept as one method so the two cannot drift on what
         the file is called, whether it sorts by number, or what it lists.
 
-        The landed paths carry the list's own track order, so the m3u plays
+        The reported paths carry the list's own track order, so the m3u plays
         back in TIDAL's order (issue #22); the directory set alone cannot say
-        which track comes first.
+        which track comes first. They are also the m3u's CONTENTS, skipped
+        tracks included: re-downloading an album whose songs are already there
+        must still list the whole album, not just the one song that was
+        missing. What they are NOT is the writer's SCOPE. Writing the playlist
+        REPLACES the file a directory already holds, so the directories are
+        narrowed to the ones this run actually put a file into
+        (_dirs_this_run_filled); a run that skipped everything writes nothing
+        anywhere.
 
         ``file_template`` may be the raw template or the collection-formatted
         one: the item tokens the sort decision reads ({album_track_num},
@@ -3152,7 +4121,7 @@ class Download:
             return
 
         self.playlist_populate(
-            {p.parent for p in result_paths},
+            self._dirs_this_run_filled(result_paths),
             name_builder_title(media),
             isinstance(media, Album),
             bool("album_track_num" in file_template or "list_pos" in file_template),
@@ -3300,11 +4269,12 @@ class Download:
         # success. A single failed track therefore left the whole item list being
         # re-submitted forever, re-downloading every sibling on each pass.
         while not progress.tasks[progress_task].finished:
+            COLLECTION_GAUGE.limit(self.settings.data.downloads_concurrent_max)
             with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
                 # Dispatch all download tasks to worker threads
                 download_futures: list[futures.Future] = [
                     executor.submit(
-                        self.item,
+                        self._item_gauged,
                         media=item_media,
                         file_template=file_name_relative,
                         quality_audio=quality_audio,
@@ -3364,8 +4334,24 @@ class Download:
 
                 break
 
-            # Surface a crashed item's exception now, as this always did.
-            future.result()
+            # An item that crashed is THAT item's failure, not the list's. This
+            # used to re-raise, which unwound the whole collection: the outcome
+            # was never judged from the counters, the m3u was never written, and
+            # the row reported whatever the one bad item happened to raise. On a
+            # 500-track playlist a single crash therefore threw away the reading
+            # of 499 successes (issue #35). Counted here, exactly as the merge
+            # fan-out counts its own crashes, so _collection_incomplete_reason
+            # judges the list.
+            try:
+                future.result()
+            except ApiCallStopped:
+                # The item's retry ladder refused another call because the job
+                # was stopped. Not a crash: counting it would report a stopped
+                # list as a partly failed one.
+                self.fn_logger.debug("An item was abandoned: the download was stopped")
+            except Exception:
+                self.fn_logger.exception("An item of this list could not be downloaded.")
+                self._note_item_crashed()
 
             # Advance progress bar.
             progress.advance(progress_task)
@@ -3392,10 +4378,20 @@ class Download:
         exclusion or a copy owned elsewhere answers ``(True, "")``, and a
         refusal, a failed fetch, a stopped download or a name with no free
         variant answers ``(False, <the path it was aiming for>)`` from before
-        anything was written there. Neither is a landed file, so neither hands
-        the playlist writer a folder this run did not fill; a first-time album
-        that lost every track used to fail on the playlist's own temp file in a
-        folder that was never created, and that error hid the real reason.
+        anything was written there. Neither produced a file, so neither is
+        listed; a first-time album that lost every track used to fail on the
+        playlist's own temp file in a folder that was never created, and that
+        error hid the real reason.
+
+        A reported path is NOT proof this run wrote it. An item found already
+        on disk answers ``(True, <the file it found>)``, which is right for the
+        m3u's contents (a re-download of an album you already have still lists
+        the whole album) and wrong for the m3u's scope: with skip-existing on,
+        which is the default, a re-download of an owned album reports nothing
+        but folders that pre-date this run, and pointing the writer at those
+        would replace a playlist file it has no business touching. The scope is
+        decided separately, from what was actually written
+        (:meth:`_dirs_this_run_filled`).
         """
         result_paths: list[pathlib.Path] = []
 
@@ -3500,7 +4496,21 @@ class Download:
                     for path_track in path_tracks:
                         # If it's a symlink write the relative file path to the actual track into the playlist file
                         if path_track.is_symlink():
-                            media_file_target = path_track.resolve().relative_to(path_track.parent, walk_up=True)
+                            try:
+                                media_file_target = path_track.resolve().relative_to(path_track.parent, walk_up=True)
+                            except (OSError, ValueError):
+                                # resolve() can spell the target on a different
+                                # anchor than the link's own folder: a Windows
+                                # mapped drive resolves to its UNC name, so the
+                                # two are 'Z:\...' and '\\server\share\...',
+                                # and relating them raises ValueError. That
+                                # escaped the whole collection job at its very
+                                # last step, with every track already landed and
+                                # a hidden temp left behind on each retry. The
+                                # link's own name plays exactly as well: a
+                                # player follows the link the way it followed
+                                # the relative target.
+                                media_file_target = path_track.name
                         else:
                             media_file_target = path_track.name
 
@@ -3513,9 +4523,12 @@ class Download:
                     os.fsync(f.fileno())
 
                 path_playlist_tmp.replace(path_playlist)
-            except OSError:
+            except (OSError, ValueError):
                 # Never leave the throwaway behind, and never let a failing
-                # cleanup mask what actually went wrong.
+                # cleanup mask what actually went wrong. ValueError is here so
+                # the cleanup is never narrower than the body it guards: a path
+                # comparison inside can raise it, and the temp would then
+                # survive every attempt.
                 with contextlib.suppress(OSError):
                     path_playlist_tmp.unlink(missing_ok=True)
 
@@ -3581,15 +4594,36 @@ class Download:
         # and this run's order is applied to it only when the two agree on the
         # contents; otherwise the folder listing stands, exactly as it did
         # before order was known at all.
-        here = set(path_tracks)
+        # Matched on the key two spellings of one file share, not on the raw
+        # path: a normalizing filesystem (HFS+ externals, several NAS shares)
+        # stores an accented name as NFD while this run wrote it as NFC, and
+        # those compare unequal. Every accented track then missed the folder
+        # set, the counts could not agree, and TIDAL's order stood down on
+        # exactly the libraries most likely to hold accented titles: the
+        # issue #22 symptom, silently, with nothing logged.
+        here: dict[str, pathlib.Path] = {}
+        for landed in path_tracks:
+            here.setdefault(name_comparison_key(str(landed)), landed)
         # First occurrences only: a playlist can carry the same track twice,
         # and both occurrences land on ONE file (the name ledger lets an item
         # retake its own name), so the raw ordered list held that path twice,
         # could never match the folder's count, and the order fix silently
         # stood down for exactly those playlists. One entry per file keeps the
         # order; the duplicate spin is the playlist's business, not the m3u's.
-        seen: set[pathlib.Path] = set()
-        ordered = [p for p in paths_ordered if p in here and not (p in seen or seen.add(p))]
+        seen: set[str] = set()
+        ordered: list[pathlib.Path] = []
+
+        for wrote in paths_ordered:
+            key = name_comparison_key(str(wrote))
+
+            if key in seen or key not in here:
+                continue
+
+            seen.add(key)
+            # The folder's spelling, never this run's: the m3u has to name each
+            # file the way the filesystem actually stores it.
+            ordered.append(here[key])
+
         return ordered if len(ordered) == len(path_tracks) else path_tracks
 
     def _video_convert(self, path_file: pathlib.Path) -> pathlib.Path:
@@ -3603,7 +4637,7 @@ class Download:
         """
         path_file_out: pathlib.Path = path_file.with_suffix(AudioExtensions.MP4)
 
-        self.fn_logger.debug(f"Converting video: {path_file.name} -> {path_file_out.name}")
+        self.fn_logger.debug(f"Converting video: {log_content(path_file.name)} -> {log_content(path_file_out.name)}")
 
         ffmpeg = (
             FFmpeg(executable=self.settings.data.path_binary_ffmpeg)
@@ -3616,7 +4650,7 @@ class Download:
 
         ffmpeg.execute()
 
-        self.fn_logger.debug(f"Video conversion complete: {path_file_out.name}")
+        self.fn_logger.debug(f"Video conversion complete: {log_content(path_file_out.name)}")
 
         return path_file_out
 
@@ -3778,8 +4812,8 @@ class Download:
             ffmpeg.execute()
 
             if not self._move_file(path_out, path_file, overwrite=True):
-                self.fn_logger.error(f"Unable to replace downsampled file: {path_file}")
-                raise OSError(f"Unable to replace downsampled file: {path_file}")
+                self.fn_logger.error(f"Unable to replace downsampled file: {log_content(path_file)}")
+                raise OSError("Unable to replace downsampled file")
 
         return path_file
 

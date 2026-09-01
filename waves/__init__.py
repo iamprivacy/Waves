@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 import importlib.metadata
+import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-import toml
 
-from tidaler.constants import REQUESTS_TIMEOUT_SEC
-from tidaler.model.meta import ProjectInformation, ReleaseLatest
+from waves.constants import REQUESTS_TIMEOUT_SEC
+from waves.model.meta import ProjectInformation, ReleaseLatest
 
 # Sentinel version returned by latest_version_information() when the update
 # check could not be completed (e.g. no network). It must never compare equal
@@ -30,7 +30,8 @@ def metadata_project() -> ProjectInformation:
         pyproject_toml_file: Path = pyproject_toml_dir / "pyproject.toml"
 
         if pyproject_toml_file.is_file():
-            tmp_result = toml.load(pyproject_toml_file)
+            with pyproject_toml_file.open("rb") as f:
+                tmp_result = tomllib.load(f)
 
             break
 
@@ -115,7 +116,18 @@ def name_package() -> str:
     return package_name
 
 
+# is_dev_env() cache: the verdict cannot change within a process, and the
+# importlib.metadata probe behind it costs real import-time work (it used to
+# run twice before the first window appeared).
+_is_dev_env: bool | None = None
+
+
 def is_dev_env() -> bool:
+    global _is_dev_env
+
+    if _is_dev_env is not None:
+        return _is_dev_env
+
     package_name: str = name_package()
     result: bool = False
 
@@ -129,6 +141,7 @@ def is_dev_env() -> bool:
             # If package is not installed
             result = True
 
+    _is_dev_env = result
     return result
 
 
@@ -142,20 +155,39 @@ def name_app() -> str:
     return app_name
 
 
-__name_display__ = name_app()
-__version__ = version_app()
+# __name_display__, __version__ and __config_dirname__ are computed on first
+# access (PEP 562) instead of at import time: eagerly they cost two
+# importlib.metadata probes plus a pyproject.toml parse before the first
+# window can appear, and most launches never read __name_display__ or
+# __version__ at all (the UI carries its own version literal).
+#
+# __config_dirname__ is the per-user state directory name (settings, token,
+# log, managed ffmpeg, updater staging). A hardcoded literal, deliberately
+# independent of the package name: a package rename must never move or strand
+# this folder. It also must never collide with ~/.config/tidaler, where an
+# installed copy of the upstream Tidaler / tidal-dl-ng app keeps ITS login
+# and settings; Waves state stays fully isolated from every other app's.
+def __getattr__(name: str):
+    if name == "__name_display__":
+        value = name_app()
+    elif name == "__version__":
+        value = version_app()
+    elif name == "__config_dirname__":
+        value = "Waves-dev" if is_dev_env() else "Waves"
+    else:
+        msg = f"module {__name__!r} has no attribute {name!r}"
+        raise AttributeError(msg)
 
-# Per-user state directory name (settings, token, log, managed ffmpeg, updater
-# staging). Deliberately NOT the package name: the package is still "tidaler"
-# for upstream-merge friendliness, but sharing ~/.config/tidaler would make
-# Waves silently pick up an installed Tidaler / tidal-dl-ng login and settings.
-# Waves state must be fully isolated from every other app's.
-__config_dirname__ = "Waves-dev" if is_dev_env() else "Waves"
+    globals()[name] = value  # cache: later reads skip this hook entirely
+    return value
 
 
 def update_available() -> tuple[bool, ReleaseLatest]:
     latest_info: ReleaseLatest = latest_version_information()
-    version_current: str = f"v{__version__}"
+    # version_app(), not the module attribute: a global read from inside the
+    # module bypasses the lazy __getattr__ hook and would NameError before
+    # anything else touched __version__.
+    version_current: str = f"v{version_app()}"
 
     # A failed check (sentinel version) is NOT an available update; treating it
     # as one would show a bogus "v0.0.0 update available" prompt when offline.

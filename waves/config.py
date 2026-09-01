@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import shutil
+import tempfile
+import threading
 import time
 from collections.abc import Callable
 from json import JSONDecodeError
@@ -11,16 +13,19 @@ from threading import Event, Lock
 from typing import Any
 
 import tidalapi
+from requests.adapters import HTTPAdapter, Retry
+from urllib3.exceptions import InvalidHeader
 
-from tidaler.constants import (
+from waves.constants import (
     ATMOS_CLIENT_ID,
     ATMOS_CLIENT_SECRET,
     ATMOS_REQUEST_QUALITY,
+    REQUESTS_TIMEOUT_SEC,
 )
-from tidaler.helper.decorator import SingletonMeta
-from tidaler.helper.path import path_config_base, path_file_settings, path_file_token
-from tidaler.model.cfg import Settings as ModelSettings
-from tidaler.model.cfg import Token as ModelToken
+from waves.helper.decorator import SingletonMeta
+from waves.helper.path import path_config_base, path_file_settings, path_file_token
+from waves.model.cfg import Settings as ModelSettings
+from waves.model.cfg import Token as ModelToken
 
 logger = logging.getLogger("waves.config")
 
@@ -64,6 +69,12 @@ class BaseConfig:
         if config_to_compare == data_json:
             return
 
+        self.write_serialized(data_json)
+
+    def write_serialized(self, data_json: str) -> None:
+        """The disk half of :meth:`save`, for a caller that serialized the data
+        itself (the GUI snapshots the JSON on its thread, microseconds, and
+        hands only this fsync-bearing part to a background writer)."""
         # Try to create the base folder.
         os.makedirs(self.path_base, exist_ok=True)
 
@@ -73,11 +84,31 @@ class BaseConfig:
         # Windows), so a reader (or the next launch) only ever sees a complete
         # file. This mirrors the page_cache write in the Waves bridge.
         obj_json_config = json.loads(data_json)  # pretty format
-        tmp_path = f"{self.file_path}.tmp"
-        with open(tmp_path, encoding="utf-8", mode="w") as f:
-            json.dump(obj_json_config, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno())
+        # A temp sibling of this write's OWN, not one fixed name. Nothing stops
+        # a second copy of Waves running against the same config folder (the
+        # launch path contemplates one), and both staged through
+        # "settings.json.tmp": open() truncates and each writer flushes its own
+        # length, so the two interleaved into one file and whichever os.replace
+        # landed last published the mixture. The next launch called that
+        # corrupt, moved it to .bak and started on factory defaults, taking the
+        # download folder, the templates and the quality with it; the identical
+        # shape on token.json signs the user out.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(self.file_path) or ".",
+            prefix=f"{os.path.basename(self.file_path)}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, mode="w", encoding="utf-8") as f:
+                json.dump(obj_json_config, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            # Ours and nobody else's, so a failed write takes it with it rather
+            # than leaving a stray sibling in the user's config folder.
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+            raise
         _replace_with_retry(tmp_path, self.file_path)
 
     def set_option(self, key: str, value: Any) -> None:
@@ -100,8 +131,15 @@ class BaseConfig:
 
             self.data = self.cls_model.from_json(settings_json)
             result = True
-        except (JSONDecodeError, TypeError, FileNotFoundError, ValueError) as e:
-            if isinstance(e, ValueError):
+        except (JSONDecodeError, TypeError, FileNotFoundError, ValueError, AttributeError) as e:
+            # AttributeError is what a file of valid JSON whose top level is not
+            # an object raises: dataclasses_json asks the parsed value for
+            # .items(), and "[]", "null", a bare string or a number has none. It
+            # crashed every launch with a traceback, past the very self-heal this
+            # arm exists to do, and only deleting the file by hand recovered the
+            # app. A file that is there and unusable is a broken config whatever
+            # shape it is broken in.
+            if isinstance(e, ValueError | AttributeError):
                 path_bak = path + ".bak"
 
                 # First check if a backup file already exists. If yes, remove it.
@@ -134,6 +172,12 @@ class BaseConfig:
         return result
 
 
+# The longest pause anyone could mean by "how long to pause between batches of
+# songs". Above this it is a leftover from when the field counted albums and
+# paced nothing, and it costs a long list half an hour of standing still.
+_RATE_LIMIT_PAUSE_PLAUSIBLE_MAX_SEC: float = 30.0
+
+
 def _migrate_settings(data: ModelSettings) -> bool:
     """Apply one-time upgrade steps to an already-loaded settings model.
 
@@ -164,6 +208,24 @@ def _migrate_settings(data: ModelSettings) -> bool:
         data.format_playlist_folder_migrated = True
         changed = True
 
+    # The two rate-limit fields sat in Advanced while nothing read them, and
+    # they asked a different question then ("albums to process"), so a value on
+    # disk is a guess about something else that never took effect. Now that
+    # they pace real downloads, a leftover of a minute between batches would
+    # quietly add half an hour to a long playlist, so a pause no answer to the
+    # new question would give goes back to the default.
+    #
+    # It resets THAT and nothing else, because the marker cannot be relied on
+    # to keep this to one run: the marker is a field the previous release does
+    # not have, and that release rewrites settings.json from its own model on
+    # every launch, so a downgrade and back strips it and this runs again. A
+    # pace the user has since tuned is theirs, and stands.
+    if not data.api_rate_limit_wired_migrated:
+        if data.api_rate_limit_delay_sec > _RATE_LIMIT_PAUSE_PLAUSIBLE_MAX_SEC:
+            data.api_rate_limit_delay_sec = ModelSettings().api_rate_limit_delay_sec
+        data.api_rate_limit_wired_migrated = True
+        changed = True
+
     return changed
 
 
@@ -185,6 +247,180 @@ class Settings(BaseConfig, metaclass=SingletonMeta):
                 )
 
 
+# Retry policy for api.tidal.com. Every catalog call the download engine makes
+# (the track re-fetch, its album, the playback request) went out exactly once:
+# tidalapi mounts no adapter, so the first 429 or 5xx failed that track, and a
+# failed track fails the collection around it. A 12-track album never noticed;
+# a 500-track playlist makes some 1500 calls in a row and noticed every time
+# (issue #35). Nothing that REACHED TIDAL is ever sent twice: a status or read
+# retry is GET/HEAD only, so a sign-in or a playlist edit is never resubmitted,
+# and a connect retry can only repeat a request whose connection never opened.
+# TIDAL's own Retry-After wins over the backoff.
+_API_RETRY_TOTAL: int = 3
+# urllib3's ladder from this factor is 0, 3, 6 seconds: its first retry is
+# always immediate (get_backoff_time returns 0 for it), which is the right
+# answer to a one-off blip. The jitter spreads the retries after that one, so
+# workers that fell back together do not climb the ladder in step.
+#
+# What it does NOT do, whatever it looks like it promises: de-synchronize
+# workers that met one rate limit together. A 429 carrying Retry-After is slept
+# for the header's own (capped) value and never touches the backoff at all, so
+# all three wake at the same instant by design, TIDAL's design. And on a
+# header-less 429 the first retry is the flat 0 above, before any jitter
+# applies. The pace gate in download.py is what actually holds workers apart
+# under throttling; this is only the ladder's own spread.
+_API_RETRY_BACKOFF_SEC: float = 1.5
+_API_RETRY_STATUS = (429, 500, 502, 503, 504)
+# Longest one Retry-After may hold a call. urllib3 honours the header verbatim
+# and caps nothing, so a single answer could park a download worker (and, with
+# the queue running one job at a time, the queue behind it) for as long as it
+# says. Waiting a little is the point of honouring it; waiting a quarter of an
+# hour is a hang with an explanation, and the track is better off failing and
+# being retried by hand.
+#
+# It also bounds how long one call can be held: with _API_RETRY_TOTAL that is
+# at most half a minute per request, and only while TIDAL is actively
+# throttling. A STOP does not have to wait even that long: the waits below are
+# taken on the download's own abort event where there is one, so a stopped job
+# comes out of a rate-limit wait at once (see api_waits_wake_for).
+_API_RETRY_AFTER_MAX_SEC: float = 10.0
+
+# The event a retry wait on THIS thread may be cut short by. Thread-local
+# because the catalog session is shared by everything (searches, the browse
+# pages, every download worker) while an abort belongs to one job: the worker
+# that is about to make a call is the only place that knows which.
+_api_waits = threading.local()
+
+
+class ApiCallStopped(Exception):
+    """A catalog retry refused because the download it belongs to was stopped.
+
+    Raised from the retry wait, which is the last place the ladder can still
+    decide not to make the call. Callers treat it like any other failed
+    catalog call: the item they were working on is over anyway, which is what
+    the STOP said.
+    """
+
+    def __init__(self, message: str = "the download was stopped; not retrying") -> None:
+        super().__init__(message)
+
+
+def api_waits_wake_for(event) -> None:
+    """Let ``event`` cut short the catalog session's retry waits on this thread.
+
+    urllib3 sleeps between retries on the wall clock, and with the queue
+    running one job at a time that sleep is in front of the whole queue: after
+    STOP, each worker still finished its ladder (up to 30 seconds per request,
+    a minute for the two calls a track costs, and the workers serialize), so
+    the next thing the user queued sat at Queued with nothing running for a
+    minute or more. Every deliberate wait the app itself takes already wakes
+    for a STOP (see Download._sleep_politely); this is the one that did not.
+
+    Called by the engine as each item's API traffic begins, so a pooled thread
+    always carries the event of the job it is working for.
+    """
+    _api_waits.event = event
+
+
+class _ApiRetry(Retry):
+    """A Retry that cannot be told to wait indefinitely, or to fall over.
+
+    Two things happen to Retry-After here, and everything else is urllib3's.
+    It is capped, because urllib3's own ceiling is six hours. And a value it
+    cannot parse is read as no value at all rather than raised: urllib3 answers
+    anything that is not a plain count of seconds or an HTTP date with
+    InvalidHeader, and mounting a retry policy is what newly exposed us to
+    that, so a proxy's "60s" or a captive portal's prose would leave a catalog
+    call as an exception no caller expects in place of the 429 they handle.
+    Unreadable means the backoff decides, which is what happens with no header.
+
+    ``Retry.new`` rebuilds through ``type(self)``, so both survive every
+    attempt of a retried call.
+    """
+
+    def get_retry_after(self, response) -> float | None:
+        try:
+            after = super().get_retry_after(response)
+        except InvalidHeader:
+            return None
+        return None if after is None else min(after, _API_RETRY_AFTER_MAX_SEC)
+
+    def sleep(self, response=None) -> None:
+        """urllib3's own wait, taken on the caller's abort event when it has
+        one, so a stopped download is not held by a retry ladder it no longer
+        has any reason to finish. Same durations, same order (a Retry-After
+        wins over the backoff); only what is waited ON differs.
+
+        And a wait that ends because the job was STOPPED does not return: it
+        raises. urllib3 reads a returned sleep as "the wait is over" and fires
+        the next attempt at once, so cutting the waits short freed the queue
+        (which is what it was for) and turned the ladder into a burst, twenty
+        further requests inside a hundredth of a second at the one moment
+        TIDAL is already throttling us. This hook is the last place the ladder
+        can still decide not to make the call.
+        """
+        event = getattr(_api_waits, "event", None)
+        stopped = event is not None and event.is_set()
+        if stopped:
+            # Already stopped before the wait even starts, which is also the
+            # zero-backoff case (urllib3 would not have waited at all, so the
+            # check after the wait below would never see it).
+            raise ApiCallStopped
+        seconds = None
+        if self.respect_retry_after_header and response is not None:
+            seconds = self.get_retry_after(response)
+        if not seconds:  # no header, or one that says no time at all: urllib3 falls through to the backoff
+            seconds = self.get_backoff_time()
+        if seconds <= 0:
+            return
+        if event is None:
+            time.sleep(seconds)
+            return
+        event.wait(seconds)
+        if event.is_set():
+            raise ApiCallStopped
+
+
+class _ApiAdapter(HTTPAdapter):
+    """The catalog adapter: bounded retries, plus a timeout on every call.
+
+    tidalapi passes no timeout, so a black-holed connection parks a download
+    worker forever and, with the queue running one job at a time, the whole
+    queue with it. requests only applies a default when the caller gave none,
+    which is exactly the gap this fills.
+    """
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = REQUESTS_TIMEOUT_SEC
+        return super().send(request, **kwargs)
+
+
+def harden_api_session(session: tidalapi.Session) -> None:
+    """Give a tidalapi session the retry and timeout policy it ships without.
+
+    ``raise_on_status`` stays False so the last answer comes back as a
+    response: tidalapi's own ``raise_for_status`` then turns it into the very
+    same TooManyRequests / HTTPError the callers already handle, and the only
+    difference is that it took several tries to get there.
+    """
+    retry = _ApiRetry(
+        total=_API_RETRY_TOTAL,
+        connect=_API_RETRY_TOTAL,
+        read=_API_RETRY_TOTAL,
+        status=_API_RETRY_TOTAL,
+        backoff_factor=_API_RETRY_BACKOFF_SEC,
+        backoff_jitter=_API_RETRY_BACKOFF_SEC,
+        status_forcelist=_API_RETRY_STATUS,
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = _ApiAdapter(max_retries=retry)
+    session.request_session.mount("https://", adapter)
+    session.request_session.mount("http://", adapter)
+
+
 class Tidal(BaseConfig, metaclass=SingletonMeta):
     session: tidalapi.Session
     token_from_storage: bool = False
@@ -195,6 +431,7 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         self.cls_model = ModelToken
         tidal_config: tidalapi.Config = tidalapi.Config(item_limit=10000)
         self.session = tidalapi.Session(tidal_config)
+        harden_api_session(self.session)
         self.original_client_id = self.session.config.client_id
         self.original_client_secret = self.session.config.client_secret
         # The PKCE pair is a separate set of fields, and it is the one that the
@@ -214,6 +451,12 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         # session re-authentication when the session is already in the
         # correct mode (Atmos or Normal).
         self.is_atmos_session = False
+        # Called with this session whenever a credential on it has just been
+        # minted, so the log redactor can be taught it at the moment it exists
+        # (a secret is registered where it is acquired). A hook rather than an
+        # import, so the config layer goes on knowing nothing about the UI, and
+        # None by default so a headless run needs nothing.
+        self.on_session_credentials = None
         self.file_path = path_file_token()
         self.token_from_storage = self.read(self.file_path)
 
@@ -265,6 +508,20 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
 
         return result
 
+    def _note_session_credentials(self) -> None:
+        """Tell the listener (if any) that this session's credentials are new.
+
+        Best-effort in every direction: a listener that raises must never take
+        a login or a quality switch down with it.
+        """
+        sink = getattr(self, "on_session_credentials", None)
+
+        if sink is None:
+            return
+
+        with contextlib.suppress(Exception):
+            sink(self.session)
+
     def token_persist(self) -> None:
         self.set_option("token_type", self.session.token_type)
         self.set_option("access_token", self.session.access_token)
@@ -275,6 +532,8 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         # Set restrictive permissions on token file (Unix-based systems only)
         with contextlib.suppress(OSError, NotImplementedError):
             os.chmod(self.file_path, 0o600)
+
+        self._note_session_credentials()
 
     def _reauthenticate_current_client(self) -> bool:
         """Make the currently set client credentials actually take effect.
@@ -293,12 +552,19 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         try:
             if not self.login_token(do_pkce=self.is_pkce):
                 return False
-            return bool(self.session.token_refresh(self.session.refresh_token))
+            refreshed = bool(self.session.token_refresh(self.session.refresh_token))
         except Exception as exc:
             # A category, never the credential: the exception type says what
             # kind of failure it was without naming any client id or endpoint.
             logger.warning("Session re-authentication raised (%s)", type(exc).__name__)
             return False
+        else:
+            # Not persisted (see above), but very much acquired: every Atmos
+            # switch and restore comes through here, so without this the live
+            # access pass after the first Atmos album was one the redactor had
+            # never been told about.
+            self._note_session_credentials()
+            return refreshed
 
     def switch_to_atmos_session(self) -> bool:
         """
@@ -322,6 +588,14 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         self.session.config.client_id_pkce = ATMOS_CLIENT_ID
         self.session.config.client_secret_pkce = ATMOS_CLIENT_SECRET
         self.session.audio_quality = ATMOS_REQUEST_QUALITY
+        # Raised HERE, not after the re-authentication below. The flag is what
+        # stops a Settings save from writing the user's stereo tier over the
+        # Atmos request on the shared session, and the re-authentication is two
+        # network round trips (tens of seconds while TIDAL throttles): a save
+        # landing in that window used to sail through the gate, and the Atmos
+        # get_stream that followed asked at a tier the Atmos client never
+        # requests. Lowered again by the restore below if the switch fails.
+        self.is_atmos_session = True
 
         # Re-authenticate under the new client (a real refresh, not just a load).
         if not self._reauthenticate_current_client():
@@ -331,7 +605,6 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
             self.restore_normal_session(force=True)
             return False
 
-        self.is_atmos_session = True  # Set the flag
         print("Session is now in Atmos mode.")
         logger.info("Dolby Atmos session engaged")
         return True
@@ -357,6 +630,12 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
         self.session.config.client_id_pkce = self.original_client_id_pkce
         self.session.config.client_secret_pkce = self.original_client_secret_pkce
 
+        # Lowered BEFORE the tier is written, and the tier read right next to
+        # its write: while the flag is up a Settings save is held off the
+        # session, so leaving it up across the re-authentication below meant a
+        # quality change saved during the restore reached the session nowhere
+        # at all and the session kept the tier from before it.
+        self.is_atmos_session = False
         # Explicitly restore audio quality to user's configured setting
         self.session.audio_quality = tidalapi.Quality(self.settings.data.quality_audio)
 
@@ -366,7 +645,6 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
             logger.warning("Restoring the normal session failed")
             return False
 
-        self.is_atmos_session = False  # Set the flag
         print("Session is now in Normal mode.")
         logger.info("Normal session restored")
         return True

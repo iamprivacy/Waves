@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import math
 import os
 import pathlib
@@ -17,8 +18,8 @@ from pathvalidate.error import ErrorReason, ValidationError
 from tidalapi import Album, Mix, Playlist, Track, UserPlaylist, Video
 from tidalapi.media import AudioExtensions
 
-from tidaler import __config_dirname__
-from tidaler.constants import (
+from waves import __config_dirname__
+from waves.constants import (
     DOT_SEGMENT_STANDIN,
     FILENAME_LENGTH_MAX,
     FILENAME_SANITIZE_PLACEHOLDER,
@@ -26,7 +27,9 @@ from tidaler.constants import (
     UNIQUIFY_THRESHOLD,
     MediaType,
 )
-from tidaler.helper.tidal import name_builder_album_artist, name_builder_artist, name_builder_title
+from waves.helper.tidal import name_builder_album_artist, name_builder_artist, name_builder_title
+
+logger = logging.getLogger("waves.path")
 
 
 def path_home() -> str:
@@ -57,17 +60,27 @@ def path_home() -> str:
 PATH_LENGTH_MAX: int = 259 if sys.platform == "win32" else 1023
 
 
-def _path_length(path: pathlib.Path) -> int:
-    """How long a path is, the way its platform will measure it.
+def _text_length(text: str) -> int:
+    """How long a piece of a path is, the way its platform will measure it.
 
     Windows measures UTF-16 units against MAX_PATH; Python's len counts code
     points, which only differs on astral characters (each costs two UTF-16
     units), so those are counted at their real weight. POSIX measures bytes.
+
+    Split out from :func:`_path_length` because anything SUBTRACTED from a
+    whole-path budget has to be measured in the same unit as the budget. A
+    UTF-8 byte count taken off a UTF-16 measurement is two different rulers on
+    one sum, and on Windows it charged an emoji or CJK suffix three or four
+    units where the platform charges one or two.
     """
-    text = str(path)
     if sys.platform == "win32":
         return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
     return len(os.fsencode(text))
+
+
+def _path_length(path: pathlib.Path) -> int:
+    """How long a path is, the way its platform will measure it."""
+    return _text_length(str(path))
 
 
 def _exceeds_path_cap(path: pathlib.Path) -> bool:
@@ -335,6 +348,21 @@ def sanitize_name_component(
     return _tidy_spacing(result) if tidy_spacing else result
 
 
+def _album_field(media, field):
+    """One field of a track's album: None when the album has no such field to
+    give, and None when there is no album there at all.
+
+    A track whose album TIDAL has delisted still streams, and the engine keeps
+    such a track with the album summary embedded in its own JSON (id, title,
+    cover, and nothing else) or with no album at all. Every album token has to
+    survive both spellings: the alternative is a folder called "[None] Album"
+    and a file with a literal "{album_track_num}" in its name, which nothing
+    ever renames.
+    """
+    album = getattr(media, "album", None)
+    return getattr(album, field, None) if album is not None else None
+
+
 def format_path_media(
     fmt_template: str,
     media: Track | Album | Playlist | UserPlaylist | Video | Mix,
@@ -446,9 +474,26 @@ def _drop_empty_segments(path_relative: str) -> str:
     here, on the string, is the only place either can still be seen, and it
     covers every segment a template can name: artist, album, playlist, mix.
     """
-    return "/".join(
-        DOT_SEGMENT_STANDIN if part in (".", "..") else part for part in re.split(r"[\\/]+", path_relative) if part
-    )
+    parts = (_close_up_after_a_vanished_token(part) for part in re.split(r"[\\/]+", path_relative))
+    return "/".join(DOT_SEGMENT_STANDIN if part in (".", "..") else part for part in parts if part)
+
+
+def _close_up_after_a_vanished_token(part: str) -> str:
+    """Take out a bracket pair the template wrapped around nothing.
+
+    A token with no value substitutes "", and a template that dresses it wins
+    an empty pair: the shipped track template writes "[{album_year}] {album_
+    title}", so an album TIDAL has no release date for landed in a folder
+    called "[] Album". The brackets are the template's own text, so they are
+    only removed where nothing at all came back between them, and the space
+    that pair was holding open closes with it.
+
+    Nothing released ever wrote such a pair (the year read "None" instead), so
+    no library on disk is named this way and none is renamed by this.
+    """
+    if "[]" not in part and "()" not in part:
+        return part
+    return _tidy_spacing(part.replace("[]", "").replace("()", ""))
 
 
 def format_str_media(
@@ -503,7 +548,12 @@ def format_str_media(
             if result is not None:
                 return result
     except (AttributeError, KeyError, TypeError, ValueError) as e:
-        print(f"Error formatting path for media attribute '{name}': {e}")
+        # The catch stays blanket (a template token must never be what stops a
+        # download), but a stdout print is invisible in a packaged build, so
+        # the token that failed goes to the breadcrumb ring instead. The name
+        # is a template token, never user content; the exception text is what
+        # the attribute lookup said.
+        logger.warning("path: could not format the '%s' token: %s", name, e)
 
     return name
 
@@ -579,7 +629,11 @@ def _format_titles(
         if isinstance(media, Album):
             return media.name
         elif isinstance(media, Track):
-            return media.album.name
+            # A track can arrive with no album at all (a bare track id, or a
+            # song whose album TIDAL has delisted): there is no folder name to
+            # be had, so the segment empties out and the track lands in the
+            # artist folder rather than one called "{album_title}".
+            return _album_field(media, "name") or ""
     return None
 
 
@@ -645,13 +699,19 @@ def _format_numbers(
         str | None: The formatted number or None if the format string is not number-related.
     """
     if name == "album_track_num" and isinstance(media, Track | Video):
+        # An unknown track count falls back to the track's own number, so the
+        # padding is whatever that number needs and never less than the user's
+        # minimum. Passing the unknown straight through raised inside
+        # calculate_number_padding, and the blanket catch above then left a
+        # literal "{album_track_num}" in the file name.
         return calculate_number_padding(
             album_track_num_pad_min,
             media.track_num,
-            media.album.num_tracks if hasattr(media, "album") else 1,
+            _album_field(media, "num_tracks") or media.track_num or 0,
         )
     elif name == "album_num_tracks" and isinstance(media, Track | Video):
-        return str(media.album.num_tracks if hasattr(media, "album") else 1)
+        count = _album_field(media, "num_tracks")
+        return str(count) if count else ""
     elif name == "list_pos" and isinstance(media, Track | Video):
         # TODO: Rename `album_track_num_pad_min` globally.
         return calculate_number_padding(album_track_num_pad_min, list_pos, list_total)
@@ -683,7 +743,8 @@ def _format_ids(
         if isinstance(media, Album):
             return str(media.id)
         elif isinstance(media, Track):
-            return str(media.album.id)
+            album_id = _album_field(media, "id")
+            return str(album_id) if album_id is not None else ""
     # Handle ISRC
     elif name == "isrc" and isinstance(media, Track):
         # "" (my token, no value) rather than None ("not my token"): None
@@ -693,7 +754,9 @@ def _format_ids(
     elif name == "album_artist_id" and isinstance(media, Album):
         return str(media.artist.id)
     elif name == "track_artist_id" and isinstance(media, Track):
-        return str(media.album.artist.id)
+        artist = _album_field(media, "artist")
+        artist_id = getattr(artist, "id", None) if artist is not None else None
+        return str(artist_id) if artist_id is not None else ""
     return None
 
 
@@ -748,10 +811,15 @@ def _format_dates(
         str | None: The formatted date or None if the format string is not date-related.
     """
     if name == "album_year":
+        # "" on an unknown year, the same rule as album_date below: an album
+        # TIDAL has no release date for (and every album summary that arrives
+        # embedded in a track) would otherwise write the word "None" into the
+        # folder name.
         if isinstance(media, Album):
-            return str(media.year)
+            return str(media.year) if media.year else ""
         elif isinstance(media, Track):
-            return str(media.album.year)
+            year = _album_field(media, "year")
+            return str(year) if year else ""
     elif name == "album_date":
         # "" (my token, no value) rather than None ("not my token"): None
         # leaves a literal {album_date} in the folder name (back-catalogue
@@ -760,7 +828,8 @@ def _format_dates(
         if isinstance(media, Album):
             return media.release_date.strftime("%Y-%m-%d") if media.release_date else ""
         elif isinstance(media, Track):
-            return media.album.release_date.strftime("%Y-%m-%d") if media.album.release_date else ""
+            released = _album_field(media, "release_date")
+            return released.strftime("%Y-%m-%d") if released else ""
 
     return None
 
@@ -821,9 +890,9 @@ def _format_metadata(
         return ""
     elif name == "media_type":
         if isinstance(media, Album):
-            return media.type
+            return media.type or ""
         elif isinstance(media, Track):
-            return media.album.type
+            return _album_field(media, "type") or ""
     return None
 
 
@@ -841,16 +910,19 @@ def _format_volumes(
         str | None: The formatted volume information or None if the format string is not volume-related.
     """
     if name == "album_num_volumes" and isinstance(media, Album):
-        return str(media.num_volumes)
+        return str(media.num_volumes) if media.num_volumes else ""
     elif name == "track_volume_num" and isinstance(media, Track | Video):
         return str(media.volume_num)
     elif name == "track_volume_num_optional" and isinstance(media, Track | Video):
-        num_volumes: int = media.album.num_volumes if hasattr(media, "album") else 1
+        # An unknown volume count reads as one disc: a disc prefix is a claim
+        # about a set, and "1-" in front of every track of an album we know
+        # nothing about is a claim we cannot make.
+        num_volumes: int = _album_field(media, "num_volumes") or 1
         # Disc-number prefix in Plex's documented "2-01 - Track" style: the
         # dash keeps disc 2 track 13 readable as 2-13 instead of 213.
         return "" if num_volumes == 1 else f"{media.volume_num!s}-"
     elif name == "track_volume_num_optional_CD" and isinstance(media, Track | Video):
-        num_volumes: int = media.album.num_volumes if hasattr(media, "album") else 1
+        num_volumes: int = _album_field(media, "num_volumes") or 1
         return "" if num_volumes == 1 else f"CD{media.volume_num!s}"
     return None
 
@@ -951,6 +1023,31 @@ def _shorten_to_valid_length(path: pathlib.Path, sanitize) -> pathlib.Path:
     return sanitize(pathlib.Path(*parts))
 
 
+def _longest_stem_that_fits(directory: pathlib.Path, stem: str, suffix: str) -> str:
+    """The most of ``stem`` that can stay while the whole path still fits.
+
+    Two caps, in two different units, so both are asked directly rather than
+    converted between: the platform's PATH cap (UTF-16 units on Windows, bytes
+    elsewhere) and the filesystem's per-name BYTE cap. Given back one character
+    at a time from the end, which cannot over-trim the way a unit-count
+    subtracted from a byte count did.
+    """
+    keep: int = len(stem)
+
+    while keep > 1:
+        candidate: str = stem[:keep]
+
+        if (
+            _path_length(directory / (candidate + suffix)) <= PATH_LENGTH_MAX
+            and len(os.fsencode(candidate + suffix)) <= FILENAME_LENGTH_MAX
+        ):
+            return candidate
+
+        keep -= 1
+
+    return stem[:1]
+
+
 def _fit_name_within_path(directory: pathlib.Path, name: str, sanitize) -> pathlib.Path:
     """Shrink an over-long full path, taking it out of the file name first.
 
@@ -962,12 +1059,18 @@ def _fit_name_within_path(directory: pathlib.Path, name: str, sanitize) -> pathl
     have to give, and then through the same deterministic shortener the
     directory-only case uses, so all of an album's tracks still land together.
 
-    The trim is measured, not guessed: the stem gives up exactly the overage
-    (byte-counted, so it is never short on POSIX and at worst generous on
-    Windows) and the halving loop below is only the backstop for whatever the
-    arithmetic cannot see. Halving alone cost a title half its length for a
+    The trim is measured, not guessed, and measured in the units the platform
+    itself uses (see _path_length): the stem gives back characters until the
+    whole path fits, and the halving loop below is only the backstop for
+    whatever that cannot see. Halving alone cost a title half its length for a
     one-character overflow, and two long titles differing only in their back
     halves collapsed onto one name.
+
+    The measurement used to subtract a UTF-16 unit count from a UTF-8 byte
+    count, which agrees for ASCII and for nothing else: a CJK title (one unit,
+    three bytes per character) gave back a third of the characters it owed, the
+    re-check failed anyway, and the halving backstop took half the stem, which
+    is the exact over-trim the measured path was added to prevent.
 
     Args:
         directory (pathlib.Path): The already-sanitized parent directory.
@@ -981,9 +1084,8 @@ def _fit_name_within_path(directory: pathlib.Path, name: str, sanitize) -> pathl
     suffix: str = pathlib.PurePath(name).suffix
     stem: str = name[: len(name) - len(suffix)] if suffix else name
 
-    overage: int = _path_length(directory / (stem + suffix)) - PATH_LENGTH_MAX
-    if overage > 0:
-        measured = truncate_to_byte_limit(stem, max(1, len(os.fsencode(stem)) - overage))
+    if _path_length(directory / (stem + suffix)) > PATH_LENGTH_MAX:
+        measured = _longest_stem_that_fits(directory, stem, suffix)
         if measured:
             candidate = directory / (measured + suffix)
             try:
@@ -1229,15 +1331,41 @@ def _path_with_unique_suffix(path_file: pathlib.Path, unique_suffix: str) -> pat
     file_suffix = unique_suffix + path_file.suffix
     stem = str(path_file.stem)
 
-    budget: int = min(
-        FILENAME_LENGTH_MAX - len(os.fsencode(file_suffix)),
-        PATH_LENGTH_MAX - _path_length(path_file.parent) - 1 - len(os.fsencode(file_suffix)),
-    )
+    # Two budgets in two different units, because the two caps are in two
+    # different units. FILENAME_LENGTH_MAX is a BYTE limit on every real
+    # filesystem; PATH_LENGTH_MAX is measured the way the platform measures a
+    # path, which on Windows is UTF-16 units. Taking the min of them meant
+    # subtracting a UTF-8 byte count from a UTF-16 measurement, one sum with
+    # two rulers: a CJK or emoji suffix was charged three or four units against
+    # a cap that would have charged one or two, so a name near the path cap
+    # gave up stem it did not have to. On POSIX both measures are the same
+    # byte count and this is exactly what the min() computed.
+    suffix_bytes = len(os.fsencode(file_suffix))
+    name_budget = FILENAME_LENGTH_MAX - suffix_bytes
+    path_budget = PATH_LENGTH_MAX - _path_length(path_file.parent) - 1 - _text_length(file_suffix)
 
-    if len(os.fsencode(stem)) > budget:
-        stem = truncate_to_byte_limit(stem, budget) or stem[:1]
+    if len(os.fsencode(stem)) > name_budget or _text_length(stem) > path_budget:
+        stem = _truncate_to_both_limits(stem, name_budget, path_budget) or stem[:1]
 
     return path_file.parent / (stem + file_suffix)
+
+
+def _truncate_to_both_limits(value: str, byte_limit: int, path_limit: int) -> str:
+    """The longest prefix of ``value`` that fits the filesystem's byte budget
+    for a name AND the platform's own budget for the whole path.
+
+    Args:
+        value (str): The stem to fit.
+        byte_limit (int): What is left of the 255-byte filename cap.
+        path_limit (int): What is left of the path cap, in the platform's unit.
+
+    Returns:
+        str: The longest prefix that fits both, possibly empty.
+    """
+    result = truncate_to_byte_limit(value, byte_limit)
+    while result and _text_length(result) > path_limit:
+        result = result[:-1]
+    return result
 
 
 def unique_variant_name(path_file: pathlib.Path, unique_suffix: str) -> str:

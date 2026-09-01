@@ -47,7 +47,7 @@ import urllib.request
 from collections.abc import Callable
 from threading import Lock
 
-from tidaler.matching import _album_duration_tol, same_edition, to_year_int
+from waves.matching import _album_duration_tol, same_edition, to_year_int
 
 logger = logging.getLogger("waves.mbarbiter")
 
@@ -71,12 +71,14 @@ _NEGATIVE_STATUSES = frozenset({400, 404, 410})
 
 
 def _default_user_agent() -> str:
-    """The descriptive User-Agent MusicBrainz requires. Version via tidaler's
-    own metadata so it stays current, with a static fallback for source runs."""
+    """The descriptive User-Agent MusicBrainz requires. Version via the app's
+    own metadata (pyproject-first, like lyrics.py) so it stays current on
+    source runs and frozen builds alike, never pinned to a distribution name.
+    Must never raise: one construction site sits on the GUI thread."""
     try:
-        from importlib.metadata import version
+        from waves import version_app
 
-        v = version("tidaler")
+        v = version_app()
     except Exception:
         v = "dev"
     return f"Waves/{v} ( https://github.com/iamprivacy/Waves )"

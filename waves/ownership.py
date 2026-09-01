@@ -16,6 +16,7 @@ tests without the GUI stack and never couples the download engine to the UI.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -27,6 +28,8 @@ from threading import Lock
 # comparison, and the DB can ORDER BY the stored rank. Bit depth and sample rate
 # are deliberately NOT used for ranking: TIDAL omits them for some tiers (they
 # default to 16 / 44100), so the tier string is the only trustworthy signal.
+logger = logging.getLogger("waves.ownership")
+
 QUALITY_RANK = {"LOW": 0, "HIGH": 1, "LOSSLESS": 2, "HI_RES_LOSSLESS": 3}
 
 
@@ -59,6 +62,17 @@ _ADDED_COLUMNS = (
     # re-fetched on every run, forever).
     ("requested_rank", "INTEGER NOT NULL DEFAULT -1"),
     ("ceiling_rank", "INTEGER NOT NULL DEFAULT -1"),
+    # How many times in a row this copy has come back BELOW the ceiling TIDAL
+    # advertised for it. The ranks above cannot converge that case on their
+    # own, and must not: a copy served under its own advertised ceiling is the
+    # one case where a better master is provably there for the asking (issue
+    # #2), so the upgrade deliberately stays open. But TIDAL can advertise
+    # LOSSLESS and serve HIGH persistently, and then "stays open" means the
+    # track is re-fetched and overwritten on every album click, forever, with
+    # nothing on screen to say why. Counted, so the retry can be given up
+    # after a couple of honest attempts. Reset to 0 by any delivery that lands
+    # at or above the ceiling, so a master TIDAL really does fix is taken.
+    ("degraded_tries", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -103,6 +117,7 @@ class OwnershipStore:
                        recorded_at  INTEGER NOT NULL DEFAULT 0,
                        requested_rank INTEGER NOT NULL DEFAULT -1,
                        ceiling_rank   INTEGER NOT NULL DEFAULT -1,
+                       degraded_tries INTEGER NOT NULL DEFAULT 0,
                        PRIMARY KEY (track_id, path)
                    )""")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_track ON downloads(track_id)")
@@ -118,11 +133,39 @@ class OwnershipStore:
     def _ensure_columns(self) -> None:
         """Add any expected column missing from an older DB. A no-op once the DB
         matches the current schema; lets a future column land without a manual
-        migration. Caller holds the lock."""
+        migration. Caller holds the lock.
+
+        The lock is this process's own, and the config folder is shared: a
+        double launch on the first run after an upgrade (or the packaged app
+        beside a source run) can have both copies read the column list before
+        either adds anything, and SQLite answers the loser's ALTER with
+        "duplicate column name". That was an unhandled exception in the store's
+        constructor, which is built unguarded while the bridge is being
+        constructed, so the second copy died at startup instead of opening.
+        Whoever got there first is a perfectly good answer, so the column being
+        there already is not an error.
+        """
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(downloads)")}
         for name, decl in _ADDED_COLUMNS:
-            if name not in have:
+            if name in have:
+                continue
+            try:
                 self._conn.execute(f"ALTER TABLE downloads ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError:
+                # Ask the FILE, do not read the message. The race this handles
+                # can also surface as "database is locked" once sqlite's busy
+                # timeout is exceeded, and that text carries no column name at
+                # all, so matching on "duplicate column" re-raised precisely
+                # the loser this exists to let through, under load, at startup.
+                # The only question that matters is whether the column is there
+                # now.
+                try:
+                    present = {row[1] for row in self._conn.execute("PRAGMA table_info(downloads)")}
+                except sqlite3.Error:
+                    present = set()
+                if name not in present:
+                    raise
+                logger.debug("ownership: %s was added by another copy of Waves", name)
 
     def record(
         self,
@@ -137,7 +180,8 @@ class OwnershipStore:
         user_id: str | None = None,
         requested_rank: int = -1,
         ceiling_rank: int = -1,
-    ) -> None:
+        degraded: bool = False,
+    ) -> int:
         """Record that ``track_id`` was written to ``path`` at ``quality_tier``.
 
         Upserts on (track_id, path): re-recording the same file updates its
@@ -146,7 +190,15 @@ class OwnershipStore:
         ``requested_rank`` is the quality rank the run asked for and
         ``ceiling_rank`` the best rank TIDAL advertised at the time (both -1
         when unknown); see backend's _copy_is_current for how they stop a
-        forever-upgrade loop.
+        forever-upgrade loop. ``degraded`` says this delivery came back BELOW
+        that advertised ceiling: it bumps a consecutive counter (and any
+        delivery that is not degraded resets it to zero), which is what lets
+        the same gate give up on a track TIDAL persistently under-serves
+        instead of re-fetching it on every click for good.
+
+        Returns:
+            int: This row's consecutive degraded-delivery count after the
+                write, so the caller can report which attempt this was.
         """
         tier = (quality_tier or "").upper() or None
         row = (
@@ -162,14 +214,15 @@ class OwnershipStore:
             int(time.time()),
             int(requested_rank),
             int(ceiling_rank),
+            1 if degraded else 0,
         )
         with self._lock:
             self._conn.execute(
                 """INSERT INTO downloads
                        (track_id, path, quality_tier, quality_rank, audio_mode,
                         bit_depth, sample_rate, codecs, user_id, recorded_at,
-                        requested_rank, ceiling_rank)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        requested_rank, ceiling_rank, degraded_tries)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(track_id, path) DO UPDATE SET
                        quality_tier = excluded.quality_tier,
                        quality_rank = excluded.quality_rank,
@@ -180,10 +233,23 @@ class OwnershipStore:
                        user_id      = excluded.user_id,
                        recorded_at  = excluded.recorded_at,
                        requested_rank = excluded.requested_rank,
-                       ceiling_rank   = excluded.ceiling_rank""",
+                       ceiling_rank   = excluded.ceiling_rank,
+                       degraded_tries = CASE
+                           WHEN excluded.degraded_tries > 0 THEN downloads.degraded_tries + 1
+                           ELSE 0
+                       END""",
                 row,
             )
             self._conn.commit()
+            # Read back under the same lock, so the caller can say how many
+            # attempts this makes without a second query racing another
+            # worker's write (and without ownership_of's disk check, which
+            # would stat a network mount for a file just written here).
+            got = self._conn.execute(
+                "SELECT degraded_tries FROM downloads WHERE track_id = ? AND path = ?",
+                (str(track_id), str(path)),
+            ).fetchone()
+        return int(got[0]) if got else 0
 
     def record_members_replace(self, collection_id: str, track_ids: list[str]) -> None:
         """Remember the exact, current track ids that make up ``collection_id``
@@ -261,7 +327,8 @@ class OwnershipStore:
             if user_id is None:
                 rows = self._conn.execute(
                     """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank
+                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
+                              degraded_tries
                        FROM downloads WHERE track_id = ?
                        ORDER BY quality_rank DESC, recorded_at DESC""",
                     (str(track_id),),
@@ -269,7 +336,8 @@ class OwnershipStore:
             else:
                 rows = self._conn.execute(
                     """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank
+                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
+                              degraded_tries
                        FROM downloads WHERE track_id = ? AND user_id = ?
                        ORDER BY quality_rank DESC, recorded_at DESC""",
                     (str(track_id), str(user_id)),
@@ -278,7 +346,7 @@ class OwnershipStore:
         # and a read must never hold up a worker-thread write behind it. A
         # zero-byte survivor is a truncation artifact, not a copy: skip it (not
         # removed, like a deleted path) so the track reads as wanted again.
-        for path, tier, rank, mode, depth, rate, codecs, recorded_at, requested, ceiling in rows:
+        for path, tier, rank, mode, depth, rate, codecs, recorded_at, requested, ceiling, degraded in rows:
             if path and _nonempty_file(path):
                 return {
                     "owned": True,
@@ -292,6 +360,7 @@ class OwnershipStore:
                     "recorded_at": recorded_at,
                     "requested_rank": requested,
                     "ceiling_rank": ceiling,
+                    "degraded_tries": degraded,
                 }
         return None
 

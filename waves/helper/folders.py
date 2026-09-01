@@ -23,7 +23,7 @@ from tidalapi import Playlist, Session
 from tidalapi.exceptions import TooManyRequests
 from tidalapi.playlist import Folder
 
-from tidaler.helper.path import sanitize_name_component
+from waves.helper.path import sanitize_name_component
 
 logger = logging.getLogger("waves.folders")
 

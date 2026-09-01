@@ -9,7 +9,7 @@ the audio files for the track total. The raw per-album facts are cached in a
 small sqlite file so a relaunch is a cheap stat sweep instead of a full re-scan.
 
 It never DECIDES ownership matching itself: it just enumerates album facts. The
-caller feeds those facts to ``tidaler.matching``, which is where every "is this
+caller feeds those facts to ``waves.matching``, which is where every "is this
 the same album?" question in the app is answered, so the matching brain stays
 in one place.
 
@@ -41,13 +41,15 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from threading import Lock
 
+from waves.poolgauge import PoolGauge
+
 # Child of the "waves" logger so scan milestones feed the breadcrumb ring crash
 # reports are stitched from. Only outcomes, counts and timings are logged here:
 # never the library path, folder names, or an album's artist/title.
 logger = logging.getLogger("waves.library")
 
 # Audio file extensions we treat as album tracks. A superset of what Waves
-# writes (see tidaler.constants.AudioExtensionsValid), widened to the common
+# writes (see waves.constants.AudioExtensionsValid), widened to the common
 # formats a pre-existing, ripped-or-purchased library actually contains, so an
 # album Waves did not create is still recognised.
 AUDIO_EXTS = frozenset(
@@ -148,67 +150,13 @@ _UNREADABLE_RETRY_S = 24 * 3600.0
 _EMPTY_STRIKE_GAP_S = 30 * 60.0
 
 
-class _PoolGauge:
-    """QThreadPool-shaped view of one of the scanner's executors.
-
-    The diagnostics perf sampler reads ``activeThreadCount`` /
-    ``maxThreadCount`` off every pool it is given, and the project convention is
-    that a new pool registers so its saturation shows up in a verbose report.
-    The scanner's executors cannot be handed over directly: they are
-    ThreadPoolExecutors (no such methods) and they are built and torn down per
-    scan, so a registered reference would go stale. This counts work items in
-    flight instead, which is what saturation actually means here, and reads zero
-    between scans. Registered once at startup, in backend.py beside the others.
-
-    Counts only integers. Nothing about the library, its paths or its contents
-    passes through here.
-    """
-
-    def __init__(self, maximum: int) -> None:
-        self._busy = 0
-        self._max = maximum
-        self._lock = Lock()
-        #: High-water mark of items in flight. The sampler reads the
-        #: INSTANTANEOUS count on a timer, which on a fast pool it can sample
-        #: straight past; this remembers the busiest the pool ever got, which is
-        #: the number worth having once a scan is over and the question is
-        #: whether it was ever saturated. Never reset: it describes the run.
-        self.peak = 0
-
-    @contextlib.contextmanager
-    def working(self):
-        """Hold for the duration of one work item. The lock costs about a
-        microsecond against work items that are a network round trip or a tag
-        read, and a plain ``+= 1`` from eight threads is not atomic."""
-        with self._lock:
-            self._busy += 1
-            if self._busy > self.peak:
-                self.peak = self._busy
-        try:
-            yield
-        finally:
-            with self._lock:
-                self._busy -= 1
-
-    def activeThreadCount(self) -> int:  # (Qt's spelling: the sampler calls this)
-        return self._busy
-
-    def maxThreadCount(self) -> int:
-        return self._max
-
-    def limit(self, maximum: int) -> None:
-        """Record the cap the CURRENT scan actually runs under, so a throttled
-        network scan reports 2/2 (saturated, as intended) rather than 2/8
-        (looking mysteriously underdriven). Scans are serialized by the bridge,
-        so the shared gauge follows the one scan in flight."""
-        self._max = maximum
-
-
-#: The scanner's three pools, as gauges. Module-level because the executors are
-#: per-scan and the sampler needs one stable object per pool.
-WALK_GAUGE = _PoolGauge(_WALK_WORKERS)
-READ_GAUGE = _PoolGauge(_READ_WORKERS)
-POLL_GAUGE = _PoolGauge(_WALK_WORKERS)
+#: The scanner's three pools, as gauges (waves.poolgauge, the gauge class the
+#: scanner's private one was promoted into so the download engine shares it).
+#: Module-level because the executors are per-scan and the sampler needs one
+#: stable object per pool.
+WALK_GAUGE = PoolGauge(_WALK_WORKERS)
+READ_GAUGE = PoolGauge(_READ_WORKERS)
+POLL_GAUGE = PoolGauge(_WALK_WORKERS)
 
 # Outcome of the last refresh(), so the UI can tell "your library is empty" from
 # "the folder exists but the OS won't let me read it" (a silently-swallowed
@@ -776,8 +724,11 @@ class LibraryIndex:
         # Rescan a full tag read of the whole library (thousands of files over
         # a network mount) to find the handful the listing had already found.
         # An album that failed to read has no row at all, so it is never
-        # "unchanged" and a Rescan still retries it.
-        to_read = [c for c in candidates if not self._unchanged(c[0], c[2], c[3])]
+        # "unchanged" and a Rescan still retries it. One query answers for
+        # every candidate (see _unchanged_rows); a candidate with no album row
+        # gets None and the verdict re-reads it, exactly as before.
+        known = self._unchanged_rows()
+        to_read = [c for c in candidates if not self._unchanged_verdict(known.get(c[0]), c[2], c[3])]
         if to_read:
             # The walk is done, so the read phase's size is now known: announce it
             # up front so the UI can show "0 of N" (and an ETA once reads flow).
@@ -1674,6 +1625,25 @@ class LibraryIndex:
                    FROM albums WHERE folder_path = ?""",
                 (folder_path,),
             ).fetchone()
+        return self._unchanged_verdict(row, mtime, count)
+
+    def _unchanged_rows(self) -> dict[str, tuple]:
+        """Every album's _unchanged row in ONE query, for the scan's verdict
+        pass. Asking _unchanged per candidate cost one round-trip with a
+        correlated subquery each, 18k of them on a warm scan of a big library;
+        the same rows come out of a single LEFT JOIN against a grouped track
+        count, and the verdict itself is plain Python (_unchanged_verdict)."""
+        with self._lock:
+            rows = self._conn.execute("""SELECT albums.folder_path, dir_mtime, track_count, codec, recorded_at,
+                          COALESCE(tc.n, 0), declared, runtime, raw_count
+                   FROM albums
+                   LEFT JOIN (SELECT folder_path, COUNT(*) AS n FROM tracks
+                              GROUP BY folder_path) tc
+                     ON tc.folder_path = albums.folder_path""").fetchall()
+        return {r[0]: r[1:] for r in rows}
+
+    @staticmethod
+    def _unchanged_verdict(row: tuple | None, mtime: float, count: int) -> bool:
         # A NULL codec is a row from before quality capture existed, a NULL
         # declared one from before the release's own shape was read, and a row
         # short of one track row per counted file is from before per-track

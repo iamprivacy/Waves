@@ -1219,16 +1219,26 @@ def build_artist_rollup(album_index: dict) -> dict:
         # copy per position, so duplicate editions of a disc still count
         # once), then let a single-folder copy outbid the sum if it holds
         # more.
-        discs: dict[int, int] = {}
+        #
+        # Disc positions only sum WITHIN one release: the bucket also holds
+        # every collapse-class edition of the title, and one shared dict let
+        # an 18-track standard copy tagged 1/1 fold into a two-disc Legacy
+        # Edition (12+12) as a 30-track tally no copy on disk can back. Group
+        # the disc rows by the raw tagged title and the declared disc total
+        # (what separates editions while keeping one set's folders together),
+        # sum each group, and let the best group win.
+        groups: dict[tuple, dict[int, int]] = {}
         plain = 0
         for f in facts:
             n = _as_int(f.get("tracks"))
             d = _as_int(f.get("disc_no"))
             if d > 0:
+                edition = (str(f.get("title", "") or "").casefold(), _as_int(f.get("disc_total")))
+                discs = groups.setdefault(edition, {})
                 discs[d] = max(discs.get(d, 0), n)
             else:
                 plain = max(plain, n)
-        best_tracks = max(plain, sum(discs.values()))
+        best_tracks = max([plain, *(sum(discs.values()) for discs in groups.values())])
         lossless = any(str(f.get("codec", "") or "").lower() in LOSSLESS_CODECS for f in facts)
         r = rollup.get(artist_key)
         if r is None:

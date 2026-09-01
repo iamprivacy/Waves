@@ -2,7 +2,24 @@ import pathlib
 
 import mutagen
 from mutagen import flac, id3, mp4
-from mutagen.id3 import APIC, SYLT, TALB, TBPM, TCOM, TCOP, TDRC, TIT2, TKEY, TOPE, TPE1, TRCK, TSRC, TXXX, USLT, WOAS
+from mutagen.id3 import (
+    APIC,
+    SYLT,
+    TALB,
+    TBPM,
+    TCOM,
+    TCOP,
+    TDRC,
+    TIT2,
+    TKEY,
+    TPE1,
+    TPE2,
+    TRCK,
+    TSRC,
+    TXXX,
+    USLT,
+    WOAS,
+)
 
 
 def _rg_missing(value) -> bool:
@@ -55,6 +72,54 @@ class MetadataUnreadable(Exception):
 # mixes sharing a title) are told apart by this id, not by their name.
 ITEM_ID_TAG = "WAVES_TIDAL_ID"
 
+# The same question asked about people rather than items: "whose music is this?"
+# Two artists can share a name (and so share a folder), and a name cannot tell
+# them apart afterwards. These carry the TIDAL artist ids beside the names, so a
+# file, and through it the folder holding it, can always answer for itself.
+# Written from the release onward only: an untagged file means "unknown", never
+# "somebody else".
+ARTIST_ID_TAG = "WAVES_TIDAL_ARTIST_ID"
+ALBUM_ARTIST_ID_TAG = "WAVES_TIDAL_ALBUM_ARTIST_ID"
+
+
+def read_custom_ids(path_file: str | pathlib.Path, tag: str) -> list[str]:
+    """Every value one of Waves' own id tags carries, in written order.
+
+    One probe for all three containers: a Vorbis comment is stored under the
+    bare name, ID3 under a "TXXX:" description, MP4 under an iTunes freeform
+    atom. An unreadable file, a container with no tags at all, or a tag that
+    was never written all answer the same way, with an empty list.
+    """
+    try:
+        m = mutagen.File(path_file)
+    except Exception:
+        return []
+    if m is None or not m.tags:
+        return []
+    for key in (tag, f"TXXX:{tag}", f"----:com.apple.iTunes:{tag}"):
+        try:
+            value = m.tags.get(key)
+        except Exception:  # noqa: S112 - a container that can't .get() a key simply has no id
+            continue
+        if not value:
+            continue
+        raw = value if isinstance(value, list) else [value]
+        found: list[str] = []
+        for item in raw:
+            # MP4 freeform values are a bytes subclass, so decode before the
+            # frame check: bytes have no .text and must not be str()'d into
+            # a b"..." literal.
+            if isinstance(item, bytes):
+                item = item.decode("utf-8", "ignore")
+            elif hasattr(item, "text"):  # an ID3 TXXX frame carries its own list
+                found.extend(str(part).strip() for part in item.text or [])
+                continue
+            found.append(str(item).strip())
+        texts = [text for text in found if text]
+        if texts:
+            return texts
+    return []
+
 
 def read_item_id(path_file: str | pathlib.Path) -> str:
     """The TIDAL item id a file was downloaded as, or "" when untagged.
@@ -63,28 +128,8 @@ def read_item_id(path_file: str | pathlib.Path) -> str:
     no tag atoms) return "": callers must treat that as "identity unknown",
     never as "different item".
     """
-    try:
-        m = mutagen.File(path_file)
-    except Exception:
-        return ""
-    if m is None or not m.tags:
-        return ""
-    for key in (ITEM_ID_TAG, f"TXXX:{ITEM_ID_TAG}", f"----:com.apple.iTunes:{ITEM_ID_TAG}"):
-        try:
-            value = m.tags.get(key)
-        except Exception:  # noqa: S112 - a container that can't .get() a key simply has no id
-            continue
-        if not value:
-            continue
-        first = value[0] if isinstance(value, list) else value
-        if hasattr(first, "text"):  # an ID3 TXXX frame
-            first = first.text[0] if first.text else ""
-        if isinstance(first, bytes):
-            first = first.decode("utf-8", "ignore")
-        text = str(first).strip()
-        if text:
-            return text
-    return ""
+    ids = read_custom_ids(path_file, ITEM_ID_TAG)
+    return ids[0] if ids else ""
 
 
 class Metadata:
@@ -151,6 +196,8 @@ class Metadata:
         release_type: str = "",
         is_video: bool = False,
         item_id: str = "",
+        artist_ids: [str] = None,
+        album_artist_ids: [str] = None,
     ):
         self.path_file = path_file
         self.title = title
@@ -183,6 +230,8 @@ class Metadata:
         self.release_type = release_type
         self.is_video = is_video
         self.item_id = item_id
+        self.artist_ids = artist_ids or []
+        self.album_artist_ids = album_artist_ids or []
 
     def _cover(self) -> bool:
         result: bool = False
@@ -197,7 +246,17 @@ class Metadata:
                 self.m.clear_pictures()
                 self.m.add_picture(flac_cover)
             elif isinstance(self.m, mutagen.mp3.MP3):
-                self.m.tags.add(APIC(encoding=3, data=self.cover_data))
+                # Without a mime type (mutagen's default is "") strict readers
+                # skip the picture; the FLAC arm above names the same one.
+                self.m.tags.add(
+                    APIC(
+                        encoding=3,
+                        mime="image/jpeg",
+                        type=id3.PictureType.COVER_FRONT,
+                        desc="Cover",
+                        data=self.cover_data,
+                    )
+                )
             elif isinstance(self.m, mutagen.mp4.MP4):
                 cover_mp4 = mp4.MP4Cover(self.cover_data)
                 self.m.tags["covr"] = [cover_mp4]
@@ -259,7 +318,10 @@ class Metadata:
         self.m.tags["ARTIST"] = self.artists
         self.m.tags["COPYRIGHT"] = self.copy_right
         self.m.tags["TRACKNUMBER"] = str(self.tracknumber)
-        self.m.tags["TRACKTOTAL"] = str(self.totaltrack)
+        # 0 means the count is unknown (the album summary carried none):
+        # write nothing rather than "of 1" beside a real track number.
+        # cleanup_tags drops the empty value before the file is saved.
+        self.m.tags["TRACKTOTAL"] = str(self.totaltrack) if self.totaltrack > 0 else ""
         self.m.tags["DISCNUMBER"] = str(self.discnumber)
         self.m.tags["DISCTOTAL"] = str(self.totaldisc)
         self.m.tags["DATE"] = self.date
@@ -274,6 +336,10 @@ class Metadata:
         self.m.tags["INITIALKEY"] = self.initial_key
         self.m.tags["RELEASETYPE"] = self.release_type
         self.m.tags[ITEM_ID_TAG] = self.item_id
+        if self.artist_ids:
+            self.m.tags[ARTIST_ID_TAG] = self.artist_ids
+        if self.album_artist_ids:
+            self.m.tags[ALBUM_ARTIST_ID_TAG] = self.album_artist_ids
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -284,22 +350,31 @@ class Metadata:
         # Mapping overview: https://docs.mp3tag.de/mapping/
         self.m.tags.add(TIT2(encoding=3, text=self.title))
         self.m.tags.add(TALB(encoding=3, text=self.album))
-        self.m.tags.add(TOPE(encoding=3, text=self.albumartist))
+        self.m.tags.add(TPE2(encoding=3, text=self.albumartist))  # TPE2 is the album artist
         self.m.tags.add(TPE1(encoding=3, text=self.artists))
         self.m.tags.add(TCOP(encoding=3, text=self.copy_right))
         self.m.tags.add(TRCK(encoding=3, text=str(self.tracknumber)))
         self.m.tags.add(TDRC(encoding=3, text=self.date))
         self.m.tags.add(TCOM(encoding=3, text=self.composer))
         self.m.tags.add(TSRC(encoding=3, text=self.isrc))
-        self.m.tags.add(SYLT(encoding=3, desc="text", text=self.lyrics))
+        if self.lyrics:
+            # SYLT is a list of (text, timestamp) pairs; handed a plain string
+            # mutagen raises while rendering, which would abort the whole save.
+            self.m.tags.add(SYLT(encoding=3, desc="text", text=[(self.lyrics, 0)]))
         self.m.tags.add(USLT(encoding=3, desc="text", text=self.lyrics_unsynced))
-        self.m.tags.add(WOAS(encoding=3, text=self.isrc))
+        # A URL frame has one field, "url", and mutagen silently discards every
+        # other keyword: WOAS(text=...) wrote an empty URL and dropped its value.
+        self.m.tags.add(WOAS(url=self.url_share))
         self.m.tags.add(TXXX(encoding=3, desc=self.target_upc["MP3"], text=self.upc))
         self.m.tags.add(TBPM(encoding=3, text=str(self.bpm if self.bpm > 0 else "")))
         self.m.tags.add(TKEY(encoding=3, text=self.initial_key))
         self.m.tags.add(TXXX(encoding=3, desc="MusicBrainz Album Type", text=self.release_type))
         if self.item_id:
             self.m.tags.add(TXXX(encoding=3, desc=ITEM_ID_TAG, text=self.item_id))
+        if self.artist_ids:
+            self.m.tags.add(TXXX(encoding=3, desc=ARTIST_ID_TAG, text=self.artist_ids))
+        if self.album_artist_ids:
+            self.m.tags.add(TXXX(encoding=3, desc=ALBUM_ARTIST_ID_TAG, text=self.album_artist_ids))
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -329,6 +404,7 @@ class Metadata:
         self.m.tags["----:com.apple.iTunes:MusicBrainz Album Type"] = self.release_type.encode("utf-8")
         if self.item_id:
             self.m.tags[f"----:com.apple.iTunes:{ITEM_ID_TAG}"] = self.item_id.encode("utf-8")
+        self._set_mp4_artist_ids()
 
         if self.replay_gain_write:
             for key, text in self._rg_pairs():
@@ -351,9 +427,36 @@ class Metadata:
         self.m.tags["stik"] = [6]
         if self.item_id:
             self.m.tags[f"----:com.apple.iTunes:{ITEM_ID_TAG}"] = self.item_id.encode("utf-8")
+        self._set_mp4_artist_ids()
+
+    def _set_mp4_artist_ids(self):
+        # Shared by the album and the music-video branch: a freeform atom holds
+        # BYTES, and a multi-artist credit is a list of them.
+        if self.artist_ids:
+            self.m.tags[f"----:com.apple.iTunes:{ARTIST_ID_TAG}"] = [i.encode("utf-8") for i in self.artist_ids]
+        if self.album_artist_ids:
+            self.m.tags[f"----:com.apple.iTunes:{ALBUM_ARTIST_ID_TAG}"] = [
+                i.encode("utf-8") for i in self.album_artist_ids
+            ]
+
+    @staticmethod
+    def _is_empty_tag(value) -> bool:
+        """True for a tag that carries no text.
+
+        MP4 freeform atoms (``----:com.apple.iTunes:*``) hold BYTES, so an
+        unset lyric, UPC, key or release type is written as b"" and was invisible
+        to a string-only sweep: those atoms reached the file and showed up as
+        blank custom fields in tag editors, where the same track saved as FLAC
+        carried none at all.
+        """
+        if isinstance(value, str | bytes):
+            return not value
+        if isinstance(value, list) and value:
+            return all(isinstance(item, str | bytes) and not item for item in value)
+        return False
 
     def cleanup_tags(self):
         # Collect keys to delete first to avoid RuntimeError during iteration
-        keys_to_delete = [key for key, value in self.m.tags.items() if value == "" or value == [""]]
+        keys_to_delete = [key for key, value in self.m.tags.items() if self._is_empty_tag(value)]
         for key in keys_to_delete:
             del self.m.tags[key]

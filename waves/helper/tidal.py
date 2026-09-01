@@ -7,8 +7,8 @@ from tidalapi.media import MediaMetadataTags, Quality
 from tidalapi.session import SearchTypes
 from tidalapi.user import LoggedInUser
 
-from tidaler.constants import FAVORITES, MediaType
-from tidaler.helper.exceptions import MediaUnknown
+from waves.constants import FAVORITES, MediaType
+from waves.helper.exceptions import MediaUnknown
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +28,46 @@ def name_builder_artist(media: Track | Video | Album, delimiter: str = ", ") -> 
     return delimiter.join(artist.name for artist in media.artists)
 
 
-def get_album_artists(media: Track | Album) -> [str]:
-    artists_tmp: [str] = []
-    artists: [Artist] = media.album.artists if isinstance(media, Track) else media.artists
+def get_album_artist_objects(media: Track | Album) -> [Artist]:
+    """The album's main-credit artists, in the album's own order.
+
+    The one place the main-credit filter lives, so neither the names written to
+    a tag nor the ids written beside them can carry an artist the other's filter
+    excluded. The two are not positionally aligned, though: the ids drop an
+    id-less stub, and the name tag can be collapsed to the primary by a user
+    setting (see waves_ui/backend.py). Never pair them by index.
+    """
+    artists_tmp: [Artist] = []
+    # A playlist can carry a track whose album block never arrived, so the
+    # album credit is simply unknown. Answer "no album artists" rather than
+    # raising: the track still has its own artists and still deserves to land.
+    album = media.album if isinstance(media, Track) else media
+    artists: [Artist] = (getattr(album, "artists", None) or []) if album is not None else []
 
     for artist in artists:
         # Albums from TIDAL's V2 home feed carry artists without a role/type
         # field, so tidalapi leaves .roles as None: treat the missing
         # information as a main credit rather than crashing on the lookup.
         if artist.roles is None or Role.main in artist.roles:
-            artists_tmp.append(artist.name)
+            artists_tmp.append(artist)
 
     return artists_tmp
+
+
+def get_album_artists(media: Track | Album) -> [str]:
+    return [artist.name for artist in get_album_artist_objects(media)]
+
+
+def get_album_artist_ids(media: Track | Album) -> [str]:
+    """TIDAL ids for the same album artists :func:`get_album_artists` names.
+
+    Ids only, so an id-less stub artist is dropped rather than written as an
+    empty value. That makes this a set of identities, not a positional mirror
+    of the name tag: the album-artist NAME tag can be collapsed to the primary
+    by a user setting (see waves_ui/backend.py), and identity should not shrink
+    because a display preference did.
+    """
+    return [str(artist.id) for artist in get_album_artist_objects(media) if getattr(artist, "id", None)]
 
 
 def name_builder_album_artist(media: Track | Album, first_only: bool = False, delimiter: str = ", ") -> str:
@@ -120,7 +148,16 @@ def url_ending_clean(url: str) -> str:
     return url[:-2] if url.endswith("/u") or url.endswith("?u") else url
 
 
-def search_results_all(session: Session, needle: str, types_media: SearchTypes = None) -> dict[str, [SearchTypes]]:
+def search_results_all(
+    session: Session, needle: str, types_media: SearchTypes = None, single_page: bool = False
+) -> dict[str, [SearchTypes]]:
+    """Search TIDAL, accumulating every page of results per type.
+
+    ``single_page=True`` stops after the first page (300 per type): a caller
+    that keeps only a bounded head of each list (the GUI keeps at most 80 of
+    any type) pays one round-trip instead of several serial ones whose extra
+    rows it immediately discards. Exhaustive paging stays the default.
+    """
     limit: int = 300
     offset: int = 0
     result: dict[str, [SearchTypes]] = {}
@@ -150,7 +187,7 @@ def search_results_all(session: Session, needle: str, types_media: SearchTypes =
                 result[key].extend(value)
                 has_page_results = True
 
-        if not has_page_results:
+        if single_page or not has_page_results:
             break
 
         offset += limit
@@ -165,6 +202,14 @@ def items_results_all(
 
     if isinstance(media_list, Mix):
         result = media_list.items()
+
+        if not videos_include:
+            # A mix is the one collection whose items() hands back tracks and
+            # videos together (an album or a playlist has a .tracks call to ask
+            # instead, used just below). Without this the "music videos" switch
+            # was silently ignored for mixes: full .mp4 videos landed in the
+            # mix folder, counted as real writes, whatever the setting said.
+            result = [item for item in result if not isinstance(item, Video)]
     else:
         func_get_items_media: [Callable] = []
 
