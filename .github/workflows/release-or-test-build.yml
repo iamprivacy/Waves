@@ -25,7 +25,7 @@ on:
         required: false
         default: ""
       only:
-        description: "Comma-separated OS_ARCH legs to build (e.g. macos-intel,macos-apple-silicon,windows-x64; the legacy macOS legs are macos-intel_legacy / macos-apple-silicon_legacy, and naming one also runs its regular macOS leg because the filter is a substring match). Blank = all eight."
+        description: "Comma-separated OS_ARCH legs to build (e.g. macos-intel,macos-apple-silicon,windows-x64; the legacy macOS legs are macos-intel_legacy / macos-apple-silicon_legacy, and naming one also runs its regular macOS leg because the filter is a substring match). Blank = all eight. Cannot be combined with release_tag: a release must carry every platform."
         required: false
         default: ""
 
@@ -96,9 +96,9 @@ jobs:
       - name: Guard, a published release must be able to self-update
         if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '') }}
         run: |
-          grep -Eq '^REPO = "[^"]+"' tidaler/waves_ui/updater.py \
+          grep -Eq '^REPO = "[^"]+"' waves/waves_ui/updater.py \
             || { echo "::error::updater.REPO is empty; a published build could never auto-update. Set REPO before tagging a release."; exit 1; }
-          grep -Eq '^UPDATE_PUBLIC_KEY = "[^"]+"' tidaler/waves_ui/signing.py \
+          grep -Eq '^UPDATE_PUBLIC_KEY = "[^"]+"' waves/waves_ui/signing.py \
             || { echo "::error::signing.UPDATE_PUBLIC_KEY is empty; shipped updates could not be signature-verified. Embed UPDATE_PUBLIC_KEY before tagging a release."; exit 1; }
           echo "Updater is configured; release build may proceed."
       # The version compiled INTO the binary must equal the release tag, or the
@@ -112,26 +112,48 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           TAG_VERSION="${RELEASE_TAG#v}"
-          CODE_VERSION="$(grep -m1 '__version__' tidaler/waves_ui/__init__.py | tr -d ' "' | cut -d'=' -f2)"
+          CODE_VERSION="$(grep -m1 '__version__' waves/waves_ui/__init__.py | tr -d ' "' | cut -d'=' -f2)"
           if [ "$TAG_VERSION" != "$CODE_VERSION" ]; then
-            echo "::error::release tag '$RELEASE_TAG' (version '$TAG_VERSION') does not match tidaler/waves_ui/__init__.py __version__ '$CODE_VERSION'. Bump __version__ to match the tag before releasing."
+            echo "::error::release tag '$RELEASE_TAG' (version '$TAG_VERSION') does not match waves/waves_ui/__init__.py __version__ '$CODE_VERSION'. Bump __version__ to match the tag before releasing."
             exit 1
           fi
           echo "Version $CODE_VERSION matches release tag $RELEASE_TAG."
-      # A manual release may be dispatched from any ref; only publish binaries
-      # from a commit that is already on master. Otherwise a release could ship
-      # from an unmerged feature branch, and (since target_commitish points the
-      # created tag at the built commit) the public tag would name code that was
-      # never reviewed onto the release line.
-      - name: Guard, dispatch release commit is on master
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' }}
+      # A dispatch naming a tag publishes a signed, live Release, and the `only`
+      # filter is honored by every per-leg step including the asset uploads: the
+      # two together published a release holding one platform's zip and a
+      # manifest covering only it, so every field updater on the other platforms
+      # saw a latest release with no asset for it and silently stopped offering
+      # updates. `only` is for re-cutting a leg as an ARTIFACT run; refused here
+      # rather than discovered once the Release is already public.
+      - name: Guard, a release builds every platform
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.only != '' }}
         run: |
-          git fetch --quiet origin master
-          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/master; then
-            echo "::error::commit ${{ github.sha }} is not on master; refusing to publish a release from an unmerged ref. Merge into master first, then dispatch the release."
+          echo "::error::release_tag and only cannot be combined: a release must carry every platform's asset. Leave only blank to publish, or drop release_tag to re-cut one leg as an artifact."
+          exit 1
+      # A manual release may be dispatched from any ref; only publish binaries
+      # from a commit that is already on the release line. Otherwise a release
+      # could ship from an unmerged feature branch, and (since target_commitish
+      # points the created tag at the built commit) the public tag would name
+      # code that was never reviewed onto the release line.
+      - name: Guard, dispatch release commit is on the default branch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' }}
+        env:
+          # The repository's OWN default branch, never a hard-coded name. This
+          # workflow lives in a private repo whose line is `master` and ships to
+          # the public one whose only branch is `main`, and a dispatch release is
+          # only ever meaningful on the public side: `git fetch origin master`
+          # died there with "couldn't find remote ref", failing this job under
+          # `bash -e` and skipping every build leg. That killed the documented
+          # fallback (RELEASING.md) exactly when it is needed, which is when a
+          # tag push has not fired the build.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --quiet origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "${{ github.sha }}" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::commit ${{ github.sha }} is not on $DEFAULT_BRANCH; refusing to publish a release from an unmerged ref. Merge into $DEFAULT_BRANCH first, then dispatch the release."
             exit 1
           fi
-          echo "Dispatched commit is on master; release build may proceed."
+          echo "Dispatched commit is on $DEFAULT_BRANCH; release build may proceed."
 
   create-release:
     # Create the draft Release exactly once, before the build matrix starts.
@@ -194,7 +216,9 @@ jobs:
             # Deleting only the stray unversioned symlinks leaves one canonical
             # path (the keg), which is what Python's _ssl actually links, so TLS
             # still works and Nuitka still bundles a working libcrypto/libssl.
-            # arm64 is unaffected (Homebrew there is at /opt/homebrew). Trailing
+            # arm64 does not abort, but it silently bundles BOTH the versioned
+            # libraries and their unversioned symlink twins (5.7 MB dead), so
+            # its legs run the same pre-clean against /opt/homebrew. Trailing
             # ';' (not '&&') so a no-op rm never short-circuits the build chain.
             CMD_BUILD: >
               ls -l /usr/local/lib/libcrypto* /usr/local/lib/libssl* || true;
@@ -202,17 +226,19 @@ jobs:
               source $VENV &&
               poetry run make gui-waves &&
               cd dist &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
           - os: "macos-14"
             TARGET: "macos-14 M1"
             OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_ARM64}}
             MACOS_FLOOR: "15.0"
             CMD_BUILD: >
+              ls -l /opt/homebrew/lib/libcrypto* /opt/homebrew/lib/libssl* || true;
+              rm -f /opt/homebrew/lib/libcrypto*.dylib /opt/homebrew/lib/libssl*.dylib || true;
               source $VENV &&
               poetry run make gui-waves &&
               cd dist &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
           # Legacy macOS flavor for macOS 12 through 14 (see the env note on the
           # _LEGACY names): the locked PySide6 is overlaid with 6.9.3, the newest
@@ -233,19 +259,21 @@ jobs:
               pyside6==6.9.3 pyside6-addons==6.9.3 pyside6-essentials==6.9.3 shiboken6==6.9.3 &&
               WAVES_MACOS_MIN=12.0 poetry run make gui-waves &&
               cd dist &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
           - os: "macos-14"
             TARGET: "macos-14 M1 legacy"
             OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_ARM64_LEGACY}}
             MACOS_FLOOR: "12.0"
             CMD_BUILD: >
+              ls -l /opt/homebrew/lib/libcrypto* /opt/homebrew/lib/libssl* || true;
+              rm -f /opt/homebrew/lib/libcrypto*.dylib /opt/homebrew/lib/libssl*.dylib || true;
               source $VENV &&
               poetry run pip install --force-reinstall --no-deps
               pyside6==6.9.3 pyside6-addons==6.9.3 pyside6-essentials==6.9.3 shiboken6==6.9.3 &&
               WAVES_MACOS_MIN=12.0 poetry run make gui-waves &&
               cd dist &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64_LEGACY}}${{needs.compute.outputs.ASSET_EXTENSION}} waves.app -x "*.DS_Store" &&
               cd ..
           # Linux legs ship BOTH a zip of the standalone tree and a single-file
           # AppImage of the same tree (tools/build_appimage.sh); the in-app
@@ -258,7 +286,7 @@ jobs:
               poetry run make gui-waves-linux &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}.AppImage &&
               cd ..
           - os: "ubuntu-24.04-arm"
@@ -269,7 +297,7 @@ jobs:
               poetry run make gui-waves-linux &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}.AppImage &&
               cd ..
           - os: "windows-2022"
@@ -281,7 +309,7 @@ jobs:
               poetry run make gui-waves-windows &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              zip -9 -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               cd ..
           - os: "windows-11-arm"
             TARGET: "windows-11-arm"
@@ -292,7 +320,7 @@ jobs:
               poetry run make gui-waves-windows &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              zip -9 -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               cd ..
     runs-on: ${{ matrix.os }}
     steps:
