@@ -1,10 +1,10 @@
 [project]
-name = "tidaler"
+name = "waves"
 authors = [{ name = "iamprivacy" }]
-# Kept equal to tidaler.waves_ui.__version__, which is the version the app and
+# Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.25"
+version = "0.1.26"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -25,7 +25,7 @@ repository = "https://github.com/iamprivacy/Waves"
 documentation = "https://getwaves.dev"
 
 [tool.poetry]
-packages = [{ include = "tidaler" }]
+packages = [{ include = "waves" }]
 
 [tool.poetry.dependencies]
 requests = "~2.32.5"
@@ -44,8 +44,6 @@ m3u8 = "^6.0.0"
 # macOS version floor" step enforces each flavor's floor on every macOS build;
 # when a PySide6 release honors its wheel tags again the legacy legs can go.
 pyside6 = { version = "6.11.1", optional = true }
-rich = "^14.2.0"
-toml = "^0.10.2"
 tidalapi = "^0.8.10"
 python-ffmpeg = "^2.0.12"
 pycryptodome = "^3.23.0"
@@ -142,11 +140,14 @@ ignore = [
 # Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
 # helper for real on macOS (S603, fixed argv).
 "tests/test_apple_double_cleanup.py" = ["S603"]
+# Measures import-time metadata cost in a fresh interpreter: this interpreter
+# runs a literal probe script (S603, fixed argv).
+"tests/test_lazy_metadata.py" = ["S603"]
 # The library scanner's directory walk (_walk_album_dirs) is a small state
 # machine over each folder's probe result (unchanged / relist / transient error /
 # vanished / root offline); the branching is the point and the function was kept
 # whole so it reads (and was reviewed) as one flow, so exempt mccabe (C901).
-"tidaler/library_index.py" = ["C901"]
+"waves/library_index.py" = ["C901"]
 # Same subprocess-isolation + linear-scenario shape as the scroll guard.
 "tests/test_forward_history_account_switch.py" = ["S603", "C901"]
 "tests/test_playlist_folder_qml.py" = ["S603", "C901"]
@@ -156,11 +157,14 @@ ignore = [
 "tests/test_search_top_result.py" = ["S603", "C901"]
 "tests/test_breadcrumb_navigation.py" = ["S603", "C901"]
 "tests/test_boot_handover_gate.py" = ["S603", "C901"]
+"tests/test_boot_fade_landing_park.py" = ["S603", "C901"]
+"tests/test_boot_shield_cursor_release.py" = ["S603", "C901"]
 "tests/test_browse_card_library_state.py" = ["S603", "C901"]
 "tests/test_browse_strip_fits_the_card.py" = ["S603", "C901"]
 "tests/test_library_track_claim.py" = ["S603", "C901"]
 "tests/test_boot_version_drain_order.py" = ["S603", "C901"]
 "tests/test_boot_scroll_dressing_hidden.py" = ["S603", "C901"]
+"tests/test_search_tab_artist_restore.py" = ["S603", "C901"]
 "tests/test_boot_input_shield.py" = ["S603", "C901"]
 "tests/test_boot_reveal_prewarm.py" = ["S603", "C901"]
 "tests/test_search_paste_autosearch.py" = ["S603", "C901"]
@@ -170,6 +174,7 @@ ignore = [
 "tests/test_queue_unavailable_word.py" = ["S603", "C901"]
 "tests/test_queue_drawer_resize.py" = ["S603", "C901"]
 "tests/test_queue_delta_mirror.py" = ["S603", "C901"]
+"tests/test_queue_failure_reason_qml.py" = ["S603", "C901"]
 "tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
 "tests/test_library_downloaded_state.py" = ["S603", "C901"]
 "tests/test_qml_loads.py" = ["S603", "C901"]
@@ -185,6 +190,11 @@ ignore = [
 "tests/test_video_grid_hover_dwell.py" = ["S603", "C901"]
 "tests/test_hover_prefetch_scenario.py" = ["S603", "C901"]
 "tests/test_offscreen_qt_is_usable.py" = ["S603"]
+# Runs the bundle size report for real, on a root wide enough to fill the pipe
+# buffer, through the shell it is written for (S603/S607, fixed argv).
+"tests/test_final_audit_updater.py" = ["S603", "S607"]
+# Same subprocess-isolation + linear-scenario shape as the scroll guard.
+"tests/test_update_toast_staged.py" = ["S603", "C901"]
 "tests/test_video_card_date_no_overlap.py" = ["S603", "C901"]
 "tests/test_search_playlist_block.py" = ["S603", "C901"]
 "tests/test_playlist_selection_and_reset.py" = ["S603", "C901"]
@@ -200,26 +210,27 @@ ignore = [
 "tests/test_queue_owned_prediction.py" = ["S603", "C901"]
 "tests/test_progress_jump_ramp.py" = ["S603", "C901"]
 "tests/test_progress_pad_cells.py" = ["S603", "C901"]
+"tests/test_search_artists_show_all_empty.py" = ["S603", "C901"]
+"tests/test_boot_library_scan_deferral.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
-"tidaler/cli.py" = ["UP007"]
 # The Waves bridge has several inherently branchy but linear functions (the
 # settings-schema builder, the settings dispatcher and the search/discography
 # orchestration) that trip mccabe (C901) without being genuinely complex.
-"tidaler/waves_ui/backend.py" = ["C901"]
+"waves/waves_ui/backend.py" = ["C901"]
 # The ffmpeg manager's job is to download and run a static ffmpeg build, so it
 # intentionally shells out (S603/S607); install() is one linear sequence (C901);
 # and its raised errors carry deliberately descriptive messages (TRY003).
-"tidaler/waves_ui/ffmpeg_manager.py" = ["S603", "S607", "C901", "TRY003"]
+"waves/waves_ui/ffmpeg_manager.py" = ["S603", "S607", "C901", "TRY003"]
 # The updater downloads and swaps a packaged build, so it intentionally shells
 # out (S603/S607) for the platform swap/relaunch; install()/_apply are linear
 # sequences (C901); and its errors carry deliberately descriptive messages (TRY003).
-"tidaler/waves_ui/updater.py" = ["S603", "S606", "S607", "C901", "TRY003"]
+"waves/waves_ui/updater.py" = ["S603", "S606", "S607", "C901", "TRY003"]
 # download.py is upstream Tidaler code (kept as-is apart from the keep_album flag);
 # its downsample/transcode raises carry deliberately descriptive messages (TRY003),
 # same rationale as ffmpeg_manager/updater above.
-"tidaler/download.py" = ["TRY003"]
+"waves/download.py" = ["TRY003"]
 
 [tool.black]
 # https://github.com/psf/black
