@@ -1,14 +1,14 @@
 """In-app FFmpeg manager for Waves.
 
 Waves needs FFmpeg for three optional post-processing steps in
-``tidaler.download``, converting videos to MP4, extracting FLAC out of MP4
+``waves.download``, converting videos to MP4, extracting FLAC out of MP4
 containers, and downsampling hi-res audio. Rather than make the user install
 FFmpeg and point the app at the binary, this module downloads a trusted static
 build on demand into the app's own data folder, verifies it, and can tell when a
 newer build is available.
 
 Nothing here touches Qt, so it is pure and unit-testable; the Qt slots/signals
-that drive the Settings UI live in :mod:`tidaler.waves_ui.backend`.
+that drive the Settings UI live in :mod:`waves.waves_ui.backend`.
 
 Sources (native build per CPU arch, chosen for trust + automatability):
 
@@ -36,6 +36,7 @@ plus the smoke test is the guarantee, and we do not claim more.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,7 +54,7 @@ from threading import Event
 
 import requests
 
-from tidaler.waves_ui import proc
+from waves.waves_ui import proc
 
 logger = logging.getLogger("waves")
 
@@ -385,7 +386,17 @@ class FfmpegManager:
         _log(f"downloading {release.label or release.version}")
         with tempfile.NamedTemporaryFile(dir=self.install_dir, suffix=".zip", delete=False) as tmp:
             zip_tmp = Path(tmp.name)
-        staged = self.install_dir / (_exe_name(self.os_key) + ".new")
+        # A staged name of this install's OWN: two Waves instances share
+        # <config>/bin, and both staging through one fixed "ffmpeg.new" let
+        # either truncate, promote, or unlink the other's half-written binary
+        # (the in-process inflight flag cannot see a second process). A
+        # crashed install's leftover stays behind under the same policy as
+        # the tmp zip above; neither carries user data.
+        fd_staged, staged_name = tempfile.mkstemp(
+            dir=self.install_dir, prefix=_exe_name(self.os_key) + ".", suffix=".new"
+        )
+        os.close(fd_staged)
+        staged = Path(staged_name)
         try:
             self._download(sess, release.url, zip_tmp, progress_cb, abort)
             _check_abort()
@@ -440,8 +451,22 @@ class FfmpegManager:
             "ffmpeg_version": ver,
             "installed_at": int(time.time()),
         }
-        with open(self.manifest_path, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, indent=2)
+        # Staged and swapped like every other shared-folder JSON: a plain
+        # open("w") from two instances (or a crash mid-dump) left a corrupt
+        # manifest that read back as {}, blanking the recorded version.
+        fd_manifest, manifest_tmp = tempfile.mkstemp(
+            dir=self.install_dir, prefix=self.manifest_path.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd_manifest, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(manifest_tmp, self.manifest_path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.remove(manifest_tmp)
+            raise
         _log(f"installed ffmpeg {ver}")
         return self.status()
 
