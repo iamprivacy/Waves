@@ -1,5 +1,5 @@
 WAVES_APP_NAME = "Waves"
-WAVES_VERSION=`grep -m 1 '__version__' tidaler/waves_ui/__init__.py | tr -d ' "' | cut -d'=' -f2`
+WAVES_VERSION=`grep -m 1 '__version__' waves/waves_ui/__init__.py | tr -d ' "' | cut -d'=' -f2`
 app_path_dist = "dist"
 # Oldest macOS the bundle can run on: the most demanding file shipped inside
 # decides this, in practice the PySide6 wheels (see the note in pyproject.toml).
@@ -57,7 +57,7 @@ gui-waves: ## Build the Waves QML app (standalone). On macOS this yields dist/wa
 		--macos-app-name=$(WAVES_APP_NAME) \
 		--output-filename=$(WAVES_APP_NAME) \
 		--product-name=$(WAVES_APP_NAME) \
-		tidaler/waves.py
+		waves.py
 	@# Strip the Qt modules the QML UI never loads (chiefly a ~210 MB bundled
 	@# Chromium), see tools/trim_qt_bundle.sh, which auto-detects the per-OS
 	@# bundle layout (waves.app on macOS, waves.dist on Linux/Windows).

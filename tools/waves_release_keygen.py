@@ -3,7 +3,7 @@
 
 Run this once, offline, before the first signed release. It prints two things:
 
-  * ``UPDATE_PUBLIC_KEY = "..."``: paste into ``tidaler/waves_ui/signing.py`` so
+  * ``UPDATE_PUBLIC_KEY = "..."``: paste into ``waves/waves_ui/signing.py`` so
     every shipped binary can verify update manifests.
   * a PKCS#8 PEM private key: store verbatim as the GitHub Actions secret
     ``WAVES_SIGNING_KEY`` and never commit it. Anyone with this key can sign
@@ -16,12 +16,12 @@ Usage::
 
 from __future__ import annotations
 
-from tidaler.waves_ui.signing import keygen
+from waves.waves_ui.signing import keygen
 
 
 def main() -> None:
     public_b64, private_pem = keygen()
-    print("# --- 1. Embed this public key in tidaler/waves_ui/signing.py ---")
+    print("# --- 1. Embed this public key in waves/waves_ui/signing.py ---")
     print(f'UPDATE_PUBLIC_KEY = "{public_b64}"')
     print()
     print("# --- 2. Store the PEM below as the CI secret WAVES_SIGNING_KEY ---")

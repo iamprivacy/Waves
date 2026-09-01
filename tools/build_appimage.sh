@@ -47,7 +47,7 @@ mkdir -p "$APPDIR/usr/lib"
 cp -a "$DIST_TREE" "$APPDIR/usr/lib/waves"
 install -m 0755 "$REPO_ROOT/tools/appimage/AppRun" "$APPDIR/AppRun"
 install -m 0644 "$REPO_ROOT/tools/appimage/waves.desktop" "$APPDIR/waves.desktop"
-install -m 0644 "$REPO_ROOT/tidaler/ui/icon512.png" "$APPDIR/waves.png"
+install -m 0644 "$REPO_ROOT/waves/ui/icon512.png" "$APPDIR/waves.png"
 
 TOOL="$WORK/appimagetool"
 echo "→ fetching appimagetool ${TOOL_VERSION} (${TOOL_ARCH})"
