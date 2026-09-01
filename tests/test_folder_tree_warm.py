@@ -26,8 +26,8 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.helper.folders import FolderNode, FolderTree
-from tidaler.waves_ui.backend import WavesBridge
+from waves.helper.folders import FolderNode, FolderTree
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Emit:

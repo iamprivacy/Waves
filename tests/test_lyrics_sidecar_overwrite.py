@@ -12,13 +12,14 @@ import pathlib
 import threading
 from unittest.mock import MagicMock
 
-from tidaler.download import Download
+from waves.download import Download
+from waves.waves_ui.backend import _TrackedDownload
 
 HAND_TIMED = "[00:12.30] a line somebody timed by hand\n"
 
 
-def _make_download(tmp_path: pathlib.Path, skip_existing: bool) -> Download:
-    dl = Download(
+def _make_download(tmp_path: pathlib.Path, skip_existing: bool, cls: type[Download] = Download) -> Download:
+    dl = cls(
         tidal_obj=MagicMock(),
         skip_existing=skip_existing,
         path_base=str(tmp_path),
@@ -77,6 +78,35 @@ class TestLyricsFollowTheSameRuleAsTheAudio:
 
         assert dl._move_lyrics(_fetched_lyrics(tmp_path), destination) is True
         assert (tmp_path / "Song.lrc").read_text(encoding="utf-8") == "[00:12.30] the line as fetched\n"
+
+    def test_the_gui_download_keeps_the_sidecar_the_same_way(self, tmp_path):
+        # The bare Download above cannot see the GUI's per-thread override
+        # (_TrackedDownload layers skip_existing over a thread-local), so on
+        # its own it proved nothing about the app the user actually runs.
+        dl = _make_download(tmp_path, skip_existing=True, cls=_TrackedDownload)
+        sidecar = tmp_path / "Song.lrc"
+        sidecar.write_text(HAND_TIMED, encoding="utf-8")
+
+        assert dl._move_lyrics(_fetched_lyrics(tmp_path), tmp_path / "Song.flac") is True
+        assert sidecar.read_text(encoding="utf-8") == HAND_TIMED
+
+    def test_a_forced_redownload_replaces_the_sidecar_on_its_thread_only(self, tmp_path):
+        # REDOWNLOAD and a quality upgrade turn skipping off through the
+        # thread-local; the sidecar must follow that override where it holds
+        # and only there.
+        dl = _make_download(tmp_path, skip_existing=True, cls=_TrackedDownload)
+        sidecar = tmp_path / "Song.lrc"
+        sidecar.write_text(HAND_TIMED, encoding="utf-8")
+
+        with dl._force_download():
+            assert dl._move_lyrics(_fetched_lyrics(tmp_path), tmp_path / "Song.flac") is True
+
+        assert sidecar.read_text(encoding="utf-8") == "[00:12.30] the line as fetched\n"
+
+        # Back outside the override the base setting rules again.
+        sidecar.write_text(HAND_TIMED, encoding="utf-8")
+        assert dl._move_lyrics(_fetched_lyrics(tmp_path), tmp_path / "Song.flac") is True
+        assert sidecar.read_text(encoding="utf-8") == HAND_TIMED
 
     def test_a_txt_sidecar_follows_the_same_rule(self, tmp_path):
         dl = _make_download(tmp_path, skip_existing=True)

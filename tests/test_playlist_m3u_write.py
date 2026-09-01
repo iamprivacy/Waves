@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 def _make_download(tmp_path: pathlib.Path, illegal_map: dict[str, str] | None = None) -> Download:

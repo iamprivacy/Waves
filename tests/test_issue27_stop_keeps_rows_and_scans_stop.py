@@ -32,12 +32,11 @@ from collections import deque
 from threading import Event, Lock
 from types import SimpleNamespace
 
-import pytest
 from _dispatch_stub import arm_queue
 from test_discography_video_source import _Artist as _VideoArtist
 from test_discography_video_source import _DiscoStub, _Signal
 
-from tidaler.waves_ui.backend import _RETRYABLE, WavesBridge, _stop_check_for
+from waves.waves_ui.backend import _RETRYABLE, WavesBridge, _stop_check_for
 
 # ---------------------------------------------------------------------------
 # 1. STOP during a discography scan
@@ -211,7 +210,7 @@ def test_the_drawer_stop_button_reads_scanning():
     import re
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text()
+    src = (Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml").read_text()
     stop = re.search(r'visible: ([^\n]*)\n\s*danger: true; label: "STOP"', src)
     assert stop, "the drawer's STOP button"
     assert "waves.scanning" in stop.group(1) and "activeQueueCount > 0" in stop.group(1)
@@ -224,7 +223,7 @@ def test_a_stop_check_is_stale_only_after_a_bump():
     bridge._scan_gen += 1
     import pytest
 
-    from tidaler.waves_ui.backend import _ScanStopped
+    from waves.waves_ui.backend import _ScanStopped
 
     with pytest.raises(_ScanStopped):
         check()
@@ -428,16 +427,27 @@ def test_retry_all_marshals_the_queue_once_for_the_lot():
     assert stub.emits == 1
 
 
-def test_retry_all_releases_the_emit_gate_when_a_retry_raises():
-    stub = _QueueStub(["cancelled", "cancelled"])
+def test_a_retry_that_raises_costs_only_its_own_row():
+    """A kept object can raise on a property (a stale tidalapi object does).
+    RETRY ALL dropped every retryable row before re-starting any of them, so
+    one raise took every row after it with no retry started and no row left to
+    press RETRY on again: exactly the loss the Failed section exists to
+    prevent (issue #18)."""
+    stub = _QueueStub(["cancelled", "cancelled", "cancelled"])
+    bad = stub._queue[1]["qid"]
 
-    def boom(item, obj):
-        raise RuntimeError("a row that would not re-queue")
+    def start(item, obj):
+        if item["qid"] == bad:
+            raise RuntimeError("a row that would not re-queue")
+        stub.retried.append(item)
 
-    stub._start_retry = boom
-    with pytest.raises(RuntimeError):
-        stub.retryAllStopped()
+    stub._start_retry = start
+    stub.retryAllStopped()
+
+    assert len(stub.retried) == 2, "the rows either side of the raise still retried"
+    assert [it["qid"] for it in stub._queue] == [bad], "the row that could not restart keeps its place"
     assert stub._queue_emit_suspended is False, "a raise inside the batch must not mute the queue for good"
+    assert stub.emits == 1, "and the batch is still one delivery"
 
 
 def test_each_sections_clear_leaves_the_stopped_rows_to_their_own():

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from tidalapi.album import Album
 
-from tidaler.waves_ui.backend import _LIBRARY_PAGE, WavesBridge
+from waves.waves_ui.backend import _LIBRARY_PAGE, WavesBridge
 
 
 class _Signal:
@@ -95,6 +95,23 @@ class _DismissStub:
         self._pending_lock = Lock()
         self._pending_downloads = pending
         self.downloadState = _Signal()
+        # A hold that is abandoned rather than replayed gives up the state the
+        # withdrawal kept alive for it (its REDOWNLOAD force, claim override
+        # and merge plan). These tests are about the buttons, so there is no
+        # queue and nothing marked: the release walks an empty set.
+        self._queue: list = []
+        self._queue_lock = Lock()
+        self._redownload_overrides: set = set()
+        self._library_claim_overrides: set = set()
+        self._merge_plans: dict = {}
+        self._release_abandoned_hold = WavesBridge._release_abandoned_hold.__get__(self, type(self))
+        # Abandoning a held download settles its rollup now, or a discography
+        # whose members were all held could never finish
+        # (test_wholefile_audit_2026_08_31). These tests are about the buttons,
+        # so record the credits and keep the groups empty.
+        self.bumps: list = []
+        self._bump_download_groups = lambda mid, pct, state: self.bumps.append((mid, pct, state))
+        self._reap_stranded_groups = lambda: None
 
 
 def test_dismissing_the_nudge_clears_stashed_buttons():
@@ -420,6 +437,32 @@ def test_a_disabled_source_failing_cannot_mark_incomplete():
     stub = _ReleasesStub({"disco_eps": True})  # albums source off
     own, _guest, complete = stub._artist_releases(_PartialArtist())
     assert complete is True and [a.id for a in own] == ["ep1"]
+
+
+def test_a_release_credited_to_a_same_named_stranger_is_dropped():
+    # TIDAL has served a same-named artist's albums from the own-releases
+    # endpoints; a discography scan must keep only releases credited to the
+    # artist actually asked for.
+    stub = _ReleasesStub({"disco_albums": True})
+    stranger = _release("theirs")
+    stranger.artist = SimpleNamespace(name="Art", id=999)
+    stranger.artists = [stranger.artist]
+    mine = _release("mine")  # credited to id=1
+    artist = SimpleNamespace(id=1, get_albums=lambda: [stranger, mine])
+    own, _guest, complete = stub._artist_releases(artist)
+    assert complete is True and [a.id for a in own] == ["mine"]
+
+
+def test_a_creditless_release_stub_is_kept():
+    # Absent credits are a thin payload, not evidence of a foreign release:
+    # dropping on absence would empty whole discographies.
+    stub = _ReleasesStub({"disco_albums": True})
+    bare = _release("bare")
+    bare.artist = None
+    bare.artists = None
+    artist = SimpleNamespace(id=1, get_albums=lambda: [bare])
+    own, _guest, _complete = stub._artist_releases(artist)
+    assert [a.id for a in own] == ["bare"]
 
 
 class _DownloadArtistStub:

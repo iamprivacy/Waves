@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import os
 
-from tidaler.waves_ui import backend as backend_mod
-from tidaler.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge
+from waves.waves_ui import backend as backend_mod
+from waves.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge
 
 
 class _Stub:
@@ -33,7 +33,7 @@ def _bind(stub, name):
 def _values_stub():
     stub = _Stub()
     stub._default_waves_prefs = _bind(stub, "_default_waves_prefs")
-    # A canned schema: one tidaler enum field, one tidaler flag, one waves
+    # A canned schema: one engine enum field, one engine flag, one waves
     # pref, one composite carrying file_key + child_key, and one unknown key
     # that must be skipped rather than crash.
     stub.settingsSchema = lambda: [
@@ -69,7 +69,7 @@ def _values_stub():
 
 def test_factory_defaults_cover_schema_keys_in_apply_shape():
     values = _bind(_values_stub(), "_factory_default_values")()
-    # Tidaler enum arrives by NAME (what applySettings indexes _ENUM_BY_FIELD with).
+    # Engine enum arrives by NAME (what applySettings indexes _ENUM_BY_FIELD with).
     assert isinstance(values["quality_audio"], str)
     # First-run override wins over the stock dataclass default.
     assert values["video_download"] is _FIRST_RUN_OVERRIDES["video_download"]
@@ -185,6 +185,65 @@ def test_factory_reset_wipes_waves_files_and_keeps_install_channel(tmp_path, mon
     assert sorted(os.listdir(base)) == ["install_channel"], "every Waves file (and empty subdir) is gone"
     assert (base / "install_channel").read_text() == "homebrew"
     assert _FakeQSettings.cleared, "the QML setup flags are cleared too"
+
+
+def test_factory_reset_takes_everything_a_self_update_left_behind(tmp_path, monkeypatch):
+    """The updates folder as a real self-update leaves it.
+
+    armed.json records the whole install result, "applied_to" included, which
+    on Windows is C:\\Users\\<name>\\AppData\\Local\\... . The helper is named
+    per pid and the staging lock is a file, so between them the folder stopped
+    falling at all and both install paths survived a reset that promises to
+    take exactly this. Same story in bin/ for a crashed ffmpeg install.
+    """
+    base = tmp_path / "cfg"
+    base.mkdir()
+    updates = base / "updates"
+    updates.mkdir()
+    (updates / "applied.json").write_text("{}")
+    (updates / "update.log").write_text("swap ok")
+    (updates / "armed.json").write_text('{"version": "0.1.26", "applied_to": "C:/Users/someone/AppData/Local/Waves"}')
+    (updates / "install.lock").write_text("")
+    (updates / "apply_update_66648.bat").write_text("@echo off")
+    (updates / "staged").mkdir()
+    binf = base / "bin"
+    binf.mkdir()
+    (binf / "ffmpeg").write_text("x")
+    (binf / "ffmpeg.json").write_text("{}")
+    (binf / "ffmpeg.Qm7x2d.new").write_text("half a binary")
+    (binf / "ffmpeg.json.a1b2c3.tmp").write_text("{}")
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert not updates.exists(), f"the updates folder survived, holding {sorted(p.name for p in updates.iterdir())}"
+    assert not binf.exists(), f"the bin folder survived, holding {sorted(p.name for p in binf.iterdir())}"
+
+
+def test_factory_reset_patterns_still_cannot_touch_a_foreign_file(tmp_path, monkeypatch):
+    """The per-subdirectory patterns are anchored at both ends to a name only
+    Waves writes, so widening the wipe to reach a pid did not widen it to reach
+    anything of the user's."""
+    base = tmp_path / "cfg"
+    base.mkdir()
+    updates = base / "updates"
+    updates.mkdir()
+    (updates / "apply_update_7.bat").write_text("ours")
+    (updates / "apply_update_notes.bat").write_text("precious")
+    (updates / "my_apply_update_7.bat").write_text("precious")
+    binf = base / "bin"
+    binf.mkdir()
+    (binf / "ffmpeg.Qm7x2d.new").write_text("ours")
+    (binf / "notffmpeg.Qm7x2d.new").write_text("precious")
+    (binf / "tmpq8s7d1.zip").write_text("precious")
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert not (updates / "apply_update_7.bat").exists()
+    assert not (binf / "ffmpeg.Qm7x2d.new").exists()
+    assert (updates / "apply_update_notes.bat").read_text() == "precious"
+    assert (updates / "my_apply_update_7.bat").read_text() == "precious"
+    assert (binf / "notffmpeg.Qm7x2d.new").read_text() == "precious"
+    assert (binf / "tmpq8s7d1.zip").read_text() == "precious"
 
 
 def test_factory_reset_cannot_touch_foreign_files(tmp_path, monkeypatch):

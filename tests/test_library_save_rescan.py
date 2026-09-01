@@ -18,7 +18,7 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:
@@ -70,6 +70,9 @@ def _stub(*, enabled=False, source="separate", folder="", download_base="/dl"):
     # same one _save_settings holds, so a worker save cannot slip its borrowed
     # path into the write. A stub that drives applySettings needs the real thing.
     s._settings_save_lock = Lock()
+    # The real bridge hands the disk write to a background writer; the stub
+    # runs it inline through its own settings.save seam.
+    s._submit_settings_write = lambda: s.settings.save()
     s._restore_ffmpeg_flags = lambda: None
     s._restore_ffmpeg_path = lambda: None
     s._ffmpeg_source_label = lambda: "system"
@@ -77,6 +80,7 @@ def _stub(*, enabled=False, source="separate", folder="", download_base="/dl"):
     s.editionMergeChanged = _signal()
     s.ffmpegStatusChanged = _signal()
     s.confirmCategoryDlChanged = _signal()
+    s.skipExistingChanged = _signal()
     s.librarySourceChanged = _signal()
     s._logged_in = False
     s._set_status = lambda text: None

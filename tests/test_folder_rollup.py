@@ -11,8 +11,8 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.helper.folders import FolderNode, FolderTree
-from tidaler.waves_ui.backend import WavesBridge
+from waves.helper.folders import FolderNode, FolderTree
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Signal:
@@ -139,6 +139,8 @@ def test_playlist_template_root_and_cold_session_fall_back_clean():
 
 class _DownloadFolderStub:
     downloadFolder = WavesBridge.downloadFolder
+    # The folder's playlists are queued as one batch, delivered once.
+    _queue_batch = WavesBridge._queue_batch
     _playlist_template = WavesBridge._playlist_template
     _ffmpeg_gate_holds = WavesBridge._ffmpeg_gate_holds
 

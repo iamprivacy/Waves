@@ -21,9 +21,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import _TrackedDownload
+from waves.download import Download
+from waves.waves_ui import backend
+from waves.waves_ui.backend import _TrackedDownload
 
 
 def _make_tracked() -> tuple[_TrackedDownload, MagicMock]:

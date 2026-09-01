@@ -21,7 +21,7 @@ HOW THIS STAYS FIXED
 --------------------
 The real ``WavesTidal`` finalizes a sign-in against a real credentials file in
 a temp folder, and the symptom is then reproduced end to end through the REAL
-``tidaler.config.Tidal.switch_to_atmos_session`` and the REAL
+``waves.config.Tidal.switch_to_atmos_session`` and the REAL
 ``WavesTidal.login_token``. Only tidalapi's own session object is a stand-in,
 and it counts how many times it was actually asked to sign in, so "returned
 False without trying" is distinguishable from "tried and failed".
@@ -31,8 +31,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tidaler.model.cfg import Token as ModelToken
-from tidaler.waves_ui.session import WavesTidal
+from waves.model.cfg import Token as ModelToken
+from waves.waves_ui.session import WavesTidal
 
 
 class _Session:

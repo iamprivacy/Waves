@@ -23,8 +23,8 @@ import mutagen.mp3
 import mutagen.mp4
 from tidalapi import Video
 
-from tidaler.download import Download
-from tidaler.metadata import Metadata
+from waves.download import Download
+from waves.metadata import Metadata
 
 
 def _mp4_stub():
@@ -55,8 +55,8 @@ def _video(**over) -> Video:
     v = Video.__new__(Video)
     v.id = 1
     v.name = "Let The Good Times Roll"
-    v.artists = [SimpleNamespace(name="Electric Callboy"), SimpleNamespace(name="The Offspring")]
-    v.artist = SimpleNamespace(name="Electric Callboy")
+    v.artists = [SimpleNamespace(id=11, name="Electric Callboy"), SimpleNamespace(id=22, name="The Offspring")]
+    v.artist = SimpleNamespace(id=11, name="Electric Callboy")
     v.album = None
     v.cover = None
     v.explicit = True
@@ -71,7 +71,7 @@ def test_video_tags_carry_title_artists_year_and_media_kind(tmp_path):
     fake = _mp4_stub()
     file = tmp_path / "v.mp4"
     file.write_bytes(b"x")
-    with patch("tidaler.metadata.mutagen.File", return_value=fake):
+    with patch("waves.metadata.mutagen.File", return_value=fake):
         m = Metadata(
             path_file=file,
             target_upc={"MP4": "UPC"},
@@ -98,7 +98,7 @@ def test_video_tags_skip_the_album_structure_atoms(tmp_path):
     fake = _mp4_stub()
     file = tmp_path / "v.mp4"
     file.write_bytes(b"x")
-    with patch("tidaler.metadata.mutagen.File", return_value=fake):
+    with patch("waves.metadata.mutagen.File", return_value=fake):
         Metadata(
             path_file=file,
             target_upc={"MP4": "UPC"},
@@ -115,7 +115,7 @@ def test_audio_tagging_is_unchanged_by_the_video_mode(tmp_path):
     fake = _mp4_stub()
     file = tmp_path / "t.m4a"
     file.write_bytes(b"x")
-    with patch("tidaler.metadata.mutagen.File", return_value=fake):
+    with patch("waves.metadata.mutagen.File", return_value=fake):
         Metadata(
             path_file=file,
             target_upc={"MP4": "UPC"},
@@ -150,7 +150,7 @@ def test_metadata_write_video_maps_the_video_fields():
     dl.settings.data.metadata_cover_embed = False
     dl.settings.data.metadata_write_url = False
     dl.settings.data.metadata_target_upc = "UPC"
-    with patch("tidaler.download.Metadata", _RecMeta):
+    with patch("waves.download.Metadata", _RecMeta):
         assert dl.metadata_write_video(_video(), pathlib.Path("v.mp4")) is True
     kw = _RecMeta.last.kw
     assert _RecMeta.last.saved is True
@@ -158,10 +158,38 @@ def test_metadata_write_video_maps_the_video_fields():
     assert kw["date"] == "2026-06-06"
     assert kw["artists"] == ["Electric Callboy", "The Offspring"]
     assert kw["albumartist"] == ["Electric Callboy"]
+    # The video call site passes the ids, and picks the album artist id from
+    # the same artist the album artist NAME was taken from.
+    assert kw["artist_ids"] == ["11", "22"]
+    assert kw["album_artist_ids"] == ["11"]
     assert kw["explicit"] is True
     assert kw["is_video"] is True
     assert kw["replay_gain_write"] is False
     assert kw["url_share"] == "", "share URL only with the URL tag enabled"
+
+
+def test_an_id_less_video_artist_writes_no_id_rather_than_the_next_artist_s():
+    """The name and the id must name the same artist, or the tag lies.
+
+    A primary credit that carries a name but no id used to fall back to the
+    first credited artist that HAD one, so a video by the singer Marina could
+    be tagged with the id of the band Marina: the exact wrong-identity claim
+    this tag exists to prevent. No id at all is the honest answer.
+    """
+    dl = _make_download()
+    dl.settings.data.mark_explicit = False
+    dl.settings.data.metadata_cover_embed = False
+    dl.settings.data.metadata_write_url = False
+    dl.settings.data.metadata_target_upc = "UPC"
+    video = _video(
+        artists=[SimpleNamespace(id=999, name="Marina")],  # the band
+        artist=SimpleNamespace(id=None, name="Marina"),  # the singer, id absent
+    )
+    with patch("waves.download.Metadata", _RecMeta):
+        assert dl.metadata_write_video(video, pathlib.Path("v.mp4")) is True
+    kw = _RecMeta.last.kw
+    assert kw["albumartist"] == ["Marina"], "the name tag still commits to the primary"
+    assert kw["album_artist_ids"] == [], "unknown, never the other Marina"
 
 
 def test_metadata_write_video_survives_missing_fields():
@@ -172,7 +200,7 @@ def test_metadata_write_video_survives_missing_fields():
     dl.settings.data.metadata_write_url = False
     dl.settings.data.metadata_target_upc = "UPC"
     bare = _video(release_date=None, artists=[], artist=None, explicit=False, cover=None)
-    with patch("tidaler.download.Metadata", _RecMeta):
+    with patch("waves.download.Metadata", _RecMeta):
         assert dl.metadata_write_video(bare, pathlib.Path("v.mp4")) is True
     kw = _RecMeta.last.kw
     assert kw["date"] == "" and kw["artists"] == [] and kw["albumartist"] == []

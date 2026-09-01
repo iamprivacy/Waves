@@ -35,7 +35,7 @@ from pathlib import Path
 
 from test_progress_matrix_stable_width import _EXIT_OK, _EXIT_REGRESSED, _boot
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _WALK = """
  function walk(it, pred){

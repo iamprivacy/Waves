@@ -1,6 +1,6 @@
 """The packaging metadata version must match the version the app reports.
 
-``tidaler.waves_ui.__version__`` is the single source of truth: the in-app
+``waves.waves_ui.__version__`` is the single source of truth: the in-app
 updater compares it against the latest release tag, and CI refuses to build
 unless the tag matches it. ``pyproject.toml`` carries its own copy for anyone
 installing from source or reading the published tree, and nothing enforced the
@@ -14,7 +14,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from tidaler.waves_ui import __version__
+from waves.waves_ui import __version__
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
@@ -22,7 +22,7 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 def test_pyproject_version_matches_app_version():
     packaged = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
     assert packaged == __version__, (
-        f"pyproject.toml says {packaged!r} but tidaler.waves_ui.__version__ is "
+        f"pyproject.toml says {packaged!r} but waves.waves_ui.__version__ is "
         f"{__version__!r}; bump both in the release commit"
     )
 

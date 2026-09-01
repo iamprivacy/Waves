@@ -21,8 +21,8 @@ import tarfile
 
 import pytest
 
-from tidaler.waves_ui import updater as u
-from tidaler.waves_ui.updater import AppUpdater, UpdaterError
+from waves.waves_ui import updater as u
+from waves.waves_ui.updater import AppUpdater, UpdaterError
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -131,6 +131,42 @@ def test_extract_tar_gz_preserves_symlink(tmp_path, monkeypatch):
     assert link.is_symlink() and os.readlink(link) == "A"
 
 
+# ---- extraction: the CALL SITE, not only the helper -------------------------
+# Every malicious-archive test below reaches _safe_extractall / _safe_extractall_tar
+# directly, and the tests that do drive _extract_payload feed it only benign
+# archives. So swapping _extract_payload's call back to tarfile's own extractall
+# left the whole file green while an escaping member, driven through the method
+# the app actually calls, wrote outside the staging directory. These two send an
+# escaping archive down the real path, one per format.
+def test_the_real_extract_path_refuses_an_escaping_tar(tmp_path, monkeypatch):
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    up.os_key, up.arch = "linux", "amd64"
+    archive = tmp_path / "Waves-linux.tar.gz"
+    _tar_gz(archive, [("../../escaped.txt", b"owned", "file", 0o644)])
+    outside = tmp_path.parent / "escaped.txt"
+
+    with pytest.raises(UpdaterError, match="unsafe archive member"):
+        up._extract_payload(archive, "Waves-linux.tar.gz", lambda *a, **k: None)
+
+    assert not outside.exists(), "an escaping member reached the disk through the shipped call site"
+
+
+def test_the_real_extract_path_refuses_an_escaping_zip(tmp_path):
+    import zipfile
+
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    up.os_key, up.arch = "linux", "amd64"
+    archive = tmp_path / "Waves-linux.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../../escaped.txt", b"owned")
+    outside = tmp_path.parent / "escaped.txt"
+
+    with pytest.raises(UpdaterError, match="unsafe archive member"):
+        up._extract_payload(archive, "Waves-linux.zip", lambda *a, **k: None)
+
+    assert not outside.exists(), "an escaping member reached the disk through the shipped call site"
+
+
 # ---- extraction: malicious tar entries are rejected -------------------------
 def test_tar_rejects_path_traversal(tmp_path):
     archive = tmp_path / "evil.tar.gz"
@@ -162,6 +198,38 @@ def test_tar_rejects_absolute_symlink(tmp_path):
     out = tmp_path / "out"
     with tarfile.open(archive, "r:gz") as tf, pytest.raises(UpdaterError, match="unsafe link"):
         AppUpdater._safe_extractall_tar(tf, out)
+
+
+def test_tar_rejects_escaping_hard_link(tmp_path):
+    """The guard covers hard links too (their linkname is resolved against the
+    archive ROOT, not the member's folder), but until now every link test used
+    a symlink: deleting the islnk half left the whole suite green while a
+    LNKTYPE member fell through untouched."""
+    archive = tmp_path / "lnk.tar.gz"
+    _tar_gz(archive, [("evil", "../../etc/passwd", "lnk", 0o644)])
+    out = tmp_path / "out"
+    with tarfile.open(archive, "r:gz") as tf, pytest.raises(UpdaterError, match="unsafe link"):
+        AppUpdater._safe_extractall_tar(tf, out)
+
+
+def test_tar_rejects_absolute_hard_link(tmp_path):
+    archive = tmp_path / "alnk.tar.gz"
+    _tar_gz(archive, [("evil", "/etc/passwd", "lnk", 0o644)])
+    out = tmp_path / "out"
+    with tarfile.open(archive, "r:gz") as tf, pytest.raises(UpdaterError, match="unsafe link"):
+        AppUpdater._safe_extractall_tar(tf, out)
+
+
+def test_tar_keeps_a_hard_link_that_stays_inside(tmp_path):
+    """The guard rejects escapes, not hard links: a real .dist tree ships them
+    (Nuitka links duplicate payloads), so a benign one has to land."""
+    archive = tmp_path / "ok.tar.gz"
+    _tar_gz(archive, [("lib/real.so", b"SO", "file", 0o644), ("lib/alias.so", "lib/real.so", "lnk", 0o644)])
+    out = tmp_path / "out"
+    with tarfile.open(archive, "r:gz") as tf:
+        AppUpdater._safe_extractall_tar(tf, out)
+    assert (out / "lib" / "alias.so").read_bytes() == b"SO"
+    assert (out / "lib" / "alias.so").stat().st_ino == (out / "lib" / "real.so").stat().st_ino
 
 
 # ---- extraction: raw single-file binary still works -------------------------

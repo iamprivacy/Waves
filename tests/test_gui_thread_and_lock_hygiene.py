@@ -33,7 +33,7 @@ import ast
 import inspect
 import textwrap
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 def _slot_ast(name: str) -> ast.FunctionDef:

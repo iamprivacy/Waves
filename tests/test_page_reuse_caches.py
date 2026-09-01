@@ -13,8 +13,8 @@ import json
 from threading import Lock
 from unittest.mock import MagicMock
 
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 # ----- playlists/mixes sweep cache ------------------------------------------
 

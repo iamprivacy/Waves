@@ -40,7 +40,7 @@ _EXIT_REGRESSED = 1  # late results stole the surface again (or fresh ones stopp
 _EXIT_NO_QT = 77
 _EXIT_PRECONDITION = 78
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EMPTY_RESULTS = {"artists": [], "albums": [], "tracks": [], "videos": [], "playlists": [], "mixes": []}
 
@@ -69,7 +69,7 @@ def test_late_search_results_do_not_steal_surface():
 
 
 def _run_scenario() -> int:
-    # THIS checkout's tidaler, not the venv's editable install: the scenario
+    # THIS checkout's waves, not the venv's editable install: the scenario
     # drives this tree's Main.qml against this tree's bridge.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
@@ -82,8 +82,8 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

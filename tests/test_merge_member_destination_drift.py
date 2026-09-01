@@ -43,8 +43,8 @@ from unittest.mock import MagicMock
 
 from tidalapi import Album, Track
 
-from tidaler.download import Download
-from tidaler.waves_ui.backend import _as_member_of, _TrackedDownload
+from waves.download import Download
+from waves.waves_ui.backend import _as_member_of, _TrackedDownload
 
 _TITLE = "The Better Life : Dead Love"  # the colon is stripped on disk
 _LEGACY_DIR = "[2011] The Better Life  Dead Love"  # doubled space, pre-0.1.17

@@ -23,8 +23,8 @@ from unittest.mock import MagicMock
 import pytest
 from tidalapi.media import Track
 
-from tidaler import download as download_module
-from tidaler.download import Download, _waves_item_id, _waves_owned_ids
+from waves import download as download_module
+from waves.download import Download, _waves_item_id, _waves_owned_ids
 
 SOURCE_ID = "t-1"
 IDENTITY_ID = "identity-9"
@@ -51,7 +51,7 @@ def _identity_from_content(monkeypatch):
 
         return raw[3:].decode() if raw.startswith(b"id-") else ""
 
-    monkeypatch.setattr("tidaler.download.read_item_id", _read)
+    monkeypatch.setattr("waves.download.read_item_id", _read)
 
 
 def _occupy(path_file: pathlib.Path, item_id: str) -> None:
@@ -184,10 +184,10 @@ class _ClaimSpy(Download):
         self.claims: list[tuple] = []
         super().__init__(*args, **kwargs)
 
-    def _claim_destination(self, path_media_dst, media_id, owned_ids=None):
+    def _claim_destination(self, path_media_dst, media_id, owned_ids=None, fetch_is_atmos=None):
         self.claims.append((path_media_dst, media_id, owned_ids))
 
-        return super()._claim_destination(path_media_dst, media_id, owned_ids)
+        return super()._claim_destination(path_media_dst, media_id, owned_ids, fetch_is_atmos)
 
 
 class TestTheLiveDownloadPathPassesEveryOwnedId:
@@ -253,6 +253,8 @@ class TestTheLiveDownloadPathPassesEveryOwnedId:
 
         assert len(claims) == 2, "the download path and the playlist symlink move"
         for call in claims:
-            assert len(call.args) == 3 and not call.keywords, ast.unparse(call)
+            # Four positionals since the Atmos mode gate: destination, id,
+            # owned ids, and what mode the fetch delivers.
+            assert len(call.args) == 4 and not call.keywords, ast.unparse(call)
             owned = call.args[2]
             assert isinstance(owned, ast.Call) and ast.unparse(owned.func) == "_waves_owned_ids", ast.unparse(call)

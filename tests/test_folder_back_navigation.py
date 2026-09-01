@@ -36,7 +36,7 @@ _EXIT_REGRESSED = 1  # the guard swallowed the history push again
 _EXIT_NO_QT = 77
 _EXIT_PRECONDITION = 78
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 
 def test_reopening_keyed_page_from_folder_pushes_history():
@@ -63,7 +63,7 @@ def test_reopening_keyed_page_from_folder_pushes_history():
 
 
 def _run_scenario() -> int:
-    # THIS checkout's tidaler, not the venv's editable install: the scenario
+    # THIS checkout's waves, not the venv's editable install: the scenario
     # drives this tree's Main.qml against this tree's bridge (the folder slot
     # only exists here while the branch is unmerged).
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -77,8 +77,8 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

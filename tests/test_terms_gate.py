@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-QML_MAIN = ROOT / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = ROOT / "waves" / "waves_ui" / "qml" / "Main.qml"
 README = ROOT / "README.md"
 
 TERMS_VERSION = "1.0"

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tidaler.waves_ui.backend import _collection_incomplete_reason, _unavailable_note
+from waves.waves_ui.backend import _collection_incomplete_reason, _unavailable_note
 
 
 @pytest.mark.parametrize(

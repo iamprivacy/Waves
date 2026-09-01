@@ -25,7 +25,7 @@ from __future__ import annotations
 import base64
 from types import SimpleNamespace
 
-from tidaler.waves_ui.manifest import overgenerated_tail_urls
+from waves.waves_ui.manifest import overgenerated_tail_urls
 
 _MPD_TEMPLATE = """<?xml version='1.0' encoding='UTF-8'?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">

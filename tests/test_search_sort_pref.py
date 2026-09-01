@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tidaler.waves_ui import backend
+from waves.waves_ui import backend
 
 
 def _bridge():

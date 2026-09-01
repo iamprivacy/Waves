@@ -1,4 +1,4 @@
-"""Tests for the download-ownership store (tidaler/ownership.py).
+"""Tests for the download-ownership store (waves/ownership.py).
 
 Pure standard library, no PySide6, so these run in the lint venv like the other
 engine-level tests. The store's whole point is that ownership is decided against
@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from tidaler.ownership import OwnershipStore, quality_rank
+from waves.ownership import OwnershipStore, quality_rank
 
 
 def _store(tmp_path):

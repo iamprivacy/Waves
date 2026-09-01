@@ -36,7 +36,7 @@ from threading import Lock
 
 import pytest
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EXIT_OK = 0
 _EXIT_REGRESSED = 1
@@ -57,7 +57,7 @@ class _Stub:
     """Just enough bridge for the registry."""
 
     def __init__(self, target="HI-RES"):
-        from tidaler.waves_ui import backend
+        from waves.waves_ui import backend
 
         self._job_tracks = {}
         # The ledger merge also overlays an expansion's predicted skips
@@ -66,9 +66,13 @@ class _Stub:
         self._job_owned = {}
         self._job_fetched = {}
         self._job_signals = {}
-        self._queue = []
-        self._queue_index = {}
+        # The row these events belong to: a registry writer ignores a qid
+        # whose row has gone, so a cleared row cannot re-create per-row state.
+        self._queue = [{"qid": 1, "media_id": "m1", "status": "running"}]
+        self._queue_index = {1: self._queue[0]}
         self._outcome_lock = Lock()
+        self._qdirty_changed: dict = {}
+        self._queue_lock = Lock()
         self.queueTrackState = _Signal()
         self.emits = 0
         self._emit_queue = lambda: setattr(self, "emits", self.emits + 1)
@@ -76,14 +80,14 @@ class _Stub:
         self._own_pool = type("P", (), {"start": lambda self_, w: None})()
         self.settings = type("S", (), {"data": type("D", (), {"download_base_path": ""})()})()
         self._target_tier = lambda: target
-        for name in ("_track_lifecycle", "_queue_item"):
+        for name in ("_track_lifecycle", "_queue_item", "_queue_mark_changed"):
             setattr(self, name, getattr(backend.WavesBridge, name).__get__(self, _Stub))
 
 
 def test_a_setting_change_leaves_every_queued_row_alone():
     """The bridge has no retarget at all any more: a queued row's request is
     what it was queued at, and applySettings must not reach into the queue."""
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     assert not hasattr(backend.WavesBridge, "_retarget_unfinished_rows")
     src = inspect.getsource(backend.WavesBridge.applySettings)
@@ -110,7 +114,7 @@ def test_running_event_seeds_the_track_ceiling_and_a_later_one_keeps_it():
 
 
 def test_merge_carries_the_ceiling_from_the_fetch_and_from_the_registry():
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     class _B(_Stub):
         def __init__(self):
@@ -134,7 +138,7 @@ def test_merge_carries_the_ceiling_from_the_fetch_and_from_the_registry():
 
 
 def test_merge_seed_and_load_queue_tracks_read_the_catalog_ceiling(monkeypatch):
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     monkeypatch.setattr(backend, "_quality_label", lambda o: getattr(o, "adv", ""))
     monkeypatch.setattr(backend, "name_builder_title", lambda t: getattr(t, "name", ""))
@@ -182,8 +186,8 @@ def _run_scenario() -> int:
     patch_offline()
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:  # pragma: no cover - environment guard
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

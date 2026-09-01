@@ -17,7 +17,7 @@ import pytest
 from pathvalidate import sanitize_filepath
 from pathvalidate.error import ValidationError
 
-from tidaler.helper.path import path_file_sanitize
+from waves.helper.path import path_file_sanitize
 
 
 def _is_valid(path_file: pathlib.Path) -> bool:

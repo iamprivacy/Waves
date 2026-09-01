@@ -1,4 +1,4 @@
-"""LRCLIB lyrics lookup (tidaler/lyrics.py).
+"""LRCLIB lyrics lookup (waves/lyrics.py).
 
 The fetcher is the front line against TIDAL's machine-transcribed lyrics: it
 must return community lyrics when LRCLIB has a confident match and empty
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 
-from tidaler.lyrics import _DURATION_TOLERANCE_SEC, fetch_lrclib_lyrics, lyrics_file_choice
-from tidaler.model.cfg import Settings
+from waves.lyrics import _DURATION_TOLERANCE_SEC, fetch_lrclib_lyrics, lyrics_file_choice
+from waves.model.cfg import Settings
 
 
 class _Response:
@@ -145,7 +145,7 @@ def test_primary_lyrics_field_falls_back_to_untimed():
     # Most players read only the primary lyrics field (FLAC LYRICS, MP4 ©lyr);
     # a track with only untimed lyrics must still show them there, and timed
     # lyrics must always win when present.
-    from tidaler.metadata import Metadata
+    from waves.metadata import Metadata
 
     m = Metadata.__new__(Metadata)  # the real __init__ needs a parsable audio file
     m.lyrics = "[00:01.00] timed"

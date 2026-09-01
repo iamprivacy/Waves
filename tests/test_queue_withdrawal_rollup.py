@@ -30,10 +30,11 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from _dispatch_stub import arm_dispatch, arm_queue
 
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Sig:
@@ -95,6 +96,7 @@ def _queue_stub(statuses):
         "_remove_row",
         "clearQueue",
         "clearQueued",
+        "clearFailed",
         "cancelQueueItem",
         "removeQueueItem",
         "stopAll",
@@ -201,6 +203,34 @@ def test_reaper_spares_a_group_with_a_live_row():
     assert "art1" in s._artist_groups
 
 
+def test_reaper_spares_a_group_whose_members_are_held_for_recovery():
+    """A share dropping mid-discography withdraws each member's row and holds
+    the download for an automatic replay when the folder comes back. That is
+    live work with no row to see it by: reaping it took the artist rollup away
+    while the replays were still coming, so the run that followed showed no
+    progress, no completion and no failure at all."""
+    s = _queue_stub([])
+    s._artist_groups = {"art1": {"keys": {"mX"}, "done": set(), "failed": set(), "prog": {}}}
+    s._pending_downloads = [("mX", lambda: None)]
+
+    s._reap_stranded_groups()
+    s._reap_stranded_groups()
+
+    assert "art1" in s._artist_groups
+    assert s.downloadState.emits == [], "and the artist button is left as it is"
+
+
+def test_reaper_still_takes_a_group_once_the_held_work_is_gone():
+    s = _queue_stub([])
+    s._artist_groups = {"art1": {"keys": {"mX"}, "done": set(), "failed": set(), "prog": {}}}
+    s._pending_downloads = [("mOther", lambda: None)]
+
+    s._reap_stranded_groups()
+    s._reap_stranded_groups()
+
+    assert s._artist_groups == {}
+
+
 def test_reaper_defers_while_a_scan_is_in_flight():
     s = _queue_stub([])
     s._artist_groups = {"art1": {"keys": {"mX"}, "done": set(), "failed": set(), "prog": {}}}
@@ -267,6 +297,12 @@ def test_a_bump_with_the_generation_still_current_emits_normally():
 def _enqueue_stub():
     s = _Stub()
     s._scan_gen = 1
+    # The scan marks every album key exempt from the edition scan before it
+    # emits the batch; a refused batch has to give those marks back.
+    s._merge_scanned = {"a1", "a2"}
+    # ...and stashes each one's merge plan, which a refused batch gives back
+    # too, or the next plain click on that album downloads the assembly.
+    s._merge_plans = {}
     s._queue_emit_suspended = False
     s._emit_queue = lambda: None
     s.downloadState = _Sig()
@@ -274,7 +310,7 @@ def _enqueue_stub():
     s.downloadAlbum = s.calls.append
     s.downloadTrack = s.calls.append
     s.downloadVideo = s.calls.append
-    for n in ("_enqueue_albums", "_enqueue_tracks", "_enqueue_videos"):
+    for n in ("_enqueue_albums", "_enqueue_tracks", "_enqueue_videos", "_queue_batch"):
         setattr(s, n, _bind(s, n))
     return s
 
@@ -286,10 +322,52 @@ def test_a_stale_album_batch_queues_nothing_and_resets_its_buttons():
     assert s.downloadState.emits == [("a1", ""), ("a2", "")]
 
 
+def test_a_stale_album_batch_hands_back_the_edition_scan_exemptions():
+    """The mark is consumed by the next click on that album, so one left
+    behind by a batch that queued nothing silently downgraded that click to a
+    plain download, skipping the edition scan the preference asks for."""
+    s = _enqueue_stub()
+
+    s._enqueue_albums(0, ["a1", "a2"])
+
+    assert s._merge_scanned == set()
+
+
+def test_a_current_batch_keeps_the_exemptions_it_was_given():
+    s = _enqueue_stub()
+
+    s._enqueue_albums(1, ["a1", "a2"])
+
+    assert s._merge_scanned == {"a1", "a2"}, "the albums it queued consume them on their own way through"
+
+
 def test_a_current_batch_queues_every_key():
     s = _enqueue_stub()
     s._enqueue_albums(1, ["a1", "a2"])
     assert s.calls == ["a1", "a2"]
+
+
+def test_a_batch_that_raises_still_delivers_what_it_queued():
+    """The closing delivery sat on the line AFTER the try/finally, so a loop
+    body that raised skipped it while the flag was still cleared: the rows
+    were in the queue and marked dirty, and the drawer showed none of them
+    until some later, unrelated change flushed the marks."""
+    s = _enqueue_stub()
+    delivered = []
+    s._emit_queue = lambda: delivered.append(True)
+
+    def boom(key):
+        s.calls.append(key)
+        if key == "a2":
+            raise RuntimeError("a key that would not queue")
+
+    s.downloadAlbum = boom
+    with pytest.raises(RuntimeError):
+        s._enqueue_albums(1, ["a1", "a2", "a3"])
+
+    assert s.calls == ["a1", "a2"]
+    assert delivered == [True], "what did make it into the queue is on screen"
+    assert s._queue_emit_suspended is False, "and the gate is open for what follows"
 
 
 def test_stale_track_and_video_batches_are_refused_the_same_way():
@@ -412,11 +490,19 @@ def _body_stub(fail=False):
     s._ffmpeg_gate_holds = lambda media_id, retry: False
     s._job_library_skip = lambda qid: False
     s._gate_reachability = lambda retry, media_id: True
-    s._download_failed_with_folder = lambda retry, media_id, qid, name: False
+    # The job's abort rides along now: the helper probes for seconds before it
+    # takes its hold, and a press landing in there has to reach it.
+    s._download_failed_with_folder = lambda retry, media_id, qid, name, abort=None: False
     s._job_quality = lambda qid: None
     s._build_download = lambda signals, **kw: s.dl
     s._enqueue = lambda *a: 41
-    s._set_queue_status = lambda qid, status: None
+    # Three arguments, as the real slot has taken since 1333a46: the failure
+    # branch calls it with a reason, and a two-argument stub raised there,
+    # inside a Worker that swallows and logs. Nothing after that line ran, so
+    # this stub could not see the failure handler at all and the assertions
+    # below passed on the never-entered success branch.
+    s.statuses = []
+    s._set_queue_status = lambda qid, status, reason="": s.statuses.append((qid, status, reason))
     s._set_queue_progress = lambda qid, pct: None
     s._set_status = lambda msg: None
     s._bump_download_groups = lambda media_id, pct, status: None
@@ -424,6 +510,9 @@ def _body_stub(fail=False):
     s._job_aborts = {}
     s._job_signals = {}
     s._job_tracks = {}
+    # The finally clause pops it; unseeded, that raised too and hid the same
+    # ground.
+    s._job_dls = {}
     s._merge_plans = {}
     s._redownload_overrides = {"m1"}
     s._library_claim_overrides = set()
@@ -458,4 +547,79 @@ def test_a_failed_forced_job_keeps_its_mark_so_the_retry_stays_forced():
     s = _body_stub(fail=True)
     with patch.object(backend, "_ProgressSignals", lambda *a, **k: object()):
         s._download(_track_obj(), "track", "Song", "T", False, "m1")
+    # Proof the failure handler was reached at all: without it this assertion
+    # is answered by the success branch never being entered, so the guard
+    # would stay green even if the mark were cleared right here.
+    assert (41, "failed") in [(q, st) for q, st, _r in s.statuses]
     assert s._redownload_overrides == {"m1"}
+
+
+def test_the_finished_job_really_walked_the_success_branch():
+    """The other half of the same proof: the clearing test must be reading a
+    job that actually finished."""
+    s = _body_stub(fail=False)
+    with patch.object(backend, "_ProgressSignals", lambda *a, **k: object()):
+        s._download(_track_obj(), "track", "Song", "T", False, "m1")
+    assert (41, "done") in [(q, st) for q, st, _r in s.statuses]
+
+
+# --------------------------------------------------------------------------- #
+# A withdrawn row takes its REDOWNLOAD force with it. The mark is dropped by
+# the job that consumes it and kept on failure and cancel so a retry stays
+# forced, but every WITHDRAWAL left it behind: the row went and the force
+# stayed, so the next click on that item this session, from anywhere, silently
+# re-fetched and overwrote copies it should have skipped.
+# --------------------------------------------------------------------------- #
+def _forced_queue_stub(statuses, media_ids=None):
+    s = _queue_stub(statuses)
+    if media_ids:
+        for row, mid in zip(s._queue, media_ids, strict=False):
+            row["media_id"] = mid
+        s._queue_index = {it["qid"]: it for it in s._queue}
+    s._redownload_overrides = {it["media_id"] for it in s._queue}
+    return s
+
+
+@pytest.mark.parametrize(
+    "withdraw",
+    [
+        lambda s: s.clearQueue(),
+        lambda s: s.clearQueued(),
+        lambda s: s.cancelQueueItem(1),
+        lambda s: s.removeQueueItem(1),
+    ],
+)
+def test_every_withdrawal_gives_the_redownload_force_back(withdraw):
+    s = _forced_queue_stub(["queued"])
+
+    withdraw(s)
+
+    assert s._queue == [], "the row was withdrawn"
+    assert s._redownload_overrides == set(), "and its force went with it"
+
+
+def test_a_withdrawal_leaves_another_rows_force_alone():
+    s = _forced_queue_stub(["queued", "queued"], media_ids=["m1", "m2"])
+
+    s.cancelQueueItem(1)
+
+    assert s._redownload_overrides == {"m2"}, "only the withdrawn row's force is released"
+
+
+def test_a_row_still_running_keeps_the_force_a_withdrawn_twin_asked_for():
+    """Two rows for one item (an upgrade queued over a running download): the
+    force belongs to the work, and one of the two rows leaving is not the end
+    of it."""
+    s = _forced_queue_stub(["running", "queued"], media_ids=["m1", "m1"])
+
+    s.clearQueued()
+
+    assert s._redownload_overrides == {"m1"}
+
+
+def test_a_settled_row_dismissed_from_the_drawer_releases_it_too():
+    s = _forced_queue_stub(["failed"])
+
+    s.clearFailed()
+
+    assert s._redownload_overrides == set()

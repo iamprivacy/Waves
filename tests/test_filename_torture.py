@@ -27,9 +27,9 @@ from unittest.mock import MagicMock
 import pytest
 from tidalapi import Album, Track
 
-from tidaler.constants import FILENAME_LENGTH_MAX
-from tidaler.download import Download
-from tidaler.helper.path import (
+from waves.constants import FILENAME_LENGTH_MAX
+from waves.download import Download
+from waves.helper.path import (
     file_unique_suffix,
     format_path_media,
     name_comparison_key,
@@ -227,9 +227,9 @@ class TestDistinctTitlesNeverShareOneFile:
         # mechanism in turn has to leave two openable files.
         with dl._names_reserved_lock:
             first_picked = path_file_uniquify(first, names_taken=dl._names_reserved)
-            dl._names_reserved.add(str(first_picked))
+            dl._names_reserved[str(first_picked)] = ("1", 1)
             second_picked = path_file_uniquify(second, names_taken=dl._names_reserved)
-            dl._names_reserved.add(str(second_picked))
+            dl._names_reserved[str(second_picked)] = ("2", 1)
 
         assert first_picked is not None
         assert second_picked is not None

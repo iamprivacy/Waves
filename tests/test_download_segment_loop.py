@@ -23,10 +23,9 @@ import pathlib
 import threading
 from unittest.mock import MagicMock
 
-from rich.progress import Progress
-
-from tidaler.download import Download
-from tidaler.model.downloader import DownloadSegmentResult
+from waves.download import Download
+from waves.model.downloader import DownloadSegmentResult
+from waves.progress import Progress
 
 
 def _bridge(total: float) -> tuple[Download, int]:
@@ -36,6 +35,8 @@ def _bridge(total: float) -> tuple[Download, int]:
     b.event_abort = threading.Event()
     b.fn_logger = MagicMock()
     b.progress = Progress()
+    b._segment_executor = None
+    b._segment_executor_lock = threading.Lock()
     p_task = b.progress.add_task("test", total=total)
     return b, p_task
 

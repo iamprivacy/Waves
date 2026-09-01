@@ -9,8 +9,8 @@ Only the em dash may be rewritten.
 
 from __future__ import annotations
 
-from tidaler.model.cfg import HelpSettings
-from tidaler.waves_ui.backend import WavesBridge
+from waves.model.cfg import HelpSettings
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import types
 
-from tidaler.waves_ui.backend import _TrackedDownload
+from waves.waves_ui.backend import _TrackedDownload
 
 
 def _media(identity: str | None = None):
@@ -114,7 +114,7 @@ def test_a_claim_lookup_failure_never_gates():
 
 def _adapter(media, album=None):
     """_library_claim_media on a stub that records the question it asks."""
-    from tidaler.waves_ui.backend import WavesBridge
+    from waves.waves_ui.backend import WavesBridge
 
     asked: list[tuple] = []
     stub = types.SimpleNamespace(_library_track_claim=lambda *a: asked.append(a) and None)

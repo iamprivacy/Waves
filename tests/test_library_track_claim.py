@@ -49,7 +49,7 @@ _EXIT_REGRESSED = 1
 _EXIT_NO_QT = 77
 _EXIT_PRECONDITION = 78
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 ARTIST = "Miss May I"
 ALBUM = "Shadows Inside"
@@ -101,9 +101,9 @@ def _run_scenario() -> int:
     try:
         from PySide6.QtCore import Slot
 
-        from tidaler.matching import track_key
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.matching import track_key
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

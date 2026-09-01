@@ -14,7 +14,7 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:
@@ -37,6 +37,9 @@ def _apply_stub():
     # same one _save_settings holds, so a worker save cannot slip its borrowed
     # path into the write. A stub that drives applySettings needs the real thing.
     stub._settings_save_lock = Lock()
+    # The real bridge hands the disk write to a background writer; the stub
+    # runs it inline through its own settings.save seam.
+    stub._submit_settings_write = lambda: stub.settings.save()
     stub._restore_ffmpeg_flags = lambda: None
     stub._restore_ffmpeg_path = lambda: None
     stub._ffmpeg_source_label = lambda: "system"
@@ -44,6 +47,7 @@ def _apply_stub():
     stub.ownershipChanged = _signal()
     stub.editionMergeChanged = _signal()
     stub.ffmpegStatusChanged = _signal()
+    stub.skipExistingChanged = _signal()
     stub.dl_pool = SimpleNamespace(setMaxThreadCount=lambda n: None)
     stub._logged_in = False
     stub._set_status = lambda text: None

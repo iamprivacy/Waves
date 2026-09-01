@@ -12,8 +12,8 @@ clock exercises the time branch without sleeping.
 
 from __future__ import annotations
 
-import tidaler.waves_ui.backend as backend
-from tidaler.waves_ui.backend import WavesBridge
+import waves.waves_ui.backend as backend
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:

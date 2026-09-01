@@ -24,8 +24,8 @@ from unittest.mock import MagicMock
 
 from tidalapi import Album, Track
 
-from tidaler.download import Download
-from tidaler.helper.path import format_path_media
+from waves.download import Download
+from waves.helper.path import format_path_media
 
 _ARTIST = "XXXTENTACION"
 _TEMPLATE = "{album_artist}/{album_title}/{album_track_num}. {track_title}"

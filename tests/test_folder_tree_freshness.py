@@ -24,9 +24,9 @@ from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from tidaler.helper.folders import FolderNode, FolderTree
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.helper.folders import FolderNode, FolderTree
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 def _tree(names, partial=False):

@@ -16,11 +16,11 @@ import time
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MAIN_QML = (ROOT / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text()
-SETTINGS_QML = (ROOT / "tidaler" / "waves_ui" / "qml" / "SettingsPage.qml").read_text()
+MAIN_QML = (ROOT / "waves" / "waves_ui" / "qml" / "Main.qml").read_text()
+SETTINGS_QML = (ROOT / "waves" / "waves_ui" / "qml" / "SettingsPage.qml").read_text()
 
 
 class _Signal:
@@ -69,6 +69,11 @@ class RecoveryHost:
     _REMOUNT_COOLDOWN_SEC = WavesBridge._REMOUNT_COOLDOWN_SEC
     _WEDGE_FORCE_SEC = WavesBridge._WEDGE_FORCE_SEC
     _save_settings = WavesBridge._save_settings
+
+    def _submit_settings_write(self):
+        # The disk seam behind _save_settings; route it into the counter.
+        self.settings.save()
+
     _restore_ffmpeg_flags = WavesBridge._restore_ffmpeg_flags
     _restore_ffmpeg_path = WavesBridge._restore_ffmpeg_path
 
@@ -231,7 +236,7 @@ def test_warmup_deadline_raises_the_dialog_once():
 
 
 def test_keepwarm_touches_only_network_volumes(monkeypatch):
-    import tidaler.waves_ui.backend as backend_mod
+    import waves.waves_ui.backend as backend_mod
 
     listed: list[str] = []
     monkeypatch.setattr(backend_mod.os, "listdir", listed.append)
@@ -256,7 +261,7 @@ def test_keepwarm_touches_only_network_volumes(monkeypatch):
 
 
 def test_keepwarm_collapses_while_a_touch_is_hung(monkeypatch):
-    import tidaler.waves_ui.backend as backend_mod
+    import waves.waves_ui.backend as backend_mod
 
     started: list = []
     monkeypatch.setattr(

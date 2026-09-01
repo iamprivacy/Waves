@@ -16,9 +16,9 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.model.cfg import HelpSettings
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import _ARTIST_VIDEO_PAGE, _FLAG_FIELDS, WavesBridge
+from waves.model.cfg import HelpSettings
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import _ARTIST_VIDEO_PAGE, _FLAG_FIELDS, WavesBridge
 
 _KEY = "video_download"
 
@@ -66,7 +66,7 @@ def test_the_toggle_reads_as_a_discography_source():
     field = next(f for f in _sections_by_id()["discography"]["fields"] if f["key"] == _KEY)
     assert field["type"] == "bool"
     assert field["label"] == "Music videos"
-    # The stock tidaler help ("Allow download of videos.") describes a gate
+    # The stock engine help ("Allow download of videos.") describes a gate
     # this toggle no longer is; the schema must override it.
     assert field["help"] != HelpSettings().video_download
     assert "music videos" in field["help"].lower()

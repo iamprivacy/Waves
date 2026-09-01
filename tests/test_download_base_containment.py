@@ -35,8 +35,8 @@ from types import SimpleNamespace
 import pytest
 from tidalapi import Track
 
-from tidaler.helper.path import format_path_media
-from tidaler.model.cfg import Settings
+from waves.helper.path import format_path_media
+from waves.model.cfg import Settings
 
 # Names that pathvalidate reduces to nothing.
 EMPTYING_NAMES = ["?", "??", "*", "<>", "|", '"', "..."]

@@ -20,9 +20,9 @@ from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
-QML = Path(__file__).resolve().parents[1] / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML = Path(__file__).resolve().parents[1] / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 
 class _Emit:
@@ -95,7 +95,7 @@ def test_a_playlist_waiting_on_the_folder_sweep_never_lights_the_progress_bar():
 
 def test_every_pre_queue_hand_off_uses_the_same_word():
     """No entry point may go back to "running" for a click it has not queued."""
-    src = (Path(__file__).resolve().parents[1] / "tidaler" / "waves_ui" / "backend.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "waves" / "waves_ui" / "backend.py").read_text()
     # The three pre-queue acknowledgements, each immediately before a return or
     # a worker dispatch. Any of them saying "running" is the progress-bar flash.
     assert src.count('"preparing")') == 4, "refetch, playlist warm, category warm, edition scan"

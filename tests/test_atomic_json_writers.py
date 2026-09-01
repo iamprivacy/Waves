@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tidaler.waves_ui.backend import _FACTORY_WIPE_FILES, _write_json_atomic, _write_text_atomic
+from waves.waves_ui.backend import _FACTORY_WIPE_FILES, _write_json_atomic, _write_text_atomic
 
 
 class TestAtomicWriters:
@@ -32,7 +32,7 @@ class TestAtomicWriters:
         target.write_text('{"kept": true}', encoding="utf-8")
 
         with (
-            patch("tidaler.waves_ui.backend.os.replace", side_effect=OSError(28, "No space left on device")),
+            patch("waves.waves_ui.backend.os.replace", side_effect=OSError(28, "No space left on device")),
             pytest.raises(OSError, match="No space left on device"),
         ):
             _write_json_atomic(str(target), {"replacement": True})
@@ -43,7 +43,7 @@ class TestAtomicWriters:
         target = tmp_path / "cache.json"
 
         with (
-            patch("tidaler.waves_ui.backend.os.replace", side_effect=OSError(28, "No space left on device")),
+            patch("waves.waves_ui.backend.os.replace", side_effect=OSError(28, "No space left on device")),
             pytest.raises(OSError),
         ):
             _write_json_atomic(str(target), {"a": 1})
@@ -69,8 +69,8 @@ class TestAtomicWriters:
             return replace_real(src, dst)
 
         with (
-            patch("tidaler.waves_ui.backend.os.fsync", _fsync),
-            patch("tidaler.waves_ui.backend.os.replace", _replace),
+            patch("waves.waves_ui.backend.os.fsync", _fsync),
+            patch("waves.waves_ui.backend.os.replace", _replace),
         ):
             _write_text_atomic(str(target), "{}")
 
@@ -93,3 +93,31 @@ class TestTheWritersAreTheOnesUsed:
 
         assert json.loads(target.read_text(encoding="utf-8"))["window"]["w"] == 1280
         assert not pathlib.Path(str(target) + ".tmp").exists()
+
+
+# --------------------------------------------------------------------------- #
+# gap-round G-11: the wipe must know the per-write staging shape too
+# --------------------------------------------------------------------------- #
+def test_a_mkstemp_staging_leftover_is_wiped_by_a_factory_reset():
+    # A hard kill mid-save strands "<name>.<random>.tmp"; for token.json that
+    # stray holds the session token document, the one thing a factory reset
+    # promises to remove.
+    from waves.waves_ui.backend import _FACTORY_WIPE_LOG_PATTERNS
+
+    for base in ("settings.json", "token.json", "waves.json", "page_cache.json", "browse_tile_art.json"):
+        stray = f"{base}.k3j9x2ab.tmp"
+        assert any(p.match(stray) for p in _FACTORY_WIPE_LOG_PATTERNS), stray
+
+
+def test_the_staging_pattern_cannot_eat_a_foreign_file():
+    # Anchored on both ends: only a name Waves itself stages may ever match.
+    from waves.waves_ui.backend import _FACTORY_WIPE_LOG_PATTERNS
+
+    for foreign in (
+        "notes.json.k3j9x2ab.tmp",
+        "mytoken.json.k3j9x2ab.tmp",
+        "token.json.tmp.bak",
+        "token.json.k3j9x2ab.tmp2",
+        "token.json.backup.of.mine.tmp",
+    ):
+        assert not any(p.match(foreign) for p in _FACTORY_WIPE_LOG_PATTERNS), foreign

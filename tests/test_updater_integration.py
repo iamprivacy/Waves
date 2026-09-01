@@ -22,9 +22,9 @@ import zipfile
 import pytest
 import requests
 
-from tidaler.waves_ui import signing
-from tidaler.waves_ui import updater as u
-from tidaler.waves_ui.updater import AppUpdater, Release
+from waves.waves_ui import signing
+from waves.waves_ui import updater as u
+from waves.waves_ui.updater import AppUpdater, Release
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):

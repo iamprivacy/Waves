@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.media import Quality
 
-from tidaler.download import Download
-from tidaler.waves_ui.backend import (
+from waves.download import Download
+from waves.waves_ui.backend import (
     WavesBridge,
     _align_edition,
     _as_member_of,
@@ -367,7 +367,7 @@ def test_seed_merge_registry_keys_rows_by_identity_id():
     # loadQueueTracks fetches the IDENTITY album's track list and joins it to
     # this registry by id; source-id keys would miss, freezing rows at pending
     # and appending ghost rows (a 3-track album rendered as 5 rows).
-    from tidaler.waves_ui.backend import _seed_merge_registry
+    from waves.waves_ui.backend import _seed_merge_registry
 
     plan = [
         _PlanEntry(_Track("s-a", "A", 200), 1, 1, "d-a"),
@@ -621,7 +621,7 @@ def test_a_merged_member_is_filed_under_the_identity_id():
     # whether a destination holds Waves' own copy. Writing the SOURCE edition's
     # id meant a later plain job asked with the identity id, failed to recognise
     # the file, and wrote a _01 duplicate beside it instead of replacing it.
-    from tidaler.download import _waves_item_id, _waves_owned_ids
+    from waves.download import _waves_item_id, _waves_owned_ids
 
     plain = _Track("t-1", "Song", 200)
     assert _waves_item_id(plain) == "t-1", "an ordinary track is filed under its own id"

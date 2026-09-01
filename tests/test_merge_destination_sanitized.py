@@ -44,9 +44,9 @@ from types import SimpleNamespace
 import pytest
 from tidalapi import Album, Track
 
-from tidaler.download import Download
-from tidaler.helper.path import format_path_media, path_file_sanitize
-from tidaler.waves_ui.backend import _as_member_of, _TrackedDownload
+from waves.download import Download
+from waves.helper.path import format_path_media, path_file_sanitize
+from waves.waves_ui.backend import _as_member_of, _TrackedDownload
 
 _ARTIST = "Bright Eyes"
 # 300 characters: over the 255-byte component cap on its own, and the default

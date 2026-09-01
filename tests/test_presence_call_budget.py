@@ -57,7 +57,7 @@ _ROWS = 30
 #: back, and no multiplier would catch that.
 _SLACK = 8
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 
 def test_presence_is_asked_once_per_badge_not_once_per_property():
@@ -101,8 +101,8 @@ def _run_scenario() -> int:  # (a linear boot -> drive -> measure scenario)
     patch_offline()
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.matching import presence_key, track_key
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.matching import presence_key, track_key
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

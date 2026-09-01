@@ -22,14 +22,14 @@ from logging.handlers import QueueHandler, RotatingFileHandler
 
 def _fresh(monkeypatch, tmp_path):
     monkeypatch.delenv("WAVES_DEBUG", raising=False)
-    for name in ("tidaler.waves_ui.devlog", "tidaler.waves_ui.diagnostics"):
+    for name in ("waves.waves_ui.devlog", "waves.waves_ui.diagnostics"):
         sys.modules.pop(name, None)
     shared = (logging.getLogger("waves"), logging.getLogger())
     saved = {lg: (list(lg.handlers), lg.propagate, lg.level) for lg in shared}
     for lg in shared:
         for h in list(lg.handlers):
             lg.removeHandler(h)
-    diagnostics = importlib.import_module("tidaler.waves_ui.diagnostics")
+    diagnostics = importlib.import_module("waves.waves_ui.diagnostics")
     log_path = diagnostics.install(str(tmp_path))
     assert log_path is not None
     return diagnostics, log_path, shared, saved
@@ -45,7 +45,7 @@ def _restore(diagnostics, shared, saved):
             lg.addHandler(h)
         lg.propagate = propagate
         lg.setLevel(level)
-    sys.modules.pop("tidaler.waves_ui.diagnostics", None)
+    sys.modules.pop("waves.waves_ui.diagnostics", None)
 
 
 def test_loggers_hold_a_queue_not_the_file_and_the_line_still_lands_scrubbed(monkeypatch, tmp_path):

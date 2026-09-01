@@ -30,9 +30,9 @@ from unittest.mock import MagicMock
 import pytest
 from tidalapi import Album, Track
 
-import tidaler.download as download_module
-from tidaler.download import Download
-from tidaler.model.cfg import Settings
+import waves.download as download_module
+from waves.download import Download
+from waves.model.cfg import Settings
 
 _ARTIST = "Bright Eyes"
 # A slash in the title. Removing it left a doubled space until 0.1.17 tidied it,

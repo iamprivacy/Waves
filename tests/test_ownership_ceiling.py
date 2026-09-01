@@ -28,8 +28,8 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.media import Track
 
-from tidaler.ownership import OwnershipStore, quality_rank
-from tidaler.waves_ui.backend import _advertised_ceiling, _copy_is_current, _TrackedDownload
+from waves.ownership import OwnershipStore, quality_rank
+from waves.waves_ui.backend import _DEGRADED_RETRY_MAX, _advertised_ceiling, _copy_is_current, _TrackedDownload
 
 
 # --------------------------------------------------------------------------- #
@@ -70,8 +70,16 @@ def test_a_known_ceiling_caps_the_target(rec, target, ceiling, current):
         # The advertised ceiling has risen past what that run saw: a better
         # master now exists, so the upgrade reopens.
         ({"quality_rank": 2, "requested_rank": 3, "ceiling_rank": 2}, 3, 3, False),
-        # Asked below the target: no run has tried at this quality yet.
-        ({"quality_rank": 2, "requested_rank": 2, "ceiling_rank": 2}, 3, None, False),
+        # Asked below the target, but the copy already sits AT the ceiling its
+        # own release advertised: no run at any setting can do better, so it is
+        # current. This is the button path (no live ceiling), which used to
+        # answer False here for good while the ceiling-aware gate answered
+        # "skip", so the button read DOWNLOAD forever and every click completed
+        # as a success having fetched nothing.
+        ({"quality_rank": 2, "requested_rank": 2, "ceiling_rank": 2}, 3, None, True),
+        # Below the target AND below its own release's ceiling: a better master
+        # exists and has never been asked for, so the upgrade is open.
+        ({"quality_rank": 1, "requested_rank": 1, "ceiling_rank": 2}, 3, None, False),
         # Legacy row (columns default to -1 after migration): behaves exactly
         # as before the fix, one more re-download and then it converges.
         ({"quality_rank": 2, "requested_rank": -1, "ceiling_rank": -1}, 3, None, False),
@@ -269,7 +277,7 @@ def _capture_dl(monkeypatch, *, target_rank, stream_quality="LOSSLESS"):
     stream, so the stamping runs without a session or network."""
     from threading import Lock
 
-    from tidaler import download as download_mod
+    from waves import download as download_mod
 
     dl = _TrackedDownload.__new__(_TrackedDownload)
     dl._pinned_quality = None
@@ -289,16 +297,18 @@ def _capture_dl(monkeypatch, *, target_rank, stream_quality="LOSSLESS"):
 
 def test_a_fetch_stamps_the_requested_and_ceiling_ranks(monkeypatch):
     dl = _capture_dl(monkeypatch, target_rank=3)
-    dl._get_track_stream_info(_track(tags=["LOSSLESS"]))
-    quality = dl._delivered["101"]
+    track = _track(tags=["LOSSLESS"])
+    dl._get_track_stream_info(track)
+    quality = dl._delivered[dl._delivered_key(track)]
     assert quality["requested_rank"] == 3
     assert quality["ceiling_rank"] == 2
 
 
 def test_a_fetch_with_unknown_tags_stamps_no_ceiling(monkeypatch):
     dl = _capture_dl(monkeypatch, target_rank=3)
-    dl._get_track_stream_info(_track(tags=None))
-    quality = dl._delivered["101"]
+    track = _track(tags=None)
+    dl._get_track_stream_info(track)
+    quality = dl._delivered[dl._delivered_key(track)]
     assert quality["requested_rank"] == 3
     assert quality["ceiling_rank"] == -1
 
@@ -311,8 +321,116 @@ def test_a_post_stream_skip_drops_the_captured_quality(monkeypatch):
     dl = _capture_dl(monkeypatch, target_rank=3)
     track = _track(tags=["LOSSLESS"])
     dl._get_track_stream_info(track)
-    assert "101" in dl._delivered
+    assert dl._delivered_key(track) in dl._delivered
     dl._note_skipped_after_stream(track)
-    assert "101" not in dl._delivered
+    assert dl._delivered_key(track) not in dl._delivered
     dl._note_skipped_after_stream(track)  # idempotent, and safe on absent ids
     dl._note_skipped_after_stream(None)  # and on no media at all
+
+
+# --------------------------------------------------------------------------- #
+# A run served below its own ceiling is degraded, not converged (F-11).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "rec, target, ceiling, current",
+    [
+        # The degradation: asked at HI_RES, the release advertised LOSSLESS,
+        # and TIDAL handed back HIGH. The request settle clause used to call
+        # that current for good, so the copy never healed.
+        ({"quality_rank": 1, "requested_rank": 3, "ceiling_rank": 2}, 3, 2, False),
+        # And with no live ceiling to consult (the ownershipOf path), the
+        # stored pair alone still says the delivery fell short.
+        ({"quality_rank": 1, "requested_rank": 3, "ceiling_rank": 2}, 3, None, False),
+        # Served AT the ceiling its run saw: the issue #31 convergence, which
+        # this must leave exactly as it was.
+        ({"quality_rank": 2, "requested_rank": 3, "ceiling_rank": 2}, 3, None, True),
+        # Above it (the ceiling was under-advertised): still converged.
+        ({"quality_rank": 3, "requested_rank": 3, "ceiling_rank": 2}, 3, None, True),
+        # An unknown stored ceiling (-1) judges nothing: legacy rows and Atmos
+        # fetches keep the behaviour they had.
+        ({"quality_rank": 1, "requested_rank": 3, "ceiling_rank": -1}, 3, None, True),
+        ({"quality_rank": 0, "requested_rank": 3}, 3, None, True),
+    ],
+)
+def test_a_delivery_below_its_own_ceiling_never_settles(rec, target, ceiling, current):
+    assert _copy_is_current(rec, target, wants_atmos=False, ceiling_rank=ceiling) is current
+
+
+def test_a_degraded_copy_reopens_the_upgrade_end_to_end(tmp_path):
+    """Through the real store: a HIGH file stamped by a HI_RES run that saw a
+    LOSSLESS ceiling reads as an upgrade candidate, not as downloaded."""
+    store = OwnershipStore(str(tmp_path / "ownership.db"))
+    landed = tmp_path / "Song.flac"
+    landed.write_bytes(b"x")  # ownership_of answers only for a copy still on disk
+    store.record("101", str(landed), quality_tier="HIGH", requested_rank=3, ceiling_rank=2)
+    rec = store.ownership_of("101")
+
+    assert rec["quality_rank"] == quality_rank("HIGH")
+    assert _copy_is_current(rec, quality_rank("HI_RES_LOSSLESS"), wants_atmos=False, ceiling_rank=2) is False
+
+
+# --------------------------------------------------------------------------- #
+# ...but not forever. The cost of keeping that upgrade open (N-08).
+# --------------------------------------------------------------------------- #
+def test_a_persistently_under_served_track_stops_re_downloading(tmp_path):
+    """Issue #2's own story, measured through the real store.
+
+    TIDAL advertises LOSSLESS for a track and keeps serving HIGH. Reopening
+    the upgrade on every degraded delivery is right the first time and wrong
+    the tenth: the track is re-fetched and overwritten on EVERY album click,
+    forever, the button never settles, and nothing on screen says why. After
+    _DEGRADED_RETRY_MAX honest attempts the ask has been made and the answer
+    is not changing.
+    """
+    store = OwnershipStore(str(tmp_path / "ownership.db"))
+    landed = _file(tmp_path, "Song.flac")
+    target, ceiling = quality_rank("HI_RES_LOSSLESS"), 2
+
+    seen = []
+    for _ in range(_DEGRADED_RETRY_MAX + 1):
+        tries = store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=ceiling, degraded=True)
+        rec = store.ownership_of("101")
+        seen.append((tries, _copy_is_current(rec, target, wants_atmos=False, ceiling_rank=ceiling)))
+
+    assert [t for t, _ in seen] == [1, 2, 3], "the consecutive count is what settles it"
+    assert [c for _, c in seen] == [False, True, True], seen
+
+
+def test_one_bad_delivery_is_still_retried(tmp_path):
+    """The regression guard on the other side: a single degraded delivery (a
+    bad edge node, a session that fell back mid stream) must still reopen, or
+    the fix would freeze the first miss in place forever."""
+    store = OwnershipStore(str(tmp_path / "ownership.db"))
+    landed = _file(tmp_path, "Song.flac")
+    store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=2, degraded=True)
+
+    rec = store.ownership_of("101")
+    assert _copy_is_current(rec, quality_rank("HI_RES_LOSSLESS"), wants_atmos=False, ceiling_rank=2) is False
+
+
+def test_a_delivery_that_reaches_the_ceiling_clears_the_count(tmp_path):
+    """A master TIDAL genuinely fixes must still be taken, and the track must
+    not carry a spent count into its next degradation."""
+    store = OwnershipStore(str(tmp_path / "ownership.db"))
+    landed = _file(tmp_path, "Song.flac")
+    for _ in range(_DEGRADED_RETRY_MAX):
+        store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=2, degraded=True)
+
+    # TIDAL finally serves what it advertised.
+    assert store.record("101", landed, quality_tier="LOSSLESS", requested_rank=3, ceiling_rank=2, degraded=False) == 0
+    assert store.ownership_of("101")["degraded_tries"] == 0
+    # And a LATER degradation starts its own count from one, so the track gets
+    # its retries back rather than settling on the first miss.
+    assert store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=2, degraded=True) == 1
+
+
+def test_a_pre_count_row_reads_as_never_degraded(tmp_path):
+    """Rows written before the column existed default to zero, so an install
+    upgrading into this keeps exactly the behaviour it had."""
+    store = OwnershipStore(str(tmp_path / "ownership.db"))
+    landed = _file(tmp_path, "Song.flac")
+    store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=2)
+
+    rec = store.ownership_of("101")
+    assert rec["degraded_tries"] == 0
+    assert _copy_is_current(rec, quality_rank("HI_RES_LOSSLESS"), wants_atmos=False, ceiling_rank=2) is False

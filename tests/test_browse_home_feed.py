@@ -3,7 +3,7 @@
 Pins the rules ``_home_v2_rows`` adds on top of the shared row builder:
 - rows parse through the REAL tidalapi V2 category parser, tolerantly: an
   unknown module type drops that row, never the whole feed,
-- MIX rows fall away whole (they parse to MixV2, which tidaler's download
+- MIX rows fall away whole (they parse to MixV2, which the engine's download
   path silently rejects, so a card for one would be a dead button),
 - no row carries a ``more`` link or paging handle: the feed's view-all
   handles are V2 ``home/...`` paths the v1 page drill-in cannot open,
@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import tidalapi
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 # ----- fixture: a small but shape-faithful home/feed/static payload ---------
 

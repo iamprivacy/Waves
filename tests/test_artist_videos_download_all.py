@@ -17,9 +17,9 @@ from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import _ARTIST_VIDEO_PAGE, _VIDEOS_GROUP_PREFIX, WavesBridge
+from waves.waves_ui.backend import _ARTIST_VIDEO_PAGE, _VIDEOS_GROUP_PREFIX, WavesBridge
 
-QML = (Path(__file__).parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+QML = (Path(__file__).parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
 
 
 class _Signal:

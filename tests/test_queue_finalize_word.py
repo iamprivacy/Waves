@@ -24,8 +24,8 @@ from unittest.mock import MagicMock, patch
 
 from tidalapi.media import Track
 
-from tidaler.download import Download
-from tidaler.waves_ui import backend
+from waves.download import Download
+from waves.waves_ui import backend
 
 
 def _tracked(relay):
@@ -53,18 +53,21 @@ class _Signal:
 
 
 class _LifecycleStub:
-    """Just enough bridge for _track_lifecycle: a track registry and a queue
-    that answers None (an event for a cleared row is a real shape, and the
-    rollup then no-ops)."""
+    """Just enough bridge for _track_lifecycle: a track registry and the queue
+    row the events belong to. The row is not decoration: an event for a row
+    that has been cleared records nothing at all now, so that a withdrawn row
+    cannot re-create per-row state nothing will ever free."""
 
     def __init__(self):
         self._job_tracks = {}
         self._job_signals = {}
-        self._queue_index = {}
+        self._queue_index = {1: {"qid": 1, "media_id": "m1", "status": "running"}}
         self._outcome_lock = Lock()
+        self._qdirty_changed: dict = {}
+        self._queue_lock = Lock()
         self.queueTrackState = _Signal()
         self._emit_queue = lambda: None
-        for name in ("_track_lifecycle", "_queue_item"):
+        for name in ("_track_lifecycle", "_queue_item", "_queue_mark_changed"):
             setattr(self, name, getattr(backend.WavesBridge, name).__get__(self, _LifecycleStub))
 
 
@@ -119,8 +122,12 @@ def _finalize_fracs(tmp_path, *, extract=False, suffix=".flac", is_bts=True):
     td._tls = local()
     td._skip_existing_base = False
     td.fn_logger = MagicMock()
-    td._names_reserved = set()
+    td._names_reserved = {}
     td._names_reserved_lock = Lock()
+    # The engine records the folders a run put a file into, which is what
+    # decides where the m3u writer may write (_note_dir_filled).
+    td._dirs_filled = set()
+    td._dirs_filled_lock = Lock()
     td.settings = SimpleNamespace(
         data=SimpleNamespace(
             video_convert_mp4=False,
@@ -144,7 +151,7 @@ def _finalize_fracs(tmp_path, *, extract=False, suffix=".flac", is_bts=True):
         patch.object(cls, "_handle_metadata_and_extras", return_value=None),
         patch.object(cls, "_move_file", return_value=True),
         patch.object(cls, "_record_name_written"),
-        patch("tidaler.download.name_builder_item", return_value="x"),
+        patch("waves.download.name_builder_item", return_value="x"),
     ):
         ok, _ = td._perform_actual_download(media, dst, None, extract, False, stream)
     assert ok is True
@@ -191,12 +198,13 @@ def test_note_delivered_carries_the_captured_tier_and_leaves_it_for_item():
     needs it to record ownership."""
     relay = MagicMock()
     td = _tracked(relay)
-    td._delivered["456"] = {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}
-    td._note_delivered(_media("456", identity="123"))
+    media = _media("456", identity="123")
+    td._delivered[td._delivered_key(media)] = {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}
+    td._note_delivered(media)
     ev = relay.track_event.emit.call_args.args[0]
     assert ev == {"id": "123", "status": "done", "quality": {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}}
     assert "path" not in ev
-    assert td._delivered == {"456": {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}}
+    assert td._delivered == {td._delivered_key(media): {"tier": "HI_RES_LOSSLESS", "mode": "STEREO"}}
 
 
 def _run_item(tmp_path, *, success):

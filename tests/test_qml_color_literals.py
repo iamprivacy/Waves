@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-QML_DIR = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml"
+QML_DIR = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 
 _HEX9 = re.compile(r'"#([0-9a-fA-F]{8})"')
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from tidaler.download import Download, _SharedContextAdapter, pooled_session
+from waves.download import Download, _SharedContextAdapter, pooled_session
 
 
 @pytest.fixture(autouse=True)

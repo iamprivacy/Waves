@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from tidaler.waves_ui.backend import WavesBridge, _MergeRec
+from waves.waves_ui.backend import WavesBridge, _MergeRec
 
 
 class _Song:
@@ -90,7 +90,7 @@ def _queue(albums, recs, mode, ranks=None):
     bridge._merge_rank_fn = lambda: (lambda obj: ranks.get(str(getattr(obj, "id", "")), 1))
     # One release, so the split and the collapse are what is under test rather
     # than the edition keying.
-    with patch("tidaler.waves_ui.backend._edition_base_key", lambda album: "one release"):
+    with patch("waves.waves_ui.backend._edition_base_key", lambda album: "one release"):
         return bridge._merge_editions(list(albums))
 
 

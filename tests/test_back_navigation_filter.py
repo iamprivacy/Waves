@@ -22,8 +22,8 @@ from __future__ import annotations
 from conftest import _Signal
 from PySide6.QtCore import QEvent, Qt
 
-from tidaler.waves_ui import backend as backend_mod
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend as backend_mod
+from waves.waves_ui.backend import WavesBridge
 
 
 class _MouseEvent:
@@ -187,7 +187,7 @@ def test_search_select_all_rearms_on_window_activation():
     QWindow signal the swallow does not touch."""
     from pathlib import Path
 
-    main = (Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text(
+    main = (Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml").read_text(
         encoding="utf-8"
     )
     assert "onAppActiveChanged: if (appActive && activeFocus)" in main

@@ -99,7 +99,7 @@ def _bridge(track_ids=("t1", "t2"), other_track_ids=("u1",)):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6 import QtCore
 
-    from tidaler.waves_ui import backend as be
+    from waves.waves_ui import backend as be
 
     b = be.WavesBridge.__new__(be.WavesBridge)
     QtCore.QObject.__init__(b)
@@ -108,6 +108,10 @@ def _bridge(track_ids=("t1", "t2"), other_track_ids=("u1",)):
         _OTHER_QID: {"qid": _OTHER_QID, "media_id": "a2", "type": "album", "collection": True},
     }
     b._objs = {"album": {"a1": _Album(track_ids), "a2": _Album(other_track_ids)}}
+    # The row's own kept object, which _row_object prefers over the
+    # search-scoped bucket above. Empty here on purpose: these tests are about
+    # the marks, so the bucket is the one that has to answer.
+    b._job_objs = {}
     # The fetch runs on the calling thread, so an expansion is finished by the
     # time loadQueueTracks returns.
     b.threadpool = _InlinePool()
@@ -267,7 +271,7 @@ def test_the_bridge_wires_the_owned_answer_into_the_marks_it_keeps():
     """The tests above connect the signal themselves, so this is where the real
     class's own wiring is held: without it the answer never reaches the GUI
     thread at all and no mark, fresh or stale, would ever be kept."""
-    from tidaler.waves_ui import backend as be
+    from waves.waves_ui import backend as be
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(be.WavesBridge.__init__)))
 

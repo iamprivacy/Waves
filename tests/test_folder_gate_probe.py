@@ -8,7 +8,7 @@ Pure staticmethod, so no Qt or bridge construction is needed.
 
 from __future__ import annotations
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 probe = WavesBridge._probe_folder_verdict
 

@@ -25,8 +25,8 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.ownership import OwnershipStore
-from tidaler.waves_ui.backend import WavesBridge
+from waves.ownership import OwnershipStore
+from waves.waves_ui.backend import WavesBridge
 
 OWNED_CURRENT = {"owned": True, "up_to_date": True}
 OWNED_STALE = {"owned": True, "up_to_date": False}

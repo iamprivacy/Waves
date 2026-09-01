@@ -16,9 +16,9 @@ from unittest.mock import MagicMock, patch
 
 from pathvalidate.error import ErrorReason, ValidationError
 
-from tidaler.download import Download
-from tidaler.helper.path import _shorten_to_valid_length, path_file_sanitize
-from tidaler.waves_ui.backend import WavesBridge
+from waves.download import Download
+from waves.helper.path import _shorten_to_valid_length, path_file_sanitize
+from waves.waves_ui.backend import WavesBridge
 
 
 def _downloader(tmp_path: pathlib.Path) -> Download:
@@ -27,6 +27,10 @@ def _downloader(tmp_path: pathlib.Path) -> Download:
     d._FILE_OPERATION_RETRIES = 2
     d._FILE_OPERATION_RETRY_DELAY_SEC = 0
     d._dirs_ensured = set()
+    # The engine records the folders a run put a file into, which is what
+    # decides where the m3u writer may write (_note_dir_filled).
+    d._dirs_filled = set()
+    d._dirs_filled_lock = threading.Lock()
     d.path_base = str(tmp_path)
     d.skip_existing = True
     d.settings = SimpleNamespace(
@@ -67,7 +71,7 @@ def test_a_symlink_into_a_missing_playlist_dir_creates_the_dir(tmp_path: pathlib
     dst.write_text("audio", encoding="utf-8")
     src = tmp_path / "Playlists" / "Road Songs" / "song.flac"  # parent never created
 
-    with patch("tidaler.download.format_path_media", return_value="Tracks/song"):
+    with patch("waves.download.format_path_media", return_value="Tracks/song"):
         out = d.media_move_and_symlink(SimpleNamespace(), src, ".flac")
 
     assert out == dst
@@ -82,7 +86,7 @@ def test_a_failed_symlink_is_logged_and_never_raises(tmp_path: pathlib.Path) -> 
     src = tmp_path / "Playlists" / "PL" / "song.flac"
 
     with (
-        patch("tidaler.download.format_path_media", return_value="Tracks/song"),
+        patch("waves.download.format_path_media", return_value="Tracks/song"),
         patch.object(pathlib.Path, "symlink_to", side_effect=OSError("no symlinks here")),
     ):
         out = d.media_move_and_symlink(SimpleNamespace(), src, ".flac")
@@ -170,10 +174,10 @@ def test_factory_reset_wipes_diagnostic_bundles(tmp_path: pathlib.Path, monkeypa
     foreign.write_text("the user's own notes", encoding="utf-8")
 
     stub = SimpleNamespace(_ownership=SimpleNamespace(close=lambda: None))
-    monkeypatch.setattr("tidaler.waves_ui.backend.path_config_base", lambda: str(tmp_path))
-    monkeypatch.setattr("tidaler.waves_ui.backend.OwnershipStore", lambda _p: SimpleNamespace())
-    monkeypatch.setattr("tidaler.waves_ui.backend.diagnostics.detach_disk_log", lambda: None)
-    monkeypatch.setattr("tidaler.waves_ui.backend.QtCore.QSettings", lambda: MagicMock())
+    monkeypatch.setattr("waves.waves_ui.backend.path_config_base", lambda: str(tmp_path))
+    monkeypatch.setattr("waves.waves_ui.backend.OwnershipStore", lambda _p: SimpleNamespace())
+    monkeypatch.setattr("waves.waves_ui.backend.diagnostics.detach_disk_log", lambda: None)
+    monkeypatch.setattr("waves.waves_ui.backend.QtCore.QSettings", lambda: MagicMock())
     WavesBridge.factoryReset(stub)
 
     assert not bundle.exists(), "the export contains breadcrumbs and must go with the reset"
@@ -227,13 +231,13 @@ def test_the_save_serializes_one_shot_never_incrementally(tmp_path: pathlib.Path
     a cache change size mid-encode; json.dumps' one-shot C encoder cannot. The
     save must use dumps."""
     stub = _SaveStub(tmp_path / "page_cache.json")
-    with patch("tidaler.waves_ui.backend.json.dump", side_effect=AssertionError("dump() must not be used")):
+    with patch("waves.waves_ui.backend.json.dump", side_effect=AssertionError("dump() must not be used")):
         stub._save_page_cache()
     assert (tmp_path / "page_cache.json").exists()
 
 
 def test_factory_reset_pattern_cannot_match_a_user_file() -> None:
-    from tidaler.waves_ui.backend import _FACTORY_WIPE_LOG_PATTERNS
+    from waves.waves_ui.backend import _FACTORY_WIPE_LOG_PATTERNS
 
     def one_pattern_matches(name: str) -> bool:
         return any(pat.match(name) for pat in _FACTORY_WIPE_LOG_PATTERNS)

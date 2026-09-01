@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 # The ledger row delegate is the only thing that carries this name, so it is
 # the anchor for finding the ledger's own Repeater without pinning a line

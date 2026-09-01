@@ -5,8 +5,8 @@ every pre-folder install stores the old default string. Only that exact value
 may be rewritten; any other stored template is a customized one the user owns.
 """
 
-from tidaler.config import _migrate_settings
-from tidaler.model.cfg import Settings
+from waves.config import _migrate_settings
+from waves.model.cfg import Settings
 
 OLD_DEFAULT = "Playlists/{playlist_name}/{list_pos}. {artist_name} - {track_title}"
 

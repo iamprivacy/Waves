@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 
 from tidalapi.media import Track
 
-from tidaler.download import Download
-from tidaler.helper.path import check_file_exists
+from waves.download import Download
+from waves.helper.path import check_file_exists
 
 TRACK_DIR_RELATIVE = "Tracks/Song"
 
@@ -78,8 +78,8 @@ class TestSymlinkMoveDoesNotEatACollidingTrack:
         source = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-111")
 
         with (
-            patch("tidaler.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
-            patch("tidaler.download.read_item_id", _ids_by_payload({b"id-999": "999", b"id-111": "111"})),
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-999": "999", b"id-111": "111"})),
         ):
             destination = dl.media_move_and_symlink(_track(111), source, ".flac")
 
@@ -98,8 +98,8 @@ class TestSymlinkMoveDoesNotEatACollidingTrack:
         source = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-111")
 
         with (
-            patch("tidaler.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
-            patch("tidaler.download.read_item_id", _ids_by_payload({b"id-111": "111"})),
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-111": "111"})),
         ):
             destination = dl.media_move_and_symlink(_track(111), source, ".flac")
 
@@ -134,9 +134,9 @@ class TestSymlinkMoveDoesNotEatACollidingTrack:
             results[track_id] = dl.media_move_and_symlink(_track(track_id), sources[track_id], ".flac")
 
         with (
-            patch("tidaler.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
-            patch("tidaler.download.read_item_id", _ids_by_payload(payload_ids)),
-            patch("tidaler.download.check_file_exists", _check_synced),
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload(payload_ids)),
+            patch("waves.download.check_file_exists", _check_synced),
         ):
             threads = [threading.Thread(target=_run, args=(track_id,)) for track_id in sources]
 
@@ -151,7 +151,7 @@ class TestSymlinkMoveDoesNotEatACollidingTrack:
 
         landed = {p.read_bytes() for p in results.values()}
         assert landed == {b"id-111", b"id-222"}, "neither track may be overwritten by the other"
-        assert dl._names_reserved == set(), "claims are released once the files are in place"
+        assert dl._names_reserved == {}, "claims are released once the files are in place"
 
 
 class TestSkipLogicAgreesWithTheMove:
@@ -168,8 +168,8 @@ class TestSkipLogicAgreesWithTheMove:
         media.media_metadata_tags = []
 
         with (
-            patch("tidaler.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
-            patch("tidaler.download.read_item_id", _ids_by_payload({b"id-999": "999"})),
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-999": "999"})),
             patch.object(dl, "extension_guess", return_value=".flac"),
         ):
             _path, _extension, _skip_file, skip_download = dl._prepare_file_paths_and_skip_logic(

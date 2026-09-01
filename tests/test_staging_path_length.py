@@ -15,8 +15,8 @@ import pathlib
 
 import pytest
 
-import tidaler.download as download_module
-from tidaler.download import _STAGING_NAME_OVERHEAD, _staging_path
+import waves.download as download_module
+from waves.download import _STAGING_NAME_OVERHEAD, _staging_path
 
 # The album from the report, respelled with POSIX separators so the length
 # arithmetic is the same on the test machine as on the reporter's Windows box.

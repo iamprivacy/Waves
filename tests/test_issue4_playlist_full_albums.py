@@ -20,9 +20,9 @@ from types import SimpleNamespace
 from tidalapi.album import Album
 from tidalapi.media import AudioMode, Quality, Track, Video
 
-from tidaler.waves_ui.backend import _PLAYLIST_ALBUMS_GROUP_PREFIX, WavesBridge
+from waves.waves_ui.backend import _PLAYLIST_ALBUMS_GROUP_PREFIX, WavesBridge
 
-QML = (Path(__file__).parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+QML = (Path(__file__).parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
 ATMOS = AudioMode.dolby_atmos.value
 
 

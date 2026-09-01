@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 import pytest
 from tidalapi.media import Track
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,7 @@ def _identity_from_content(monkeypatch):
 
         return raw[3:].decode() if raw.startswith(b"id-") and raw[3:].isdigit() else ""
 
-    monkeypatch.setattr("tidaler.download.read_item_id", _read)
+    monkeypatch.setattr("waves.download.read_item_id", _read)
 
 
 def _make_download(tmp_path: pathlib.Path, skip_existing: bool, cls: type[Download] = Download) -> Download:
@@ -171,7 +171,7 @@ class TestOverwriteModeStillKeepsBothTracks:
         paths = [path for _, path in results.values()]
         assert {p.name for p in paths} == {"Song.flac", "Song_01.flac"}
         assert {p.read_bytes() for p in paths} == {b"id-111", b"id-222"}
-        assert dl._names_reserved == set(), "claims are released once the files are in place"
+        assert dl._names_reserved == {}, "claims are released once the files are in place"
 
     def test_an_existing_file_is_still_replaced_with_skipping_off(self, tmp_path):
         # The setting's whole purpose: a file already there is overwritten,
@@ -370,7 +370,7 @@ class TestAQualityUpgradeKeepsItsSiblings:
         assert destination.read_bytes() == b"id-111"
         assert results[222][1].name == "Song_01.flac"
         assert results[222][1].read_bytes() == b"id-222"
-        assert dl._names_reserved == set()
+        assert dl._names_reserved == {}
 
     def test_upgrading_two_colliding_tracks_loses_neither(self, tmp_path):
         # The album's two same-name mixes are both in the library, the second
@@ -415,14 +415,14 @@ class TestAQualityUpgradeKeepsItsSiblings:
         landed = {path.read_bytes() for _, path in results.values()}
         assert landed == {b"id-111", b"id-222"}, "an upgrade may not overwrite the mix beside it"
         assert {p.name for _, p in results.values()} == {"Song.flac", "Song_01.flac"}
-        assert dl._names_reserved == set()
+        assert dl._names_reserved == {}
 
 
 class TestTrackedDownloadForcesSkippingOffPerThread:
     def test_force_download_is_thread_local(self):
         # The link the tests above stand on: the upgrade context manager flips
         # skipping for the calling thread only.
-        from tidaler.waves_ui.backend import _TrackedDownload
+        from waves.waves_ui.backend import _TrackedDownload
 
         dl = _TrackedDownload.__new__(_TrackedDownload)
         dl._tls = threading.local()

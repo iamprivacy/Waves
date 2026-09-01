@@ -1,6 +1,6 @@
-"""Audit regression tests for the legacy tidaler entry points.
+"""Audit regression tests for the legacy engine entry points.
 
-Covers the audited update-check bugs in ``tidaler.__init__``:
+Covers the audited update-check bugs in ``waves.__init__``:
 
 * A failed check (no network / bad response) must report **no** update
   available, instead of the previous behaviour where ``update_available()``
@@ -14,8 +14,8 @@ All hermetic: ``requests.get`` is monkeypatched, no network is touched.
 
 import requests
 
-import tidaler
-from tidaler import (
+import waves
+from waves import (
     VERSION_CHECK_FAILED,
     latest_version_information,
     update_available,
@@ -36,8 +36,8 @@ class _FakeResponse:
 
 
 def _patch_get(monkeypatch, fn) -> None:
-    """Patch the ``requests.get`` used inside ``tidaler`` with ``fn``."""
-    monkeypatch.setattr(tidaler.requests, "get", fn)
+    """Patch the ``requests.get`` used inside ``waves`` with ``fn``."""
+    monkeypatch.setattr(waves.requests, "get", fn)
 
 
 class TestLatestVersionInformation:
@@ -124,7 +124,7 @@ class TestUpdateAvailable:
 
     def test_same_version_reports_no_update(self, monkeypatch) -> None:
         """The current version equalling the latest tag is not an update."""
-        current_tag = f"v{tidaler.__version__}"
+        current_tag = f"v{waves.__version__}"
 
         def _ok(*args, **kwargs):
             return _FakeResponse(

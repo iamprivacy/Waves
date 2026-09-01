@@ -26,7 +26,7 @@ import inspect
 import re
 from pathlib import Path
 
-from tidaler.waves_ui import diagnostics
+from waves.waves_ui import diagnostics
 
 # Modules whose logging carries user-chosen text. Per the project's diagnostics
 # convention, search terms and track, album or artist names are content.
@@ -72,8 +72,8 @@ def _unmarked_media_names(node, marked: bool = False) -> list[str]:
 def test_content_has_production_call_sites():
     """The whole content tier is dead code without callers. This is the guard
     that failed silently before: zero call sites tree-wide."""
-    from tidaler import download
-    from tidaler.waves_ui import backend
+    from waves import download
+    from waves.waves_ui import backend
 
     for module in (backend, download):
         source = inspect.getsource(module)
@@ -85,7 +85,7 @@ def test_content_has_production_call_sites():
 
 def test_the_search_needle_is_marked_wherever_it_is_logged():
     """Both search log lines carry the raw needle. Neither may pass it bare."""
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     source = inspect.getsource(backend.WavesBridge.search)
     logged_needles = [line for line in source.splitlines() if "needle=" in line]
@@ -97,7 +97,7 @@ def test_the_search_needle_is_marked_wherever_it_is_logged():
 def test_engine_media_name_logs_are_marked():
     """The download engine logs the track and list names it is working on at
     INFO, which feeds the always-on breadcrumb ring."""
-    from tidaler import download
+    from waves import download
 
     source = inspect.getsource(download)
     for fragment in ("Downloaded item", "Finished list"):
@@ -113,7 +113,7 @@ def test_no_log_line_in_the_engine_builds_a_media_name_bare():
     catches identity PII, but a track or artist name is content: only the
     marker decides whether "also hide titles and searches" can hash it.
     """
-    from tidaler import download
+    from waves import download
 
     tree = ast.parse(Path(download.__file__).read_text(encoding="utf-8"))
     offenders = [
@@ -139,3 +139,38 @@ def test_a_logged_search_term_is_hashed_in_a_redacted_export():
     assert needle not in redacted
     assert "aphex" not in redacted.lower()
     assert re.search(r"«#[0-9a-f]{8}»", redacted), redacted
+
+
+def _unmarked_paths(node, marked: bool = False) -> list[str]:
+    """Every ``path_*``-named value (or the sibling-scan variable) interpolated
+    under ``node`` that no content marker wraps. A destination path spells out
+    artist, album, title and the user's folder layout: it is content, and
+    outside the home prefix the identity redactor does not touch it at all."""
+    found: list[str] = []
+    if isinstance(node, ast.Call) and _dotted(node.func) in _MARKERS:
+        marked = True
+    if isinstance(node, ast.Name | ast.Attribute) and not marked:
+        dotted = _dotted(node)
+        root = dotted.split(".")[0]
+        if root.startswith("path_") or root == "sibling":
+            found.append(dotted)
+    for child in ast.iter_child_nodes(node):
+        found += _unmarked_paths(child, marked)
+    return found
+
+
+def test_no_log_line_in_the_engine_builds_a_path_bare():
+    """The move/symlink/skip/convert log lines named full destination paths
+    with no marker, so an exported bundle with "also hide titles and searches"
+    checked still showed exactly which artists, albums and tracks were
+    downloaded, and the whole library layout (gap-round finding G-03)."""
+    from waves import download
+
+    tree = ast.parse(Path(download.__file__).read_text(encoding="utf-8"))
+    offenders = [
+        f"{download.__name__}:{node.lineno} {name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _is_log_call(node)
+        for name in _unmarked_paths(node)
+    ]
+    assert not offenders, f"unmarked paths reach the log: {offenders}"

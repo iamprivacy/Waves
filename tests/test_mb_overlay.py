@@ -20,8 +20,8 @@ test_library_claim_gate.py: no Qt, no network, no files.
 
 from __future__ import annotations
 
-import tidaler.matching as matching
-from tidaler.waves_ui.bridge_library import LibraryMixin
+import waves.matching as matching
+from waves.waves_ui.bridge_library import LibraryMixin
 
 
 class _Stub:
@@ -162,7 +162,7 @@ def test_bulk_gate_never_reads_the_overlay():
     # method must appear in exactly one place: the presence slot.
     import inspect
 
-    import tidaler.waves_ui.bridge_library as bl
+    import waves.waves_ui.bridge_library as bl
 
     src = inspect.getsource(bl)
     assert src.count("self._mb_arbitrated(") == 1

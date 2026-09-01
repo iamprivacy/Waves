@@ -46,3 +46,17 @@ class _InlinePool:
         # seed is dispatched raised, to jump a queue busy with downloads), and
         # running inline there is no queue for it to jump.
         worker.run()
+
+
+class _InlineWriter:
+    """Stand-in for the bridge's ``_SingleFlightWriter`` that performs each
+    submitted config write synchronously, so a test that borrows the real
+    ``_save_settings`` / ``_save_waves_prefs`` can assert what landed on disk
+    right after the call, exactly as before those saves went off-thread. The
+    writer's own async behavior is covered by its dedicated tests."""
+
+    def submit(self, key: str, fn) -> None:
+        fn()
+
+    def flush(self, timeout: float = 0.0) -> None:
+        pass

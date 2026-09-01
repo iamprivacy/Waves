@@ -1,4 +1,4 @@
-"""Unit tests for the MusicBrainz arbiter (tidaler.mb_arbiter).
+"""Unit tests for the MusicBrainz arbiter (waves.mb_arbiter).
 
 Hermetic: the HTTP layer is injected, so every case drives the arbiter with
 canned (status, body) responses and never touches the network or sleeps. The
@@ -12,7 +12,7 @@ cached.
 
 import json
 
-from tidaler.mb_arbiter import MBArbiter
+from waves.mb_arbiter import MBArbiter
 
 
 def _search_body(*releases):
@@ -271,7 +271,7 @@ def test_an_empty_search_answer_expires_and_is_reasked(tmp_path):
     # array. Caching that body forever meant an album MusicBrainz catalogued
     # next month could never upgrade its badge for the life of the file; it
     # must expire exactly like the negative statuses do.
-    from tidaler.mb_arbiter import NEGATIVE_TTL_SEC
+    from waves.mb_arbiter import NEGATIVE_TTL_SEC
 
     log: list = []
     responses = {"/release/?": (200, json.dumps({"releases": []}))}
@@ -302,7 +302,7 @@ def test_a_release_without_lengths_expires_and_is_reasked(tmp_path):
     # A release whose recordings carry no lengths cannot vouch today, but
     # contributors add lengths; its 200 body must expire like a not-found,
     # not pin the badge to "unprovable" forever.
-    from tidaler.mb_arbiter import NEGATIVE_TTL_SEC
+    from waves.mb_arbiter import NEGATIVE_TTL_SEC
 
     log: list = []
     responses = {

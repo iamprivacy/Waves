@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tidaler.waves_ui import diagnostics
+from waves.waves_ui import diagnostics
 
 
 def _qt_app():
@@ -91,7 +91,7 @@ def test_the_dump_wait_leaves_a_full_tick_of_headroom():
 def test_shutdown_stops_the_watchdog_before_it_drains_the_pools():
     """Order is the whole point: stopping it afterwards is stopping it after
     the drain has already blocked long enough to fire the dump."""
-    from tidaler.waves_ui.backend import WavesBridge
+    from waves.waves_ui.backend import WavesBridge
 
     order: list[str] = []
 

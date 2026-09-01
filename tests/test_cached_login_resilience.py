@@ -24,7 +24,7 @@ import pytest
 import requests
 from tidalapi.exceptions import TooManyRequests
 
-from tidaler.waves_ui.session import WavesTidal
+from waves.waves_ui.session import WavesTidal
 
 
 def _bare(tmp_path, *, raises=None, returns=False, has_token=True):

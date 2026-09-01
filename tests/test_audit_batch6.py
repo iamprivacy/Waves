@@ -17,12 +17,12 @@ from unittest.mock import patch
 import pytest
 from test_updater import _manifest, _prep
 
-from tidaler.helper.path import FILENAME_LENGTH_MAX, format_path_media, path_file_uniquify
-from tidaler.helper.tidal import name_builder_album_artist, user_media_lists
-from tidaler.waves_ui import backend as backend_mod
-from tidaler.waves_ui import signing
-from tidaler.waves_ui.backend import WavesBridge, _graft_scroll_growth
-from tidaler.waves_ui.updater import UpdateCancelled
+from waves.helper.path import FILENAME_LENGTH_MAX, format_path_media, path_file_uniquify
+from waves.helper.tidal import name_builder_album_artist, user_media_lists
+from waves.waves_ui import backend as backend_mod
+from waves.waves_ui import signing
+from waves.waves_ui.backend import WavesBridge, _graft_scroll_growth
+from waves.waves_ui.updater import UpdateCancelled
 
 BACKEND_SRC = pathlib.Path(backend_mod.__file__).read_text(encoding="utf-8")
 
@@ -94,8 +94,10 @@ class _LogoutStub:
         self._folder_tree = None
         self._tree_warm_waiting: list = []
         self._search_cache: dict = {}
+        self._search_gen = 0  # logout supersedes in-flight search workers by bumping this
         self._artist_pop_cache: dict = {}
         self._objs = {"album": {"a1": object()}, "track": {"t1": object()}}
+        self._objs_lock = Lock()  # the clear runs under it, as search's does
         self._page_cache_path = "/nonexistent/page_cache.json"
 
     def _set_logged_in(self, on):
@@ -103,6 +105,11 @@ class _LogoutStub:
 
     def _set_status(self, text):
         pass
+
+    def _set_busy(self, on):
+        # Sign-out clears the spinner for the workers its generation bump
+        # orphans; each of those returns above its own _set_busy(False).
+        self.events.append(("busy", bool(on)))
 
 
 def test_logout_clears_the_old_accounts_live_objects():
@@ -175,6 +182,7 @@ class _TileArtStub:
         self._tile_art_mem = mem
         self._disk = disk
         self._tile_art_running = False
+        self._tile_art_lock = Lock()  # one crawl at a time, decided under it
         self._browse_gen = 1
         self._logged_in = True
         self.browseTileArt = _Signal()
@@ -384,7 +392,7 @@ class _LifecycleStub:
     _track_lifecycle = WavesBridge._track_lifecycle
 
     def __init__(self, base):
-        self._job_tracks: dict = {}
+        self._job_tracks: dict = {1: {}}
         self._job_signals: dict = {}
         self._own_pool = _HeldPool()
         self.queueTrackState = _Signal()
@@ -399,7 +407,10 @@ class _LifecycleStub:
 
     # _track_lifecycle also rolls the registry up onto the job's queue row.
     # These tests are about the liveness stamp and drive it with no queue, so
-    # the row lookup answers None and the rollup no-ops.
+    # the row lookup answers None and the rollup no-ops. The registry below is
+    # seeded the way a started job seeds it, which is what tells the event
+    # apart from one for a row that was cleared (those record nothing at all
+    # now, see test_queue_row_state_is_not_resurrected).
     def _queue_item(self, qid):
         return None
 
@@ -600,7 +611,7 @@ def test_isrc_without_a_value_never_writes_literal_braces():
 
 
 def test_album_artist_with_no_credits_is_empty_not_a_crash():
-    with patch("tidaler.helper.tidal.get_album_artists", return_value=[]):
+    with patch("waves.helper.tidal.get_album_artists", return_value=[]):
         assert name_builder_album_artist(SimpleNamespace(), first_only=True) == ""
 
 
@@ -635,14 +646,14 @@ def test_empty_mix_categories_keep_the_playlists():
 
 def test_uniquify_leaves_a_short_name_at_a_deep_path_alone():
     deep = pathlib.Path("/" + "/".join(["d" * 10] * 40)) / "song.flac"
-    with patch("tidaler.helper.path.file_unique_suffix", return_value="_01"):
+    with patch("waves.helper.path.file_unique_suffix", return_value="_01"):
         out = path_file_uniquify(deep)
     assert out.name == "song_01.flac", "path depth must never shred a short filename"
 
 
 def test_uniquify_still_bounds_a_maximal_filename():
     long_name = "x" * FILENAME_LENGTH_MAX + ".flac"
-    with patch("tidaler.helper.path.file_unique_suffix", return_value="_01"):
+    with patch("waves.helper.path.file_unique_suffix", return_value="_01"):
         out = path_file_uniquify(pathlib.Path("/music") / long_name)
     assert len(out.name) <= FILENAME_LENGTH_MAX
     assert out.name.endswith("_01.flac")

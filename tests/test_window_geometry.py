@@ -22,9 +22,10 @@ import json
 import types
 
 import pytest
+from conftest import _InlineWriter
 
-import tidaler.waves_ui.backend as backend
-from tidaler.waves_ui.backend import WavesBridge, _fit_frame
+import waves.waves_ui.backend as backend
+from waves.waves_ui.backend import WavesBridge, _fit_frame
 
 
 # The suite itself runs offscreen, so the headless-save guard would turn every
@@ -132,6 +133,9 @@ class _PrefsStub:
         ):
             setattr(self, name, getattr(WavesBridge, name).__get__(self, _PrefsStub))
         self._waves_prefs = self._load_waves_prefs()
+        # The real _save_waves_prefs submits its disk work here; inline keeps
+        # "what landed on disk" assertable right after the call.
+        self._config_writer = _InlineWriter()
 
     # Run the REAL clamp against a synthetic screen list (not identity), so a
     # restore that stopped calling the clamp would be caught.

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _RecordingSignal:

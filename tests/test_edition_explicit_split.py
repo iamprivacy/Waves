@@ -36,7 +36,7 @@ from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tidaler.waves_ui.backend import (
+from waves.waves_ui.backend import (
     WavesBridge,
     _align_edition,
     _build_merge_plan,
@@ -407,7 +407,7 @@ class _DiscoStub:
 def _disco(mode):
     std, deluxe, clean, recs = _twin_group()
     stub = _DiscoStub(mode, recs)
-    with patch("tidaler.waves_ui.backend._edition_base_key", lambda a: "one-group"):
+    with patch("waves.waves_ui.backend._edition_base_key", lambda a: "one-group"):
         plain, plans = stub._merge_editions([std, deluxe, clean])
     return std, deluxe, clean, plain, plans
 

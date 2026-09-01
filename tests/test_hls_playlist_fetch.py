@@ -18,7 +18,7 @@ import pathlib
 import re
 from unittest.mock import MagicMock, patch
 
-from tidaler.download import Download, RequestsClient
+from waves.download import Download, RequestsClient
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -31,7 +31,11 @@ hls/480.m3u8
 
 
 def _iter_source_files():
-    for path in (REPO / "tidaler").rglob("*.py"):
+    files = list((REPO / "waves").rglob("*.py"))
+    # A wrong package path makes the glob empty and every scan below pass
+    # vacuously; fail loudly instead.
+    assert files, f"source sweep found no files under {REPO / 'waves'}"
+    for path in files:
         yield path, path.read_text(encoding="utf-8")
 
 
@@ -60,7 +64,7 @@ def test_requests_client_uses_shared_session():
 
 def test_backend_load_playlist_parses_via_pooled_session():
     """_load_playlist fetches over the probe pool and resolves absolute URIs."""
-    from tidaler.waves_ui import backend as backend_mod
+    from waves.waves_ui import backend as backend_mod
 
     cls = next(
         obj

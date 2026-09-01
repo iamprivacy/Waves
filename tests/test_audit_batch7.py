@@ -18,15 +18,15 @@ import pathlib
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.helper.path import check_file_exists
-from tidaler.ownership import OwnershipStore
-from tidaler.waves_ui.updater import AppUpdater, UpdaterError
+from waves.download import Download
+from waves.helper.path import check_file_exists
+from waves.ownership import OwnershipStore
+from waves.waves_ui.updater import AppUpdater, UpdaterError
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BACKEND_SRC = (ROOT / "tidaler" / "waves_ui" / "backend.py").read_text()
-MAIN_QML = (ROOT / "tidaler" / "waves_ui" / "qml" / "Main.qml").read_text()
-BRIDGE_MD = (ROOT / "tidaler" / "waves_ui" / "BRIDGE.md").read_text()
+BACKEND_SRC = (ROOT / "waves" / "waves_ui" / "backend.py").read_text()
+MAIN_QML = (ROOT / "waves" / "waves_ui" / "qml" / "Main.qml").read_text()
+BRIDGE_MD = (ROOT / "waves" / "waves_ui" / "BRIDGE.md").read_text()
 
 
 # ---------------------------------------------------------------- finding 65
@@ -49,7 +49,7 @@ def test_copy_file_contents_fsyncs_before_returning(tmp_path, monkeypatch):
         synced.append(fd)
         real_fsync(fd)
 
-    monkeypatch.setattr("tidaler.download.os.fsync", spy_fsync)
+    monkeypatch.setattr("waves.download.os.fsync", spy_fsync)
     Download._copy_file_contents(_CopyHost(), src, dst)
     assert synced, "destination file was never fsynced"
     assert dst.read_bytes() == b"x" * 1024
@@ -100,7 +100,12 @@ def test_ownership_zero_byte_falls_through_to_real_copy(tmp_path):
 
 
 class _TreeHost:
-    pass
+    # The reclaim asks what the OLD build shipped, so a file the new release
+    # legitimately dropped is not mistaken for one of the user's and put back.
+    # Nothing recorded here: unknown means "the user's", which is the answer
+    # these tests were written against.
+    def _shipped_by_the_old_build(self):
+        return None
 
 
 def _tree_setup(tmp_path):

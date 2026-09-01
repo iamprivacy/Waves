@@ -41,11 +41,11 @@ from types import SimpleNamespace
 
 from tidalapi.media import AudioMode, Quality, Track
 
-from tidaler.constants import ATMOS_REQUEST_QUALITY
-from tidaler.download import Download
-from tidaler.ownership import OwnershipStore, quality_rank
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import (
+from waves.constants import ATMOS_REQUEST_QUALITY
+from waves.download import Download
+from waves.ownership import OwnershipStore, quality_rank
+from waves.waves_ui import backend
+from waves.waves_ui.backend import (
     WavesBridge,
     _collection_incomplete_reason,
     _delivers_atmos,

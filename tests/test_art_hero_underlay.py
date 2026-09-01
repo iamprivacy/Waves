@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-MAIN_PATH = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+MAIN_PATH = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 MAIN_QML = MAIN_PATH.read_text()
 
 
@@ -136,9 +136,14 @@ def test_the_finished_page_never_waits_for_the_hint_to_fade():
     wire = (MAIN_PATH.parent / "WireHint.qml").read_text(encoding="utf-8")
     assert "height: active ? implicitHeight : 0" in wire
     assert "Behavior on height" not in wire
-    # The visual, and only the visual, rides the cross-fade.
+    # The visual, and only the visual, rides the cross-fade. Through states and
+    # transitions, not a Behavior: a Behavior whose duration binding also reads
+    # the flag that drives it captures the OLD value and swaps the two timings
+    # (measured on HoverSwell in Main.qml), so every appearance ran at the exit
+    # speed and every exit at the arrival one.
     assert "opacity: hint.shown" in wire
-    assert "Behavior on shown" in wire
+    assert 'states: State { name: "up"; when: hint.active' in wire
+    assert "Behavior on shown" not in wire
 
 
 # ----- the hover prefetch wiring ----------------------------------------------

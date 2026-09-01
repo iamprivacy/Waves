@@ -3,7 +3,7 @@ directory via ``..`` path traversal (pathvalidate leaves ``..`` untouched)."""
 
 from __future__ import annotations
 
-from tidaler.helper import path as p
+from waves.helper import path as p
 
 
 def test_no_traversal_neutralizes_dot_components():
@@ -46,8 +46,8 @@ def test_config_dir_is_waves_specific():
     # installed Tidaler / tidal-dl-ng: a fresh install has to start signed out.
     import os
 
-    from tidaler import __config_dirname__
-    from tidaler.helper.path import path_config_base, path_file_settings, path_file_token
+    from waves import __config_dirname__
+    from waves.helper.path import path_config_base, path_file_settings, path_file_token
 
     assert __config_dirname__ in ("Waves", "Waves-dev")
     assert os.path.basename(path_config_base()).startswith("Waves")

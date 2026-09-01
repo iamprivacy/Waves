@@ -6,7 +6,7 @@ Pure-function tests: no network and no Qt runtime (the module-level helpers in
 
 import pytest
 
-from tidaler.waves_ui.backend import (
+from waves.waves_ui.backend import (
     _collapse_album_editions,
     _edition_base_key,
     _norm_track_title,

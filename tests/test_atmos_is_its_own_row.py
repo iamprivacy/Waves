@@ -34,7 +34,7 @@ from types import SimpleNamespace
 from tidalapi.album import Album
 from tidalapi.media import AudioMode, Quality, Track
 
-from tidaler.waves_ui import backend
+from waves.waves_ui import backend
 
 ATMOS = AudioMode.dolby_atmos.value
 

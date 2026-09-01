@@ -18,8 +18,8 @@ import types
 
 import tidalapi
 
-from tidaler.config import Tidal
-from tidaler.constants import ATMOS_CLIENT_ID, ATMOS_CLIENT_SECRET, ATMOS_REQUEST_QUALITY
+from waves.config import Tidal
+from waves.constants import ATMOS_CLIENT_ID, ATMOS_CLIENT_SECRET, ATMOS_REQUEST_QUALITY
 
 # Dummy fixture values, not real credentials (bandit S105).
 _ORIG_ID = "orig-plain-id"
@@ -88,6 +88,50 @@ def test_switch_moves_the_pkce_pair_and_forces_a_refresh():
     assert t.session.refresh_calls == [ATMOS_CLIENT_ID]
 
 
+def test_a_settings_save_mid_switch_cannot_take_the_atmos_tier_back():
+    """The Atmos switch writes the tier the Atmos client asks for and then
+    re-authenticates, which is two network round trips (tens of seconds while
+    TIDAL throttles). Saving an audio-quality change in Settings is a GUI-
+    thread call on the SAME shared session, gated only on the "we are in Atmos"
+    flag, and that flag used to go up only after the re-authentication: a save
+    landing in that window wrote the user's stereo tier over the Atmos request,
+    and the get_stream that followed asked at a tier the Atmos client never
+    requests."""
+    t = _make()
+    seen: list[bool] = []
+
+    def _refresh(refresh_token: str) -> bool:
+        # The Settings SAVE lands here, mid-switch.
+        seen.append(t.is_atmos_session)
+        t.settings.data.quality_audio = tidalapi.Quality.hi_res_lossless.value
+        t.settings_apply()
+        return True
+
+    t.session.token_refresh = _refresh
+
+    assert t.switch_to_atmos_session() is True
+    assert seen == [True], "the save saw a session that did not yet call itself Atmos"
+    assert t.session.audio_quality == ATMOS_REQUEST_QUALITY
+
+
+def test_a_settings_save_mid_restore_still_reaches_the_session():
+    """The mirror image: while the flag is up a save is held off the session,
+    so leaving it up across the restore's re-authentication meant a quality
+    change saved during the restore reached the session nowhere at all."""
+    t = _make()
+    t.switch_to_atmos_session()
+
+    def _refresh(refresh_token: str) -> bool:
+        t.settings.data.quality_audio = tidalapi.Quality.hi_res_lossless.value
+        t.settings_apply()
+        return True
+
+    t.session.token_refresh = _refresh
+
+    assert t.restore_normal_session() is True
+    assert t.session.audio_quality == tidalapi.Quality(tidalapi.Quality.hi_res_lossless.value)
+
+
 def test_atmos_client_ships_no_secret():
     # The public id authenticates on its own; nothing private is shipped.
     assert ATMOS_CLIENT_SECRET == ""
@@ -126,8 +170,8 @@ def test_a_real_atmos_copy_settles_instead_of_re_fetching_forever():
     target the user can pick. The gate has to answer on the audio_mode, not the
     tier, or every save re-fetches the identical Atmos file. Pinned because the
     whole point of restoring delivery is undone if the copy never settles."""
-    from tidaler.ownership import QUALITY_RANK
-    from tidaler.waves_ui.backend import _copy_is_current, _delivers_atmos
+    from waves.ownership import QUALITY_RANK
+    from waves.waves_ui.backend import _copy_is_current, _delivers_atmos
 
     atmos_only = types.SimpleNamespace(audio_modes=["DOLBY_ATMOS"])
     rec_atmos = {"audio_mode": "DOLBY_ATMOS", "quality_tier": "LOW", "quality_rank": QUALITY_RANK["LOW"]}
@@ -150,7 +194,7 @@ def test_rebuilding_the_session_recaptures_every_original_the_swap_restores():
     import inspect
     import re
 
-    from tidaler.waves_ui.backend import WavesBridge
+    from waves.waves_ui.backend import WavesBridge
 
     def _captured(src: str) -> set[str]:
         return set(re.findall(r"original_client_\w+", src))

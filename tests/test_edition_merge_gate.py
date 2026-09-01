@@ -11,7 +11,7 @@ test_discography_video_source.py does.
 
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 def _bind(stub, name):

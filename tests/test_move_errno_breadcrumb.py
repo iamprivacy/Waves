@@ -14,7 +14,7 @@ import logging
 import pathlib
 from unittest.mock import MagicMock, patch
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 def _download_instance() -> Download:

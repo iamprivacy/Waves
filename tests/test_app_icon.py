@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-_ICO = Path(__file__).resolve().parent.parent / "tidaler" / "ui" / "icon.ico"
+_ICO = Path(__file__).resolve().parent.parent / "waves" / "ui" / "icon.ico"
 _EXPECTED_SIZES = {16, 32, 48, 64, 128, 256}
 
 
@@ -50,7 +50,7 @@ def test_icon_usable_guard_rejects_degenerate_icons():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     _ = QGuiApplication.instance() or QGuiApplication([])
 
-    from tidaler.waves_ui.app import _icon_usable
+    from waves.waves_ui.app import _icon_usable
 
     good = QIcon(str(_ICO))
     assert _icon_usable(good) is True

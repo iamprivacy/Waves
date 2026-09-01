@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 from tidalapi.media import Track
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 @pytest.fixture

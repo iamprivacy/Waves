@@ -28,7 +28,7 @@ from threading import Lock
 
 import pytest
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EXIT_OK = 0
 _EXIT_REGRESSED = 1
@@ -46,7 +46,7 @@ class _Signal:
 
 class _Stub:
     def __init__(self):
-        from tidaler.waves_ui import backend
+        from waves.waves_ui import backend
 
         self._job_tracks = {}
         # The ledger merge also overlays an expansion's predicted skips
@@ -55,15 +55,19 @@ class _Stub:
         self._job_owned = {}
         self._job_fetched = {}
         self._job_signals = {}
-        self._queue = []
-        self._queue_index = {}
+        # The row these events belong to: a registry writer ignores a qid
+        # whose row has gone, so a cleared row cannot re-create per-row state.
+        self._queue = [{"qid": 1, "media_id": "m1", "status": "running"}]
+        self._queue_index = {1: self._queue[0]}
         self._outcome_lock = Lock()
+        self._qdirty_changed: dict = {}
+        self._queue_lock = Lock()
         self.queueTrackState = _Signal()
         self.queueTracksLoaded = _Signal()
         self._emit_queue = lambda: None
         self._own_pool = type("P", (), {"start": lambda self_, w: None})()
         self.settings = type("S", (), {"data": type("D", (), {"download_base_path": ""})()})()
-        for name in ("_track_lifecycle", "_queue_item", "_merge_queue_tracks"):
+        for name in ("_track_lifecycle", "_queue_item", "_queue_mark_changed", "_merge_queue_tracks"):
             setattr(self, name, getattr(backend.WavesBridge, name).__get__(self, _Stub))
 
 
@@ -119,8 +123,8 @@ def _run_scenario() -> int:
     patch_offline()
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:  # pragma: no cover - environment guard
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

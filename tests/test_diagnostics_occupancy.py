@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from tidaler.waves_ui import diagnostics as D
+from waves.waves_ui import diagnostics as D
 
 
 def test_occupancy_buckets():

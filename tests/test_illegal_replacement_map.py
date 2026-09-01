@@ -21,18 +21,18 @@ from unittest.mock import MagicMock
 
 from tidalapi import Album, Track
 
-from tidaler.download import Download
-from tidaler.helper.path import (
+from waves.download import Download
+from waves.helper.path import (
     ILLEGAL_FILENAME_CHARS,
     format_path_media,
     safe_filename_replacement_map,
 )
-from tidaler.model.cfg import HelpSettings
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.model.cfg import HelpSettings
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
-_UI = pathlib.Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui"
+_UI = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui"
 
 _SUBTITLED = "The Better Life (Rarities Edition: Live At Red Rocks)"
 _MIDDOT = "The Better Life (Rarities Edition · Live At Red Rocks)"

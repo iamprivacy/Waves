@@ -17,10 +17,10 @@ from unittest.mock import patch
 
 from _dispatch_stub import arm_queue
 
-from tidaler.waves_ui import updater as updater_mod
-from tidaler.waves_ui.backend import WavesBridge, _link_tiles_of
+from waves.waves_ui import updater as updater_mod
+from waves.waves_ui.backend import WavesBridge, _link_tiles_of
 
-QML_DIR = pathlib.Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml"
+QML_DIR = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 MAIN_QML = (QML_DIR / "Main.qml").read_text(encoding="utf-8")
 SETTINGS_QML = (QML_DIR / "SettingsPage.qml").read_text(encoding="utf-8")
 
@@ -251,6 +251,7 @@ def test_save_settings_notifies_the_settings_page():
         _ffmpeg_flag_prefs={},
         _settings_save_lock=Lock(),
     )
+    stub._submit_settings_write = lambda: stub.settings.save()
     WavesBridge._save_settings(stub)
     assert stub.settingsPersistedExternally.emits == [()]
 
@@ -409,7 +410,7 @@ class _BestOfBothStub:
 def test_best_of_both_guards_the_button_before_the_scan():
     stub = _BestOfBothStub()
     with patch(
-        "tidaler.waves_ui.backend._build_merge_plan",
+        "waves.waves_ui.backend._build_merge_plan",
         return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}, ""),
     ):
         stub.downloadAlbumBestOfBoth("a1")
@@ -422,7 +423,7 @@ def test_best_of_both_guards_the_button_before_the_scan():
 def test_best_of_both_same_identity_keeps_the_button_waiting():
     stub = _BestOfBothStub()
     with patch(
-        "tidaler.waves_ui.backend._build_merge_plan",
+        "waves.waves_ui.backend._build_merge_plan",
         return_value=(SimpleNamespace(id="a1", full_name="Album"), {"a1": []}, ""),
     ):
         stub.downloadAlbumBestOfBoth("a1")

@@ -36,8 +36,8 @@ import pytest
 from _dispatch_stub import arm_dispatch
 from tidalapi.media import Quality
 
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Signal:

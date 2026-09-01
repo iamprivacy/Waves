@@ -31,11 +31,11 @@ from types import SimpleNamespace
 
 from tidalapi.media import AudioMode, Quality, Track
 
-from tidaler.constants import ATMOS_REQUEST_QUALITY
-from tidaler.download import Download
-from tidaler.ownership import OwnershipStore, quality_rank
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import _delivers_atmos, _TrackedDownload
+from waves.constants import ATMOS_REQUEST_QUALITY
+from waves.download import Download
+from waves.ownership import OwnershipStore, quality_rank
+from waves.waves_ui import backend
+from waves.waves_ui.backend import _delivers_atmos, _TrackedDownload
 
 ATMOS = AudioMode.dolby_atmos.value
 ATMOS_TIER = str(getattr(ATMOS_REQUEST_QUALITY, "value", ATMOS_REQUEST_QUALITY))

@@ -19,9 +19,9 @@ from unittest.mock import MagicMock
 
 from tidalapi.media import Track
 
-from tidaler.constants import UNIQUIFY_THRESHOLD
-from tidaler.download import Download
-from tidaler.helper.path import file_unique_suffix
+from waves.constants import UNIQUIFY_THRESHOLD
+from waves.download import Download
+from waves.helper.path import file_unique_suffix
 
 
 def _make_download(tmp_path: pathlib.Path) -> Download:

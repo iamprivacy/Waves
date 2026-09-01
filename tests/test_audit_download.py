@@ -14,9 +14,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.metadata import Metadata, MetadataUnreadable
-from tidaler.model.downloader import DownloadSegmentResult
+from waves.download import Download
+from waves.metadata import Metadata, MetadataUnreadable
+from waves.model.downloader import DownloadSegmentResult
 
 
 class _FakeTask:
@@ -154,7 +154,7 @@ class TestMetadataUnreadableGuard:
         bogus = tmp_path / "truncated.m4a"
         bogus.write_bytes(b"not a real audio container")
 
-        with patch("tidaler.metadata.mutagen.File", return_value=None):
+        with patch("waves.metadata.mutagen.File", return_value=None):
             m = Metadata(path_file=bogus, target_upc={"MP4": "x"})
 
             with pytest.raises(MetadataUnreadable):
@@ -172,9 +172,9 @@ class TestPlaylistLineEndings:
         track.write_bytes(b"x")
 
         # Force os.linesep to CRLF to prove the writer does not concatenate it directly.
-        monkeypatch.setattr("tidaler.download.os.linesep", "\r\n")
+        monkeypatch.setattr("waves.download.os.linesep", "\r\n")
 
-        with patch("tidaler.download.AudioExtensionsValid", [".m4a"]):
+        with patch("waves.download.AudioExtensionsValid", [".m4a"]):
             created = dl.playlist_populate({tmp_path}, name_list="MyList", is_album=True, sort_alphabetically=True)
 
         assert len(created) == 1

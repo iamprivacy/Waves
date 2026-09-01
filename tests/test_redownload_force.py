@@ -26,8 +26,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tidaler.ownership import OwnershipStore
-from tidaler.waves_ui import backend
+from waves.ownership import OwnershipStore
+from waves.waves_ui import backend
 
 
 def _gate(force: bool) -> backend._TrackedDownload:
@@ -57,7 +57,7 @@ def test_register_redownload_marks_both_overrides():
 
 # --------------------------------------------------------------------------- #
 # The tier boundary itself: which owned copies are "current" and which force
-# an upgrade. Ranks follow tidaler.ownership.QUALITY_RANK (LOW 0, HIGH 1,
+# an upgrade. Ranks follow waves.ownership.QUALITY_RANK (LOW 0, HIGH 1,
 # LOSSLESS 2, HI_RES_LOSSLESS 3); -1 is a tier-less (video) record.
 # --------------------------------------------------------------------------- #
 def _upgrade_gate(rec: dict | None, target_rank: int) -> backend._TrackedDownload:
@@ -171,3 +171,29 @@ def test_ownership_of_reports_a_low_copy_against_the_current_setting(tmp_path, q
     assert info["owned"] is True
     assert info["quality_rank"] == 0
     assert info["up_to_date"] is up_to_date
+
+
+# --------------------------------------------------------------------------- #
+# gap-round G-13: a broken-formatter copy must never satisfy the gate. Old
+# builds wrote "[None]" where the release year belonged (any album TIDAL
+# lists no date for), and the pre-fix album-404 fallback left a literal
+# "{album_track_num}" token in file names. The fixed formatter can never
+# rebuild those spellings, so a record pointing at one would freeze the
+# garbage file as the owned copy and skip the corrected re-download forever.
+# The old file is left alone (the app never deletes user-visible files); the
+# fresh download lands at the corrected path and takes over the record.
+# --------------------------------------------------------------------------- #
+def test_a_none_foldered_copy_never_satisfies_the_gate():
+    rec = {"path": "/m/Artist/[None] Album/01 Song.flac", "quality_rank": 3}
+    assert _upgrade_gate(rec, target_rank=2)._ownership_decision(_plain_track()) == (None, None)
+
+
+def test_a_template_token_copy_never_satisfies_the_gate():
+    rec = {"path": "/m/Artist/Album/1-{album_track_num}. Artist - Song.flac", "quality_rank": 3}
+    assert _upgrade_gate(rec, target_rank=2)._ownership_decision(_plain_track()) == (None, None)
+
+
+def test_a_normally_named_copy_still_skips_at_equal_quality():
+    rec = {"path": "/m/Artist/[2019] Album/01 Song.flac", "quality_rank": 2}
+    verdict, out = _upgrade_gate(rec, target_rank=2)._ownership_decision(_plain_track())
+    assert verdict == "skip" and out is rec

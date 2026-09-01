@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-QML = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "SettingsPage.qml"
+QML = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "SettingsPage.qml"
 
 _DIAG_PREFS = ("verbose_diagnostics", "diagnostics_redact_content")
 

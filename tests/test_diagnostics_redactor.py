@@ -22,10 +22,10 @@ import pytest
 
 @pytest.fixture()
 def diag():
-    sys.modules.pop("tidaler.waves_ui.diagnostics", None)
-    module = importlib.import_module("tidaler.waves_ui.diagnostics")
+    sys.modules.pop("waves.waves_ui.diagnostics", None)
+    module = importlib.import_module("waves.waves_ui.diagnostics")
     yield module
-    sys.modules.pop("tidaler.waves_ui.diagnostics", None)
+    sys.modules.pop("waves.waves_ui.diagnostics", None)
 
 
 # ---- identity tier: (input line, leaked fragments that MUST be gone) --------
@@ -53,8 +53,45 @@ IDENTITY_CORPUS = [
     ("etag 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", ["9f86d081884c7d659a2f"]),
     ("device 550e8400-e29b-41d4-a716-446655440000 registered", ["550e8400-e29b-41d4-a716-446655440000"]),
     # traceback path
-    ('  File "/Users/karl/dev/waves/tidaler/download.py", line 42', ["karl"]),
+    ('  File "/Users/karl/dev/waves/waves/download.py", line 42', ["karl"]),
+    # third-party lines never pass through content(), so a URL query string is
+    # the one place a search needle can reach the disk log unmarked: urllib3
+    # logs the retried URL verbatim once the API session mounts a Retry policy
+    (
+        "Retrying (_ApiRetry(total=2)) after connection broken by "
+        "'ConnectionResetError(54)': /v1/search?query=my+private+search&limit=3&types=TRACKS",
+        ["my+private+search"],
+    ),
+    ("GET https://api.tidal.com/v1/pages/search?query=lana+del+rey -> 429", ["lana+del+rey"]),
+    # A credential after a bare SPACE, which is the arm that had to be narrowed
+    # (see the KEEP corpus below for what it was eating). Each of these still
+    # has to go.
+    ("sending auth token abc123def456ghi next", ["abc123def456ghi"]),
+    ("api_key 7f3a91bcd0e4b2 rejected", ["7f3a91bcd0e4b2"]),
+    ("set-cookie sessionblob0123456789abcdef stored", ["sessionblob0123456789abcdef"]),
+    ("client_secret abcdefghijklmnopqrst rotated", ["abcdefghijklmnopqrst"]),
+    ("refresh_token rt-9f8e7d6c5b4a expired", ["rt-9f8e7d6c5b4a"]),
 ]
+
+# The other direction: what over-redaction must NOT eat. A word after a word is
+# far more often a TITLE than a credential, and the bare-space arm treated every
+# one of them as a value: a track called "Secret Song" logged as
+# "Secret ‹redacted›", which destroys exactly the diagnostic value the content
+# marker exists to preserve. (input line, fragments that must SURVIVE)
+KEEP_CORPUS = [
+    ("playing Secret Song by The Band", ["Secret Song"]),
+    ("queued Token Ring live 1998", ["Token Ring"]),
+    ("album The Secret History of Rock scanned", ["Secret History"]),
+    ("downloading Auth Mode by Cipher", ["Auth Mode"]),
+    ("skipped Password Kids single", ["Password Kids"]),
+]
+
+
+@pytest.mark.parametrize(("line", "kept"), KEEP_CORPUS, ids=range(len(KEEP_CORPUS)))
+def test_ordinary_titles_survive_the_scrub(diag, line, kept):
+    out = diag.scrub(line)
+    for fragment in kept:
+        assert fragment in out, f"over-redacted {fragment!r} into {out!r}"
 
 
 @pytest.mark.parametrize(("line", "leaks"), IDENTITY_CORPUS, ids=range(len(IDENTITY_CORPUS)))
@@ -115,6 +152,16 @@ def test_timestamps_survive(diag):
     """Clock times must not be eaten by the IPv6 pattern."""
     out = diag.scrub("14:23:01.123  WARN  [slow] search took 2.31s")
     assert "14:23:01" in out
+
+
+def test_url_query_is_dropped_but_the_path_survives(diag):
+    """A query string is dropped whole (it can hold a search term, an email or
+    an id), while the path in front of it stays: that is what makes a retry or
+    error line diagnosable at all."""
+    out = diag.scrub("Retrying after connection broken: /v1/search?query=daft+punk&limit=3")
+    assert "daft+punk" not in out
+    assert "/v1/search" in out
+    assert diag.scrub(out) == out  # idempotent, like every other pass
 
 
 def test_content_tier_hashes_marked_spans_only(diag):

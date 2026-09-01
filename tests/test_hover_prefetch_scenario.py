@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EXIT_OK = 0
 _EXIT_FAIL = 1
@@ -64,8 +64,8 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:  # pragma: no cover - environment guard
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT
@@ -299,8 +299,27 @@ def _run_scenario() -> int:
         return _EXIT_FAIL
 
     # 2. Click the card's art: the page must paint at once, no loading hint.
+    #
+    # Waited on the key, not on a fixed settle. The open is a round trip out to
+    # the backend and back, and 50 ms of it was a coin toss on a loaded machine:
+    # the run that failed had finished in 2.7 s where a passing one takes 8 to 9.
+    # This does not soften what is measured. The key and browsePageLoading are
+    # set in the SAME statement block when a page opens (Main.qml's openBrowse*),
+    # and the slow-page leg below proves a page still on the wire reads
+    # loading === true WITH its key already set. So sampling the moment the key
+    # flips is the sharpest instant there is, sharper than an arbitrary +50 ms.
+    def opened() -> bool:
+        return q("browsePageKey") == "item:playlist:p0"
+
     QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c)
-    settle(50)
+    if not pump(opened, 3000) and q("browsePageKey") == "":
+        # An empty key, not a wrong one: the press went nowhere, which is the
+        # shelf still settling under load rather than the app opening something
+        # else. One more click, never a third. A second miss is a real failure
+        # and must read as one (commit 06875c9 made a click that does not open
+        # a hard fail on purpose, and that stays).
+        QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c)
+        pump(opened, 3000)
     if q("browsePageKey") != "item:playlist:p0":
         print(f"the click did not open the page (key={q('browsePageKey')})", file=sys.stderr)
         return _EXIT_FAIL

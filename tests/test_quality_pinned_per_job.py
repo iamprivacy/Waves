@@ -44,8 +44,8 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.media import AudioMode, Quality
 
-from tidaler.constants import ATMOS_REQUEST_QUALITY
-from tidaler.waves_ui import backend
+from waves.constants import ATMOS_REQUEST_QUALITY
+from waves.waves_ui import backend
 
 
 class _Session:
@@ -113,7 +113,7 @@ def test_a_job_without_a_pin_is_left_entirely_alone():
 
 
 class _SwitchingTidal:
-    """The session switch as tidaler/config.py really performs it.
+    """The session switch as waves/config.py really performs it.
 
     The two facts that matter, and that a recorder-only stub hides: the Atmos
     request quality is written only when the session has to be BUILT, and the

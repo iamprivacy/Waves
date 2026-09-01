@@ -17,9 +17,9 @@ from threading import Lock
 
 from _dispatch_stub import arm_queue
 
-import tidaler.waves_ui.backend as backend_mod
-from tidaler.waves_ui import netmount
-from tidaler.waves_ui.backend import WavesBridge
+import waves.waves_ui.backend as backend_mod
+from waves.waves_ui import netmount
+from waves.waves_ui.backend import WavesBridge
 
 
 def _bridge(base_path="", origins=None):

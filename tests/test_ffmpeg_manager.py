@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import zipfile
 
 import pytest
 
-from tidaler.waves_ui import ffmpeg_manager as fm
+from waves.waves_ui import ffmpeg_manager as fm
 
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +269,91 @@ def test_update_available_compares_build(tmp_path, monkeypatch):
     assert avail is False
 
 
+def test_a_build_that_sorts_lower_is_still_a_different_build(tmp_path, monkeypatch):
+    """The comparison is plain inequality, and the fixture pair (123_8.1.1 vs
+    999_8.2) reads the same under inequality, numeric ordering and text
+    ordering alike, so it pinned none of them. The epoch the source stamps is
+    seconds, not a version: it rolls over into a longer number whose FIRST
+    digit is smaller ("1781692804_N-1" against "999_8.2"), and a well-meaning
+    change to a "newer than" text compare would then hide every future build
+    from every user who ever installed one."""
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    mgr = fm.FfmpegManager(tmp_path)
+    mgr.install(release=rel, session=session)  # installs build 123_8.1.1
+
+    rollover = fm.Release(source="martin-riedl", version="1781692804_N-1", label="N-1", url="u")
+    monkeypatch.setattr(fm, "latest", lambda os_key, arch, session=None: rollover)
+    avail, cur, new = mgr.update_available()
+    assert avail is True, "a different build is an available update, whatever it sorts as"
+    assert (cur, new) == ("123_8.1.1", "1781692804_N-1")
+
+    # And the other direction is deliberate too: the source rolling a build BACK
+    # is offered, not silently withheld, because the local copy is then wrong.
+    older = fm.Release(source="martin-riedl", version="1_7.0", label="7.0", url="u")
+    monkeypatch.setattr(fm, "latest", lambda os_key, arch, session=None: older)
+    assert mgr.update_available()[0] is True
+
+
+def test_a_text_ordering_compare_is_caught_too(tmp_path, monkeypatch):
+    """The pair the test above cannot see, and the one its docstring promises.
+
+    Every version offered there text-sorts ABOVE the installed 123_8.1.1,
+    the rollback 1_7.0 included (because "_" is 0x5F and outranks "2" at
+    0x32), so swapping the inequality for a plain `new > current` left that
+    whole file green. The two tempting rewrites, numeric ordering and text
+    ordering, need two different pairs: this is the text one. 1781692804_N-1
+    is the LOWER string against 999_8.2 and the newer build.
+    """
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    mgr = fm.FfmpegManager(tmp_path)
+    mgr.install(release=dataclasses.replace(rel, version="999_8.2"), session=session)
+
+    rollover = fm.Release(source="martin-riedl", version="1781692804_N-1", label="N-1", url="u")
+    monkeypatch.setattr(fm, "latest", lambda os_key, arch, session=None: rollover)
+
+    assert "1781692804_N-1" < "999_8.2", "the pair has to separate a text compare from an inequality"
+    avail, cur, new = mgr.update_available()
+    assert avail is True, "a text 'newer than' compare hides every epoch build from every user"
+    assert (cur, new) == ("999_8.2", "1781692804_N-1")
+
+
+def _leftovers(mgr):
+    """Every staging file an install may have left in the bin folder."""
+    return sorted(p.name for p in mgr.install_dir.glob("*") if p.suffix in (".zip", ".new") or ".new." in p.name)
+
+
+def test_a_finished_install_leaves_no_download_temp(tmp_path, monkeypatch):
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    mgr = fm.FfmpegManager(tmp_path)
+    mgr.install(release=rel, session=session)
+
+    assert mgr.is_installed()
+    assert _leftovers(mgr) == [], "the multi-megabyte download temp is the app's own litter"
+
+
+def test_a_failed_install_leaves_no_download_temp(tmp_path, monkeypatch):
+    """A bad checksum is the common failure (a truncated or swapped upload).
+    Every retry downloads the zip again, so a leaked temp grows the bin folder
+    by tens of megabytes per attempt."""
+    payload = _zip_bytes({"ffmpeg": b"X"})
+    url = "https://example.test/ffmpeg.zip"
+    session = _FakeSession(
+        {
+            "ffmpeg.zip.sha256": _Resp(text="deadbeef  ffmpeg.zip\n"),
+            "ffmpeg.zip": _Resp(content=payload, headers={"Content-Length": str(len(payload))}),
+        }
+    )
+    rel = fm.Release(source="martin-riedl", version="1_1.0", label="1.0", url=url, sha256_url=url + ".sha256")
+    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8")
+    mgr = fm.FfmpegManager(tmp_path)
+
+    for _ in range(3):
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            mgr.install(release=rel, session=session)
+    assert not mgr.is_installed()
+    assert _leftovers(mgr) == []
+
+
 def test_fetch_sha256_selects_from_combined_manifest(tmp_path):
     manifest = (
         "11aa  ffmpeg-master-latest-win64-lgpl.zip\n"
@@ -366,3 +452,55 @@ def test_remove(tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "")
     st = mgr.remove()
     assert not mgr.is_installed() and st["state"] == "missing"
+
+
+# --------------------------------------------------------------------------- #
+# gap-round G-10: two instances share <config>/bin, so staging is per-install
+# --------------------------------------------------------------------------- #
+def test_install_stages_through_a_name_of_its_own(tmp_path, monkeypatch):
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    staged_names: list[str] = []
+    real_extract = fm._extract_ffmpeg
+
+    def extract(zip_path, dest, os_key):
+        staged_names.append(dest.name)
+        return real_extract(zip_path, dest, os_key)
+
+    monkeypatch.setattr(fm, "_extract_ffmpeg", extract)
+    mgr = fm.FfmpegManager(tmp_path)
+
+    mgr.install(release=rel, session=session)
+    mgr.install(release=rel, session=session)
+
+    exe = fm._exe_name(mgr.os_key)
+    assert len(staged_names) == 2 and staged_names[0] != staged_names[1]
+    for name in staged_names:
+        assert name.startswith(exe + ".") and name.endswith(".new")
+        assert name != exe + ".new", "the fixed name is what two instances truncate and unlink under each other"
+
+
+def test_a_finished_install_leaves_another_instances_staging_alone(tmp_path, monkeypatch):
+    # Under the fixed staging name, instance A's extract truncated B's
+    # half-written binary and A's cleanup unlinked it; a per-install name
+    # means A only ever touches its own.
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    mgr = fm.FfmpegManager(tmp_path)
+    mgr.install_dir.mkdir(parents=True, exist_ok=True)
+    other = mgr.install_dir / (fm._exe_name(mgr.os_key) + ".new")
+    other.write_bytes(b"HALFWRITTEN")
+
+    mgr.install(release=rel, session=session)
+
+    assert other.read_bytes() == b"HALFWRITTEN"
+
+
+def test_install_stages_the_manifest_too(tmp_path, monkeypatch):
+    # A plain open("w") from two instances (or a crash mid-dump) left a
+    # corrupt manifest that read back as {}, blanking the recorded version.
+    rel, session = _install_fixture(tmp_path, monkeypatch)
+    mgr = fm.FfmpegManager(tmp_path)
+
+    mgr.install(release=rel, session=session)
+
+    assert mgr._read_manifest()["version"] == "123_8.1.1"
+    assert not list(mgr.install_dir.glob("ffmpeg.json.*.tmp")), "manifest staging must not leave litter"

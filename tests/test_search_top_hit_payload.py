@@ -28,8 +28,8 @@ from tidalapi.artist import Artist
 from tidalapi.media import Track, Video
 from tidalapi.playlist import Playlist
 
-from tidaler.helper.tidal import search_results_all
-from tidaler.waves_ui import backend
+from waves.helper.tidal import search_results_all
+from waves.waves_ui import backend
 
 
 def _bridge():
@@ -128,3 +128,22 @@ def test_search_results_all_reports_a_missing_top_hit_as_none():
     r = search_results_all(_Empty(), "nothing")
     assert r["top_hit"] is None
     assert r["albums"] == []
+
+
+def test_single_page_mode_stops_after_one_round_trip():
+    # The GUI keeps at most a bounded head of each list, all of it inside the
+    # first page of 300, so its opt-in must cost exactly one request even when
+    # TIDAL has more pages to give.
+    s = _FakeSession()
+    r = search_results_all(s, "needle", single_page=True)
+    assert s.calls == 1
+    assert r["top_hit"] == "TOP"
+    assert r["albums"] == ["b1", "b2"] and r["artists"] == ["a1"] and r["tracks"] == ["t1"]
+
+
+def test_the_default_still_pages_to_exhaustion():
+    # single_page is an opt-in; the signature's default behavior is unchanged
+    # for every other caller.
+    s = _FakeSession()
+    search_results_all(s, "needle")
+    assert s.calls == 3

@@ -13,7 +13,7 @@ import zipfile
 
 import pytest
 
-from tidaler.waves_ui import ffmpeg_manager as fm
+from waves.waves_ui import ffmpeg_manager as fm
 
 
 # --------------------------------------------------------------------------- #
@@ -207,12 +207,27 @@ def test_macos_verify_failure_is_not_fatal_and_does_not_resign(tmp_path, monkeyp
 # Finding 3: _probe_version is memoized and uses a bounded timeout so status()
 # on the GUI thread cannot re-fork a subprocess per call.
 # --------------------------------------------------------------------------- #
+def test_the_gui_thread_probe_stays_bounded():
+    """The bound itself, asserted from the test BODY.
+
+    It used to live inside the fake subprocess.run below, and _probe_version
+    wraps that call in `except Exception: return ""`. So the AssertionError was
+    swallowed: the guard still went red one line later, but on
+    `assert '' == 'n7.1'`, and whoever raised the timeout read that instead of
+    the reason. Interpolating the constant into its own expectation pins only
+    that SOME timeout is passed, so this is the assertion that matters: raise
+    the constant to 900 and a GUI-thread freeze of a quarter hour ships green.
+    """
+    assert 0 < fm._PROBE_TIMEOUT <= 10, "status() runs on the GUI thread; this is its worst case"
+
+
 def test_probe_version_is_cached_per_binary(tmp_path, monkeypatch):
     fm._probe_cache.clear()
     binary = tmp_path / "ffmpeg"
     binary.write_bytes(b"BIN")
 
     runs: list[int] = []
+    passed: list = []
 
     class _R:
         returncode = 0
@@ -221,7 +236,11 @@ def test_probe_version_is_cached_per_binary(tmp_path, monkeypatch):
 
     def fake_run(argv, *a, **kw):
         runs.append(1)
-        assert kw.get("timeout") == fm._PROBE_TIMEOUT  # bounded, not 15s
+        # Recorded, not asserted: an AssertionError raised in here is eaten by
+        # _probe_version's own `except Exception: return ""`, so the failure
+        # would arrive as `assert '' == 'n7.1'` with no message at all. See
+        # test_the_gui_thread_probe_stays_bounded for the bound.
+        passed.append(kw.get("timeout"))
         return _R()
 
     monkeypatch.setattr(fm.subprocess, "run", fake_run)
@@ -230,6 +249,7 @@ def test_probe_version_is_cached_per_binary(tmp_path, monkeypatch):
     assert fm._probe_version(str(binary)) == "n7.1"
     assert fm._probe_version(str(binary)) == "n7.1"
     assert sum(runs) == 1  # only the first call actually forked
+    assert passed == [fm._PROBE_TIMEOUT], "the probe forked without the bounded timeout"
 
 
 def test_probe_version_reprobes_when_binary_changes(tmp_path, monkeypatch):

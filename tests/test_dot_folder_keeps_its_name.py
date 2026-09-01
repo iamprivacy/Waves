@@ -26,8 +26,8 @@ from types import SimpleNamespace
 
 from tidalapi import Album, Track
 
-from tidaler.constants import DOT_SEGMENT_STANDIN
-from tidaler.helper.path import format_path_media, path_file_sanitize
+from waves.constants import DOT_SEGMENT_STANDIN
+from waves.helper.path import format_path_media, path_file_sanitize
 
 _ARTIST = "Kesha"
 _TEMPLATE = "{album_artist}/{album_title}/{album_track_num}. {track_title}"

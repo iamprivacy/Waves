@@ -35,7 +35,7 @@ from test_discography_video_source import _DiscoStub
 from tidalapi.album import Album
 from tidalapi.media import AudioMode, Quality
 
-from tidaler.waves_ui.backend import _drop_spatial_editions
+from waves.waves_ui.backend import _drop_spatial_editions
 
 ATMOS = AudioMode.dolby_atmos.value
 

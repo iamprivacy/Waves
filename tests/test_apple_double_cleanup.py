@@ -13,8 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.helper.path import strip_apple_double
+from waves.download import Download
+from waves.helper.path import strip_apple_double
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ def test_move_file_strips_apple_double_after_move(
     source_path.write_bytes(b"audio")
     ghost_path.write_bytes(b"\x00" * 32)
 
-    with patch("tidaler.download.strip_apple_double") as strip_mock:
+    with patch("waves.download.strip_apple_double") as strip_mock:
         result: bool = download_instance._move_file(source_path, destination_path, overwrite=True)
 
     assert result is True
@@ -146,7 +146,7 @@ def test_move_file_failure_skips_cleanup(download_instance: Download, tmp_path: 
         download_instance (Download): Download instance under test.
         tmp_path (pathlib.Path): Temporary test directory.
     """
-    with patch("tidaler.download.strip_apple_double") as strip_mock:
+    with patch("waves.download.strip_apple_double") as strip_mock:
         result: bool = download_instance._move_file(
             tmp_path / "missing-source.flac", tmp_path / "destination.flac", overwrite=True
         )

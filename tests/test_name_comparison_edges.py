@@ -21,8 +21,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tidalapi.media import Track
 
-from tidaler.download import Download
-from tidaler.helper.path import name_comparison_key, path_file_uniquify
+from waves.download import Download
+from waves.helper.path import name_comparison_key, path_file_uniquify
 
 
 def _case_insensitive(tmp_path: pathlib.Path) -> bool:
@@ -152,7 +152,7 @@ class TestTheNumberedCopyScanMatchesTheSameWay:
 
             return ids["NFD"] if "_01" in name else ids["NFC"]
 
-        with patch("tidaler.download.read_item_id", _read_item_id):
+        with patch("waves.download.read_item_id", _read_item_id):
             assert dl._existing_same_item_at(base, _track(456)) == sibling
 
 
@@ -169,4 +169,4 @@ class TestCaseTwinsUnderConcurrency:
         paths = [path for _, path in results.values()]
         assert len({name_comparison_key(str(p)) for p in paths}) == 2, "one file cannot hold two tracks"
         assert {p.read_bytes() for p in paths} == {b"id-111", b"id-222"}
-        assert dl._names_reserved == set()
+        assert dl._names_reserved == {}

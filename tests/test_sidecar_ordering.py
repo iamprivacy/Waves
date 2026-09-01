@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 from tidalapi.media import Track
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 def _make_download(tmp_path: pathlib.Path) -> Download:
@@ -104,6 +104,9 @@ class TestSidecarsWaitForTheAudio:
 
         assert ok is False
         assert list(library.iterdir()) == [], "no cover or lyrics for a track that never arrived"
+        # And the folder is not this run's to write a playlist into: nothing
+        # of ours reached it.
+        assert dl._dirs_filled == set()
 
     def test_a_successful_move_brings_the_sidecars_with_it(self, tmp_path):
         library = tmp_path / "library"
@@ -117,6 +120,9 @@ class TestSidecarsWaitForTheAudio:
         assert path.read_bytes() == b"audio"
         assert (library / "Song.lrc").read_text(encoding="utf-8") == "[00:01.00] words\n"
         assert (library / "cover.jpg").read_bytes() == b"cover bytes"
+        # A file landed here, so this folder is one the m3u writer may write in
+        # (see tests/test_playlist_scope_only_what_landed.py).
+        assert dl._dirs_filled == {library}
 
     def test_the_sidecars_follow_the_name_the_audio_actually_took(self, tmp_path):
         # The audio uniquifies away from an occupied name; the lyrics have to

@@ -21,7 +21,7 @@ from __future__ import annotations
 import pathlib
 import re
 
-_QML = pathlib.Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "SettingsPage.qml"
+_QML = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "SettingsPage.qml"
 
 
 def _source() -> str:

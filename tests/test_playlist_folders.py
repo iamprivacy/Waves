@@ -1,4 +1,4 @@
-"""Folder tree sweep + {folder_path} handling (tidaler/helper/folders.py).
+"""Folder tree sweep + {folder_path} handling (waves/helper/folders.py).
 
 The fakes mirror the tidalapi surface the sweep touches: paged
 favorites.playlist_folders(parent_folder_id=...) and Folder.items(). The
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.exceptions import TooManyRequests
 
-from tidaler.helper import folders as f
+from waves.helper import folders as f
 
 
 class FakePlaylist(SimpleNamespace):
@@ -158,7 +158,7 @@ def test_a_folder_named_like_a_template_token_is_not_expanded():
 
     from tidalapi import Track
 
-    from tidaler.helper.path import format_path_media
+    from waves.helper.path import format_path_media
 
     template = f.apply_folder_path("Playlists/{folder_path}fixed", "Best of {artist_name}")
     assert "{artist_name}" not in template

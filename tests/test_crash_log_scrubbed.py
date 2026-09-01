@@ -25,7 +25,7 @@ import threading
 
 import pytest
 
-from tidaler.waves_ui import app as waves_app
+from waves.waves_ui import app as waves_app
 
 
 @pytest.fixture

@@ -34,8 +34,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.waves_ui.backend import WavesBridge
+from waves.download import Download
+from waves.waves_ui.backend import WavesBridge
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ def test_ensure_directory_creates_once_per_instance(downloader: Download, tmp_pa
     # A direct child: makedirs recurses through the mocked name for missing
     # parents, which would inflate the count without meaning extra ensures.
     target = tmp_path / "Album"
-    with patch("tidaler.download.os.makedirs", wraps=os.makedirs) as makedirs_mock:
+    with patch("waves.download.os.makedirs", wraps=os.makedirs) as makedirs_mock:
         for _ in range(4):  # audio + lyrics + cover + explicit pre-ensure
             downloader._ensure_directory(target)
     assert makedirs_mock.call_count == 1
@@ -87,7 +87,7 @@ def test_copy_file_contents_uses_large_buffer_without_copystat(downloader: Downl
     destination = tmp_path / "dst.bin"
     source.write_bytes(b"x" * 1024)
 
-    with patch("tidaler.download.shutil.copyfileobj", wraps=None) as copy_mock:
+    with patch("waves.download.shutil.copyfileobj", wraps=None) as copy_mock:
         downloader._copy_file_contents(source, destination)
 
     (_, _), kwargs = copy_mock.call_args
@@ -130,6 +130,8 @@ def test_segment_fanout_clamped_to_connection_pool(downloader: Download) -> None
     downloader.progress = MagicMock()
     downloader.progress.tasks = {0: SimpleNamespace(total=None, finished=False)}
     downloader.event_abort = SimpleNamespace(is_set=lambda: False)
+    downloader._segment_executor = None
+    downloader._segment_executor_lock = Lock()
 
     captured: dict = {}
     real_executor = futures.ThreadPoolExecutor
@@ -138,8 +140,11 @@ def test_segment_fanout_clamped_to_connection_pool(downloader: Download) -> None
         captured["max_workers"] = kwargs.get("max_workers", args[0] if args else None)
         return real_executor(*args, **kwargs)
 
-    with patch("tidaler.download.futures.ThreadPoolExecutor", capturing_executor):
-        downloader._download_segments([], pathlib.Path("."), None, 0, False, None)
+    try:
+        with patch("waves.download.futures.ThreadPoolExecutor", capturing_executor):
+            downloader._download_segments([], pathlib.Path("."), None, 0, False, None)
+    finally:
+        downloader.close_segment_pool()
 
     assert captured["max_workers"] == Download._HTTP_POOL_MAXSIZE
 
@@ -205,7 +210,7 @@ def test_ownership_misses_still_refresh_during_downloads() -> None:
 def test_record_ownership_skips_realpath_without_symlink_mode() -> None:
     stub = _Stub(downloads_running=False, symlink_to_track=False)
     ev = {"id": 7, "path": "/library/Artist/Album/track.flac", "quality": {"tier": "LOSSLESS"}}
-    with patch("tidaler.waves_ui.backend.os.path.realpath") as realpath_mock:
+    with patch("waves.waves_ui.backend.os.path.realpath") as realpath_mock:
         stub._record_ownership(ev)
     realpath_mock.assert_not_called()
     recorded_path = stub._ownership.record.call_args[0][1]
@@ -215,7 +220,7 @@ def test_record_ownership_skips_realpath_without_symlink_mode() -> None:
 def test_record_ownership_resolves_realpath_in_symlink_mode() -> None:
     stub = _Stub(downloads_running=False, symlink_to_track=True)
     ev = {"id": 7, "path": "/library/link.flac", "quality": {"tier": "LOSSLESS"}}
-    with patch("tidaler.waves_ui.backend.os.path.realpath", return_value="/real/track.flac") as realpath_mock:
+    with patch("waves.waves_ui.backend.os.path.realpath", return_value="/real/track.flac") as realpath_mock:
         stub._record_ownership(ev)
     realpath_mock.assert_called_once_with("/library/link.flac")
     assert stub._ownership.record.call_args[0][1] == "/real/track.flac"

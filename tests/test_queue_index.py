@@ -13,7 +13,7 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:
@@ -53,6 +53,22 @@ def _stub():
     # test_queue_row_pins_the_library_skip.py).
     stub._library_bulk_skip_on = lambda: True
     stub._job_aborts = {}
+    # A withdrawn row gives up its REDOWNLOAD force (test_queue_withdrawal_rollup).
+    stub._redownload_overrides = set()
+    stub._library_claim_overrides = set()
+    # And the best-of-both plan stashed for the row, released the same way
+    # (test_wholefile_audit_2026_08_31).
+    stub._merge_plans = {}
+    # The held-download stash, which the withdrawal reads to tell a hold from a
+    # give-up (all three marks above survive a hold) and which the clears drain
+    # so a held download is stopped rather than merely postponed. These tests
+    # drive the index with nothing held.
+    stub._pending_downloads = []
+    stub._pending_lock = Lock()
+    # The job in flight, so a clear that drops its row can abort it. These
+    # tests drive the index with nothing running.
+    stub._running_qid = None
+    stub._abort_if_in_flight = WavesBridge._abort_if_in_flight.__get__(stub, type(stub))
     # The withdrawal slots credit rollups and sweep for stranded groups now
     # (issue #32); these tests are about the index, so the groups stay empty.
     stub._artist_groups = {}
@@ -69,11 +85,14 @@ def _stub():
     stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX
     for name in (
         "_enqueue",
+        "_queue_batch",
         "_reindex_queue",
         "_queue_item",
         "_trim_queue_history",
         "_remove_rows_where",
         "_remove_row",
+        "_discard_pending_downloads",
+        "_release_abandoned_hold",
         "removeQueueItem",
         "clearFinished",
         "clearFailed",

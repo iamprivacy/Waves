@@ -17,8 +17,8 @@ import pytest
 from conftest import _InlinePool, _Signal
 from tidalapi.media import Track
 
-import tidaler.waves_ui.backend as backend
-from tidaler.waves_ui.backend import WavesBridge
+import waves.waves_ui.backend as backend
+from waves.waves_ui.backend import WavesBridge
 
 # ----- fakes ----------------------------------------------------------------
 

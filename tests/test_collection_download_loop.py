@@ -28,9 +28,8 @@ import pathlib
 import threading
 from unittest.mock import MagicMock
 
-from rich.progress import Progress
-
-from tidaler.download import Download
+from waves.download import Download
+from waves.progress import Progress
 
 
 def _bridge(n_items: int) -> tuple[Download, Progress, int]:

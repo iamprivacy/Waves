@@ -10,9 +10,9 @@ value.
 
 from __future__ import annotations
 
-from tidaler.model.cfg import HelpSettings
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge, _shipped_default
+from waves.model.cfg import HelpSettings
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge, _shipped_default
 
 # Every string field the page lets you customize, and whether restoring a
 # shipped default makes sense for it.
@@ -71,7 +71,7 @@ def test_templates_carry_the_shipped_default():
 
 
 def test_the_default_is_what_a_fresh_install_gets():
-    # A fresh install is tidaler's dataclass with Waves' first-run overrides on
+    # A fresh install is the engine's dataclass with Waves' first-run overrides on
     # top, which is also what "reset all settings" restores. Both halves matter:
     # the illegal-character table's shipped value lives in the overrides only
     # (the dataclass default stays empty so an upgrade changes nothing until

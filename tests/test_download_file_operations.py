@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tidaler.constants import DownsampleTarget
-from tidaler.download import Download
+from waves.constants import DownsampleTarget
+from waves.download import Download
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def download_instance() -> Download:
     # The in-flight name claims every destination now goes through, whether or
     # not skipping is on, and the names this run has already written (see
     # _perform_actual_download).
-    downloader._names_reserved = set()
+    downloader._names_reserved = {}
     downloader._names_written = {}
     downloader._names_reserved_lock = Lock()
 
@@ -96,7 +96,7 @@ def test_retry_file_operation_does_not_sleep_after_final_attempt(download_instan
     def operation() -> bool:
         raise PermissionError(32, "The process cannot access the file because it is being used by another process")
 
-    with patch("tidaler.download.time.sleep") as sleep_mock:
+    with patch("waves.download.time.sleep") as sleep_mock:
         result: bool = download_instance._retry_file_operation(operation, "locked operation")
 
     assert result is False
@@ -128,7 +128,7 @@ def test_media_move_and_symlink_skips_symlink_when_unlink_fails(
     )
 
     with (
-        patch("tidaler.download.format_path_media", return_value="Tracks/Artist - Title"),
+        patch("waves.download.format_path_media", return_value="Tracks/Artist - Title"),
         patch.object(download_instance, "_move_file", return_value=True),
         patch.object(download_instance, "_unlink_with_retry", return_value=False),
         patch.object(pathlib.Path, "symlink_to") as symlink_to_mock,
@@ -171,8 +171,8 @@ def test_downsample_audio_raises_when_output_move_fails(
     ffmpeg_mock.output.return_value = ffmpeg_mock
 
     with (
-        patch("tidaler.download.FLAC", return_value=flac_mock),
-        patch("tidaler.download.FFmpeg", return_value=ffmpeg_mock),
+        patch("waves.download.FLAC", return_value=flac_mock),
+        patch("waves.download.FFmpeg", return_value=ffmpeg_mock),
         patch.object(download_instance, "_move_file", return_value=False),
         pytest.raises(OSError),
     ):

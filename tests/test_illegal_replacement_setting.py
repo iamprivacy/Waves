@@ -25,11 +25,11 @@ from unittest.mock import MagicMock
 
 from tidalapi import Album, Track
 
-from tidaler.download import Download
-from tidaler.helper.path import format_path_media, safe_filename_replacement
-from tidaler.waves_ui.backend import WavesBridge
+from waves.download import Download
+from waves.helper.path import format_path_media, safe_filename_replacement
+from waves.waves_ui.backend import WavesBridge
 
-_UI = pathlib.Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui"
+_UI = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui"
 
 _SLASHED = "The Better Life / Dead Love"
 _LEGACY_DIR = "The Better Life  Dead Love"  # doubled space, pre-0.1.17

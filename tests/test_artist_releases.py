@@ -9,7 +9,7 @@ target is a featured guest on ('Featured'), purely from the primary credit.
 import pytest
 from tidalapi.album import Album
 
-from tidaler.waves_ui.backend import _is_album_entity, _is_compilation_release
+from waves.waves_ui.backend import _is_album_entity, _is_compilation_release
 
 
 class _Artist:
@@ -113,7 +113,7 @@ class _Track:
 
 
 def test_artist_on_track_matches_credited_artist():
-    from tidaler.waves_ui.backend import _artist_on_track
+    from waves.waves_ui.backend import _artist_on_track
 
     me = _Artist("Me", aid=42)
     other = _Artist("Other", aid=7)
@@ -126,7 +126,33 @@ def test_artist_on_track_matches_credited_artist():
 
 
 def test_artist_on_track_compares_ids_as_strings():
-    from tidaler.waves_ui.backend import _artist_on_track
+    from waves.waves_ui.backend import _artist_on_track
 
     me = _Artist("Me", aid=42)
     assert _artist_on_track(_Track("t1", artists=[me]), 42) is True
+
+
+# ---- same-name conflation: the credit check on per-artist endpoints ---------
+def test_foreign_credit_flags_only_positively_foreign_items():
+    from waves.waves_ui.backend import _foreign_credit
+
+    me = _Artist("Marina", aid=42)
+    stranger = _Artist("Marina", aid=7)  # same name, different artist
+    assert _foreign_credit(_Track("t1", artists=[stranger]), "42") is True
+    assert _foreign_credit(_Track("t2", artists=[stranger, me]), "42") is False
+    assert _foreign_credit(_Track("t3", artist=me), "42") is False
+    # a credit-less stub is NOT foreign: dropping on absence would empty
+    # whole pages if TIDAL ever thinned these payloads
+    assert _foreign_credit(_Track("t4"), "42") is False
+    # ids compare as strings on both sides
+    assert _foreign_credit(_Track("t5", artists=[me]), 42) is False
+
+
+def test_foreign_credit_works_on_releases_too():
+    from waves.waves_ui.backend import _foreign_credit
+
+    me = _Artist("Marina", aid=42)
+    stranger = _Artist("Marina", aid=7)
+    assert _foreign_credit(_Album(artist=stranger), "42") is True
+    assert _foreign_credit(_Album(artists=[me]), "42") is False
+    assert _foreign_credit(_Album(), "42") is False

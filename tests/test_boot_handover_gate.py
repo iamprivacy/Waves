@@ -34,7 +34,7 @@ _EXIT_REGRESSED = 1
 _EXIT_NO_QT = 77
 _EXIT_PRECONDITION = 78
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 
 def test_boot_overlay_waits_for_the_landing_build():
@@ -59,7 +59,7 @@ def test_boot_overlay_waits_for_the_landing_build():
 
 
 def _run_scenario() -> int:
-    # THIS checkout's tidaler, not the venv's editable install.
+    # THIS checkout's waves, not the venv's editable install.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
         from PySide6.QtCore import QEventLoop, QTimer, QUrl
@@ -71,8 +71,8 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT
@@ -261,13 +261,63 @@ def _run_scenario() -> int:
     # And even mid-reveal the gate outranks the launch overlay in paint order.
     gate_on_top = q("termsGate.z") > q("bootOverlay.z")
 
+    # The third leg: a ZERO incubation count at the instant handover() runs
+    # says nothing. This path is normally reached from the veil falling, which
+    # happens inside the last counted loader's own handler, after the engine
+    # has dropped it from the count and before the shelves' cards have joined
+    # it, so a page that has not started its cards reads exactly like a
+    # finished one. Reading it there revealed onto cards still popping in.
+    q("bootHandover.stop()")
+    q("bootBlk.stop()")
+    q("bootZoom.stop()")
+    q("handoverCap.stop()")
+    q("handoverCap.expired = false")
+    q("bootOverlay.done = false")
+    q("bootVer.shown = 1")
+    q("bootContentShown = 0")
+    q("incubationQuietPoll.stop()")
+    q("incubationQuietPoll.quietRuns = 0")
+    q("browseBuilding = false")
+    q("browseError = false")
+    bridge.note_incubation_count(0)  # the blip between two batches
+    settle()
+
+    q("bootOverlay.handover()")
+    settle(300)
+    blip_held = bool(q("bootOverlay.handoverHeld")) and not bool(q("bootOverlay.done"))
+
+    # The next batch registers: the count is busy again and the quiet restarts.
+    bridge.note_incubation_count(3)
+    settle(300)
+    blip_still_held = bool(q("bootOverlay.handoverHeld")) and not bool(q("bootOverlay.done"))
+
+    # Genuinely quiet now, for poll after poll: the reveal is released. The
+    # hold must never be able to outlive the work it is waiting for.
+    bridge.note_incubation_count(0)
+    settle(3000)
+    blip_released = bool(q("bootOverlay.done")) and q("bootContentShown") == 1
+
     print(
         f"held={held} handed={handed} drained={drained} parked={parked} applied={applied} "
         f"data_held={data_held} data_handed={data_handed} gate_waits={gate_waits} "
-        f"gate_on_top={gate_on_top}",
+        f"gate_on_top={gate_on_top} blip_held={blip_held} blip_still_held={blip_still_held} "
+        f"blip_released={blip_released}",
         flush=True,
     )
-    ok = held and handed and drained and parked and applied and data_held and data_handed and gate_waits and gate_on_top
+    ok = (
+        held
+        and handed
+        and drained
+        and parked
+        and applied
+        and data_held
+        and data_handed
+        and gate_waits
+        and gate_on_top
+        and blip_held
+        and blip_still_held
+        and blip_released
+    )
     return _EXIT_OK if ok else _EXIT_REGRESSED
 
 

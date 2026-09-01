@@ -37,10 +37,10 @@ from tidalapi.album import Album
 from tidalapi.exceptions import StreamNotAvailable
 from tidalapi.media import Track
 
-from tidaler import download as download_mod
-from tidaler.download import Download, _tidal_refuses_asset
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import _TrackedDownload
+from waves import download as download_mod
+from waves.download import Download, _tidal_refuses_asset
+from waves.waves_ui import backend
+from waves.waves_ui.backend import _TrackedDownload
 
 
 def _make_tracked() -> tuple[_TrackedDownload, MagicMock]:

@@ -28,18 +28,18 @@ from types import SimpleNamespace
 
 from tidalapi import Album, Track
 
-from tidaler.constants import DEFAULT_ILLEGAL_MAP
-from tidaler.helper.path import (
+from waves.constants import DEFAULT_ILLEGAL_MAP
+from waves.helper.path import (
     ILLEGAL_FILENAME_CHARS,
     format_path_media,
     safe_filename_replacement,
     safe_filename_replacement_map,
 )
-from tidaler.model.cfg import HelpSettings
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge
+from waves.model.cfg import HelpSettings
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import _FIRST_RUN_OVERRIDES, WavesBridge
 
-_UI = pathlib.Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui"
+_UI = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui"
 _SETTINGS_QML = (_UI / "qml" / "SettingsPage.qml").read_text(encoding="utf-8")
 
 
@@ -254,6 +254,7 @@ class TestSavingStandInsAnswersTheOfferToo:
         stub._settings_save_lock = Lock()
         stub._restore_ffmpeg_flags = lambda: None
         stub._restore_ffmpeg_path = lambda: None
+        stub._submit_settings_write = lambda: stub.settings.save()
         stub._ffmpeg_source_label = lambda: "system"
         stub._waves_pref_bool = lambda key: False
         stub._set_status = lambda text: None

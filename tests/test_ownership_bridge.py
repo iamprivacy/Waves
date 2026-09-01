@@ -18,9 +18,9 @@ import os
 from threading import Event, Lock, local
 from types import SimpleNamespace
 
-import tidaler.waves_ui.backend as backend
-from tidaler.ownership import OwnershipStore
-from tidaler.waves_ui.backend import WavesBridge, _stream_quality
+import waves.waves_ui.backend as backend
+from waves.ownership import OwnershipStore
+from waves.waves_ui.backend import WavesBridge, _stream_quality
 
 
 class _Signal:
@@ -52,7 +52,7 @@ class _BridgeStub:
     query touch, with the real bridge methods bound on and a real store."""
 
     def __init__(self, tmp_path, quality_audio="LOSSLESS", atmos=False):
-        self._job_tracks: dict = {}
+        self._job_tracks: dict = {1: {}}
         self._job_signals: dict = {}
         self.queueTrackState = _Signal()
         self.ownershipChanged = _Signal()
@@ -76,7 +76,10 @@ class _BridgeStub:
         # tests drive it with no queue at all, which is a real shape: an event
         # can arrive for a row already cleared. An empty index makes _queue_item
         # answer None, the rollup no-ops, and the ownership behaviour under test
-        # is unaffected either way.
+        # is unaffected either way. The registry is seeded the way a started
+        # job seeds it, which is what marks these events as a running job's
+        # own (an event that would CREATE state for a row that has gone
+        # records nothing, see test_queue_row_state_is_not_resurrected).
         self._queue_index: dict = {}
         self._emit_queue = lambda: None
         self.settings = SimpleNamespace(
@@ -185,10 +188,11 @@ def test_get_track_stream_info_captures_quality(monkeypatch):
     info = SimpleNamespace(media_stream=stream, stream_manifest=SimpleNamespace(codecs="FLAC"))
     monkeypatch.setattr(backend.Download, "_get_track_stream_info", lambda self, media: info)
     td = _new_tracked()
-    out = td._get_track_stream_info(SimpleNamespace(id=99))
+    media = SimpleNamespace(id=99)
+    out = td._get_track_stream_info(media)
     assert out is info
-    assert td._delivered["99"]["tier"] == "HI_RES_LOSSLESS"
-    assert td._delivered["99"]["bit_depth"] == 24
+    assert td._delivered[td._delivered_key(media)]["tier"] == "HI_RES_LOSSLESS"
+    assert td._delivered[td._delivered_key(media)]["bit_depth"] == 24
 
 
 def test_get_track_stream_info_no_stream_captures_nothing(monkeypatch):
@@ -211,14 +215,15 @@ def test_item_attaches_path_and_quality_on_real_download(monkeypatch, tmp_path):
     _patch_item_helpers(monkeypatch, (True, fpath))
     td = _new_tracked()
     td._track_signals = _Relay()
-    td._delivered["42"] = {
+    media = SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180)
+    td._delivered[td._delivered_key(media)] = {
         "tier": "LOSSLESS",
         "audio_mode": "STEREO",
         "bit_depth": 16,
         "sample_rate": 44100,
         "codecs": "FLAC",
     }
-    ok, _path = td.item(media=SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180))
+    ok, _path = td.item(media=media)
     assert ok is True
     done = [e for e in td._track_signals.track_event.emits if e["status"] == "done"]
     assert len(done) == 1
@@ -245,8 +250,9 @@ def test_item_failure_pops_capture(monkeypatch, tmp_path):
     _patch_item_helpers(monkeypatch, (False, fpath))
     td = _new_tracked()
     td._track_signals = _Relay()
-    td._delivered["42"] = {"tier": "LOSSLESS"}
-    td.item(media=SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180))
+    media = SimpleNamespace(id=42, track_num=1, volume_num=1, duration=180)
+    td._delivered[td._delivered_key(media)] = {"tier": "LOSSLESS"}
+    td.item(media=media)
     failed = next(e for e in td._track_signals.track_event.emits if e["status"] == "failed")
     assert "quality" not in failed
     assert td._delivered == {}, "a non-done outcome still clears the stash (no leak)"
@@ -317,8 +323,9 @@ def _new_video(vid=7):
 def test_video_url_fetch_captures_marker(monkeypatch):
     monkeypatch.setattr(backend.Download, "_get_media_urls", lambda self, media, stream_manifest=None: ["u1", "u2"])
     td = _new_tracked()
-    td._get_media_urls(_new_video())
-    assert td._delivered["7"] == {"tier": None}
+    video = _new_video()
+    td._get_media_urls(video)
+    assert td._delivered[td._delivered_key(video)] == {"tier": None}
 
 
 def test_video_no_urls_captures_nothing(monkeypatch):
@@ -333,9 +340,10 @@ def test_track_url_fetch_does_not_overwrite_capture(monkeypatch):
     # must not clobber them with a tier-less video marker.
     monkeypatch.setattr(backend.Download, "_get_media_urls", lambda self, media, stream_manifest=None: ["u1"])
     td = _new_tracked()
-    td._delivered["42"] = {"tier": "LOSSLESS"}
-    td._get_media_urls(SimpleNamespace(id=42))
-    assert td._delivered["42"] == {"tier": "LOSSLESS"}
+    media = SimpleNamespace(id=42)
+    td._delivered[td._delivered_key(media)] = {"tier": "LOSSLESS"}
+    td._get_media_urls(media)
+    assert td._delivered[td._delivered_key(media)] == {"tier": "LOSSLESS"}
 
 
 def test_video_done_event_records_ownership(monkeypatch, tmp_path):
@@ -343,8 +351,9 @@ def test_video_done_event_records_ownership(monkeypatch, tmp_path):
     _patch_item_helpers(monkeypatch, (True, fpath))
     td = _new_tracked()
     td._track_signals = _Relay()
-    td._delivered["7"] = {"tier": None}  # as stashed by the URL hook
-    td.item(media=SimpleNamespace(id=7, track_num=0, volume_num=1, duration=240))
+    media = SimpleNamespace(id=7, track_num=0, volume_num=1, duration=240)
+    td._delivered[td._delivered_key(media)] = {"tier": None}  # as stashed by the URL hook
+    td.item(media=media)
     done = next(e for e in td._track_signals.track_event.emits if e["status"] == "done")
     assert done["path"] == str(fpath)
     stub_quality = done["quality"]

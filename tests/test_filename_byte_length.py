@@ -15,9 +15,9 @@ a numbered suffix was inserted into it. Both caps are pinned here.
 import os
 import pathlib
 
-from tidaler.constants import FILENAME_LENGTH_MAX
-from tidaler.download import _staging_path
-from tidaler.helper.path import (
+from waves.constants import FILENAME_LENGTH_MAX
+from waves.download import _staging_path
+from waves.helper.path import (
     PATH_LENGTH_MAX,
     _path_length,
     _path_with_unique_suffix,

@@ -12,7 +12,7 @@ import datetime as _dt
 from types import SimpleNamespace
 from typing import ClassVar
 
-from tidaler.waves_ui.backend import WavesBridge, _video_spec
+from waves.waves_ui.backend import WavesBridge, _video_spec
 
 
 def _video(**kw):

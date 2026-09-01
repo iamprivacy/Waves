@@ -13,8 +13,8 @@ import os
 
 import pytest
 
-from tidaler.config import BaseConfig
-from tidaler.model.cfg import Settings as ModelSettings
+from waves.config import BaseConfig
+from waves.model.cfg import Settings as ModelSettings
 
 
 def _cfg(tmp_path):

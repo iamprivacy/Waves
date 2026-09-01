@@ -82,7 +82,7 @@ def sandbox(tmp_path: Path) -> Path:
     _write(private / "README.md", _readme(""))
     _write(private / "keep.txt", "published\n")
     # Something new, so the snapshot actually differs from the public tip.
-    _write(private / "tidaler" / "app.py", "print(1)\n")
+    _write(private / "waves" / "app.py", "print(1)\n")
     _write(private / "RELEASING.md", "never published\n")
     _git(private, "add", "-A")
     _git(private, "commit", "-m", "private tree")

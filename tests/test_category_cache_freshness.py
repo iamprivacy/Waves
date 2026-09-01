@@ -19,7 +19,7 @@ the confirm dialog had already been answered against the old count.
 
 from __future__ import annotations
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _CacheStub:

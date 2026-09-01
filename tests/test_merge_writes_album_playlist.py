@@ -46,11 +46,11 @@ from unittest.mock import patch
 import pytest
 from tidalapi import Album
 
-from tidaler.constants import PLAYLIST_EXTENSION, PLAYLIST_PREFIX
-from tidaler.download import Download
-from tidaler.helper.path import format_path_media
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.constants import PLAYLIST_EXTENSION, PLAYLIST_PREFIX
+from waves.download import Download
+from waves.helper.path import format_path_media
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 _ALBUM_TITLE = "Album X (Deluxe)"
 _M3U8 = f"{PLAYLIST_PREFIX}{_ALBUM_TITLE}{PLAYLIST_EXTENSION}"
@@ -92,6 +92,12 @@ class _WritingDownload(Download):
         self.pause = pause or {}
         self.outcomes: dict[int, tuple[bool, str]] = {}
         self._lock = threading.Lock()
+        # The engine's own record of the directories a run put a file into,
+        # which decides where the m3u writer is allowed to write. Built here
+        # because this stub skips the real constructor, and kept honest below:
+        # this item() really does write a file, so it really does fill a folder.
+        self._dirs_filled: set[pathlib.Path] = set()
+        self._dirs_filled_lock = threading.Lock()
 
     def item(self, *, media=None, list_position=0, event_stop=None, **_kw):
         # The engine's own first line: a set stop event means nothing is
@@ -104,6 +110,7 @@ class _WritingDownload(Download):
             return ok, ""
         path = self.folder / name
         path.write_bytes(b"\0")
+        self._note_dir_filled(path)
         return ok, str(path)
 
 
@@ -247,12 +254,12 @@ def test_a_member_that_failed_names_no_folder_either(tmp_path):
     before anything was written there (a refusal, a stream that would not
     fetch, a stopped download). A first-time album that lost EVERY track
     therefore handed the playlist writer a folder that was never created,
-    and the merge's own verdict ("N/N merged tracks failed") was replaced by
+    and the merge's own verdict ("N of N tracks failed") was replaced by
     the playlist's temp file failing to open. Landed means landed."""
     fresh = tmp_path / "never created"
     dl = _WritingDownload(fresh, _Settings())
     dl.item = lambda *, media=None, **kw: (False, str(fresh / media.name))  # aimed for, never written
-    with pytest.raises(RuntimeError, match="merged tracks failed"):
+    with pytest.raises(RuntimeError, match="tracks failed"):
         _run_merge(dl, _plan("01 A.flac", "02 B.flac"))
     assert not fresh.exists()
 
@@ -317,6 +324,11 @@ def test_items_ends_with_the_same_engine_method_the_merge_calls(tmp_path):
             self.fn_logger = logging.getLogger("test.merge.playlist")
             self.progress = SimpleNamespace(add_task=lambda *a, **k: 0)
             self.progress_overall = None
+            # The job whose stop the collection's own API waits belong to.
+            self.event_abort = None
+            # items() ends by summarizing the cover cache's counters.
+            self._cover_cache_hits = 0
+            self._cover_cache_fetches = 0
 
         def _validate_and_prepare_media(self, media, media_id, media_type, video_download):
             return media

@@ -25,8 +25,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tidaler.download import Download
-from tidaler.waves_ui.backend import WavesBridge
+from waves.download import Download
+from waves.waves_ui.backend import WavesBridge
 
 
 class GateHost:
@@ -50,6 +50,11 @@ class GateHost:
     # Saves go through the guarded helper, which undoes the transient ffmpeg
     # injections before writing (see tests/test_settings_save_guard.py).
     _save_settings = WavesBridge._save_settings
+
+    def _submit_settings_write(self):
+        # The disk seam behind _save_settings; route it into the counter.
+        self.settings.save()
+
     _restore_ffmpeg_flags = WavesBridge._restore_ffmpeg_flags
     _restore_ffmpeg_path = WavesBridge._restore_ffmpeg_path
 
@@ -231,7 +236,7 @@ class _MakedirsHost:
 
 
 def test_makedirs_survives_a_transient_permission_error(tmp_path, monkeypatch):
-    import tidaler.download as dl_mod
+    import waves.download as dl_mod
 
     real_makedirs = dl_mod.os.makedirs
     failures = {"left": 2}
@@ -249,7 +254,7 @@ def test_makedirs_survives_a_transient_permission_error(tmp_path, monkeypatch):
 
 
 def test_makedirs_still_raises_when_the_error_is_permanent(tmp_path, monkeypatch):
-    import tidaler.download as dl_mod
+    import waves.download as dl_mod
 
     def always_denied(path, exist_ok=False):
         raise PermissionError(13, "Permission denied", str(path))

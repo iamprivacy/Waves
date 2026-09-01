@@ -20,7 +20,7 @@ from __future__ import annotations
 
 def patch_offline() -> None:
     """Make the bridge's cached-token login resolve instantly, offline."""
-    from tidaler.waves_ui.session import WavesTidal
+    from waves.waves_ui.session import WavesTidal
 
     WavesTidal.login_token = lambda self: False  # type: ignore[method-assign]
 

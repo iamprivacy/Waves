@@ -16,8 +16,8 @@ import os
 
 import pytest
 
-import tidaler.helper.path as path_helper
-from tidaler import __config_dirname__
+import waves.helper.path as path_helper
+from waves import __config_dirname__
 
 
 @pytest.fixture(autouse=True)

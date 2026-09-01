@@ -28,8 +28,8 @@ from unittest.mock import patch
 
 from _dispatch_stub import arm_dispatch, arm_queue
 
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 def _plain_relay():

@@ -9,7 +9,7 @@ bound onto a minimal stub so no Qt app or network session is needed.
 
 from __future__ import annotations
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Signal:

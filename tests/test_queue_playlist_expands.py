@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EXIT_OK = 0
 _EXIT_REGRESSED = 1
@@ -65,7 +65,7 @@ def _bridge_for_fetch(monkeypatch):
     from PySide6.QtGui import QGuiApplication
 
     QGuiApplication.instance() or QGuiApplication([])
-    from tidaler.waves_ui import backend as be
+    from waves.waves_ui import backend as be
 
     monkeypatch.setattr(be, "name_builder_title", lambda t: getattr(t, "name", ""))
     bridge = be.WavesBridge(tidal=None)
@@ -133,8 +133,8 @@ def _run_scenario() -> int:
     patch_offline()
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:  # pragma: no cover - environment guard
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

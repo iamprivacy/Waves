@@ -43,7 +43,7 @@ _EXIT_PRECONDITION = 78
 _MAX_GAP_MS = 300
 _SAMPLE_MS = 25
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 
 def test_the_version_drains_before_the_wordmark_zooms():
@@ -70,7 +70,7 @@ def test_the_version_drains_before_the_wordmark_zooms():
 
 
 def _run_scenario() -> int:
-    # THIS checkout's tidaler, not the venv's editable install.
+    # THIS checkout's waves, not the venv's editable install.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
         from PySide6.QtCore import QEventLoop, QTimer, QUrl
@@ -82,8 +82,8 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

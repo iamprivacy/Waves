@@ -26,12 +26,15 @@ that regressed, so a newly added save site is caught by the audit test below.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from threading import Lock
 from typing import ClassVar
 
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import WavesBridge
+from conftest import _InlineWriter
+
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import WavesBridge
 
 # The managed binary sits under the account's own Application Support folder, so
 # the path is identity-bearing. That is the whole reason it must never reach the
@@ -67,6 +70,12 @@ def _bridge():
                 }
             )
 
+        def write_serialized(self, data_json):
+            # The async path: capture what the SNAPSHOT would put on disk,
+            # which is exactly what _submit_settings_write serialized.
+            payload = json.loads(data_json)
+            self.saved.append({k: payload[k] for k in ("extract_flac", "video_convert_mp4", "path_binary_ffmpeg")})
+
     stub.settings = _Cfg()
 
     # The user's real preferences: both features ON, no explicit ffmpeg path.
@@ -81,6 +90,8 @@ def _bridge():
     stub._restore_ffmpeg_flags = _bind(stub, "_restore_ffmpeg_flags")
     stub._restore_ffmpeg_path = _bind(stub, "_restore_ffmpeg_path")
     stub._save_settings = _bind(stub, "_save_settings")
+    stub._submit_settings_write = _bind(stub, "_submit_settings_write")
+    stub._config_writer = _InlineWriter()
     stub._settings_save_lock = Lock()
 
     class _Signal:
@@ -203,17 +214,28 @@ def test_no_bare_settings_save_outside_the_guarded_helper():
     """
     source = inspect.getsource(WavesBridge)
     bare = len(re.findall(r"self\.settings\.save\(\)", source))
-    assert bare == 5, (
-        f"found {bare} bare self.settings.save() calls, expected 5 "
-        "(_save_settings, applySettings, _apply_first_run_defaults, and __init__'s "
-        "video-template migration + video_download force-off). Route new saves "
-        "through _save_settings, or this writes the transient ffmpeg flags and "
-        "path to disk."
+    assert bare == 3, (
+        f"found {bare} bare self.settings.save() calls, expected 3 "
+        "(_apply_first_run_defaults, and __init__'s video-template migration + "
+        "video_download force-off, all before ffmpeg is resolved). Route new "
+        "saves through _save_settings, or this writes the transient ffmpeg "
+        "flags and path to disk."
+    )
+    # The guarded sites persist through the snapshot-then-background write
+    # (_submit_settings_write): exactly its own body plus these two callers.
+    submits = len(re.findall(r"self\._submit_settings_write\(\)", source))
+    assert submits == 2, (
+        f"found {submits} _submit_settings_write() calls, expected 2 "
+        "(_save_settings and applySettings). A new caller must hold "
+        "_settings_save_lock with the restores done, exactly as those two do."
     )
 
-    for name in ("_save_settings", "applySettings", "_apply_first_run_defaults", "__init__"):
+    for name in ("_apply_first_run_defaults", "__init__"):
         method_src = inspect.getsource(getattr(WavesBridge, name))
         assert "self.settings.save()" in method_src, f"{name} no longer saves; update this guard"
+    for name in ("_save_settings", "applySettings"):
+        method_src = inspect.getsource(getattr(WavesBridge, name))
+        assert "self._submit_settings_write()" in method_src, f"{name} no longer saves; update this guard"
 
 
 def _apply_bridge(save_hook=None):
@@ -242,6 +264,12 @@ def _apply_bridge(save_hook=None):
                 }
             )
 
+        def write_serialized(self, data_json):
+            if save_hook is not None:
+                save_hook()
+            payload = json.loads(data_json)
+            self.saved.append({k: payload[k] for k in ("extract_flac", "video_convert_mp4", "path_binary_ffmpeg")})
+
     stub.settings = _Cfg()
     stub._ffmpeg_flag_prefs = {"extract_flac": True, "video_convert_mp4": True}
     stub._ffmpeg_user_path = ""
@@ -256,9 +284,11 @@ def _apply_bridge(save_hook=None):
         "_user_ffmpeg_path",
         "_waves_pref_bool",
         "_save_settings",
+        "_submit_settings_write",
         "applySettings",
     ):
         setattr(stub, name, _bind(stub, name))
+    stub._config_writer = _InlineWriter()
     stub._settings_save_lock = Lock()
 
     class _Signal:

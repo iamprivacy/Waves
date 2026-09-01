@@ -6,7 +6,9 @@ developer explicitly sets ``WAVES_DEBUG=1``.
 """
 
 import importlib
+import os
 import sys
+from unittest import mock
 
 import pytest
 
@@ -27,18 +29,24 @@ def _load_devlog(monkeypatch, *, waves_debug=None, compiled=False, frozen=False)
     else:
         monkeypatch.delattr(sys, "frozen", raising=False)
 
-    sys.modules.pop("tidaler.waves_ui.devlog", None)
-    module = importlib.import_module("tidaler.waves_ui.devlog")
+    sys.modules.pop("waves.waves_ui.devlog", None)
+    module = importlib.import_module("waves.waves_ui.devlog")
     module = importlib.reload(module)
 
     if compiled:
-        # Simulate a Nuitka build: it sets __compiled__ in the module globals.
+        # Nuitka sets __compiled__ in the module's own globals at build time,
+        # which is BEFORE the module-level default is computed and therefore
+        # before any test can reach it. This marks the module after the fact and
+        # asserts nothing changed, which is all a test can honestly do here.
+        # What it must NOT do is recompute ENABLED from the test's own copy of
+        # the formula, as it used to: that asserted the test's arithmetic
+        # against the fixture's environment and could not have failed whatever
+        # devlog did, so a compiled-build term added to the default would have
+        # kept every one of these green while shipping activity logging on by
+        # default in every real build. test_the_default_stays_off_in_every_
+        # packaged_build below is the guard that actually holds that line, by
+        # running devlog's own source under the marker and asserting the VALUE.
         monkeypatch.setattr(module, "__compiled__", True, raising=False)
-        # Re-evaluate the default the same way the module does, to prove that
-        # even a compiled build stays disabled without WAVES_DEBUG.
-        import os
-
-        module.ENABLED = os.environ.get("WAVES_DEBUG", "0") != "0"
 
     return module
 
@@ -65,6 +73,61 @@ def test_compiled_build_disabled_by_default(monkeypatch):
     assert module.ENABLED is False
 
 
+def _enabled_in(markers: dict, waves_debug=None):
+    """What ENABLED comes out as in a build carrying ``markers``.
+
+    Nuitka and PyInstaller set their markers BEFORE the module-level default is
+    computed, which is before any test can reach the module. Executing the
+    module's own source in a namespace that already carries them is therefore
+    the faithful simulation, and the only form that sees the whole default:
+    a guard reading the first column-0 ``ENABLED =`` line stays green on
+
+        ENABLED = os.environ.get("WAVES_DEBUG", "0") != "0"
+        if "__compiled__" in globals():
+            ENABLED = True
+
+    which is a packaged build shipping activity logging on, with CI green.
+    """
+    import inspect
+
+    module = importlib.import_module("waves.waves_ui.devlog")
+    source = inspect.getsource(module)
+    env = dict(os.environ)
+    env.pop("WAVES_DEBUG", None)
+    if waves_debug is not None:
+        env["WAVES_DEBUG"] = waves_debug
+    namespace = {"__name__": "waves.waves_ui.devlog_probe", "__file__": module.__file__, **markers}
+    with mock.patch.dict(os.environ, env, clear=True):
+        exec(compile(source, module.__file__, "exec"), namespace)  # noqa: S102
+    return namespace["ENABLED"]
+
+
+def test_the_default_stays_off_in_every_packaged_build():
+    """The VALUE, not the line.
+
+    The default may read WAVES_DEBUG and nothing else, which is what keeps a
+    packaged build from ever starting with activity logging on. Asserted by
+    running the module's own source under each build marker instead of by
+    matching the text of one line.
+    """
+    guidance = (
+        "the verbose default now reads something other than WAVES_DEBUG. If that is "
+        "deliberate, prove the packaged build still starts quiet before changing it."
+    )
+    assert _enabled_in({}) is False, f"a plain from-source run starts verbose: {guidance}"
+    assert _enabled_in({"__compiled__": True}) is False, f"a Nuitka build starts verbose: {guidance}"
+    assert _enabled_in({"__file__": "x", "frozen": True}) is False, f"a frozen build starts verbose: {guidance}"
+    assert (
+        _enabled_in({"__compiled__": True}, waves_debug="0") is False
+    ), f"a compiled build ignores WAVES_DEBUG=0: {guidance}"
+
+
+def test_a_developer_can_still_turn_it_on():
+    """The guard above must not have made the switch inert."""
+    assert _enabled_in({}, waves_debug="1") is True
+    assert _enabled_in({"__compiled__": True}, waves_debug="1") is True
+
+
 def test_frozen_build_disabled_by_default(monkeypatch):
     """A PyInstaller-style frozen build stays OFF by default too."""
     module = _load_devlog(monkeypatch, waves_debug=None, frozen=True)
@@ -84,7 +147,7 @@ def test_disabled_event_stays_off_disk(monkeypatch, tmp_path):
     import logging
 
     monkeypatch.delenv("WAVES_DEBUG", raising=False)
-    for name in ("tidaler.waves_ui.devlog", "tidaler.waves_ui.diagnostics"):
+    for name in ("waves.waves_ui.devlog", "waves.waves_ui.diagnostics"):
         sys.modules.pop(name, None)
     # diagnostics.install() reconfigures the process-wide "waves" logger
     # (handlers, level, propagate=False). Snapshot both shared loggers and put
@@ -98,8 +161,8 @@ def test_disabled_event_stays_off_disk(monkeypatch, tmp_path):
         for h in list(lg.handlers):
             lg.removeHandler(h)
     try:
-        devlog = importlib.import_module("tidaler.waves_ui.devlog")
-        diagnostics = importlib.import_module("tidaler.waves_ui.diagnostics")
+        devlog = importlib.import_module("waves.waves_ui.devlog")
+        diagnostics = importlib.import_module("waves.waves_ui.diagnostics")
         log_path = diagnostics.install(str(tmp_path))
         assert log_path is not None
 
@@ -118,11 +181,11 @@ def test_disabled_event_stays_off_disk(monkeypatch, tmp_path):
                 lg.addHandler(h)
             lg.propagate = propagate
             lg.setLevel(level)
-        sys.modules.pop("tidaler.waves_ui.diagnostics", None)
+        sys.modules.pop("waves.waves_ui.diagnostics", None)
 
 
 @pytest.fixture(autouse=True)
 def _restore_module():
     """Leave the real module in a clean, reimported state for other tests."""
     yield
-    sys.modules.pop("tidaler.waves_ui.devlog", None)
+    sys.modules.pop("waves.waves_ui.devlog", None)

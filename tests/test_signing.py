@@ -1,6 +1,6 @@
 """Unit tests for the release-signing primitives (pure crypto, no network/Qt).
 
-Pins the fail-closed contract of :func:`tidaler.waves_ui.signing.verify`: it
+Pins the fail-closed contract of :func:`waves.waves_ui.signing.verify`: it
 returns ``True`` only for a genuine Ed25519 signature from the configured key,
 and ``False`` for every tamper / misconfiguration, never raising.
 """
@@ -9,7 +9,7 @@ import base64
 
 import pytest
 
-from tidaler.waves_ui import signing
+from waves.waves_ui import signing
 
 
 def test_keygen_roundtrip():

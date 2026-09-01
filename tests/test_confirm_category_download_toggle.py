@@ -18,9 +18,9 @@ category, permanently.
 
 from __future__ import annotations
 
-from tidaler.model.cfg import HelpSettings
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import _FLAG_FIELDS, WavesBridge
+from waves.model.cfg import HelpSettings
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import _FLAG_FIELDS, WavesBridge
 
 _KEY = "confirm_category_download"
 

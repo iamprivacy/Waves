@@ -13,8 +13,9 @@ HOW THIS STAYS FIXED
 ``prefetchAlbumTracks`` runs the same worker as ``loadAlbumTracks`` into
 the same session cache, silently: no emit, no membership record. An expand
 served from a hover-filled cache emits at once and records the membership
-then (the hover never does). An expand that lands while a hover fetch is
-still running claims it instead of fetching the same album twice.
+then (the hover never does), on a worker: the record is a database commit,
+which is not the GUI thread's work. An expand that lands while a hover fetch
+is still running claims it instead of fetching the same album twice.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from tidaler.waves_ui import backend
+from waves.waves_ui import backend
 
 
 class _DeferredPool:
@@ -87,12 +88,17 @@ def test_a_hover_fills_the_cache_silently_and_the_expand_serves_it_at_once():
     assert "7" not in b._album_tracks_inflight
 
     b.loadAlbumTracks("7")
-    assert b.threadpool.pending == []  # no second fetch
+    # The rows go out at once (no second fetch, the cache had them); the only
+    # deferred work is the membership commit, off the GUI thread.
     assert len(b.albumTracksLoaded.calls) == 1 and b.albumTracksLoaded.calls[0][0] == "7"
+    assert b._recorded == []
+    assert len(b.threadpool.pending) == 1
+    b.threadpool.run_all()
     assert b._recorded == [("7", ["1", "2"])]
     assert b.collectionMembershipChanged.calls == [("7",)]
     # Recorded once: the next expand is a plain cache hit.
     b.loadAlbumTracks("7")
+    b.threadpool.run_all()
     assert len(b._recorded) == 1 and len(b.albumTracksLoaded.calls) == 2
 
 

@@ -15,7 +15,7 @@ import threading
 from concurrent.futures import Future
 from unittest.mock import MagicMock
 
-from tidaler.download import Download
+from waves.download import Download
 
 
 def _make_download(tmp_path: pathlib.Path) -> Download:

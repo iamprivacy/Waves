@@ -16,13 +16,27 @@ from types import SimpleNamespace
 
 from conftest import _InlinePool, _Signal
 
-from tidaler.library_index import LibraryIndex, cache_file_for_root, root_comparison_key
-from tidaler.matching import presence_key as _presence_key
-from tidaler.waves_ui.backend import WavesBridge
+from waves.library_index import LibraryIndex, cache_file_for_root, root_comparison_key
+from waves.matching import presence_key as _presence_key
+from waves.waves_ui.backend import WavesBridge
 
 _METHODS = (
+    # Every emit the scan makes off the pool goes through this guard (a scan
+    # can outlive the bridge on a quit), so the stub needs it to emit at all.
+    "_emit_from_worker",
     "_rebuild_library_index",
     "_invalidate_library_index",
+    # Every publish precomputes the artist rollup off the GUI thread before
+    # the presence signal fires (the slot keeps a lazy derive as fallback).
+    "_publish_artist_rollup",
+    # The scan's index builder and the launch badge seed, extracted from
+    # _rebuild_library_index so the seed can run at construction while the
+    # sweep itself waits for the boot reveal; the rebuild's closures delegate
+    # to them, so every scan in this file needs them bound.
+    "_build_presence_indexes",
+    "_seed_library_badges_job",
+    "_seed_library_badges",
+    "_start_boot_library_scan",
     "libraryAlbumPresence",
     "libraryTrackPresence",
     "artistLibraryPresence",
@@ -111,6 +125,10 @@ def _make(
     s._library_track_index = None
     s._library_artist_index = {}
     s._library_artist_index_src = None
+    s._presence_memo = {}
+    s._presence_memo_src = None
+    s._track_presence_memo = {}
+    s._track_presence_memo_src = None
     s._library_index_building = False
     s._library_index_pending = False
     s._library_force_full_pending = False
@@ -399,7 +417,7 @@ def test_presence_carries_local_quality_for_the_badge(tmp_path):
 def test_local_quality_label_includes_the_sample_rate():
     # The rate marks hi-res on its own: a 16-bit/96 kHz file must not be
     # undersold as plain lossless, and above-CD copies show both facts.
-    from tidaler.matching import local_quality_label as _local_quality_label
+    from waves.matching import local_quality_label as _local_quality_label
 
     assert _local_quality_label("flac", 2900, 24, 96000) == "FLAC 24-BIT 96KHZ"
     assert _local_quality_label("flac", 1500, 16, 96000) == "FLAC 96KHZ"
@@ -415,7 +433,7 @@ def test_local_quality_label_covers_every_codec_family():
     # Every audio type a library can hold gets a proper label, not just the
     # popular ones: a user with WAV rips, Ogg Vorbis or a DSD collection must
     # see their format recognized, never a blank or a wrong badge.
-    from tidaler.matching import local_quality_label as _local_quality_label
+    from waves.matching import local_quality_label as _local_quality_label
 
     # Uncompressed / lossless containers, with hi-res facts when above CD.
     assert _local_quality_label("wav", 0, 24, 96000) == "WAV 24-BIT 96KHZ"
@@ -452,7 +470,7 @@ def test_local_quality_label_covers_every_codec_family():
 def test_local_quality_class_bands():
     # The coarse class drives the pill's at-a-glance color: gold hi-res, green
     # lossless, cyan healthy lossy, red small lossy, neutral when unknown.
-    from tidaler.matching import local_quality_class as _local_quality_class
+    from waves.matching import local_quality_class as _local_quality_class
 
     assert _local_quality_class("flac", 0, 24, 96000) == "hires"
     assert _local_quality_class("flac", 0, 16, 96000) == "hires"  # rate alone is hi-res
@@ -744,7 +762,7 @@ def test_a_long_download_batch_still_gets_its_badges(tmp_path, monkeypatch):
     Driven on a fake clock: tracks land every second forever, and the rebuild
     must still happen, roughly on the ceiling's cadence.
     """
-    from tidaler.waves_ui import bridge_library
+    from waves.waves_ui import bridge_library
 
     s = _make(tmp_path, library_source="download", download_base=str(tmp_path / "dl"))
     s._on_download_recorded = WavesBridge._on_download_recorded.__get__(s)
@@ -786,7 +804,7 @@ def test_a_short_download_batch_still_coalesces(tmp_path, monkeypatch):
     """And the ceiling does not break the debounce it guards: a burst shorter
     than the ceiling still collapses to nothing forced, leaving the ordinary
     settle timer to run one rebuild after the last track."""
-    from tidaler.waves_ui import bridge_library
+    from waves.waves_ui import bridge_library
 
     s = _make(tmp_path, library_source="download", download_base=str(tmp_path / "dl"))
     s._on_download_recorded = WavesBridge._on_download_recorded.__get__(s)
@@ -978,8 +996,8 @@ def test_presence_never_reaches_the_download_engine():
     override so a claim is never the end of the conversation.
 
     Pinned by IMPORT CLOSURE, not by grepping for a substring. The substring
-    version read download.py for the literal "tidaler.matching", which survives
-    `from tidaler import matching`, `import tidaler.matching as m`, an
+    version read download.py for the literal "waves.matching", which survives
+    `from waves import matching`, `import waves.matching as m`, an
     `importlib.import_module` call, and reaching the matcher through any third
     module. Importing the engine in a clean interpreter and looking at what
     landed in sys.modules survives all of those, because it asks what the code
@@ -993,7 +1011,7 @@ def test_presence_never_reaches_the_download_engine():
     root = pathlib.Path(__file__).resolve().parent.parent
 
     # 1. The whole transitive closure of the engine, however it is spelled.
-    probe = "import sys, tidaler.download; print('tidaler.matching' in sys.modules)"
+    probe = "import sys, waves.download; print('waves.matching' in sys.modules)"
     out = subprocess.run(
         [sys.executable, "-c", probe],
         cwd=str(root),
@@ -1003,19 +1021,19 @@ def test_presence_never_reaches_the_download_engine():
     )
     assert out.returncode == 0, f"could not import the download engine:\n{out.stderr}"
     assert out.stdout.strip() == "False", (
-        "tidaler.matching is now in the download engine's import closure. The engine "
+        "waves.matching is now in the download engine's import closure. The engine "
         "must never consult the presence matcher, however indirectly."
     )
 
     # 2. A lazy import inside a function body never reaches sys.modules until it
     #    runs, so the closure check alone would miss it. Walk the AST at every
     #    depth rather than only the module's top level.
-    engine_tree = ast.parse((root / "tidaler" / "download.py").read_text(encoding="utf-8"))
+    engine_tree = ast.parse((root / "waves" / "download.py").read_text(encoding="utf-8"))
     for node in ast.walk(engine_tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 assert alias.name.split(".")[0:2] != [
-                    "tidaler",
+                    "waves",
                     "matching",
                 ], f"download.py imports the presence matcher at line {node.lineno}"
         elif isinstance(node, ast.ImportFrom):
@@ -1026,9 +1044,9 @@ def test_presence_never_reaches_the_download_engine():
     #    bridge_library: the badge slot and the bulk claim helper. Not the
     #    engine, and not the rest of the bridge: backend reaches presence only
     #    through the bridge's claim helpers, whose answers are skip-or-nothing.
-    backend = (root / "tidaler" / "waves_ui" / "backend.py").read_text(encoding="utf-8")
+    backend = (root / "waves" / "waves_ui" / "backend.py").read_text(encoding="utf-8")
     assert "decide_presence" not in backend, "presence answers stay in bridge_library"
-    bridge = (root / "tidaler" / "waves_ui" / "bridge_library.py").read_text(encoding="utf-8")
+    bridge = (root / "waves" / "waves_ui" / "bridge_library.py").read_text(encoding="utf-8")
     assert bridge.count("decide_presence") == 2  # the badge slot + _library_claims_album
     assert bridge.count("decide_track_presence") == 2  # the pill slot + _library_claims_track
 

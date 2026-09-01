@@ -9,7 +9,7 @@ re-reads the pref on that signal, see Main.qml's hoverMotion).
 
 from __future__ import annotations
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Stub:
@@ -65,8 +65,8 @@ def _schema_stub():
     Built on a fresh defaults-only config, never the machine's own, so the
     test can't depend on (or print) the user's real settings.
     """
-    from tidaler.model.cfg import HelpSettings
-    from tidaler.model.cfg import Settings as CfgSettings
+    from waves.model.cfg import HelpSettings
+    from waves.model.cfg import Settings as CfgSettings
 
     class _Cfg:
         data = CfgSettings()

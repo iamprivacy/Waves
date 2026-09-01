@@ -21,7 +21,7 @@ import inspect
 import re
 from pathlib import Path
 
-from tidaler.waves_ui import backend as backend_mod
+from waves.waves_ui import backend as backend_mod
 
 BACKEND_SRC = Path(inspect.getsourcefile(backend_mod))
 
@@ -52,7 +52,7 @@ def test_settings_save_never_resizes_the_pool():
 def test_the_knob_still_reaches_the_track_executor():
     """downloads_concurrent_max must keep meaning something: the engine's
     per-collection executor is sized by it, read live at download time."""
-    from tidaler import download as engine_dl
+    from waves import download as engine_dl
 
     src = Path(inspect.getsourcefile(engine_dl)).read_text(encoding="utf-8")
     assert "max_workers=self.settings.data.downloads_concurrent_max" in src

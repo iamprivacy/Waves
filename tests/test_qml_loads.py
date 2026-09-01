@@ -35,7 +35,7 @@ _EXIT_OK = 0
 _EXIT_BROKEN = 1
 _EXIT_NO_QT = 77
 
-QML_DIR = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml"
+QML_DIR = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 
 
 def test_main_qml_loads_without_errors_or_warnings():
@@ -77,7 +77,7 @@ def _run_scenario() -> int:
 
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

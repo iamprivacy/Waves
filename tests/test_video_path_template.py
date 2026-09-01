@@ -20,9 +20,9 @@ from types import SimpleNamespace
 
 from tidalapi import Video
 
-from tidaler.helper.path import format_path_media
-from tidaler.model.cfg import Settings as CfgSettings
-from tidaler.waves_ui.backend import _LEGACY_FORMAT_VIDEOS, WavesBridge
+from waves.helper.path import format_path_media
+from waves.model.cfg import Settings as CfgSettings
+from waves.waves_ui.backend import _LEGACY_FORMAT_VIDEOS, WavesBridge
 
 
 def _video(**over) -> Video:
@@ -103,7 +103,7 @@ def test_every_shipped_default_token_is_documented_in_app():
     must be listed there, or a user who edits it away can never rebuild it."""
     import re
 
-    from tidaler.waves_ui.backend import _TEMPLATE_TOKENS
+    from waves.waves_ui.backend import _TEMPLATE_TOKENS
 
     documented = {t[0] for t in _TEMPLATE_TOKENS}
     d = CfgSettings()

@@ -11,8 +11,8 @@ fake media objects, so the wrapper is exercised end to end.
 import pytest
 from tidalapi.artist import Role
 
-import tidaler.download as _tidaler_download
-from tidaler.waves_ui.backend import (
+import waves.download as _waves_download
+from waves.waves_ui.backend import (
     _album_artists_for_metadata,
     _clean_album_artists,
     _set_clean_album_artist,
@@ -55,7 +55,7 @@ def test_clean_album_artists(names, expected):
 
 # ---- the installed wrapper honours the flag --------------------------------
 def test_wrapper_is_installed_on_download_module():
-    assert _tidaler_download.get_album_artists is _album_artists_for_metadata
+    assert _waves_download.get_album_artists is _album_artists_for_metadata
 
 
 def test_default_off_keeps_every_main_album_artist():

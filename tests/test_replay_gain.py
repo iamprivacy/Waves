@@ -6,9 +6,9 @@ None) are never written, and a real gain is emitted in the ReplayGain 2.0 writer
 form ("-7.36 dB") while peak stays a bare linear amplitude.
 """
 
-from tidaler.config import _migrate_settings
-from tidaler.metadata import _replay_gain_tags, _rg_missing
-from tidaler.model.cfg import Settings
+from waves.config import _migrate_settings
+from waves.metadata import _replay_gain_tags, _rg_missing
+from waves.model.cfg import Settings
 
 
 def _tags(album_gain, album_peak, track_gain, track_peak):
@@ -97,6 +97,7 @@ def test_migration_is_a_noop_once_marked():
     data = Settings()
     data.replay_gain_default_migrated = True
     data.format_playlist_folder_migrated = True
+    data.api_rate_limit_wired_migrated = True
     data.metadata_replay_gain = False
     assert _migrate_settings(data) is False
     assert data.metadata_replay_gain is False

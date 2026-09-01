@@ -12,10 +12,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tidaler.constants import CoverDimensions
-from tidaler.download import Download
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.constants import CoverDimensions
+from waves.download import Download
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 # ----- download-folder gate ------------------------------------------------
 
@@ -67,6 +67,8 @@ def _gate_fake():
     fake._restore_ffmpeg_flags = WavesBridge._restore_ffmpeg_flags.__get__(fake)
     fake._restore_ffmpeg_path = WavesBridge._restore_ffmpeg_path.__get__(fake)
     fake._save_settings = WavesBridge._save_settings.__get__(fake)
+    # The disk seam behind _save_settings; route it into the fake's counter.
+    fake._submit_settings_write = lambda: fake.settings.save()
     return fake
 
 
@@ -211,7 +213,7 @@ def test_cover_file_dimension_explicit_and_invalid():
 
 def _cover_fixture():
     dl = MagicMock(spec=Download)
-    dl.cover_data = MagicMock(return_value=b"fetched")
+    dl.cover_data_cached = MagicMock(return_value=b"fetched")
     track = MagicMock()
     track.album.image = MagicMock(side_effect=lambda d: f"url:{d}")
     return dl, track
@@ -221,7 +223,7 @@ def test_cover_file_data_reuses_embedded_when_sizes_match():
     dl, track = _cover_fixture()
     out = Download._album_cover_file_data(dl, track, b"embedded", CoverDimensions.Px320, CoverDimensions.Px320)
     assert out == b"embedded"
-    dl.cover_data.assert_not_called()  # no second download when sizes match
+    dl.cover_data_cached.assert_not_called()  # no second download when sizes match
 
 
 def test_cover_file_data_refetches_for_a_different_size():

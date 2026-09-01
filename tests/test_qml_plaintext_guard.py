@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-QML_DIR = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml"
+QML_DIR = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 
 # Files in scope, and (per file) whether `model.`/`modelData.` denote *remote*
 # (attacker-controllable TIDAL) data.
@@ -423,6 +423,73 @@ def _is_literal_only(text_value: str) -> bool:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+# A component DERIVED from Text (`component DecryptText: Text { … }`) matches
+# the element scanner only at its own definition; its instances are named
+# something the Text|Label regex has never heard of, so they matched neither the
+# structural test nor the StyledText/RichText backstop. Today all of them assign
+# their text imperatively from local literals, so nothing beacons, but the guard
+# was fail-OPEN there: binding remote data through one, or adding a new
+# `component FooText: Text`, would have sailed past CI. Derived components are
+# now held to exactly what RemoteText is held to, and found by pattern rather
+# than by name, so the next one is covered the day it is written.
+_DERIVED_TEXT_COMPONENT = re.compile(r"(?m)^\s*component\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:Text|Label)\s*\{")
+
+
+def _derived_text_components() -> dict[str, tuple[str, int]]:
+    """Every `component X: Text` in the QML tree: name -> (file, brace index)."""
+    found: dict[str, tuple[str, int]] = {}
+    for fname in FILES:
+        src = (QML_DIR / fname).read_text(encoding="utf-8")
+        for m in _DERIVED_TEXT_COMPONENT.finditer(src):
+            found[m.group(1)] = (fname, m.end() - 1)
+    return found
+
+
+def test_a_text_derived_component_pins_plaintext():
+    """The same rule RemoteText lives by: bake PlainText in, so every instance
+    is safe by construction whatever it is later fed."""
+    derived = _derived_text_components()
+    assert derived, "the scanner found no `component X: Text`; has the spelling changed?"
+
+    violations: list[str] = []
+    for name, (fname, open_idx) in derived.items():
+        src = (QML_DIR / fname).read_text(encoding="utf-8")
+        body = src[open_idx : _brace_span(src, open_idx) + 1]
+        code = re.sub(r"//[^\n]*", "", body)
+        code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+        if SAFE_PLAINTEXT not in code:
+            violations.append(f"{fname}: component {name} derives from Text without pinning {SAFE_PLAINTEXT!r}")
+        elif "Text.StyledText" in code or "Text.RichText" in code or "Text.AutoText" in code:
+            violations.append(f"{fname}: component {name} also assigns a rich-text format")
+
+    assert not violations, "Text-derived component(s) not pinned to plain text:\n" + "\n".join(violations)
+
+
+def test_a_text_derived_instance_does_not_reenable_richtext():
+    """And the instance half, exactly as for RemoteText: an instantiation can
+    re-declare textFormat and undo what the component pinned."""
+    derived = _derived_text_components()
+    violations: list[str] = []
+    for name, (decl_file, decl_idx) in derived.items():
+        opens = re.compile(r"(?<![A-Za-z0-9_.])" + re.escape(name) + r"\s*\{")
+        for fname in FILES:
+            src = (QML_DIR / fname).read_text(encoding="utf-8")
+            for m in opens.finditer(src):
+                open_idx = m.end() - 1
+                if fname == decl_file and open_idx == decl_idx:
+                    continue  # the declaration itself, covered by the test above
+                span = src[open_idx : _brace_span(src, open_idx) + 1]
+                tf = _find_own_prop_value(span, "textFormat")
+                if tf is not None and tf.strip() != "Text.PlainText":
+                    line_no = src.count("\n", 0, m.start()) + 1
+                    violations.append(
+                        f"{fname}:{line_no}: {name} overrides textFormat to {tf.strip()!r}: "
+                        "re-enables rich text (auto-<img>) on whatever it is fed"
+                    )
+
+    assert not violations, "Text-derived instance(s) re-enabling rich text:\n" + "\n".join(violations)
 
 
 def test_remotetext_component_is_plaintext():

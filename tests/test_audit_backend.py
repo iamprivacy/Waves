@@ -24,7 +24,7 @@ from threading import Event, Lock
 import pytest
 from _dispatch_stub import arm_queue
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Signal:
@@ -69,7 +69,9 @@ class _Stub:
         self._lib_reval_ts: dict = {}
         self._media_lists_cache: tuple | None = None
         self._search_cache: dict = {}
+        self._search_gen = 0  # logout supersedes in-flight search workers by bumping this
         self._artist_pop_cache: dict = {}
+        self._objs_lock = Lock()  # every bucket clear takes it
         self.settings = type("S", (), {"data": type("D", (), {"path_binary_ffmpeg": ""})()})()
         self._ffmpeg_user_path = ""
         # Fake signals
@@ -119,11 +121,15 @@ class _Stub:
     def _queue_mark_changed(self, qid):
         return WavesBridge._queue_mark_changed(self, qid)
 
-    def _remove_rows_where(self, pred):
-        return WavesBridge._remove_rows_where(self, pred)
+    # withdrawn_out is how the withdrawal slots learn which rows were still
+    # queued at the instant they went, so they credit only those to their
+    # rollups: read under the removal's own lock, since the worker thread can
+    # flip a row to running between a caller's look and the removal.
+    def _remove_rows_where(self, pred, withdrawn_out=None):
+        return WavesBridge._remove_rows_where(self, pred, withdrawn_out)
 
-    def _remove_row(self, qid):
-        return WavesBridge._remove_row(self, qid)
+    def _remove_row(self, qid, withdrawn_out=None):
+        return WavesBridge._remove_row(self, qid, withdrawn_out)
 
     def _row_object(self, item):
         return WavesBridge._row_object(self, item)
@@ -131,8 +137,8 @@ class _Stub:
     def _start_retry(self, item, obj):
         return WavesBridge._start_retry(self, item, obj)
 
-    def _set_queue_status(self, qid, status):
-        return WavesBridge._set_queue_status(self, qid, status)
+    def _set_queue_status(self, qid, status, reason=""):
+        return WavesBridge._set_queue_status(self, qid, status, reason)
 
 
 def _bind(stub, name):
@@ -214,6 +220,9 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     stub._artist_cache = {"1": {}}
     stub._artist_loading = {"1"}
     stub._page_cache_path = "/nonexistent/page_cache.json"
+    # ...and the busy flag it clears for the workers its generation bump
+    # orphans (see test_proof_findings_2026_08_30).
+    stub._set_busy = lambda on: None
     # ...and the hover prefetch of item pages.
     stub._prefetch_lock = Lock()
     stub._prefetch_key = "item:playlist:p1"
@@ -357,7 +366,7 @@ def test_load_more_library_transient_error_keeps_more(monkeypatch):
     stub.threadpool = _Pool()
 
     # devlog is a module-level import used inside the method; patch its funcs.
-    import tidaler.waves_ui.backend as backend
+    import waves.waves_ui.backend as backend
 
     monkeypatch.setattr(backend.devlog, "clock", lambda: 0.0, raising=True)
     monkeypatch.setattr(backend.devlog, "done", lambda *a, **k: None, raising=True)

@@ -30,8 +30,8 @@ from unittest.mock import patch
 
 from _dispatch_stub import arm_dispatch
 
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Recorder:
@@ -102,7 +102,7 @@ class _Stub:
     def _gate_reachability(self, retry, media_id) -> bool:
         return True
 
-    def _set_queue_status(self, qid, status) -> None:
+    def _set_queue_status(self, qid, status, reason: str = "") -> None:
         self.statuses.append((qid, status))
 
     def _set_queue_progress(self, qid, pct) -> None:

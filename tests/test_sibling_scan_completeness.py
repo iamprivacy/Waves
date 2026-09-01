@@ -63,7 +63,7 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.album import Album
 
-from tidaler.waves_ui.backend import WavesBridge
+from waves.waves_ui.backend import WavesBridge
 
 ARTIST_ID = 7
 _ARTIST_CREDIT = SimpleNamespace(name="Halcyon Drift", id=ARTIST_ID)

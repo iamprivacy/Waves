@@ -1,4 +1,4 @@
-"""Tests for the local music-library scanner (tidaler/library_index.py).
+"""Tests for the local music-library scanner (waves/library_index.py).
 
 Hermetic: a temp tree of empty files stands in for a library, and the tag reader
 is injected so no real audio is needed. The default extension predicate decides
@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import Path
 
-from tidaler.library_index import (
+from waves.library_index import (
     _EMPTY_STRIKE_GAP_S,
     _NETWORK_WORKERS,
     POLL_GAUGE,
@@ -260,7 +260,7 @@ def test_walk_lists_directories_concurrently(tmp_path, monkeypatch):
     # listing over ~49 folders is ~1s serially; concurrent finishes well under.
     import time as _time
 
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     lib = _mk(tmp_path, "lib", [])
     tags = {}
@@ -311,7 +311,7 @@ def test_scan_status_unreadable_when_root_denies_listing(tmp_path, monkeypatch):
     # the TCC-gated network-volume case: os.walk would swallow the EPERM and
     # yield nothing, indistinguishable from empty. The probe must catch it, keep
     # the cache, and report SCAN_UNREADABLE so the UI can say "can't read".
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     lib = _mk(tmp_path, "lib", [])
     d = _mk(tmp_path, "lib/A/Album", ["1.flac"])
@@ -374,7 +374,7 @@ def test_read_album_tags_none_for_unreadable(tmp_path):
 def _scandir_spy(monkeypatch):
     """Record the absolute path of every os.scandir the scanner performs, so a
     test can prove which folders were (and were not) listed."""
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     calls: list[str] = []
     real = os.scandir
@@ -509,7 +509,7 @@ def test_transient_listing_failure_preserves_subtree(tmp_path, monkeypatch):
     # NOT be mistaken for an empty folder: doing so would orphan its albums and
     # the generation prune would delete them permanently. The subtree must survive
     # the failure and recover cleanly once the error clears.
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     lib = _mk(tmp_path, "lib", [])
     artist = os.path.join(lib, "Artist")
@@ -546,7 +546,7 @@ def test_root_going_offline_midwalk_does_not_wipe_cache(tmp_path, monkeypatch):
     # If the root volume drops AFTER the readability probe passed but BEFORE the
     # walk stats it, the scan must leave the cache intact and report missing, not
     # let the generation prune wipe every badge (the offline-NAS invariant).
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     lib = _mk(tmp_path, "lib", [])
     d = _mk(tmp_path, "lib/A/Album", ["1.flac"])
@@ -579,7 +579,7 @@ def test_non_utf8_folder_name_is_skipped_not_crash(tmp_path, monkeypatch):
     # A folder whose name is not valid UTF-8 cannot be stored in sqlite; it must be
     # skipped at discovery, never crash (and re-crash) the whole scan. macOS will
     # not create such a name, so inject a fake directory entry into the listing.
-    import tidaler.library_index as li
+    import waves.library_index as li
 
     lib = _mk(tmp_path, "lib", [])
     d = _mk(tmp_path, "lib/A/Album", ["1.flac"])
@@ -1280,9 +1280,7 @@ def test_the_scan_pools_are_actually_registered():
     """The gauges exist and move (above), and the bridge hands all three to
     diagnostics at startup. Without this the rule is only half kept: a gauge
     nobody registered reports to nobody."""
-    backend = (Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "backend.py").read_text(
-        encoding="utf-8"
-    )
+    backend = (Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "backend.py").read_text(encoding="utf-8")
     for name in ("libwalk", "libread", "libpoll"):
         assert f'diagnostics.register_pool("{name}"' in backend, f"the {name} pool is not registered"
 
@@ -1929,7 +1927,7 @@ class _PoolSpy:
         self.sizes: list[int] = []
 
     def install(self, monkeypatch):
-        import tidaler.library_index as mod
+        import waves.library_index as mod
 
         real = mod.ThreadPoolExecutor
         sizes = self.sizes

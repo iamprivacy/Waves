@@ -2,7 +2,7 @@
 
 THE BUG
 -------
-The engine registers one rich progress task per downloading item, described as
+The engine registers one progress task per downloading item, described as
 ``[blue]Item '<display name>'`` with the name cut to 30 characters. The bridge
 mirrored that string onto each queue row and polled percentages with
 ``{task.description: task.percentage}``.
@@ -30,12 +30,12 @@ import pathlib
 from threading import Lock, local
 from unittest.mock import MagicMock, patch
 
-from rich.progress import Progress
 from tidalapi.media import Track
 
-from tidaler import download as download_mod
-from tidaler.download import Download
-from tidaler.waves_ui.backend import WavesBridge, _TrackedDownload
+from waves import download as download_mod
+from waves.download import Download
+from waves.progress import Progress
+from waves.waves_ui.backend import WavesBridge, _TrackedDownload
 
 # A credit that eats the whole 30-character budget on its own, so every track of
 # the release truncates to a single identical description. Real shape, not a

@@ -44,7 +44,7 @@ from types import SimpleNamespace
 import pytest
 from tidalapi.media import Quality
 
-QML_MAIN = Path(__file__).resolve().parent.parent / "tidaler" / "waves_ui" / "qml" / "Main.qml"
+QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
 _EXIT_OK = 0
 _EXIT_REGRESSED = 1
@@ -67,7 +67,7 @@ class _Store:
 def _bridge(*, recs=None, claim=None, quality=Quality.hi_res_lossless, atmos=False):
     """A WavesBridge carcass with only what _predict_skips reads, and the real
     method bound onto it."""
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     b = backend.WavesBridge.__new__(backend.WavesBridge)
     b._ownership = _Store(recs or {})
@@ -218,12 +218,15 @@ def test_an_ownership_lookup_failure_never_gates():
 def test_a_live_event_outranks_a_prediction():
     """The run reached the track and said something: that is fact, and the
     prediction must not paint over it."""
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     b = backend.WavesBridge.__new__(backend.WavesBridge)
     b._job_tracks = {1: {"1": {"id": "1", "status": "running", "pct": 40.0, "quality": ""}}}
     b._job_owned = {1: {"1": {"kind": "own", "tier": "LOSSLESS"}, "2": {"kind": "claim", "tier": "HIGH"}}}
     b._job_fetched = {}
+    # The expansion's row: a merge for a row that has gone is dropped now.
+    b._queue_index = {1: {"qid": 1, "media_id": "m1", "status": "running"}}
+    b._queue_item = backend.WavesBridge._queue_item.__get__(b, backend.WavesBridge)
     emitted = []
     b.queueTracksLoaded = SimpleNamespace(emit=lambda qid, rows: emitted.append(rows))
     backend.WavesBridge._merge_queue_tracks(
@@ -242,12 +245,15 @@ def test_a_live_event_outranks_a_prediction():
 
 
 def test_marks_landing_after_the_list_are_merged_into_it():
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     b = backend.WavesBridge.__new__(backend.WavesBridge)
     b._job_tracks = {}
     b._job_owned = {}
     b._job_fetched = {}
+    # The expansion's row: a merge for a row that has gone is dropped now.
+    b._queue_index = {1: {"qid": 1, "media_id": "m1", "status": "running"}}
+    b._queue_item = backend.WavesBridge._queue_item.__get__(b, backend.WavesBridge)
     emitted = []
     b.queueTracksLoaded = SimpleNamespace(emit=lambda qid, rows: emitted.append(rows))
     fetched = [{"id": "1", "num": 1, "title": "a", "duration": "3:00"}]
@@ -262,19 +268,22 @@ def test_a_prediction_never_reaches_the_collapsed_rows_rollup():
     """The row's word is the record of what the RUN delivered (including the
     tier of a copy it really skipped). A prediction is not a delivery and must
     leave it alone until the run speaks."""
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     b = backend.WavesBridge.__new__(backend.WavesBridge)
     b._job_tracks = {}
     b._job_owned = {1: {"1": {"kind": "own", "tier": "LOSSLESS"}}}
     b._job_fetched = {}
+    # The expansion's row: a merge for a row that has gone is dropped now.
+    b._queue_index = {1: {"qid": 1, "media_id": "m1", "status": "running"}}
+    b._queue_item = backend.WavesBridge._queue_item.__get__(b, backend.WavesBridge)
     b.queueTracksLoaded = SimpleNamespace(emit=lambda *a: None)
     backend.WavesBridge._merge_queue_tracks(b, 1, [{"id": "1", "num": 1, "title": "a", "duration": "3:00"}])
     assert backend._delivered_rollup(b._job_tracks.get(1, {})) == ("", [])
 
 
 def test_the_stores_are_dropped_with_the_queue_row():
-    from tidaler.waves_ui import backend
+    from waves.waves_ui import backend
 
     b = backend.WavesBridge.__new__(backend.WavesBridge)
     b._queue = [{"qid": 2}]
@@ -324,8 +333,8 @@ def _run_scenario() -> int:  # (one straight line of scene setup)
     patch_offline()
     app = QGuiApplication.instance() or QGuiApplication([])
     try:
-        from tidaler.waves_ui.app import _load_mono
-        from tidaler.waves_ui.backend import WavesBridge
+        from waves.waves_ui.app import _load_mono
+        from waves.waves_ui.backend import WavesBridge
     except Exception as exc:  # pragma: no cover - environment guard
         print(f"Qt platform/backend unavailable: {exc}", file=sys.stderr)
         return _EXIT_NO_QT

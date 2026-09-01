@@ -5,7 +5,7 @@ THE BUG
 ``download_delay`` is a Waves setting: it appears in ``_FLAG_FIELDS``, on the
 Settings page under Downloads, and its two companion fields "Minimum/Maximum
 download delay (s)" were live. The flag itself was never read by anything in
-``tidaler/``.
+``waves/``.
 
 The engine takes it as a PARAMETER and relies on the caller to forward it.
 Waves forwarded nothing, so each dispatch fell back to a different default and
@@ -31,9 +31,9 @@ from unittest.mock import patch
 
 from _dispatch_stub import arm_dispatch
 
-from tidaler.download import Download
-from tidaler.waves_ui import backend
-from tidaler.waves_ui.backend import WavesBridge
+from waves.download import Download
+from waves.waves_ui import backend
+from waves.waves_ui.backend import WavesBridge
 
 
 class _Signal:
@@ -131,7 +131,7 @@ class _Stub:
     def _gate_reachability(self, retry, media_id) -> bool:
         return True
 
-    def _set_queue_status(self, qid, status) -> None:
+    def _set_queue_status(self, qid, status, reason: str = "") -> None:
         pass
 
     def _set_queue_progress(self, qid, pct) -> None:
