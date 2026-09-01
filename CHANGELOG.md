@@ -22,6 +22,89 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.26 (2026-09-01)
+
+### 🔧 Changed
+
+- 🏷️ Waves' internal code now carries its own name instead of the name of the project it began as a fork of; nothing changes in how the app looks or works, and the credits to that project remain.
+- 🐢 The two rate-limit settings in Advanced now do what they say: Waves pauses for the set number of seconds after every N songs, so a long playlist does not ask TIDAL for too much at once. They are now called "Pause every N songs" and "Length of that pause (s)", and setting either to 0 turns the pause off ([issue #35](https://github.com/iamprivacy/Waves/issues/35)).
+- ⏱️ A pause length over 30 seconds goes back to its standard value on this update; everything else is left exactly as you set it. Check both settings after updating: a "3" that used to mean three albums now means a pause every three songs.
+- 🔒 On macOS and Linux, the files Waves keeps for itself (your settings, your sign-in and its caches) are now created readable by your account only, rather than by anyone else with an account on the same machine. Existing files take the new permissions the next time Waves saves them.
+- 🆔 Downloaded songs now carry the TIDAL id of every artist they are credited to; players and library tools skip fields they do not know, so nothing looks or sounds different. It can only describe songs downloaded from this version onward.
+- 📦 The app is a smaller download and takes up less space once installed.
+- 🖼️ Downloading an album fetches its cover art once instead of once per track, so albums finish a little faster.
+- ⚡ Scanning a large library keeps the app responsive while the scan runs.
+- 🧠 Long download sessions use less memory.
+- 🚀 Launch is a little quicker.
+- 🔎 Search results appear sooner.
+
+### 🐛 Fixed
+
+- 🔎 Search now keeps up to 60 matching artists instead of 12, so a lesser-known artist who shares a name with a famous one can actually be found by expanding the ARTISTS row.
+- 🎛️ The Artists/Albums/Tracks filter above search results no longer carries over to the next search: every search starts back on All, so a filter picked earlier can no longer hide the artist you just searched for.
+- 👻 Opening Search no longer shows a lone "SHOW LESS" on an empty page, before any search has been run.
+- 🌊 The wave animation on the launch screen plays noticeably smoother while the app loads.
+- 🎤 An artist's page no longer lists a top song that belongs to a different artist with the same name, and holding the pointer on an artist to preview no longer plays one.
+- 💿 Downloading a discography no longer saves albums by a different artist with the same name: a release TIDAL wrongly files under the chosen artist is skipped and counted in the log.
+- 🔢 A song from an album TIDAL will not describe in full is no longer tagged "track 7 of 1": the total is left out when it is not known, so players and library tools stop reading the album as complete at one song.
+- 📄 With "Create .m3u8 playlist" on, re-downloading an album you already have no longer replaces a playlist file the folder already held: Waves now writes a playlist only in folders it actually saved a song into, so a playlist you made yourself (or one from before you used Waves) is left alone.
+- 🏷️ Songs saved as .m4a no longer carry blank extra fields (lyrics, UPC, initial key, release type) that tag editors showed as empty rows; the same song saved as FLAC never had them.
+- 💨 Expanding an album in search results no longer pauses for a moment the first time, on the way to showing its songs.
+- 🕵️ An exported diagnostics report with "also hide titles and searches" checked no longer shows the names of songs, albums and folders in its move, skip and error lines; they are hidden like every other title.
+- 📋 Pasting the wrong thing into the sign-in box (say, a stray clipboard entry) is now refused with a hint instead of being written into the app's log.
+- 🎤 An artist page that fails to load no longer leaves that artist unclickable until the next sign-in, and no longer leaves the loading spinner turning; the same slip could freeze a search or a pasted link on its "Searching" message.
+- 🚪 Signing out now discards any search still in flight, so its results can no longer flash up over "Signed out" or be shown to the next account that signs in.
+- 👥 Running two copies of Waves at once can no longer scramble the remembered window layout and interface state, and can no longer trip up an FFmpeg install the other copy is doing at the same time.
+- 📅 A song saved by an older version into an album folder named "[None]" (an album TIDAL lists no release year for) no longer blocks downloading it again: fetching the album again now saves it under the corrected folder name, though the old "[None]" copy stays for you to remove.
+- 🔢 The artist badge in Library no longer reports a track count higher than any copy on disk when two differently structured editions of the same album are both present.
+- 💿 A song TIDAL served at a lower quality than it advertises no longer reads as fully downloaded for good: it counts as one to fetch again, so raising the quality setting or re-running the album picks it up. If TIDAL keeps handing back the same lower quality, Waves stops asking after two tries and keeps what it has, so an album cannot re-download itself every time you open it; Redownload asks again.
+- 🔂 A playlist that lists the same song twice now saves it once, instead of leaving a second identical copy numbered "\_01" beside it that nothing would ever clean up or notice again, and the second listing is reported as skipped rather than as a failed song, which could finish a whole playlist in red over a song sitting correctly on disk.
+- 🎬 A mix no longer downloads its music videos when music videos are switched off; every other kind of list already left them alone.
+- 📃 An empty playlist, or one holding only videos, now finishes quietly instead of reporting "Failed: no tracks were downloaded" over a list that had nothing in it.
+- 🔤 On drives that store accented names their own way (many external Mac disks and network shares), a playlist file again lists its songs in the playlist's order rather than the order they happened to finish in.
+- 🪟 On Windows, saving to a mapped network drive with "link to the track" turned on no longer fails the whole playlist at its last step with every song already saved.
+- 🛟 A song that has already landed in your library is no longer sometimes reported as failed anyway, which also cost it its lyrics and cover.
+- 📝 A settings file that has been corrupted into something Waves cannot read is moved aside and replaced, as intended, instead of stopping the app from starting at all.
+- 🔑 Pasting your sign-in link back no longer leaves the spinner turning over an app that still says signed out; that could happen even though the sign-in had gone through, and restarting picked it up.
+- 🧹 A factory reset now removes everything the updater and the FFmpeg installer leave behind, including the note of a downloaded update waiting to be applied, which recorded the folder Waves is installed in; before, any one of those leftovers kept the whole folder, and the folders it named, on disk.
+- 🈶 A very long song title in Chinese, Japanese, Korean or similar is now shortened by only as much as the path really needs, instead of losing half its name.
+- 📁 On Windows, a song saved into a very deeply nested folder no longer fails every attempt.
+- ⚙️ A section closing in Settings no longer blanks its contents before the section itself has finished closing.
+- 🔁 On Windows, an update you installed but have not restarted into yet is picked up again the next time you open Waves, so leaving the app open all day (or shutting the PC down instead of restarting) no longer leaves you quietly on the old version.
+- 🪟 Having two copies of Waves open at once can no longer spoil an update: one of them installs it and the other is told to restart, instead of both writing over the same half-finished files.
+- 🔤 On Windows, an update now applies whatever the folder it lives under is called: letters outside the English alphabet, an "&", a percent sign; before, Waves said it had updated and then quietly stayed on the old version, every time.
+- ⚡ On Windows, an update now finishes in an instant when you quit Waves, instead of copying the new version into place while the PC is shutting down, which could leave the app broken until you repaired the folder by hand.
+- 📁 Installing an update no longer deletes files you kept in the Waves folder: anything in there that Waves did not put there is moved back after the update, and if something cannot be moved back the old folder is kept instead of deleted. When that happens Waves now names the folder it kept, so you can delete it yourself once you no longer need it, instead of it sitting there unmentioned, and later updates leave that folder alone rather than clearing it to make room for their own backup.
+- 📃 A long playlist no longer fails over a song TIDAL has taken down: one song it no longer carries used to fail the whole playlist, every time you tried, so a 200 or 500 song playlist could never finish ([issue #35](https://github.com/iamprivacy/Waves/issues/35)).
+- ⚠️ A failed album, playlist or mix now says how many songs failed, and out of how many, instead of only "Failed", so you can tell a download that saved almost everything from one that saved nothing ([issue #35](https://github.com/iamprivacy/Waves/issues/35)).
+- 🔁 A busy download no longer gives up on a song the first time TIDAL asks it to slow down: Waves waits and tries again, which is what long playlists kept running into ([issue #35](https://github.com/iamprivacy/Waves/issues/35)).
+- 🧯 One song that goes wrong mid-download no longer stops the rest of the playlist: the other songs finish, the playlist file is still written, and the queue reports how many were missed ([issue #35](https://github.com/iamprivacy/Waves/issues/35)).
+- 🏷️ A playlist song whose album details are missing now downloads and is tagged with what is known, instead of failing.
+- 🗂️ An album TIDAL lists no release year for now lands in a folder named after the album alone, instead of one beginning with "[None]".
+- 📻 A download that stops answering can no longer hold the queue up forever waiting on it.
+- 🛑 Pressing STOP while Waves is checking that your download folder is reachable now sticks: the row could go back to Downloading and the button re-light, until the whole list had been read.
+- ♻️ A REDOWNLOAD you cancelled or cleared before it started no longer forces the next download of that item: a later click on it, from a discography or a folder, could re-download and overwrite songs you already had without asking.
+- 🔁 RETRY ALL no longer loses the rows behind one that cannot be restarted: the others retry, and the one that could not keeps its place with its RETRY button.
+- 🎨 An artist download whose albums are waiting for a folder that went away now keeps its progress: the artist button went back to plain DOWNLOAD and never reported the albums that downloaded when the folder came back.
+- 🎯 An artist or folder download that finishes with every album saved no longer ends on FAILED because one of them failed on an earlier attempt in the same run.
+- 💿 Stopping a discography download no longer makes the next Download album on one of its albums skip the check for a more complete edition ("best of both").
+- 🔀 Returning to the Search tab now brings back the whole artist page you left: it could come back as one artist's name and photo over another artist's albums and songs, with the download button aimed at the wrong one.
+- 📋 Opening a queued or failed album, playlist or mix to see its songs now works after a new search, instead of showing an empty list.
+- 🎧 Saving an audio quality change while a Dolby Atmos song is being fetched no longer lands on that song: it could be downloaded at the wrong quality, or fail to download at all, with nothing to connect it to the setting you had just saved.
+- 🔊 A Dolby Atmos song you already have is never replaced by a stereo download of it, or the other way round: TIDAL hands both out under the same file name, so with "Skip existing" turned off, on a REDOWNLOAD, or after a quality change, the new one could land on top of the one you kept. Each is now saved beside the other, and an Atmos file you added yourself is protected the same way.
+- 💬 The message shown when something you download is already in your music library now says what will actually happen under your "Skip existing" setting, instead of always promising that your existing files are never touched.
+- 🧷 Having two copies of Waves open no longer risks your settings or your sign-in: they could write over each other's saved file, which reset everything to factory defaults or signed you out on the next launch.
+- 🚀 Opening Waves twice on the first run after an update no longer stops the second one from starting.
+- 🎬 Double-clicking INSTALL FFMPEG now installs it once, instead of downloading it twice at the same time and then saying "Install failed" over an install that worked.
+- 🔢 The download queue header says "1 item" rather than "1 items".
+- 🎚️ An album already at the best quality its release offers no longer keeps showing DOWNLOAD after you raise the audio quality setting, where clicking it finished at once and changed nothing.
+- 📁 A discography no longer ends on FAILED when your download folder went to sleep between albums: the albums that waited for it are counted when they arrive, not the moment they are held.
+- 📂 Choosing a new download location while albums are waiting for the old one no longer leaves that artist's button turning for the rest of the session, with an empty queue and no STOP to end it.
+- 🧹 Clearing the queue no longer leaves an album downloading with no row to show it and no STOP on screen: a download that had only just started is now stopped along with its row.
+- 🛑 STOP, CANCEL and clearing the queue now all end downloads that were waiting for your download folder to come back, instead of them starting again by themselves minutes later once it did, with no row on screen to stop them a second time.
+- 🎛️ Turning "best of both" off now applies to an album whose earlier merged download you cleared, stopped, or left waiting for a folder you then changed: clicking it again saves the edition you chose, instead of quietly combining two.
+- 🎨 Clearing the queue no longer counts an album that had just begun downloading as failed, which could leave the artist or folder it belonged to reporting a failure that never happened.
+
 ## 🗂️ v0.1.25 (2026-08-24)
 
 ### 🐛 Fixed
