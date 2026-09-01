@@ -7,8 +7,8 @@ machinery that keeps a weeks-running app honest about a folder that changed
 underneath it, and the in-memory presence index the badge is answered from.
 
 The division of labour, three modules deep, each replaceable on its own:
-``tidaler.library_index`` walks the disk and enumerates album facts;
-``tidaler.matching`` decides whether two records name the same album; this mixin
+``waves.library_index`` walks the disk and enumerates album facts;
+``waves.matching`` decides whether two records name the same album; this mixin
 is the Qt layer over both (threads, timers, signals, GUI-thread rules).
 
 A mixin over WavesBridge rather than a section of backend.py: the class name,
@@ -43,9 +43,9 @@ import time
 from PySide6 import QtCore, QtGui
 from PySide6.QtCore import Signal, Slot
 
-import tidaler.matching as matching
-from tidaler.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, root_comparison_key
-from tidaler.worker import Worker
+import waves.matching as matching
+from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, root_comparison_key
+from waves.worker import Worker
 
 # The subsystem child logger (per the diagnostics conventions): propagates into
 # the root "waves" breadcrumb ring while letting verbose logs slice per subsystem.
@@ -63,10 +63,24 @@ logger = logging.getLogger("waves.library")
 # is a best-effort accelerator and the poll is the source of truth.
 _LIBRARY_POLL_MS = 5 * 60 * 1000
 _LIBRARY_DEEP_SWEEP_MS = 12 * 60 * 60 * 1000
+# Mid-scan partial publishes (badges lighting up while a scan runs) rebuild the
+# whole presence index from a table read, so they are rate-limited to one per
+# this many seconds; the first commit and the scan's final publish always land.
+_SCAN_PUBLISH_MIN_S = 2.5
+# The presence-verdict memos (one per badge slot) hold this many answers, FIFO.
+# Sized for several screens of rows; a verdict dict is small, so the bound is
+# about forgetting a session's long tail, not about memory pressure.
+_PRESENCE_MEMO_MAX = 4096
 _LIBRARY_WATCH_DEBOUNCE_MS = 3000  # coalesce a watcher event burst (copying an album)
 _LIBRARY_WATCH_MAX_DEBOUNCE_S = 30.0  # but flush at least this often during a long import
 _LIBRARY_WATCH_CHUNK = 200  # add this many watch paths per event-loop tick (no UI stall)
 _LIBRARY_DL_DEBOUNCE_MS = 15 * 1000  # coalesce a bulk download's per-track ownership records
+# The launch sweep waits for the boot overlay to reveal (its walk starves the
+# GUI thread of the interpreter, and the boot water drops frames): this timer
+# is the failsafe that starts it anyway if the reveal never reports, sized
+# past the launch sequence's own worst case (1.9s hold + 8s handover cap +
+# drain + zoom) so it only ever fires when QML is gone or wedged.
+_BOOT_LIBRARY_SCAN_FAILSAFE_MS = 15 * 1000
 # ...but flush at least this often, because that debounce RESTARTS per track and
 # a sustained download lands tracks faster than it, so without a ceiling the
 # rebuild never runs and badges freeze for the whole batch. Longer than the
@@ -228,6 +242,184 @@ class LibraryMixin:
         self.libraryPresenceChanged.emit()
         self.libraryScanStatusChanged.emit()
 
+    def _publish_artist_rollup(self, idx: dict) -> None:
+        """(worker thread) Derive the per-artist rollup for a just-published
+        album index BEFORE libraryPresenceChanged fires. The QML handlers that
+        signal wakes re-ask artistLibraryPresence synchronously on the GUI
+        thread, and that slot's lazy derive is a full pass over the album
+        index, so leaving it to the slot put the whole pass inside a frame.
+        The slot keeps the lazy derive as the race fallback. Guarded so a
+        publish that lost the last-writer race never caches a rollup for an
+        index that is no longer the published one."""
+        try:
+            rollup = matching.build_artist_rollup(idx)
+        except Exception:
+            logger.debug("Artist rollup precompute failed; the slot derives it lazily", exc_info=True)
+            return
+        with self._library_index_lock:
+            if self._library_index is idx:
+                self._library_artist_index = rollup
+                self._library_artist_index_src = idx
+
+    def _build_presence_indexes(self, lib) -> tuple[dict, dict]:
+        """Both presence indexes (albums, tracks) from one committed cache
+        read, so every publish lands them as a pair and the two pills always
+        describe the same scan. Reads only ``lib`` (handed in, never
+        self._library at use time: see the generation notes in
+        _rebuild_library_index), so the launch seed and the scan share it."""
+        local: dict = {}
+        for a in lib.iter_albums():
+            # A Various-Artists credit is refused HERE, on the raw tag,
+            # because the artist folds can move a marker out of the
+            # detectors' reach ("V / A" splits at the spaced slash to a
+            # key of "v", which then rolled up as a real artist and could
+            # answer for one). The streaming side already refuses VA
+            # queries, so these rows were unreachable dead weight anyway.
+            if matching.is_various_artists(a["artist"]):
+                continue
+            local.setdefault(matching.presence_key(a["title"], a["artist"]), []).append(
+                {
+                    # The raw tagged title, kept because the key it is
+                    # grouped under has its edition qualifiers peeled off
+                    # and that is too loose to gate a download on.
+                    "title": a["title"],
+                    "year": a["year"],
+                    "tracks": a["tracks"],
+                    "id": a["id"],
+                    # Quality facts ride along so the badge can name the
+                    # copy ("MP3 128").
+                    "codec": a.get("codec", ""),
+                    "bitrate": a.get("bitrate", 0),
+                    "bits": a.get("bits", 0),
+                    "rate": a.get("rate", 0),
+                    # What the release SAYS it is, as opposed to what the
+                    # folder holds: its own track count and which disc of
+                    # how many this folder is. Lets the verdict tell a
+                    # complete copy of a smaller edition from a copy short
+                    # a track, and joins the disc sets no folder name spells
+                    # out.
+                    "declared": a.get("declared", 0),
+                    "disc_no": a.get("disc_no", 0),
+                    "disc_total": a.get("disc_total", 0),
+                    # The folder's summed play length in seconds (0 when
+                    # its files never said), the identity witness no tag
+                    # has to carry: it can prove an undated match and
+                    # refute a same-count impostor.
+                    "runtime": a.get("runtime", 0),
+                }
+            )
+        by_track: dict = {}
+        for t in lib.iter_tracks():
+            if not t["title"] or not t["artist"]:
+                continue  # an untagged file honestly matches nothing
+            if matching.is_various_artists(t["artist"]):
+                continue  # same raw-tag refusal as the album rows above
+            by_track.setdefault(matching.track_key(t["title"], t["artist"]), []).append(
+                {
+                    "id": t["id"],
+                    "codec": t.get("codec", ""),
+                    "bitrate": t.get("bitrate", 0),
+                    "bits": t.get("bits", 0),
+                    "rate": t.get("rate", 0),
+                    # The holding folder's identity, the only evidence a
+                    # track match can be proven against (see the track
+                    # matcher). Carried per row rather than looked up later,
+                    # because the album index is keyed by presence key and
+                    # cannot be asked "what is at this path".
+                    "album": t.get("album", ""),
+                    "album_year": t.get("album_year", ""),
+                    # The file's play length in seconds (0 when it never
+                    # said): a second, tag-free identity witness.
+                    "length": t.get("length", 0),
+                    # The featuring credit the key deliberately strips,
+                    # kept as evidence: different guests are different
+                    # recordings and must never claim each other.
+                    "guests": sorted(matching.feat_guests(t["title"], t["artist"])),
+                }
+            )
+        return local, by_track
+
+    def _seed_library_badges_job(self, gen: int, lib, root: str) -> None:
+        """(POOL THREAD) Publish the previous scan's badges straight from the
+        committed cache, so a freshly launched window is never badge-less
+        while the change-check runs underneath.
+
+        Dispatched as its OWN job, ahead of any scan, because the scan shares
+        a pool with downloads and art fetches: a search rendered while the
+        scan's turn was still queued showed every result with no badge at
+        all, then flipped all of them in one frame when the first publish
+        finally landed. This is a read of a local sqlite file, so it is cheap
+        enough to jump the queue.
+
+        Only when nothing is shown yet (the first build after launch): a
+        coalesced rebuild already has a live index and must not be reset to
+        an older one. Gated on the committed cache being for this very
+        folder, so switching library folders never briefly flashes the
+        previous library's badges."""
+        if self._library_index is not None or gen != self._library_gen:
+            return
+        try:
+            if not lib.matches_scan_root(root):
+                return
+            seeded, seeded_tracks = self._build_presence_indexes(lib)
+        except Exception:
+            # The scan behind this one publishes the real thing either way;
+            # a failed seed costs the head start, never the badges.
+            logger.debug("Library badge seed failed; leaving it to the scan", exc_info=True)
+            return
+        if not seeded or gen != self._library_gen:
+            return
+        # Re-checked AFTER the build, which the scan's own copy of this
+        # never had to do: this can run BESIDE a scan, and a scan that
+        # finishes first has published a newer index over the window this
+        # spent assembling an older one. Last writer must not be the stale
+        # one. Check and set under the lock every publisher takes, because
+        # a bare check here is a promise with a hole in it: the scan can
+        # publish between this line and the assignment below, and the
+        # badges then visibly fall BACK to the pre-scan picture until the
+        # hourly sweep (the container poll sees no change, the scan having
+        # already stamped the mtimes it compares against).
+        with self._library_index_lock:
+            if self._library_index is not None:
+                return
+            self._library_index = seeded
+            self._library_track_index = seeded_tracks
+        self._publish_artist_rollup(seeded)
+        self._emit_from_worker("libraryPresenceChanged")
+
+    def _seed_library_badges(self) -> None:
+        """(GUI thread, launch) Light the badges from the committed cache
+        WITHOUT dispatching a scan. The launch sweep itself is held until the
+        boot overlay has revealed (_start_boot_library_scan): its directory
+        walk runs on pool threads that compete with the GUI thread for the
+        interpreter, and the only motion on screen during boot (the wave
+        loop) paid for that in dropped frames (probe 2026-09-01: 59-73 ms GUI
+        stalls with _walk_album_dirs/_scandir_one busy, against a 42 ms frame
+        budget). The seed is a sqlite read, cheap enough to keep."""
+        with self._library_index_lock:
+            gen = self._library_gen
+            lib = self._library
+        root = self._library_root()
+        if not root:
+            return
+        self.threadpool.start(Worker(lambda: self._seed_library_badges_job(gen, lib, root)), 10)
+
+    def _start_boot_library_scan(self) -> None:
+        """(GUI thread) Release the launch library sweep. Called by the boot
+        reveal (bootRevealed) and by the failsafe timer armed at construction,
+        whichever comes first; one-shot, so the loser is a no-op. The
+        force_full decision is made HERE, not at construction: it reads the
+        cache's clock, and the answer cannot go stale in the seconds the
+        reveal takes."""
+        if not getattr(self, "_boot_library_scan_pending", False):
+            return
+        self._boot_library_scan_pending = False
+        timer = getattr(self, "_boot_library_scan_timer", None)
+        if timer is not None:
+            timer.stop()
+        logger.info("boot library sweep released")
+        self._rebuild_library_index(force_full=self._library.due_for_full_scan(_LIBRARY_DEEP_SWEEP_MS / 1000.0))
+
     def _rebuild_library_index(self, force_full: bool = False) -> None:  # noqa: C901 (see below)
         """(Re)build the local library-presence index off the GUI thread by
         scanning the configured library folder. Generation-guarded so a library-
@@ -302,80 +494,16 @@ class LibraryMixin:
         self.libraryScanStatusChanged.emit()
 
         def build_index() -> tuple[dict, dict]:
-            """Both presence indexes (albums, tracks) from one committed cache
-            read, so every publish below lands them as a pair and the two pills
-            always describe the same scan."""
-            local: dict = {}
-            for a in lib.iter_albums():
-                # A Various-Artists credit is refused HERE, on the raw tag,
-                # because the artist folds can move a marker out of the
-                # detectors' reach ("V / A" splits at the spaced slash to a
-                # key of "v", which then rolled up as a real artist and could
-                # answer for one). The streaming side already refuses VA
-                # queries, so these rows were unreachable dead weight anyway.
-                if matching.is_various_artists(a["artist"]):
-                    continue
-                local.setdefault(matching.presence_key(a["title"], a["artist"]), []).append(
-                    {
-                        # The raw tagged title, kept because the key it is
-                        # grouped under has its edition qualifiers peeled off
-                        # and that is too loose to gate a download on.
-                        "title": a["title"],
-                        "year": a["year"],
-                        "tracks": a["tracks"],
-                        "id": a["id"],
-                        # Quality facts ride along so the badge can name the
-                        # copy ("MP3 128").
-                        "codec": a.get("codec", ""),
-                        "bitrate": a.get("bitrate", 0),
-                        "bits": a.get("bits", 0),
-                        "rate": a.get("rate", 0),
-                        # What the release SAYS it is, as opposed to what the
-                        # folder holds: its own track count and which disc of
-                        # how many this folder is. Lets the verdict tell a
-                        # complete copy of a smaller edition from a copy short
-                        # a track, and joins the disc sets no folder name spells
-                        # out.
-                        "declared": a.get("declared", 0),
-                        "disc_no": a.get("disc_no", 0),
-                        "disc_total": a.get("disc_total", 0),
-                        # The folder's summed play length in seconds (0 when
-                        # its files never said), the identity witness no tag
-                        # has to carry: it can prove an undated match and
-                        # refute a same-count impostor.
-                        "runtime": a.get("runtime", 0),
-                    }
-                )
-            by_track: dict = {}
-            for t in lib.iter_tracks():
-                if not t["title"] or not t["artist"]:
-                    continue  # an untagged file honestly matches nothing
-                if matching.is_various_artists(t["artist"]):
-                    continue  # same raw-tag refusal as the album rows above
-                by_track.setdefault(matching.track_key(t["title"], t["artist"]), []).append(
-                    {
-                        "id": t["id"],
-                        "codec": t.get("codec", ""),
-                        "bitrate": t.get("bitrate", 0),
-                        "bits": t.get("bits", 0),
-                        "rate": t.get("rate", 0),
-                        # The holding folder's identity, the only evidence a
-                        # track match can be proven against (see the track
-                        # matcher). Carried per row rather than looked up later,
-                        # because the album index is keyed by presence key and
-                        # cannot be asked "what is at this path".
-                        "album": t.get("album", ""),
-                        "album_year": t.get("album_year", ""),
-                        # The file's play length in seconds (0 when it never
-                        # said): a second, tag-free identity witness.
-                        "length": t.get("length", 0),
-                        # The featuring credit the key deliberately strips,
-                        # kept as evidence: different guests are different
-                        # recordings and must never claim each other.
-                        "guests": sorted(matching.feat_guests(t["title"], t["artist"])),
-                    }
-                )
-            return local, by_track
+            # The shared builder, closed over THIS scan's ``lib`` (see the
+            # generation notes above).
+            return self._build_presence_indexes(lib)
+
+        # When the LAST mid-scan partial publish rebuilt the indexes (None
+        # means never, so the first committed flush always publishes; a zero
+        # start would only mean "always" while the monotonic clock happens to
+        # read past the window). Scan-local by construction: a new scan starts
+        # its own clock.
+        last_partial_publish: list[float | None] = [None]
 
         def on_progress(event: dict) -> None:
             # A COLD scan of a NAS library takes minutes, so relay the scanner's
@@ -404,7 +532,17 @@ class LibraryMixin:
                 else:
                     elapsed = max(0.001, time.monotonic() - self._library_scan_read_t0)
                     p["eta_secs"] = int((p["total"] - p["done"]) * elapsed / p["done"])
-                if event.get("committed"):
+                # Mid-scan republish, throttled: every committed flush used to
+                # rebuild BOTH presence indexes from a full table read, and a
+                # cold scan of a big library commits every 200 albums, so the
+                # rebuild cost itself grew quadratically as the table filled
+                # (the badges only need to light up, not strobe). The FIRST
+                # commit still publishes immediately; the scan's final publish
+                # is unconditional in work() below, so nothing committed is
+                # ever left unpublished at the end.
+                if event.get("committed") and (
+                    last_partial_publish[0] is None or time.monotonic() - last_partial_publish[0] >= _SCAN_PUBLISH_MIN_S
+                ):
                     fresh, fresh_tracks = build_index()
                     # Re-check the generation AFTER the build, exactly as the
                     # startup seed below does. build_index() is a full table read
@@ -415,63 +553,22 @@ class LibraryMixin:
                     # ever overwrote them.
                     if gen != self._library_gen:
                         return
+                    last_partial_publish[0] = time.monotonic()
                     # Under the lock the seed beside this scan also takes, so
                     # its "nobody has published yet" check cannot straddle
                     # this publish and overwrite it with the older cache.
                     with self._library_index_lock:
                         self._library_index = fresh
                         self._library_track_index = fresh_tracks
-                    self.libraryPresenceChanged.emit()
+                    self._publish_artist_rollup(fresh)
+                    self._emit_from_worker("libraryPresenceChanged")
             self._library_scan_progress = p
-            self.libraryScanStatusChanged.emit()
+            self._emit_from_worker("libraryScanStatusChanged")
 
         def seed() -> None:
-            """(POOL THREAD, dispatched AHEAD of the scan) Publish the previous
-            scan's badges straight from the committed cache, before this scan
-            reads a single file, so a freshly launched window is never
-            badge-less while the change-check runs underneath.
-
-            It runs as its OWN job rather than as the scan's first step
-            because the scan shares a pool with downloads and art fetches: a
-            search rendered while the scan's turn was still queued showed
-            every result with no badge at all, then flipped all of them in one
-            frame when the first publish finally landed. This is a read of a
-            local sqlite file, so it is cheap enough to jump the queue.
-
-            Only when nothing is shown yet (the first build after launch): a
-            coalesced rebuild already has a live index and must not be reset to
-            an older one. Gated on the committed cache being for this very
-            folder, so switching library folders never briefly flashes the
-            previous library's badges."""
-            if self._library_index is not None or gen != self._library_gen:
-                return
-            try:
-                if not lib.matches_scan_root(root):
-                    return
-                seeded, seeded_tracks = build_index()
-            except Exception:
-                # The scan behind this one publishes the real thing either way;
-                # a failed seed costs the head start, never the badges.
-                logger.debug("Library badge seed failed; leaving it to the scan", exc_info=True)
-                return
-            if not seeded or gen != self._library_gen:
-                return
-            # Re-checked AFTER the build, which the scan's own copy of this
-            # never had to do: this now runs BESIDE the scan, and a scan that
-            # finishes first has published a newer index over the window this
-            # spent assembling an older one. Last writer must not be the stale
-            # one. Check and set under the lock every publisher takes, because
-            # a bare check here is a promise with a hole in it: the scan can
-            # publish between this line and the assignment below, and the
-            # badges then visibly fall BACK to the pre-scan picture until the
-            # hourly sweep (the container poll sees no change, the scan having
-            # already stamped the mtimes it compares against).
-            with self._library_index_lock:
-                if self._library_index is not None:
-                    return
-                self._library_index = seeded
-                self._library_track_index = seeded_tracks
-            self.libraryPresenceChanged.emit()
+            # (POOL THREAD, dispatched AHEAD of the scan) The shared seed job:
+            # see _seed_library_badges_job for why it exists and its guards.
+            self._seed_library_badges_job(gen, lib, root)
 
         def work() -> None:
             index = None
@@ -524,8 +621,9 @@ class LibraryMixin:
                         with self._library_index_lock:
                             self._library_index = index
                             self._library_track_index = track_index
+                        self._publish_artist_rollup(index)
                         self._library_scan_progress = {"phase": "done", "indexed": count, "eta_secs": -1}
-                        self.libraryPresenceChanged.emit()
+                        self._emit_from_worker("libraryPresenceChanged")
                     # Surface why a scan found nothing (unreadable folder vs empty) so
                     # Settings can explain a permission-blocked folder, not a silent blank.
                     if status is not None:
@@ -556,7 +654,12 @@ class LibraryMixin:
                 # Always re-announce at the end: the "scanning" state (derived from the
                 # building flag) has just cleared even when the status string is
                 # unchanged, and Settings must drop its "Scanning…" note.
-                self.libraryScanStatusChanged.emit()
+                # Through the torn-down guard, like every emit this scan makes:
+                # quitting gives the pools a bounded drain, so a scan still
+                # walking a slow folder can reach this line after the bridge's
+                # C++ object is gone, and a plain emit then raises and is
+                # logged as a worker crash on the way out of a clean quit.
+                self._emit_from_worker("libraryScanStatusChanged")
                 # Refresh the local-disk watcher to match the now-current tree (add
                 # newly-discovered artist folders, drop vanished ones). Marshalled to
                 # the GUI thread via a queued signal because the QFileSystemWatcher
@@ -925,9 +1028,28 @@ class LibraryMixin:
         (TIDAL's number); the matcher weighs it against the folder's summed
         file lengths as a second identity witness. Callers without it get the
         four-argument overload and years remain the only proof."""
-        if self._library_index is None:
+        idx = self._library_index
+        if idx is None:
             return {"present": False}
-        verdict = matching.decide_presence(title, artist, year, num_tracks, self._library_index, duration)
+        # Memoized per index object: a republish makes EVERY visible pill
+        # re-ask, and scrolling re-asks per row, all against the same index,
+        # so the matcher kept re-deriving identical verdicts. The memo resets
+        # exactly when the index is swapped (the moment libraryPresenceChanged
+        # fires), so the always-on freshness rule holds; the MusicBrainz
+        # overlay is applied OUTSIDE the memo (its verdict map can gain an
+        # answer without the index changing). _mb_arbitrated never mutates the
+        # verdict it is handed (it copies to overlay), so sharing the memoized
+        # dict is safe.
+        if self._presence_memo_src is not idx:
+            self._presence_memo = {}
+            self._presence_memo_src = idx
+        key = (title, artist, year, num_tracks, duration)
+        verdict = self._presence_memo.get(key)
+        if verdict is None:
+            verdict = matching.decide_presence(title, artist, year, num_tracks, idx, duration)
+            if len(self._presence_memo) >= _PRESENCE_MEMO_MAX:
+                self._presence_memo.pop(next(iter(self._presence_memo)))
+            self._presence_memo[key] = verdict
         return self._mb_arbitrated(verdict, title, artist, year, num_tracks, duration)
 
     @Slot(str, str, result="QVariant")
@@ -952,15 +1074,27 @@ class LibraryMixin:
         refute it as a second witness. A caller that leaves them all out gets
         sure False and the badge keeps its "?"; the two-argument overload
         exists for exactly that case."""
-        if self._library_track_index is None:
+        idx = self._library_track_index
+        if idx is None:
             return {"present": False, "sure": False}
-        return matching.decide_track_presence(title, artist, self._library_track_index, album, album_year, duration)
+        # Same memo shape as the album slot above, per track index object.
+        if self._track_presence_memo_src is not idx:
+            self._track_presence_memo = {}
+            self._track_presence_memo_src = idx
+        key = (title, artist, album, album_year, duration)
+        verdict = self._track_presence_memo.get(key)
+        if verdict is None:
+            verdict = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
+            if len(self._track_presence_memo) >= _PRESENCE_MEMO_MAX:
+                self._track_presence_memo.pop(next(iter(self._track_presence_memo)))
+            self._track_presence_memo[key] = verdict
+        return verdict
 
     # ---- MusicBrainz arbitration (library_mb_arbiter, default off) -----------
     # An opt-in second opinion for matches the scan cannot prove: MusicBrainz
     # knows every edition of a release with its date, track count and total
     # length, which is exactly what an undated folder beside a length-less
-    # TIDAL page is missing. The arbiter (tidaler.mb_arbiter) may only ever
+    # TIDAL page is missing. The arbiter (waves.mb_arbiter) may only ever
     # UPGRADE an unproven verdict to proven; it never creates presence, never
     # downgrades, and the engine never sees it (the bulk gate calls the
     # matcher directly, not this overlay). Lookups run on a worker behind a
@@ -1048,7 +1182,7 @@ class LibraryMixin:
                     self._mb_pending.discard(key)
                     logger.info("MusicBrainz arbitration answered: %s", "proven" if answer else "not provable")
                     if answer:
-                        self.libraryPresenceChanged.emit()
+                        self._emit_from_worker("libraryPresenceChanged")
 
         self.threadpool.start(Worker(work))
 
@@ -1057,7 +1191,7 @@ class LibraryMixin:
         file (service data only: MusicBrainz URLs and bodies, no local paths)."""
         inst = getattr(self, "_mb_arbiter", None)
         if inst is None:
-            from tidaler.mb_arbiter import MBArbiter
+            from waves.mb_arbiter import MBArbiter
 
             path = os.path.join(os.path.dirname(self.settings.file_path), "mbarbiter.sqlite3")
             inst = self._mb_arbiter = MBArbiter(path)

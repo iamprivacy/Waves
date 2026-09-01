@@ -1,9 +1,10 @@
 """Waves-owned TIDAL session config.
 
-Subclasses the upstream-tracking ``tidaler.config.Tidal`` so a correctness fix
-lands here instead of in the shared ``config.py`` method body. Keeping the
-override out of ``config.py`` means a future tidal-dl-ng bump still merges that
-file cleanly (the whole point of the backend rework's patchability constraint).
+Subclasses the engine's ``waves.config.Tidal`` so a correctness fix lands here
+instead of in the shared ``config.py`` method body. Keeping the override out of
+``config.py`` follows the engine/UI seam discipline: engine modules stay close
+to their inherited shape (a habit from the fork era's upstream merges, kept
+because it makes the engine easy to audit), and UI-owned behavior lives here.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 
-from tidaler.config import Tidal
+from waves.config import Tidal
 
 logger = logging.getLogger("waves.session")
 

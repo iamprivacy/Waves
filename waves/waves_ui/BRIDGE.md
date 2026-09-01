@@ -65,6 +65,14 @@ side-effect free: that builder ends by recording the page's member track ids
 the hovered card answers by re-querying its ownership rollup. A hover
 therefore costs what an open costs on that path.
 
+`prefetchAlbumTracks(albumId)` is the album-row half: a dwell on a row fetches
+that album's tracks so the expand which usually follows opens on them instead
+of "Loading tracks…". Unlike its browse sibling it is silent, emitting nothing
+and recording no membership (the expand does that, see `loadAlbumTracks`), and
+a cached or already-in-flight album is a no-op. One unwatched fetch at a time:
+a second hover while one is running is DROPPED, never queued, because the same
+pool serves real clicks.
+
 ## Download queue
 
 | Signal                                                                       | Fires when                                                                                                                                 |
@@ -97,8 +105,8 @@ them, and enqueues the set under one `albums:` rollup id.
 ## Local library presence (the "in your library" badge)
 
 The scan family lives in `bridge_library.py` (`LibraryMixin`, mixed into
-`WavesBridge`); `tidaler/library_index.py` walks the configured folder and
-`tidaler/matching.py` decides what counts as the same album.
+`WavesBridge`); `waves/library_index.py` walks the configured folder and
+`waves/matching.py` decides what counts as the same album.
 
 `decide_presence` answers at two strengths and the difference matters. `present`
 lights the pill and is generous. Beyond it the verdict splits into two

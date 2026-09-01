@@ -1,24 +1,26 @@
-# Waves, desktop UI for tidaler
+# Waves, the desktop UI
 
-Waves is an alternative graphical front-end for tidaler: a search-first,
-keyboard-friendly desktop app with a console (CRT phosphor-green) theme. It wraps
-tidaler's existing download engine, search, browse, and queue downloads from a
-single window while the backend handles authentication, streaming, and tagging.
+Waves is a search-first, keyboard-friendly desktop app with a console (CRT
+phosphor-green) theme. This package is the GUI layer: it wraps the download
+engine that lives in the parent `waves` package, search, browse, and queue
+downloads from a single window while the engine handles authentication,
+streaming, and tagging.
 
-It is a self-contained GUI layer: everything lives under `tidaler/waves_ui/` and
-reuses tidaler's `Settings`, `Tidal`, and `Download` objects unchanged.
+It is self-contained: everything lives under `waves/waves_ui/` and reuses the
+engine's `Settings`, `Tidal`, and `Download` objects unchanged.
 
 ## Running
 
 ```bash
-python -m tidaler.waves_ui
+python -m waves.waves_ui
 ```
 
 A paid TIDAL plan and a one-time sign-in are required (the app guides you through
 the browser login on first launch and reuses the cached token afterwards).
 
-Requirements: Python 3.12+, PySide6 (Qt 6 / QtQuick), and the rest of tidaler's
-dependencies. Audio quality follows your tidaler settings, up to HiRes Lossless.
+Requirements: Python 3.12+, PySide6 (Qt 6 / QtQuick), and the rest of the
+project's dependencies. Audio quality follows your settings, up to HiRes
+Lossless.
 
 ## What's here
 
@@ -53,7 +55,7 @@ dependencies. Audio quality follows your tidaler settings, up to HiRes Lossless.
 | `app.py`               | Application entry point; creates the QML engine and the bridge.                                                      |
 | `backend.py`           | `WavesBridge`, the single `QObject` exposed to QML; runs blocking work (login, search, downloads) off the UI thread. |
 | `qml/Main.qml`         | The main window: search, results, artist pages, library, and the download queue.                                     |
-| `qml/SettingsPage.qml` | Settings editor (mirrors tidaler's preferences).                                                                     |
+| `qml/SettingsPage.qml` | Settings editor (mirrors the engine's preferences).                                                                  |
 | `updater.py`           | In-app self-updater: fail-closed Ed25519 verification, staged swap, rollback.                                        |
 | `signing.py`           | The embedded release public key and manifest verification.                                                           |
 | `ffmpeg_manager.py`    | Downloads and updates a trusted static FFmpeg into the app data dir.                                                 |

@@ -2,7 +2,7 @@
 
 Launch with::
 
-    python -m tidaler.waves_ui
+    python -m waves.waves_ui
 
 or import :func:`waves_activate` and call it (optionally passing an existing
 ``Tidal`` session).
@@ -20,18 +20,41 @@ import time
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QWindow
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest, QSslConfiguration
-from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
+from PySide6.QtQml import QQmlApplicationEngine, QQmlIncubationController, QQmlNetworkAccessManagerFactory
 
-from tidaler.config import Tidal
+from waves.config import Tidal
 
 from . import diagnostics, proc
 from .backend import _ART_CACHE_DIR, WavesBridge
 
-_QML_MAIN = Path(__file__).parent / "qml" / "Main.qml"
-_FONT_DIR = Path(__file__).parent / "fonts"
+
+def _data_dir(name: str) -> Path:
+    """The bundled ``qml``/``fonts`` directory, wherever this run keeps it.
+
+    From source it sits beside this file. A packaged build cannot ship it
+    there: next to the binary, a ``waves/`` data directory would collide with
+    the ``Waves`` executable on the case-insensitive filesystems macOS and
+    Windows ship with, so the build lands the data at ``waves_ui/<name>``
+    beside the binary instead (the --include-data-dir directives in the
+    repo-root waves.py). Candidate order mirrors the window-icon lookup
+    below: source first, then the packaged locations.
+    """
+    for root in (
+        Path(__file__).parent,  # from source: waves/waves_ui/
+        Path(sys.argv[0]).resolve().parent / "waves_ui",  # packaged: beside the binary
+        Path(sys.executable).resolve().parent / "waves_ui",  # Nuitka phantom-python fallback
+    ):
+        candidate = root / name
+        if candidate.is_dir():
+            return candidate
+    return Path(__file__).parent / name
+
+
+_QML_MAIN = _data_dir("qml") / "Main.qml"
+_FONT_DIR = _data_dir("fonts")
 
 
 class _CacheFirstNAM(QNetworkAccessManager):
@@ -116,6 +139,112 @@ class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
         return nam
 
 
+class _BootPacedIncubation(QQmlIncubationController):
+    """Incubation pacing that keeps the boot water smooth.
+
+    Asynchronous Loaders incubate through the engine's controller, and the
+    default one (the window's) drives incubation as hard as the frame loop
+    allows. During launch that meant the landing's ~130 shelf and card
+    incubations completed back to back, ~10-16 ms each: the GUI thread's
+    event loop never idled, the render loop missed its sync slot for
+    hundreds of milliseconds at a stretch, and the only visible motion on
+    screen (the boot water) froze with it (probe: presentation gaps up to
+    356 ms mid-hold, with no single chunk crossing the 40 ms stall
+    detector).
+
+    Installed on the engine BEFORE the QML loads (so the window never
+    installs its own). While the launch overlay is up it incubates in small
+    slices on a timer, leaving the GUI thread free for roughly half of every
+    frame, so the water holds its rate while the landing assembles slightly
+    slower (the opening hold and the handover gate already absorb exactly
+    this). The bridge's bootRevealed() opens the throttle for the rest of
+    the session: a near-continuous slice per tick, the pre-existing pace, so
+    tab strikes and page builds keep their speed.
+
+    The timer runs unconditionally for the whole boot window (an empty
+    incubateFor is near-free), and at release the engine is handed back to
+    the window's own stock controller, so this class drives incubation only
+    while the launch look is up. Nothing here may depend on the
+    incubatingObjectCountChanged virtual firing: the first shipped version
+    started its timer from that virtual, whose binding passes the new count
+    as an argument, and the no-arg override raised TypeError on every call.
+    No timer ever started, no async Loader in the whole app could complete,
+    and the launch revealed a blank, dead landing.
+    """
+
+    _BOOT_SLICE_MS = 12
+    _OPEN_SLICE_MS = 50
+
+    def __init__(self, timer_parent) -> None:
+        super().__init__()
+        self._boot = True
+        self._released = False
+        self._notify = None
+        self._handback = None
+        self._timer = QTimer(timer_parent)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    def set_count_notifier(self, fn) -> None:
+        """The bridge learns the live incubation count (bootIncubationBusy):
+        under boot pacing the landing's cards finish registering into the
+        veil count only after it has already settled, so the reveal gate
+        reads THIS count, the authoritative one, instead."""
+        self._notify = fn
+
+    def set_handback(self, fn) -> None:
+        """Called once at release; returns True when it restored the window's
+        own incubation controller on the engine."""
+        self._handback = fn
+
+    def incubatingObjectCountChanged(self, *args) -> None:
+        # The binding passes the new count positionally; *args accepts either
+        # spelling and the authoritative count is queried, not trusted. This
+        # virtual is informational only (the reveal gate's third leg): pacing
+        # itself must keep working even if it never fires.
+        if self._notify is not None:
+            self._notify(self.incubatingObjectCount())
+
+    def _tick(self) -> None:
+        self.incubateFor(self._BOOT_SLICE_MS if self._boot else self._OPEN_SLICE_MS)
+
+    def release_throttle(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._boot = False
+        if self._notify is not None:
+            self._notify(0)
+        restored = False
+        if self._handback is not None:
+            try:
+                restored = bool(self._handback())
+            except Exception:
+                restored = False
+        if restored:
+            self._timer.stop()
+        # Not restored (no window to hand back to): keep ticking at the open
+        # slice so incubation can never go dead, whatever else went wrong.
+
+
+def _hand_incubation_back_to_window(engine) -> bool:
+    """Restore the window's own incubation controller on the engine.
+
+    Stock behavior for the rest of the session: the window's controller
+    drives incubation from the frame loop again, so the paced controller
+    only ever governs the boot window.
+    """
+    for win in engine.rootObjects():
+        getter = getattr(win, "incubationController", None)
+        if callable(getter):
+            controller = getter()
+            if controller is not None:
+                engine.setIncubationController(controller)
+                return True
+    return False
+
+
 def _load_mono() -> str:
     """Register the bundled monospace font and return its family name.
 
@@ -176,7 +305,7 @@ def _app_icon() -> QIcon | None:
     roots = (
         Path(sys.executable).resolve().parent / "ui",  # packaged: data files beside the binary
         Path(sys.argv[0]).resolve().parent / "ui",  # Nuitka: sys.executable is a phantom python.exe
-        Path(__file__).resolve().parent.parent / "ui",  # from source: tidaler/ui
+        Path(__file__).resolve().parent.parent / "ui",  # from source: waves/ui
     )
     for root in roots:
         icon: QIcon | None = None
@@ -220,7 +349,7 @@ def _crash_log_path() -> Path:
     """The persistent crash log, next to settings.json so it is easy to name in
     a bug report: crash.log in the platform's config folder (Application
     Support on macOS, %APPDATA% on Windows, ~/.config elsewhere)."""
-    from tidaler.helper.path import path_config_base
+    from waves.helper.path import path_config_base
 
     return Path(path_config_base()) / "crash.log"
 
@@ -238,7 +367,7 @@ def _open_crash_log():
     except OSError:
         pass
     fh = open(path, "a", encoding="utf-8")  # noqa: SIM115
-    from tidaler.waves_ui import __version__
+    from waves.waves_ui import __version__
 
     fh.write(f"\n=== Waves {__version__} session start ===\n")
     fh.flush()
@@ -416,8 +545,11 @@ def _memoize_macos_proxy_lookups(ttl: float = 60.0) -> None:
 def _log_config_migration() -> None:
     """Breadcrumb the legacy-config migration outcome (never the path itself:
     home paths are PII). The migration ran as a side effect of the first
-    config-folder resolution, inside _install_crash_diagnostics."""
-    from tidaler.helper import path as _path_helper
+    config-folder resolution, inside _install_crash_diagnostics.
+
+    Called AFTER the bridge is built, because that is what installs the
+    diagnostics handlers: the outcome has to be able to reach the ring."""
+    from waves.helper import path as _path_helper
 
     if _path_helper.CONFIG_MIGRATION == "moved":
         logging.getLogger("waves.config").info("config migrated to the platform-native folder")
@@ -428,7 +560,6 @@ def _log_config_migration() -> None:
 def waves_activate(tidal: Tidal | None = None) -> int:
     _tune_interpreter_for_gui()
     _install_crash_diagnostics()
-    _log_config_migration()
     # The freeze watchdog's stuck-event-loop tracebacks belong in the same
     # crash.log faulthandler already writes to.
     diagnostics.set_crash_file(_crash_log_file)
@@ -467,6 +598,18 @@ def waves_activate(tidal: Tidal | None = None) -> int:
 
     engine = QQmlApplicationEngine()
     bridge = WavesBridge(tidal=tidal)
+    # After the bridge, because the bridge is what installs diagnostics: logged
+    # any earlier, no logger had a level and no handler existed, so the "moved"
+    # line was dropped at the root default and the "failed" one reached stderr
+    # only, which a packaged build has nowhere to show. Either way it never
+    # reached the breadcrumb ring, the disk log or an exported bundle, which is
+    # the one thing this line is for.
+    _log_config_migration()
+    # Where the bundled ambient wave loop lives (packaged vs from-source is
+    # this module's _data_dir knowledge); the bridge serves playback from a
+    # local cached copy of it so boot never streams video off the install
+    # volume (see WavesBridge.motionVideoUrl).
+    bridge.set_motion_video_source(str(_data_dir("qml") / "assets" / "wave_loop.mp4"))
     # HTTP disk cache for artwork (must be installed before the QML loads).
     art_cache = _ArtCacheFactory(os.path.join(os.path.dirname(bridge.settings.file_path), _ART_CACHE_DIR))
     engine.setNetworkAccessManagerFactory(art_cache)
@@ -478,6 +621,17 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine.rootContext().setContextProperty("uiFontFamily", _ui_font())
     # Keep a reference so it isn't garbage-collected.
     app._waves_bridge = bridge  # type: ignore[attr-defined]
+    # Paced incubation while the launch overlay is up (see the class): must be
+    # installed before load so the window never installs its own controller.
+    incubation = _BootPacedIncubation(app)
+    engine.setIncubationController(incubation)
+    app._waves_incubation = incubation  # type: ignore[attr-defined]  # keep alive
+    bridge.set_boot_reveal_hook(incubation.release_throttle)
+    incubation.set_count_notifier(bridge.note_incubation_count)
+    incubation.set_handback(lambda: _hand_incubation_back_to_window(engine))
+    # Belt and braces: if the reveal hook is somehow never reached, open the
+    # throttle anyway; by then every boot path has long finished.
+    QTimer.singleShot(20_000, incubation.release_throttle)
     # Abort downloads and drain the worker pools before the Qt object graph is
     # torn down, otherwise quitting mid-download hangs in QThreadPool teardown.
     app.aboutToQuit.connect(bridge.shutdown)

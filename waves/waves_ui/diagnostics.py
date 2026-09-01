@@ -139,10 +139,27 @@ class _Redactor:
     # value the key/value pattern below would otherwise consume.
     _BEARER = re.compile(r"(?i)\bbearer\s+[^\s'\"&;,]+")
     # "key: value" secrets, whatever the surrounding syntax (JSON, URLs, repr).
+    #
+    # Two arms, because the two separators carry very different evidence. A
+    # colon or an equals sign SAYS the next run is a value, so anything after
+    # it goes. A plain space says nothing of the sort: a word after a word is
+    # far more often a title than a credential, and treating it as one turned
+    # a track called "Secret Song" into "Secret ‹redacted›" and a playlist
+    # called "Token Ring" into "Token ‹redacted›", destroying exactly the
+    # diagnostic value the content marker exists to preserve. So the spaced
+    # arm asks the VALUE to look like a credential: six or more characters
+    # carrying a digit or token punctuation, or a sixteen-character run of
+    # anything. Over-redaction is still the design; this only stops it eating
+    # ordinary prose. ("Bearer <token>" has its own pattern above, and every
+    # value learned at runtime is replaced literally by register_secret.)
     _KV_SECRET = re.compile(
         r"(?i)\b(bearer|authorization|auth|token|api[_-]?key|apikey|secret|password|passwd|"
         r"cookie|set-cookie|session[_-]?id|access[_-]?token|refresh[_-]?token|client[_-]?secret)\b"
-        r"(['\"]?\s*[:=]\s*|\s+)(['\"]?)[^\s'\"&;,]+"
+        r"(?:"
+        r"(['\"]?\s*[:=]\s*)(['\"]?)([^\s'\"&;,]+)"
+        r"|"
+        r"(\s+)(['\"]?)((?=[^\s'\"&;,]*[\d\-_./+=])[^\s'\"&;,]{6,}|[^\s'\"&;,]{16,})"
+        r")"
     )
     # Bare high-entropy blobs: long hex (ids, digests) and long base64ish runs.
     _LONG_HEX = re.compile(r"\b[0-9a-fA-F]{32,}\b")
@@ -154,6 +171,16 @@ class _Redactor:
     # arrive in server messages: /Users/<x>, /home/<x>, C:\Users\<x>,
     # \\host\Users\<x>, and the %USERPROFILE% expansion style.
     _USER_PATH = re.compile(r"(?i)((?:[A-Z]:)?[\\/](?:Users|home)[\\/]+)([^\\/\s\"';]+)")
+    # A URL query string carries whatever the caller put in it: a search term,
+    # an email, an account id. Our own code marks user content with content()
+    # so the export can hash it, but a THIRD-PARTY line never does: urllib3's
+    # "Retrying ... after connection broken by ...: /v1/search?query=..."
+    # reaches the breadcrumb ring and the disk log with the raw needle in it,
+    # past the "also hide titles and searches" export switch (which only
+    # touches marked spans). No query string is worth keeping, so the whole
+    # thing goes; the path in front of it stays, which is what makes the line
+    # useful. Requires a "=" so ordinary prose ("why? x") is left alone.
+    _URL_QUERY = re.compile(r"(?<![\s'\"])\?[^\s'\"<>|]*=[^\s'\"<>|]*")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -182,6 +209,15 @@ class _Redactor:
                 self._secrets.sort(key=lambda p: len(p[0]), reverse=True)
 
     @staticmethod
+    def _kv_sub(m: re.Match) -> str:
+        """Keep the key and the separator, replace the value. Whichever of
+        _KV_SECRET's two arms matched, its three groups are the ones that are
+        not None."""
+        separator = m.group(2) if m.group(2) is not None else m.group(5)
+        quote = m.group(3) if m.group(2) is not None else m.group(6)
+        return f"{m.group(1)}{separator}{quote or ''}‹redacted›"
+
+    @staticmethod
     def _ipv6_sub(m: re.Match) -> str:
         s = m.group(0)
         hexish = any(c in "abcdefABCDEF" for c in s)
@@ -194,8 +230,9 @@ class _Redactor:
             secrets = list(self._secrets)
         for value, placeholder in secrets:
             text = text.replace(value, placeholder)
+        text = self._URL_QUERY.sub("?‹query›", text)
         text = self._BEARER.sub("Bearer ‹redacted›", text)
-        text = self._KV_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}‹redacted›", text)
+        text = self._KV_SECRET.sub(self._kv_sub, text)
         text = self._MAC.sub("‹mac›", text)
         text = self._IPV6.sub(self._ipv6_sub, text)
         text = self._IPV4.sub("‹ip›", text)
@@ -494,7 +531,18 @@ class _PerfSampler:
                 parts.append(f"peak_rss={rss:.0f}MB")
             for name, pool in self._pools:
                 with contextlib.suppress(Exception):
-                    parts.append(f"{name}={pool.activeThreadCount()}/{pool.maxThreadCount()}")
+                    part = f"{name}={pool.activeThreadCount()}/{pool.maxThreadCount()}"
+                    # Plus the high-water mark for the pools that keep one
+                    # (PoolGauge, written as ^N). This samples on a timer, and
+                    # a per-job fan-out can saturate and drain entirely between
+                    # two ticks: reading the instantaneous count alone, a pool
+                    # that spent three seconds pinned at its ceiling reports
+                    # 0/10 in every line of the export, which is the exact
+                    # blindness the mark exists to cure.
+                    peak = getattr(pool, "peak", 0)
+                    if peak:
+                        part += f"^{peak}"
+                    parts.append(part)
             if self._probe_wall > 0.0:
                 occ = max(0.0, min(1.0, self._probe_busy / self._probe_wall))
                 parts.append(f"uiloop_busy={_occ_bucket(occ)} uiloop_maxstall={_stall_bucket(self._probe_max_stall)}")
@@ -605,12 +653,20 @@ def install(log_dir: str) -> Path | None:
     _crumbs.setFormatter(fmt)
     _crumbs.addFilter(redact)
 
+    # ONE dump handler on both trees, not one each: the limiter is per handler,
+    # and the waves tree does not propagate to the root, so two instances each
+    # kept their own clock. An error from a waves.* logger and one from a
+    # third-party root-tree logger seconds later then wrote the whole trail
+    # twice inside the window the limiter exists to hold, padding the rotating
+    # log with a duplicate and evicting that much real history.
+    _crumb_dump = None if _disk_handler is None else _CrumbDumpHandler(_crumbs, _disk_handler)
+
     for target in (waves, root):
         target.addHandler(_stream_handler)
         target.addHandler(_crumbs)
         if _disk_handler is not None:
             target.addHandler(_disk_handler)
-            target.addHandler(_CrumbDumpHandler(_crumbs, _disk_handler))
+            target.addHandler(_crumb_dump)
 
     _install_qt_handler()
     logger.info("[init] session=%s waves diagnostics installed", SESSION_ID)
@@ -718,7 +774,7 @@ def flush_disk_log(timeout: float = 2.0) -> None:
 
 def _app_version() -> str:
     try:
-        from tidaler.waves_ui import __version__
+        from waves.waves_ui import __version__
     except Exception:
         return "?"
     else:
