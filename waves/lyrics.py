@@ -16,8 +16,8 @@ import logging
 
 import requests
 
-from tidaler import version_app
-from tidaler.waves_ui.diagnostics import content as log_content
+from waves import version_app
+from waves.waves_ui.diagnostics import content as log_content
 
 logger = logging.getLogger("waves.lyrics")
 
