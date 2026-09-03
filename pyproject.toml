@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.26"
+version = "0.1.27"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -143,6 +143,10 @@ ignore = [
 # Measures import-time metadata cost in a fresh interpreter: this interpreter
 # runs a literal probe script (S603, fixed argv).
 "tests/test_lazy_metadata.py" = ["S603"]
+# The quality badge menu scenario re-runs itself in a subprocess to isolate the
+# Qt boot (S603, fixed argv).
+"tests/test_quality_pick_qml.py" = ["S603"]
+"tests/test_album_collapse_returns_the_view.py" = ["S603"]
 # The library scanner's directory walk (_walk_album_dirs) is a small state
 # machine over each folder's probe result (unchanged / relist / transient error /
 # vanished / root offline); the branching is the point and the function was kept
@@ -173,6 +177,7 @@ ignore = [
 "tests/test_queue_row_quality.py" = ["S603", "C901"]
 "tests/test_queue_unavailable_word.py" = ["S603", "C901"]
 "tests/test_queue_drawer_resize.py" = ["S603", "C901"]
+"tests/test_queue_drawer_close_button.py" = ["S603", "C901"]
 "tests/test_queue_delta_mirror.py" = ["S603", "C901"]
 "tests/test_queue_failure_reason_qml.py" = ["S603", "C901"]
 "tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
