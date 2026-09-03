@@ -11,4 +11,4 @@ retired, the layering stays because it keeps the engine auditable.
 # (:mod:`waves.waves_ui.updater`) compares against the latest GitHub release
 # tag. tests/test_package_version.py pins pyproject.toml to the same value.
 # Bump both (and tag a matching ``vX.Y.Z`` release) on every shipped build.
-__version__ = "0.1.26"
+__version__ = "0.1.27"

@@ -2090,6 +2090,24 @@ def _date_added(obj) -> str:
         return str(dt)
 
 
+# The UI's tier words back to the engine's Quality, the inverse of _tier_word
+# for the four stereo tiers a download can be asked at. "DEFAULT" is the one
+# non-tier a per-item quality choice can hold: it pins the Settings tier on a
+# track whose album carries a different choice (see _ask_quality_for).
+_QUALITY_BY_TIER = {
+    "HI-RES": Quality.hi_res_lossless,
+    "LOSSLESS": Quality.high_lossless,
+    "HIGH": Quality.low_320k,
+    "LOW": Quality.low_96k,
+}
+_OVERRIDE_DEFAULT = "DEFAULT"
+
+
+def _quality_for_tier(word: str):
+    """The Quality a UI tier word asks for, or None for anything else."""
+    return _QUALITY_BY_TIER.get(str(word or "").strip().upper())
+
+
 def _tier_word(name: str) -> str:
     """The one word the UI shows for a quality, from any of the names TIDAL
     spells it with (enum member, enum value, or an already-delivered tier)."""
@@ -3178,6 +3196,17 @@ class WavesBridge(LibraryMixin, QObject):
     # A track's ownership or delivered quality changed (a fresh download landed);
     # QML re-queries ownershipOf for that id to refresh an "in your library" badge.
     ownershipChanged = Signal(str)
+    # The per-item quality choices changed (one set or cleared); Main.qml
+    # re-reads qualityOverrides and every badge follows.
+    qualityOverridesChanged = Signal()
+    # The audio quality setting changed; Main.qml re-reads targetTier (the
+    # DEFAULT mark in a badge's menu).
+    targetTierChanged = Signal()
+    # A quality choice was set or cleared on an item: the media ids whose
+    # download standing it moves (the item and, for an album, its known
+    # tracks). Main.qml hands back any of their buttons that read DOWNLOADED
+    # only because this session fetched them, so the choice can be acted on.
+    qualityChoiceChanged = Signal("QVariantList")
     # Cold-cache ownership answers, batched: one comma-delimited string of ids
     # (",id1,id2,...,") per flush instead of one ownershipChanged per id. At
     # launch every card on the landing asks about every member of its
@@ -3780,6 +3809,14 @@ class WavesBridge(LibraryMixin, QObject):
         # down, tracks overwrite in place). Session-long like the claim
         # overrides, so a retry of a forced job stays forced.
         self._redownload_overrides: set[str] = set()
+        # Per-item audio quality choices made on a row's quality badge (issue
+        # #36): media id -> UI tier word ("HI-RES", "LOSSLESS", "HIGH", "LOW")
+        # or "DEFAULT". A choice stands on its item until that item is given
+        # another tier: a download asks at it without spending it, so the badge
+        # keeps stating the tier the copy was fetched at. A track without one
+        # of its own follows its album's. Session-only on purpose: an ask that
+        # lives as long as the window, never a setting.
+        self._quality_overrides: dict[str, str] = {}
         # When set, _emit_queue() coalesces, used while enqueueing a batch so
         # QML receives a single queueChanged for the whole discography.
         self._queue_emit_suspended = False
@@ -7578,6 +7615,149 @@ class WavesBridge(LibraryMixin, QObject):
             logger.debug("Could not read the audio quality to pin on the row", exc_info=True)
             return ""
 
+    # ---- per-item quality choice (issue #36) --------------------------------
+    # A choice lives on the media id it was made on. Every download entry point
+    # (a button, the owned gate's REDOWNLOAD, the library claim's DOWNLOAD
+    # ANYWAY, a re-fetched share link, a held download released by the folder
+    # or ffmpeg gate) funnels through _download, and _download asks here at the
+    # moment the row is queued, so no entry point has to carry the choice and
+    # none can forget to. Nothing below touches the engine: the row's
+    # askQuality is what already pins every job (see _job_quality).
+    #
+    # A choice STANDS until the item is given another tier: downloading at it
+    # does not spend it, so the badge keeps stating the tier the copy on disk
+    # was asked at. Nothing here is written to disk, so a choice reaches no
+    # further than this run of the app.
+
+    def _get_quality_overrides(self) -> dict:
+        return dict(getattr(self, "_quality_overrides", None) or {})
+
+    qualityOverrides = Property("QVariant", _get_quality_overrides, notify=qualityOverridesChanged)
+
+    def _get_target_tier(self) -> str:
+        return self._target_tier()
+
+    targetTier = Property(str, _get_target_tier, notify=targetTierChanged)
+
+    @Slot(str, str)
+    def setQualityOverride(self, media_id: str, tier: str) -> None:
+        """Record (or with "" clear) the tier the next download of this item
+        asks for. Anything but the four tiers or DEFAULT is refused, so a
+        stale or garbled word can never reach a job."""
+        mid = str(media_id or "")
+        word = str(tier or "").strip().upper()
+        if not mid:
+            return
+        store = getattr(self, "_quality_overrides", None)
+        if store is None:
+            store = self._quality_overrides = {}
+        if word == "":
+            if store.pop(mid, None) is None:
+                return
+            logger.info("Quality choice cleared on one item")
+        elif word == _OVERRIDE_DEFAULT or _quality_for_tier(word) is not None:
+            if store.get(mid) == word:
+                return
+            store[mid] = word
+            logger.info("Quality choice set on one item: %s", word)
+        else:
+            logger.debug("Refused an unknown quality choice")
+            return
+        self.qualityOverridesChanged.emit()
+        # A choice moves the target the owned copies are judged against, so
+        # every button standing on one of them re-asks (a copy landed at a
+        # lower tier is an upgrade now), and a button that reads DOWNLOADED
+        # only because THIS session fetched the item is handed back too
+        # (livetest report: download a song, choose another tier on it, the
+        # button stayed DOWNLOADED and there was nothing to click).
+        scope = self._quality_choice_scope(mid)
+        for tid in scope:
+            self.ownershipChanged.emit(tid)
+        self.qualityChoiceChanged.emit(scope)
+
+    def _quality_choice_scope(self, media_id: str) -> list[str]:
+        """The media ids whose download standing a choice on ``media_id``
+        moves: the item itself and, for an album, every track of it Waves
+        knows (the members the ownership store learned from a download or
+        an opened page, plus the tracks seen on a results page). A track's
+        choice never reaches its album: the album's own download would still
+        ask at the album's tier and skip the rest."""
+        mid = str(media_id or "")
+        scope = [mid]
+        seen = {mid}
+        store = getattr(self, "_ownership", None)
+        try:
+            members = store.members_of(mid) if store is not None else None
+        except Exception:
+            logger.debug("Could not list an album's members for a quality choice", exc_info=True)
+            members = None
+        for tid in members or []:
+            if tid not in seen:
+                seen.add(tid)
+                scope.append(str(tid))
+        # Under the buckets' lock: workers evict from these dicts while they
+        # are iterated here on the GUI thread.
+        lock = getattr(self, "_objs_lock", None)
+        tracks = (getattr(self, "_objs", None) or {}).get("track", {})
+        if lock is not None:
+            with lock:
+                tracks = dict(tracks)
+        for tid, obj in tracks.items():
+            if str(getattr(getattr(obj, "album", None), "id", "") or "") == mid and tid not in seen:
+                seen.add(tid)
+                scope.append(str(tid))
+        return scope
+
+    @Slot(str, result=str)
+    def qualityOverrideOf(self, media_id: str) -> str:
+        return str((getattr(self, "_quality_overrides", None) or {}).get(str(media_id or ""), ""))
+
+    def _quality_override_key(self, obj, type_media: str, media_id: str) -> str:
+        """Which choice applies to this download: the item's own, else for a
+        track its album's. "" when neither carries one."""
+        store = getattr(self, "_quality_overrides", None) or {}
+        mid = str(media_id or "")
+        if mid and mid in store:
+            return mid
+        if type_media == "track":
+            album_id = str(getattr(getattr(obj, "album", None), "id", "") or "")
+            if album_id and album_id in store:
+                return album_id
+        return ""
+
+    def _ask_quality_for(self, obj, type_media: str, media_id: str) -> tuple[str, str]:
+        """What a download queued now asks for: (askQuality value, tier word).
+        Without a choice it is the Settings tier, exactly as before; DEFAULT is
+        that same answer made explicit on one item."""
+        key = self._quality_override_key(obj, type_media, media_id)
+        word = (getattr(self, "_quality_overrides", None) or {}).get(key, "") if key else ""
+        quality = _quality_for_tier(word)
+        if quality is None:
+            return self._queued_quality_value(), self._target_tier()
+        return str(quality.value), _tier_word(quality.name)
+
+    def _override_target_rank(self, track_id: str) -> int:
+        """The rank a download of this track would target right now: its own
+        or its album's quality choice when one stands, else the setting. So
+        an owned LOSSLESS copy reads as not current once HI-RES is chosen on
+        it, and the button offers the upgrade instead of sitting DOWNLOADED."""
+        store = getattr(self, "_quality_overrides", None) or {}
+        if not store:
+            return self._target_quality_rank()
+        tid = str(track_id or "")
+        obj = self._objs["track"].get(tid) if hasattr(self, "_objs") else None
+        key = self._quality_override_key(obj, "track", tid)
+        quality = _quality_for_tier(store.get(key, "")) if key else None
+        return self._target_quality_rank(quality) if quality is not None else self._target_quality_rank()
+
+    def _row_ask(self, qid: int) -> tuple | None:
+        """The (askQuality, tier word) a queue row was created with, for a
+        retry of that row to ask at again; None when the row is gone or
+        never carried an ask."""
+        row = self._queue_item(qid) or {}
+        ask = str(row.get("askQuality") or "")
+        return (ask, str(row.get("quality") or "")) if ask else None
+
     def _job_quality(self, qid: int):
         """The audio quality a queue row was created at, as a Quality, or None
         when the row is gone or its value is no longer a tier this build
@@ -7627,7 +7807,14 @@ class WavesBridge(LibraryMixin, QObject):
         tracks: int = 0,
         art: str = "",
         expected: str = "",
+        ask_quality: str | None = None,
+        ask_tier: str | None = None,
     ) -> int:
+        # A per-item quality choice arrives as both halves of the ask (the
+        # Quality value the job pins, the word the drawer states); without one
+        # both come from the setting as they always have.
+        if ask_quality is None or ask_tier is None:
+            ask_quality, ask_tier = self._queued_quality_value(), self._target_tier()
         self._queue_seq += 1
         qid = self._queue_seq
         row = {
@@ -7656,13 +7843,13 @@ class WavesBridge(LibraryMixin, QObject):
             # actually lands is reported per track and can differ (a release
             # without a hi-res master downgrades), which is the point of showing
             # the two separately.
-            "quality": self._target_tier(),
+            "quality": ask_tier,
             # The audio quality this job is queued at, held for its whole
             # life: a change in Settings retargets nothing that is already
             # queued or running, it applies to what is queued from then on.
             # Stored as the plain tier string the Quality enum carries so the
             # row stays a QML-friendly dict.
-            "askQuality": self._queued_quality_value(),
+            "askQuality": ask_quality,
             # Whether the library scan's tag claim may skip tracks for this job,
             # pinned here for the same reason the quality is: the run's gate and
             # the expanded row's prediction must answer alike, and a preference
@@ -8074,7 +8261,7 @@ class WavesBridge(LibraryMixin, QObject):
             return {"owned": False, "pending": True} if hit is None else {"owned": False}
         return {
             **rec,
-            "up_to_date": _copy_is_current(rec, self._target_quality_rank(), self._would_refetch_atmos(rec)),
+            "up_to_date": _copy_is_current(rec, self._override_target_rank(tid), self._would_refetch_atmos(rec)),
         }
 
     def _would_refetch_atmos(self, rec) -> bool:
@@ -8119,6 +8306,52 @@ class WavesBridge(LibraryMixin, QObject):
         """collectionOwnership's verdict for a member list the caller already
         holds (a page that knows its own tracks)."""
         return self._rollup_verdict([str(t) for t in ids or []])
+
+    @Slot(str, result=str)
+    def ownedTierOf(self, media_id: str) -> str:
+        """The tier of the copy this item ALREADY has on disk, as the UI's one
+        word, or "" when it has none (issue #36: the quality menu marks that
+        one row, so a tier you already hold is not downloaded again by
+        mistake).
+
+        A track answers with its own copy's delivered tier, which is what the
+        file actually is, not what was asked for. A collection Waves knows the
+        members of answers only when EVERY member is owned, with the WEAKEST
+        member's tier: the mark says "you already have this at this quality",
+        and on an album that has to mean the whole album. A collection Waves
+        has never observed, and any item with no copy, answers "".
+
+        Cache-only, exactly like ownershipOf: the disk is never touched on the
+        GUI thread. A cold answer reads as "" and the menu re-asks when
+        ownershipChanged says the truth landed."""
+        mid = str(media_id or "")
+        if not mid:
+            return ""
+        store = getattr(self, "_ownership", None)
+        try:
+            ids = store.members_of(mid) if store is not None else None
+        except Exception:
+            logger.debug("Could not list an album's members for the quality menu", exc_info=True)
+            ids = None
+        if not ids:
+            rec = self.ownershipOf(mid)
+            return _tier_word(str(rec.get("quality_tier") or "")) if rec.get("owned") is True else ""
+        weakest = ""
+        weakest_rank = -1
+        for tid in ids:
+            o = self.ownershipOf(str(tid))
+            if o.get("owned") is not True:
+                return ""
+            rank = quality_rank(str(o.get("quality_tier") or ""))
+            # A copy with no tier at all (a video row, a record from a build
+            # that did not store one) cannot be spoken for: say nothing rather
+            # than mark a tier the files may not be.
+            if rank < 0:
+                return ""
+            if weakest_rank < 0 or rank < weakest_rank:
+                weakest_rank = rank
+                weakest = _tier_word(str(o.get("quality_tier") or ""))
+        return weakest
 
     def _rollup_verdict(self, ids) -> str:
         if not ids:
@@ -10041,7 +10274,12 @@ class WavesBridge(LibraryMixin, QObject):
         collection: bool,
         media_id: str,
         merge_plan: list | None = None,
+        keep_ask: tuple | None = None,
     ) -> None:
+        """``keep_ask`` = (askQuality, tier word) of a row being RETRIED: the
+        retry asks at what that row asked, not at a choice or setting that
+        has moved since, and spends no choice (the row already had its own
+        ask). Every fresh click leaves it None."""
         if not self._logged_in:
             self._set_status("Sign in before downloading")
             return
@@ -10063,7 +10301,9 @@ class WavesBridge(LibraryMixin, QObject):
             # later, on the worker, by _gate_reachability.)
             self._stash_pending_download(
                 media_id,
-                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+                lambda: self._download(
+                    obj, type_media, name, file_template, collection, media_id, merge_plan, keep_ask=keep_ask
+                ),
             )
             return
         if self._ffmpeg_gate_holds(
@@ -10078,8 +10318,18 @@ class WavesBridge(LibraryMixin, QObject):
         # quality is NOT a duplicate: that click is an upgrade or downgrade
         # request and keeps its own row. Terminal rows (done, failed, stopped)
         # never block a fresh ask.
+        # The tier this click asks at: the item's (or, for a track, its
+        # album's) quality choice when one stands, else the setting. Read here,
+        # after every gate, so a held download asks at the choice that stands
+        # when it is finally released. A download never spends the choice: it
+        # stays on the item, stated by its badge, until the item is given
+        # another tier (livetest report: download a song at a chosen tier and
+        # its badge fell straight back to the catalog's word).
+        if keep_ask is not None and keep_ask[0]:
+            ask, ask_tier = str(keep_ask[0]), str(keep_ask[1] or _tier_word(keep_ask[0]))
+        else:
+            ask, ask_tier = self._ask_quality_for(obj, type_media, media_id)
         if media_id:
-            ask = self._queued_quality_value()
             with self._queue_lock:
                 dup = any(
                     it.get("media_id") == media_id
@@ -10091,7 +10341,7 @@ class WavesBridge(LibraryMixin, QObject):
                 )
             if dup:
                 # Acknowledge the click the same way a fresh row would: the
-                # work it asked for is already on its way.
+                # work it asked for is already on its way, at this very tier.
                 self.downloadState.emit(media_id, "queued")
                 return
         # Artist + total track count for the queue row label. Collections report
@@ -10100,7 +10350,17 @@ class WavesBridge(LibraryMixin, QObject):
         tracks = len(merge_plan) if merge_plan is not None else (_track_count(obj) if collection else 1)
         expected = "" if type_media == "video" else _quality_label(obj)
         qid = self._enqueue(
-            name, type_media, media_id, file_template, collection, artist, tracks, _image(obj, 160), expected
+            name,
+            type_media,
+            media_id,
+            file_template,
+            collection,
+            artist,
+            tracks,
+            _image(obj, 160),
+            expected,
+            ask_quality=ask,
+            ask_tier=ask_tier,
         )
         # Acknowledge the click on the button itself, immediately: behind a
         # saturated pool a worker may not pick this job up for minutes, and a
@@ -10219,6 +10479,11 @@ class WavesBridge(LibraryMixin, QObject):
                 # row starts from the GUI thread.
                 self._jobFinished.emit(qid)
 
+        # What this row asked at, captured now: the held retries below (a dead
+        # mount, a folder failure) re-enter _download after the row has been
+        # withdrawn, and they are retries of THIS job, not fresh clicks.
+        row_ask = self._row_ask(qid)
+
         def body() -> None:
             def stopped_before_it_started() -> None:
                 """The same teardown the finally clause does, plus settling the
@@ -10245,7 +10510,9 @@ class WavesBridge(LibraryMixin, QObject):
             # the optimistic queue row is withdrawn so the queue reads as if
             # the download never started (matching the pre-probe contract).
             if not self._gate_reachability(
-                lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+                lambda: self._download(
+                    obj, type_media, name, file_template, collection, media_id, merge_plan, keep_ask=row_ask
+                ),
                 media_id,
             ):
                 # A press that landed while the probe was running has to reach
@@ -10413,7 +10680,9 @@ class WavesBridge(LibraryMixin, QObject):
                     self._bump_download_groups(media_id, None, "failed")
                     self._set_status(f"Cancelled {name}")
                 elif self._download_failed_with_folder(
-                    lambda: self._download(obj, type_media, name, file_template, collection, media_id, merge_plan),
+                    lambda: self._download(
+                        obj, type_media, name, file_template, collection, media_id, merge_plan, keep_ask=row_ask
+                    ),
                     media_id,
                     qid,
                     name,
@@ -13344,7 +13613,15 @@ class WavesBridge(LibraryMixin, QObject):
         # silently degraded to a plain download.
         plan = self._merge_plans.get(item["media_id"]) if item["type"] == "album" else None
         self._download(
-            obj, item["type"], item["name"], item["template"], item["collection"], item["media_id"], merge_plan=plan
+            obj,
+            item["type"],
+            item["name"],
+            item["template"],
+            item["collection"],
+            item["media_id"],
+            merge_plan=plan,
+            # A retry is of THIS row: it keeps the tier the row asked at.
+            keep_ask=(str(item.get("askQuality") or ""), str(item.get("quality") or "")),
         )
 
     @Slot(int)
@@ -14192,6 +14469,8 @@ class WavesBridge(LibraryMixin, QObject):
         # because the cache stores raw records, not verdicts.
         if "quality_audio" in values:
             self.ownershipChanged.emit("")
+            # The DEFAULT mark in every badge's quality menu follows the setting.
+            self.targetTierChanged.emit()
             # Streams are requested at the SESSION's audio quality (the UI never
             # passes a per-download quality), and that was only set at startup.
             # Re-apply it now so the next download honours the new choice without
