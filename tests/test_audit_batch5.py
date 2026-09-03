@@ -195,7 +195,7 @@ class _RetryStub:
     def _emit_queue(self):
         pass
 
-    def _download(self, obj, typ, name, template, collection, media_id, merge_plan=None):
+    def _download(self, obj, typ, name, template, collection, media_id, merge_plan=None, keep_ask=None):
         self.downloads.append((typ, name, template, collection, media_id))
 
 
@@ -477,7 +477,10 @@ def test_browse_retry_routes_by_page_key():
 
 
 def test_recycled_album_rows_reset_their_selection():
-    assert "onAlbumIdChanged: sel = ({})" in MAIN_QML
+    # The handler carries the fold flag too (a recycled row must not fold a
+    # stranger's panel away), so match the reset itself, not the whole line.
+    body = MAIN_QML.split("onAlbumIdChanged:", 1)[1].split("\n", 1)[0]
+    assert "sel = ({})" in body
 
 
 def test_unc_folder_urls_stay_absolute():

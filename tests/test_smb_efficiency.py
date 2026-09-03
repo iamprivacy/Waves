@@ -169,6 +169,7 @@ class _Stub:
         self._OWN_TTL_BUSY = WavesBridge._OWN_TTL_BUSY
         self._downloads_running = lambda: downloads_running
         self._target_quality_rank = lambda: 0
+        self._override_target_rank = lambda tid: 0  # no per-item quality choice here
         self._ownership = MagicMock()
         self.ownershipChanged = MagicMock()
         self.settings = SimpleNamespace(

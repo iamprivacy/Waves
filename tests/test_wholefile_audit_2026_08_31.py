@@ -607,6 +607,9 @@ class _GateStub:
     def _job_library_skip(self, qid: int) -> bool:
         return False
 
+    def _row_ask(self, qid):
+        return None  # a held retry asks at what its row asked; no row ask here
+
     def _job_quality(self, qid):
         return None
 

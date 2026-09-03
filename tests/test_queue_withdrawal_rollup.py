@@ -388,6 +388,11 @@ def _download_stub(existing_status="queued", existing_quality="LOSSLESS"):
     s._download_gate = lambda: "ok"
     s._ffmpeg_gate_holds = lambda media_id, retry: False
     s._queued_quality_value = lambda: "LOSSLESS"
+    s._target_tier = lambda: "LOSSLESS"
+    # The per-item quality choice _download reads at queue time (issue #36):
+    # none on this carcass, so the ask is _queued_quality_value's.
+    for name in ("_ask_quality_for", "_quality_override_key"):
+        setattr(s, name, _bind(s, name))
     s._queue = [
         {
             "qid": 1,
@@ -401,7 +406,7 @@ def _download_stub(existing_status="queued", existing_quality="LOSSLESS"):
     s._queue_lock = Lock()
     s.downloadState = _Sig()
     s.enqueued = []
-    s._enqueue = lambda *a: s.enqueued.append(a) or 99
+    s._enqueue = lambda *a, **kw: s.enqueued.append(a) or 99
     s._job_objs = {}
     s._job_specs = {}
     s._job_tracks = {}
@@ -495,7 +500,11 @@ def _body_stub(fail=False):
     s._download_failed_with_folder = lambda retry, media_id, qid, name, abort=None: False
     s._job_quality = lambda qid: None
     s._build_download = lambda signals, **kw: s.dl
-    s._enqueue = lambda *a: 41
+    s._enqueue = lambda *a, **kw: 41
+    # The per-item quality choice _download reads at queue time (issue #36):
+    # none on this carcass.
+    s._ask_quality_for = lambda obj, type_media, media_id: ("LOSSLESS", "LOSSLESS")
+    s._row_ask = lambda qid: None  # a held retry asks at what its row asked; no row ask here
     # Three arguments, as the real slot has taken since 1333a46: the failure
     # branch calls it with a reason, and a two-argument stub raised there,
     # inside a Worker that swallows and logs. Nothing after that line ran, so

@@ -141,6 +141,10 @@ class _OwnBridge:
             "_announce_ownership",
             "_evict_own_cache_locked",
             "_target_quality_rank",
+            # The per-item quality choice's rank (issue #36): no choice on
+            # this carcass, so it answers with the setting's rank.
+            "_override_target_rank",
+            "_quality_override_key",
         ):
             setattr(self, name, getattr(backend.WavesBridge, name).__get__(self, _OwnBridge))
 

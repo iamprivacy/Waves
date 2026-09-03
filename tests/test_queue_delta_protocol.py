@@ -65,6 +65,9 @@ def _delta_stub():
     stub._queue_emit_suspended = False
     stub._target_tier = lambda: "LOSSLESS"
     stub._queued_quality_value = lambda: "LOSSLESS"
+    # The per-item quality choice _download reads at queue time (issue #36);
+    # none here, so every ask is the setting's.
+    _bind(stub, "_ask_quality_for", "_quality_override_key", "_row_ask")
     stub._library_bulk_skip_on = lambda: True
     stub._QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
     stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX

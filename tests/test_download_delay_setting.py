@@ -116,10 +116,18 @@ class _Stub:
         # is all these tests are looking at.
         return False
 
+    # The per-item quality choice _download reads at queue time (issue #36):
+    # none here, so the ask is the setting's.
+    def _ask_quality_for(self, obj, type_media, media_id):
+        return ("LOSSLESS", "LOSSLESS")
+
+    def _row_ask(self, qid):
+        return None
+
     def _ffmpeg_gate_holds(self, media_id, retry) -> bool:
         return False
 
-    def _enqueue(self, *args) -> int:
+    def _enqueue(self, *args, **kwargs) -> int:
         return 41
 
     def _build_download(self, signals, **kwargs):

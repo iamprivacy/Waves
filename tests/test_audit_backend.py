@@ -303,7 +303,7 @@ def test_retry_reuses_stashed_merge_plan_for_album():
 
     captured = {}
 
-    def fake_download(obj, type_media, name, template, collection, media_id, merge_plan=None):
+    def fake_download(obj, type_media, name, template, collection, media_id, merge_plan=None, keep_ask=None):
         captured["merge_plan"] = merge_plan
         captured["type"] = type_media
 

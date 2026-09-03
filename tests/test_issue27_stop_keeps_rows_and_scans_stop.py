@@ -508,7 +508,7 @@ class _RetryStub:
     def _emit_queue(self):
         self.emits += 1
 
-    def _download(self, obj, type_media, name, template, collection, media_id, merge_plan=None):
+    def _download(self, obj, type_media, name, template, collection, media_id, merge_plan=None, keep_ask=None):
         self.downloads.append(media_id)
 
 

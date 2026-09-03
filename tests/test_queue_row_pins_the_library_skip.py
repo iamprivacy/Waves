@@ -72,6 +72,11 @@ class _Stub:
     _target_quality_rank = WavesBridge._target_quality_rank
     _predict_skips = WavesBridge._predict_skips
     _download = WavesBridge._download
+    # The per-item quality choice _download reads at queue time (issue #36);
+    # this carcass holds none, so the ask is the setting's.
+    _ask_quality_for = WavesBridge._ask_quality_for
+    _quality_override_key = WavesBridge._quality_override_key
+    _row_ask = WavesBridge._row_ask
 
     def __init__(self, pref) -> None:
         # `pref` is a zero-argument callable, so a test can move the live

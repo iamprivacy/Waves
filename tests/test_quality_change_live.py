@@ -45,6 +45,7 @@ def _apply_stub():
     stub._ffmpeg_source_label = lambda: "system"
     stub._waves_pref_bool = lambda key: False
     stub.ownershipChanged = _signal()
+    stub.targetTierChanged = _signal()  # the DEFAULT mark in a badge's quality menu (issue #36)
     stub.editionMergeChanged = _signal()
     stub.ffmpegStatusChanged = _signal()
     stub.skipExistingChanged = _signal()

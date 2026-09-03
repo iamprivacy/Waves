@@ -102,7 +102,13 @@ class _BridgeStub:
             "_announce_ownership",
             "_own_announce_flush",
             "_target_quality_rank",
+            # The per-item quality choice's rank (issue #36): none on this
+            # carcass, so up_to_date is judged against the setting.
+            "_override_target_rank",
+            "_quality_override_key",
             "collectionMemberIds",
+            # The quality menu's IN LIBRARY mark (issue #36).
+            "ownedTierOf",
         ):
             setattr(self, name, getattr(WavesBridge, name).__get__(self, _BridgeStub))
 
@@ -615,3 +621,73 @@ def test_a_recorded_download_still_announces_its_id_directly(tmp_path):
     stub._track_lifecycle(1, {"id": "42", "status": "done", "path": str(f), "quality": {"tier": "LOSSLESS"}})
     assert stub.ownershipChanged.emits == ["42"]
     assert stub._own_announce == []
+
+
+# --------------------------------------------------------------------------- #
+# ownedTierOf: the tier the quality menu marks as already in the library.
+# --------------------------------------------------------------------------- #
+def test_owned_tier_of_answers_a_tracks_own_copy(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.flac")), "HI_RES_LOSSLESS")
+    stub.own("t1")
+    assert stub.ownedTierOf("t1") == "HI-RES"
+    # A tier the store spells TIDAL's way still reaches the menu as one word.
+    stub._ownership.record("t2", str(_make_file(tmp_path, "t2.m4a")), "HIGH")
+    stub.own("t2")
+    assert stub.ownedTierOf("t2") == "HIGH"
+
+
+def test_owned_tier_of_says_nothing_about_what_is_not_owned(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    assert stub.ownedTierOf("t1") == "", "a cold answer claimed a copy"
+    assert stub.ownedTierOf("") == ""
+    # A recorded copy whose file is gone is not owned, so nothing is marked.
+    f = _make_file(tmp_path, "gone.flac")
+    stub._ownership.record("t1", str(f), "LOSSLESS")
+    stub.expire("t1")  # the cold "not owned" above is cached for the TTL
+    stub.own("t1")
+    assert stub.ownedTierOf("t1") == "LOSSLESS"
+    os.remove(f)
+    stub.expire("t1")
+    stub.own("t1")
+    assert stub.ownedTierOf("t1") == ""
+
+
+def test_an_album_is_marked_only_when_every_track_of_it_is_owned(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._ownership.record_members_replace("a1", ["t1", "t2"])
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.flac")), "LOSSLESS")
+    stub.own("t1")
+    assert stub.ownedTierOf("a1") == "", "half an album was claimed as in the library"
+    stub._ownership.record("t2", str(_make_file(tmp_path, "t2.flac")), "HI_RES_LOSSLESS")
+    stub.expire("t2")  # the roll-up above cached t2 as not owned
+    stub.own("t2")
+    # Owned end to end: the mark states the WEAKEST copy, so it can never
+    # promise a quality some of the files are not.
+    assert stub.ownedTierOf("a1") == "LOSSLESS"
+
+
+def test_an_album_with_a_tierless_copy_is_not_marked(tmp_path):
+    stub = _BridgeStub(tmp_path)
+    stub._ownership.record_members_replace("a1", ["t1"])
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.mp4")), None)
+    stub.own("t1")
+    assert stub.ownedTierOf("a1") == ""
+
+
+def test_owned_tier_of_never_stats_on_the_calling_thread(tmp_path, monkeypatch):
+    """Same rule as ownershipOf: the menu opens on the GUI thread, and a stat
+    on a dropped network mount hangs for seconds."""
+    stub = _BridgeStub(tmp_path)
+    stub._ownership.record_members_replace("a1", ["t1", "t2"])
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.flac")), "LOSSLESS")
+    stub._ownership.record("t2", str(_make_file(tmp_path, "t2.flac")), "LOSSLESS")
+    stub.own("t1")
+    stub.own("t2")
+    stub._own_pool = SimpleNamespace(start=lambda worker: None)  # nothing runs off-thread either
+
+    def _no_stat(path):
+        raise AssertionError("statted the disk from the calling thread")
+
+    monkeypatch.setattr(os.path, "isfile", _no_stat)
+    assert stub.ownedTierOf("a1") == "LOSSLESS"
