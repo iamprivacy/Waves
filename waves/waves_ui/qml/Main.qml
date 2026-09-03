@@ -57,8 +57,33 @@ ApplicationWindow {
     // download folder the face says DOWNLOADED, and moving the files into
     // the library flips it through the normal rescan.
     property bool dlInLibrary: waves.downloadsInsideLibrary() === true
+    // ---- per-item quality choices (issue #36) ------------------------------
+    // Mirrored ONCE from the bridge, like the prefs above: media id -> tier
+    // word, or "DEFAULT" for a track pinned to the setting under an album
+    // that chose otherwise. A track without a choice of its own inherits its
+    // album's, so choosing on an album turns every one of its track badges.
+    property var qualityOverrides: waves.qualityOverrides || ({})
+    // The Settings tier, the DEFAULT mark in every badge's menu.
+    property string targetTier: waves.targetTier || ""
+    function qualOverrideFor(mediaId, albumId) {
+        var o = qualityOverrides
+        var own = mediaId !== "" ? o[mediaId] : undefined
+        if (own !== undefined && own !== "") return "" + own
+        var inh = albumId !== "" ? o[albumId] : undefined
+        return inh !== undefined && inh !== "" ? "" + inh : ""
+    }
+    // The ground a chosen tier's badge sits on: the tier's own container
+    // colour, so a badge stating what YOU asked for reads apart from one
+    // stating what the catalog offers (plain surface2).
+    function qualTint(q) {
+        return (q === "HI-RES" || q === "VIDEO") ? goldCont : q === "LOSSLESS" ? greenCont
+             : q === "HIGH" ? cyanCont : surface3
+    }
     Connections {
         target: waves
+        function onQualityOverridesChanged() { root.qualityOverrides = waves.qualityOverrides || ({}) }
+        function onTargetTierChanged() { root.targetTier = waves.targetTier || "" }
+        function onQualityChoiceChanged(ids) { root.reopenDoneButtons(ids) }
         function onLibrarySourceChanged() {
             root.libraryOn = waves.wavesPref("library_enabled") === true
             root.dlInLibrary = waves.downloadsInsideLibrary() === true
@@ -334,21 +359,69 @@ ApplicationWindow {
     // screen instead of below the fold. Scrolls down only: a row already
     // higher than the anchor line stays put.
     readonly property real expandAnchor: 0.10
+    // Expanding and collapsing move two things at once: the panel folds and
+    // the view scrolls. Both run on this one clock so the pair reads as a
+    // single motion, instead of one landing after the other has stopped.
+    readonly property int expandMoveMs: 280
+    // Returns the scroll spot the view left behind when it did move, -1 when
+    // the row was already high enough and nothing scrolled: the collapse
+    // uses it to bring the view back (scrollCollapsedBack).
     function scrollExpandedIntoView(item) {
         var f = item.parent
         while (f && f.contentY === undefined) f = f.parent
-        if (!f) return
+        if (!f) return -1
         var y = item.mapToItem(f.contentItem, 0, 0).y
         var target = y - f.height * expandAnchor
         target = Math.max(0, Math.min(target, Math.max(0, f.contentHeight - f.height)))
-        if (target <= f.contentY + 1) return
+        if (target <= f.contentY + 1) return -1
+        var was = f.contentY
         expandScrollAnim.stop()
         expandScrollAnim.target = f
         expandScrollAnim.from = f.contentY
         expandScrollAnim.to = target
         expandScrollAnim.start()
+        return was
     }
-    NumberAnimation { id: expandScrollAnim; property: "contentY"; duration: 300; easing.type: Easing.OutCubic }
+    NumberAnimation { id: expandScrollAnim; property: "contentY"; duration: root.expandMoveMs; easing.type: Easing.OutCubic }
+    // Where the view sat before an album or playlist row's expand pulled it
+    // up to the anchor line, keyed by the row's id (the rows are recycled
+    // delegates, so nothing is kept on them). Expanding a row scrolls the
+    // rows above it out of the top of the view; collapsing it used to leave
+    // the view there, with the rows the user had been looking at still off
+    // screen and a scroll back up owed every time (livetest report).
+    // Collapsing now returns the view to that spot, with the same motion the
+    // expand used, so the row folds back into the page it came out of.
+    property var expandReturnY: ({})
+    // Replacing the expanded set WHOLESALE (a page load, a Back restore, a new
+    // search) drops every remembered spot with it. A spot belongs to the page
+    // the row was expanded on: left behind, it outlives that page, and a later
+    // collapse of a row with the same id glides the view to a contentY from a
+    // page that is no longer there. Every wholesale write goes through here so
+    // the pair can never come apart; AlbumBlock.toggle is the one writer that
+    // keeps the spots, because it is the one that earns them.
+    function resetExpandedAlbums(map) {
+        expandedAlbums = map || ({})
+        expandReturnY = ({})
+    }
+    function rememberExpandReturn(key, y) {
+        if (y >= 0) expandReturnY[key] = y
+    }
+    function scrollCollapsedBack(key, item) {
+        var y = expandReturnY[key]
+        if (y === undefined) return
+        delete expandReturnY[key]
+        var f = item.parent
+        while (f && f.contentY === undefined) f = f.parent
+        if (!f) return
+        // The view moved up past that spot since (the user scrolled back on
+        // their own): there is nothing to return to.
+        if (f.contentY <= y + 1) return
+        expandScrollAnim.stop()
+        expandScrollAnim.target = f
+        expandScrollAnim.from = f.contentY
+        expandScrollAnim.to = y
+        expandScrollAnim.start()
+    }
     // Collapsing a SHOW ALL section from deep inside it would otherwise leave
     // the view clamped to the page bottom, a random spot with no relation to
     // what was clicked. Land the view back at the section's header instead
@@ -1384,6 +1457,20 @@ ApplicationWindow {
     }
     function dlPct(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
     function dlSt(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.st : "" }
+    // A quality choice landed on these ids (the item and, for an album, its
+    // known tracks). A button reading DOWNLOADED because THIS session fetched
+    // the item holds that word in its holder, past what ownership says; hand
+    // it back so the button falls through to the ownership verdict, which
+    // is judged against the choice: a copy below the chosen tier offers the
+    // download again, a copy at or above it keeps reading DOWNLOADED. Only
+    // "done" is touched: a queued or running item stays exactly as it is.
+    function reopenDoneButtons(ids) {
+        if (!ids) return
+        for (var i = 0; i < ids.length; ++i) {
+            var h = dlHolders[ids[i]]
+            if (h !== undefined && h.st === "done") h.st = ""
+        }
+    }
     // The queue row a media id is waiting in, so a download button can cancel
     // its own wait without the queue drawer being opened. Walked on the click,
     // never bound: a queue of any size costs nothing until someone presses the
@@ -1872,7 +1959,7 @@ ApplicationWindow {
                 // tabs may have clobbered (loadLib clears expandedAlbums), and
                 // land on the saved spot same-frame, pre-paint (the pane only
                 // becomes visible this frame, same rule as openSearch).
-                expandedAlbums = s.ex || ({})
+                resetExpandedAlbums(s.ex)
                 bioExpanded = !!s.bio
                 // Section expansion is a persisted per-section pref now (like
                 // the search sections), so snapshots neither carry nor restore
@@ -2176,7 +2263,7 @@ ApplicationWindow {
                         fillMedia(artistTracksModel, s.artistData.tracks || [])
                         fillMedia(artistVideosModel, s.artistData.videos || [])
                     }
-                    expandedAlbums = s.expandedAlbums || ({})
+                    resetExpandedAlbums(s.expandedAlbums)
                     bioExpanded = !!s.bio
                     artistOpen = true
                     browseOpen = false; libraryOpen = false; settingsOpen = false
@@ -2204,7 +2291,7 @@ ApplicationWindow {
         artistOpen = false
         searchSaved = null
         searchField.text = ""
-        trackCache = ({}); expandedAlbums = ({})
+        trackCache = ({}); resetExpandedAlbums({})
         playlistTrackCache = ({}); expandedPlaylists = ({})
         _searchBuildStart(0)   // a mid-build blank must drop the veil with the cards
         artistsModel.clear(); albumsRaw = []; tracksRaw = []; videosRaw = []; searchTop = null; applySort()
@@ -3740,43 +3827,75 @@ ApplicationWindow {
         property bool compact: false
         readonly property string specText: compact ? "" : (spec !== "" ? spec : root.qualSpec(qt.q))
         readonly property bool mixed: mix.length > 1
+        // The pill's colours, as plain properties so a surface that ANIMATES
+        // them (QualPick, the badge you can choose a tier on) binds its own
+        // eased values here, while every other pill (the queue drawer's
+        // hundreds of compact rows included) keeps these static defaults and
+        // pays for no Behavior objects.
+        property color bg: root.qualBg(qt.q)
+        property color edge: root.qualBorder(qt.q)
+        property color ink: root.qualFg(qt.q)
+        property color specInk: root.qualSpecFg(qt.q)
+        property color dotInk: root.qualDot(qt.q)
+        // Extra width the pill grows by to admit a caret at its right end; the
+        // content shifts left by it so the dot, word and spec keep their air.
+        property real extraW: 0
+        // Ground and border dropped, leaving the dot, word and spec alone: a
+        // copy of a pill laid over the real one to be faded (QualPick's
+        // outgoing tier) must not put a second ground and border on the badge.
+        property bool chromeless: false
+        // Fades the content WITHOUT the pill under it, so a tier change can
+        // swap the letters inside a ground that never blinks.
+        property real contentOpacity: 1
+        // The width the pill wants from its own content. A surface that EASES
+        // that width through a change (QualPick again) reads this, eases it,
+        // and hands the result back as pillW; -1, which is every other pill in
+        // the app, means "size yourself" and costs nothing.
+        readonly property real naturalW: mixed ? mixRow.implicitWidth + 16
+                                               : tagRow.implicitWidth + 16 + qt.extraW
+        property real pillW: -1
         visible: q !== "" || mixed
         Rectangle {
             visible: !qt.mixed
             // The ground is the tier's, not the pill's: ATMOS is an outline
             // (see qualBg), every ladder tier sits on surface2.
-            radius: 4; color: root.qualBg(qt.q)
-            border.color: root.qualBorder(qt.q); border.width: 1
-            implicitHeight: 22; implicitWidth: tagRow.implicitWidth + 16
+            radius: 4; color: qt.chromeless ? "transparent" : qt.bg
+            border.color: qt.chromeless ? "transparent" : qt.edge; border.width: 1
+            implicitHeight: 22
+            implicitWidth: qt.pillW >= 0 ? qt.pillW : tagRow.implicitWidth + 16 + qt.extraW
             Row {
                 id: tagRow
                 anchors.centerIn: parent; spacing: 6
+                anchors.horizontalCenterOffset: -qt.extraW / 2
+                opacity: qt.contentOpacity
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 6; height: 6; radius: 3; color: root.qualDot(qt.q)
+                    width: 6; height: 6; radius: 3; color: qt.dotInk
                 }
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qt.q; color: root.qualFg(qt.q); font.family: root.mono; font.pixelSize: 9; font.bold: true
+                    text: qt.q; color: qt.ink; font.family: root.mono; font.pixelSize: 9; font.bold: true
                 }
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     visible: qt.specText !== ""
-                    text: qt.specText; color: root.qualSpecFg(qt.q); font.family: root.mono; font.pixelSize: 9
+                    text: qt.specText; color: qt.specInk; font.family: root.mono; font.pixelSize: 9
                 }
             }
         }
         // MIXED, one dot per tier, then per-tier track counts as the spec
         Rectangle {
             visible: qt.mixed
-            radius: 4; color: root.surface2
-            border.color: root.outline; border.width: 1
-            implicitHeight: 22; implicitWidth: mixRow.implicitWidth + 16
+            radius: 4; color: qt.chromeless ? "transparent" : root.surface2
+            border.color: qt.chromeless ? "transparent" : root.outline; border.width: 1
+            implicitHeight: 22
+            implicitWidth: qt.pillW >= 0 ? qt.pillW : mixRow.implicitWidth + 16
             Row {
                 id: mixRow
                 anchors.centerIn: parent; spacing: 6
+                opacity: qt.contentOpacity
                 Row {
                     spacing: 2; anchors.verticalCenter: parent.verticalCenter
                     Repeater {
@@ -3816,6 +3935,385 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
+
+    // The quality menu's own metrics, measured ONCE for the whole app: every
+    // row is the same mono type, so the widest word of each column is a
+    // constant and the menu can be sized to exactly the columns it shows
+    // (a menu with nothing to say about the library stays as narrow as it was
+    // before there was an IN LIBRARY mark to fit).
+    TextMetrics { id: qpmWord; font.family: root.mono; font.pixelSize: 10; font.bold: true; text: "LOSSLESS" }
+    TextMetrics { id: qpmSpec; font.family: root.mono; font.pixelSize: 10; text: "16/44.1" }
+    TextMetrics { id: qpmNote; font.family: root.mono; font.pixelSize: 9; text: "NOT OFFERED" }
+    TextMetrics { id: qpmDefault; font.family: root.mono; font.pixelSize: 9; text: "DEFAULT" }
+    TextMetrics { id: qpmHave; font.family: root.mono; font.pixelSize: 9; font.bold: true; text: root.libraryWord }
+    // The word a copy on disk is claimed with, the SAME rule the done face of
+    // a Download button follows: with a library in the picture and downloads
+    // landing inside it, "you have this" is the claim that matters; with a
+    // separate download folder the honest word is DOWNLOADED.
+    readonly property string libraryWord: root.libraryOn && root.dlInLibrary ? "IN LIBRARY" : "DOWNLOADED"
+    // 8 margin + 6 dot + 6 + word + 6 + spec + 12 gutter + [note +6] +
+    // [have +6] + 10 check + 8 margin.
+    function qualMenuWidth(anyNotOffered, anyOwned) {
+        return Math.ceil(46 + qpmWord.width + qpmSpec.width
+                         + (anyNotOffered ? qpmNote.width : qpmDefault.width) + 6
+                         + (anyOwned ? qpmHave.width + 6 : 0) + 10)
+    }
+
+    // The quality badge you can choose a tier on (issue #36): the row's
+    // QualTag, untouched at rest, that grows a caret when hovered and drops a
+    // menu of the four tiers when clicked. A choice repaints the pill in the
+    // tier's container colour (plain ground = the catalog says, tinted = you
+    // said) and holds until the item is given another tier: downloading at a
+    // chosen tier leaves the pill stating it, so the badge and the copy on
+    // disk agree. A track without a choice of its own follows its album's.
+    // The choice itself lives on the bridge (setQualityOverride), which is
+    // what every download path reads at queue time.
+    //
+    // Motion: the menu springs open and shrinks shut and a hovered row lifts,
+    // both elastic, but the pill itself only ever EASES (see swapMs), all
+    // under the hover-motion preference like every other control.
+    component QualPick: Item {
+        id: qpk
+        property string mediaId: ""
+        property string albumId: ""      // a track's album, whose choice it inherits
+        property string catalog: ""      // the tier the catalog advertises (QualTag.q)
+        property var mix: []             // QualTag.mix: the album spans tiers
+        property bool pickable: true     // false for a video row
+        readonly property var tiers: ["HI-RES", "LOSSLESS", "HIGH", "LOW"]
+        readonly property string override: root.qualOverrideFor(mediaId, albumId)
+        // The best tier on offer: a MIXED album's top rung, else the catalog's.
+        readonly property string ceiling: (mix && mix.length > 1) ? "" + mix[0].q : catalog
+        readonly property bool canPick: pickable && root._tierRank[ceiling] !== undefined
+        readonly property bool tinted: override !== "" && override !== "DEFAULT"
+        // What the pill states: the choice, floored by what the catalog can
+        // land (an album's HI-RES choice on its LOSSLESS-only track says
+        // LOSSLESS), else the catalog's own word.
+        readonly property string shown: tinted ? root.tierFloor(override, ceiling) : catalog
+        // The tier a download queued now would ask for, the row the menu checks.
+        readonly property string effective: tinted ? shown : root.tierFloor(root.targetTier, ceiling)
+        readonly property bool hot: canPick && (hoverMa.containsMouse || menuOpen)
+        // The menu is BUILT ON THE FIRST PRESS, never with the badge. A
+        // results page carries one of these on every row, and the menu is some
+        // thirty objects (a Popup, its ground, four rows with their own
+        // easings and mouse areas); built eagerly, every row scrolled past
+        // paid for a menu almost none of them ever open. Measured over a
+        // 300-row sweep: 1.4s of delegate work had become 2.0s.
+        property bool menuBuilt: false
+        // For the scenario test, which cannot reach a Popup through children.
+        readonly property bool menuOpen: menuLoader.item !== null && menuLoader.item.visible
+        readonly property Item menuRows: menuLoader.item ? menuLoader.item.contentItem : null
+        // The tier the copy already on disk was delivered at (backend
+        // ownedTierOf: for an album, only when every track of it is owned,
+        // and then the weakest one's tier). The menu marks that row with the
+        // library word, so a tier you already hold is not asked for again by
+        // mistake. ASKED WHEN THE MENU OPENS, never bound: a page of badges
+        // must not each query the ownership cache on every paint, and the
+        // answer is only ever read inside the open menu.
+        property string ownedTier: ""
+        readonly property bool anyNotOffered: !offered(tiers[0])
+        readonly property int menuW: root.qualMenuWidth(anyNotOffered, ownedTier !== "")
+        function refreshOwnedTier() {
+            ownedTier = (canPick && mediaId !== "") ? ("" + (waves.ownedTierOf(mediaId) || "")) : ""
+        }
+        onMenuOpenChanged: if (menuOpen) refreshOwnedTier()
+        function toggleMenu() {
+            if (!canPick) return
+            menuBuilt = true            // a Loader builds synchronously, so item is there below
+            var m = menuLoader.item
+            if (!m) return
+            if (m.visible) m.close(); else m.open()
+        }
+        function closeMenu() { if (menuLoader.item) menuLoader.item.close() }
+        function offered(t) { return ceiling === "" || root._tierRank[t] >= root._tierRank[ceiling] }
+        function choose(t) {
+            closeMenu()
+            // Choosing the Settings tier is "no choice", unless the album
+            // chose otherwise: then it is a choice this track keeps, pinned as
+            // DEFAULT so the album's does not reach it.
+            var albumChose = qpk.albumId !== "" && root.qualityOverrides[qpk.albumId] !== undefined
+            var v = t === root.targetTier ? (albumChose ? "DEFAULT" : "") : t
+            waves.setQualityOverride(qpk.mediaId, v)
+        }
+        implicitWidth: tag.implicitWidth - extraW
+        implicitHeight: 22
+        // The pill's colours ease between tiers on a pick, and its edge lights
+        // under the pointer; the caret's room grows with a spring.
+        property color pillBg: tinted ? root.qualTint(shown) : root.qualBg(shown)
+        property color pillEdge: hot ? root.qualFg(shown) : root.qualBorder(shown)
+        property color pillInk: root.qualFg(shown)
+        property color pillSpecInk: root.qualSpecFg(shown)
+        property color pillDot: root.qualDot(shown)
+        property real extraW: hot ? 14 : 0
+        // A tier landing on the pill is ONE change: ground, border, dot, word
+        // ink, spec ink and the pill's own width all move together, on one
+        // curve, over one duration, with nothing leading and nothing lagging.
+        // InOutSine leaves and arrives at zero speed, so the change has no
+        // edge at either end. Rounds that cross-faded a whole second pill over
+        // this one, or staggered the ink behind the ground, made every colour
+        // arrive twice on two curves: that is what read as jerky.
+        //
+        // Letters are the one thing that cannot be interpolated, so they are
+        // the one thing handled apart, and still inside this change: they dip
+        // out over the first four tenths and back in over the rest, which puts
+        // the badge's single wordless instant exactly where the colour is
+        // halfway. Only ever one word on the pill, never two crossing.
+        readonly property int swapMs: root.hoverMotion ? 340 : 0
+        readonly property int dipOutMs: Math.round(swapMs * 0.4)
+        readonly property int dipInMs: swapMs - dipOutMs
+        property bool swapping: false
+        Behavior on pillBg { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
+        // The edge answers the pointer as well as a pick, and hover has to
+        // stay quick: a swap borrows the long curve, hover keeps its own.
+        Behavior on pillEdge {
+            ColorAnimation {
+                duration: qpk.swapping ? qpk.swapMs : (root.hoverMotion ? 160 : 0)
+                easing.type: Easing.InOutSine
+            }
+        }
+        Behavior on pillInk { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
+        Behavior on pillSpecInk { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
+        Behavior on pillDot { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
+        Behavior on extraW { NumberAnimation { duration: root.hoverMotion ? 220 : 0; easing.type: Easing.OutBack } }
+        // The pill's width, eased only THROUGH a swap: at rest and on hover it
+        // tracks the content exactly, so the caret's room keeps its own
+        // spring. Left easing, a hover would glide the caret in instead.
+        property real pillW: tag.naturalW
+        Behavior on pillW {
+            enabled: qpk.swapping
+            NumberAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine }
+        }
+        // A choice landing (or being cleared) swaps the pill. Armed only once
+        // the badge has settled on its identity: a recycled list delegate
+        // (reuseItems) rebinding to the next row's item changes the override
+        // too, and that is not news (DownloadButton's rollReady rule).
+        property bool armed: false
+        Timer { id: armTimer; interval: 0; onTriggered: qpk.armed = true }
+        Component.onCompleted: { lastFace = face; armTimer.restart() }
+        onMediaIdChanged: { armed = false; armTimer.restart(); ownedTier = "" }
+        // What the pill actually DRAWS, which is not the same question as
+        // which tier is chosen: choosing the tier a plain pill already states
+        // only tints it (colour alone, no dip), while choosing anything on a
+        // MIXED album replaces its whole face even when `shown` is unmoved.
+        readonly property string face: (mix && mix.length > 1 && !tinted) ? "MIXED" : shown
+        property string lastFace: ""
+        // Colour and width ease on ANY choice; the letters dip only when there
+        // are different letters to arrive at.
+        onOverrideChanged: if (armed && root.hoverMotion) { swapping = true; swapDone.restart() }
+        onFaceChanged: {
+            var prev = lastFace
+            lastFace = face
+            if (armed && root.hoverMotion && prev !== "") startDip(prev)
+        }
+        // The letters on their way out, held here so the pill underneath can
+        // turn immediately while they leave.
+        property string ghostQ: ""
+        property var ghostMix: []
+        property bool ghosting: false
+        property real ghostOp: 0
+        property real inkOp: 1
+        function startDip(prev) {
+            dip.stop()
+            ghostQ = prev === "MIXED" ? qpk.catalog : prev
+            ghostMix = prev === "MIXED" ? qpk.mix : []
+            ghostOp = 1; inkOp = 0
+            ghosting = true; swapping = true
+            dip.restart(); swapDone.restart()
+        }
+        SequentialAnimation {
+            id: dip
+            NumberAnimation { target: qpk; property: "ghostOp"; from: 1; to: 0
+                              duration: qpk.dipOutMs; easing.type: Easing.InOutSine }
+            NumberAnimation { target: qpk; property: "inkOp"; from: 0; to: 1
+                              duration: qpk.dipInMs; easing.type: Easing.InOutSine }
+        }
+        Timer {
+            // Everything the swap borrowed goes back, or the next one starts
+            // from halfway through the last. The width easing switching off
+            // again is the one that matters most (see pillW).
+            id: swapDone
+            interval: qpk.swapMs + 90
+            onTriggered: { qpk.ghosting = false; qpk.swapping = false; qpk.ghostOp = 0; qpk.inkOp = 1 }
+        }
+        QualTag {
+            id: tag
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            q: qpk.shown; mix: qpk.tinted ? [] : qpk.mix
+            bg: qpk.pillBg; edge: qpk.pillEdge; ink: qpk.pillInk; specInk: qpk.pillSpecInk; dotInk: qpk.pillDot
+            extraW: qpk.extraW
+            pillW: qpk.pillW
+            contentOpacity: qpk.inkOp
+        }
+        // The outgoing letters, drawn with no ground and no border directly
+        // over the arriving ones and centred on the same pill, so this badge
+        // carries exactly one ground and one border at every instant of the
+        // change. Frozen to the tier being left, colours included: the live
+        // pill's are already on their way elsewhere. Built only for the
+        // fraction of a second a tier is actually leaving: a second pill on
+        // every row of a results page is a whole pill's worth of work per row,
+        // for a change almost no row ever makes.
+        Loader {
+            anchors.centerIn: tag
+            active: qpk.ghosting
+            sourceComponent: QualTag {
+                opacity: qpk.ghostOp
+                chromeless: true
+                q: qpk.ghostQ; mix: qpk.ghostMix
+                ink: root.qualFg(qpk.ghostQ)
+                specInk: root.qualSpecFg(qpk.ghostQ)
+                dotInk: root.qualDot(qpk.ghostQ)
+                extraW: qpk.extraW
+            }
+        }
+        MouseArea {
+            id: hoverMa
+            anchors.fill: tag
+            enabled: qpk.canPick; hoverEnabled: enabled
+            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: qpk.toggleMenu()
+        }
+        // The caret, built the first time the pointer reaches this badge: at
+        // rest it is fully transparent, so a row scrolled past has nothing to
+        // show and nothing to pay for. Once built it stays, since a badge the
+        // pointer found once it will find again.
+        property bool caretBuilt: false
+        onHotChanged: if (hot) caretBuilt = true
+        Loader {
+            active: qpk.caretBuilt
+            x: tag.x + tag.width - 17; y: (qpk.height - 12) / 2
+            sourceComponent: ExpandChevron {
+                visible: qpk.canPick
+                tile: 12; glyph: 10; showTile: false
+                closedAngle: 0; openAngle: 180
+                stroke: root.qualFg(qpk.shown)
+                open: qpk.menuOpen
+                opacity: qpk.hot ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: root.hoverMotion ? 140 : 0 } }
+            }
+        }
+        Loader { id: menuLoader; active: qpk.menuBuilt; sourceComponent: menuComp }
+        Component {
+        id: menuComp
+        Popup {
+            id: menu
+            // Parented to the PILL, not this item: the pill overflows this
+            // item's left edge while it holds its caret, and a press on that
+            // overflow must count as a press on the pill (which toggles), not
+            // as a press outside (which would close, then reopen).
+            parent: tag
+            x: tag.width - width; y: tag.height + 4
+            width: qpk.menuW; padding: 4
+            modal: false; focus: true
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+            transformOrigin: Item.Top
+            background: Rectangle { radius: 8; color: root.surface2; border.color: root.outline }
+            contentItem: Column {
+                objectName: "qualPickRows"
+                spacing: 2
+                Repeater {
+                    model: qpk.tiers
+                    delegate: QualPickRow { required property string modelData; pick: qpk; t: modelData }
+                }
+            }
+            // A cold ownership answer lands a beat after the menu opened, and
+            // a download landing while it is open changes the answer too.
+            // Coalesced: a launch-time flood of answers is one refresh, not
+            // hundreds. Lives with the menu, so a badge nobody opened watches
+            // nothing.
+            Timer { id: ownAgain; interval: 60; onTriggered: qpk.refreshOwnedTier() }
+            Connections {
+                target: waves
+                enabled: menu.visible
+                // An album's answer is a roll-up of ids this badge does not
+                // hold, so any answer landing is reason enough to re-ask.
+                function onOwnershipChanged(tid) { ownAgain.restart() }
+                function onOwnershipChangedBatch(batch) { ownAgain.restart() }
+            }
+            enter: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.hoverMotion ? 120 : 0 }
+                    NumberAnimation { property: "scale"; from: 0.8; to: 1; duration: root.hoverMotion ? 260 : 0; easing.type: Easing.OutBack }
+                }
+            }
+            exit: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 1; to: 0; duration: root.hoverMotion ? 110 : 0 }
+                    NumberAnimation { property: "scale"; from: 1; to: 0.9; duration: root.hoverMotion ? 110 : 0; easing.type: Easing.InQuad }
+                }
+            }
+        }
+        }
+    }
+
+    // One row of a QualPick's menu: the tier as a pill-shaped line (dot, word,
+    // spec) resting in white like the Settings dropdown, lit in the tier's own
+    // colours under the pointer and on the tier a download would ask for; a
+    // DEFAULT mark on the setting's tier, NOT OFFERED (dimmed, inert) on a tier
+    // the catalog cannot land for this item.
+    component QualPickRow: Rectangle {
+        id: qpr
+        property var pick: null
+        property string t: ""
+        readonly property bool isDefault: t === root.targetTier
+        readonly property bool isCurrent: pick && t === pick.effective
+        readonly property bool ok: pick ? pick.offered(t) : true
+        // The copy on disk is this tier: say so, in the library badge's own
+        // amber, so "you already have it" never reads as one of the tier
+        // colours the rest of the row is spoken in.
+        readonly property bool inLibrary: pick !== null && pick.ownedTier !== "" && t === pick.ownedTier
+        readonly property bool hovering: rowMa.containsMouse && ok
+        readonly property bool lit: hovering || isCurrent
+        width: pick ? pick.menuW - 8 : 188; implicitHeight: 22; radius: 4
+        color: lit ? root.qualTint(t) : "transparent"
+        border.width: 1
+        border.color: lit ? root.qualBorder(t) : "transparent"
+        opacity: ok ? 1 : 0.6
+        scale: hovering ? 1.04 : 1
+        transformOrigin: Item.Center
+        Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+        Behavior on border.color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+        Behavior on scale { NumberAnimation { duration: root.hoverMotion ? 140 : 0; easing.type: Easing.OutBack } }
+        Row {
+            anchors.left: parent.left; anchors.leftMargin: 8
+            anchors.verticalCenter: parent.verticalCenter; spacing: 6
+            Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 6; height: 6; radius: 3; color: root.qualDot(qpr.t) }
+            Text {
+                textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                text: qpr.t; color: qpr.lit ? root.qualFg(qpr.t) : root.textHi
+                font.family: root.mono; font.pixelSize: 10; font.bold: true
+                Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+            }
+            Text {
+                textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                text: root.qualSpec(qpr.t); color: qpr.lit ? root.qualSpecFg(qpr.t) : root.textHi
+                font.family: root.mono; font.pixelSize: 10
+                Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+            }
+        }
+        Row {
+            anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; spacing: 6
+            Text {
+                textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                visible: qpr.isDefault || !qpr.ok
+                text: !qpr.ok ? "NOT OFFERED" : "DEFAULT"
+                color: qpr.lit ? root.textHi : root.textLo; font.family: root.mono; font.pixelSize: 9
+            }
+            Text {
+                textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                visible: qpr.inLibrary
+                text: root.libraryWord
+                color: qpr.lit ? root.libContTx : root.libAccent
+                font.family: root.mono; font.pixelSize: 9; font.bold: true
+                Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+            }
+            Ico { visible: qpr.isCurrent; anchors.verticalCenter: parent.verticalCenter; name: "check"; color: root.qualFg(qpr.t); size: 10; bold: 8 }
+        }
+        MouseArea {
+            id: rowMa
+            anchors.fill: parent; hoverEnabled: true
+            enabled: qpr.ok; cursorShape: Qt.PointingHandCursor
+            onClicked: if (qpr.pick) qpr.pick.choose(qpr.t)
         }
     }
 
@@ -4478,7 +4976,11 @@ ApplicationWindow {
         Item {
             id: diGridMask
             anchors.fill: parent; anchors.margins: root.btnBorderW
-            visible: enabled
+            // NEVER visible: this white rounded rectangle is the SHAPE the
+            // MultiEffect masks the LED grid with, and a ShaderEffectSource
+            // reads it whether or not the scene draws it. Drawn, it fills the
+            // whole button white behind the arrow.
+            visible: false
             Rectangle { anchors.fill: parent; radius: root.btnRad - root.btnBorderW; color: "#ffffff" }
         }
         Text {
@@ -6435,11 +6937,17 @@ ApplicationWindow {
         // headers already use, so it reads as part of the header rather than a
         // dialog button that wandered in.
         property bool compact: false
+        // A Phosphor glyph in place of the word, on a square of exactly the
+        // button height, so it lines up with the worded buttons beside it. For
+        // an action whose glyph says it faster than any label could (closing a
+        // panel), where a word would only cost room in a crowded header.
+        property string icon: ""
+        readonly property bool iconOnly: icon !== "" && label === ""
         signal clicked()
         readonly property color bg: danger ? root.redCont
                                   : warn ? root.goldCont
                                   : (primary ? root.accentCont : "transparent")
-        implicitWidth: sbTxt.implicitWidth + (compact ? 9 : root.btnPadH) * 2
+        implicitWidth: iconOnly ? implicitHeight : sbTxt.implicitWidth + (compact ? 9 : root.btnPadH) * 2
         implicitHeight: sbTxt.implicitHeight + (compact ? 3 : root.btnPadV) * 2
         radius: compact ? 5 : root.btnRad
         color: (sbMa.containsMouse && (sb.primary || sb.danger || sb.warn)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
@@ -6450,6 +6958,9 @@ ApplicationWindow {
         Behavior on color { ColorAnimation { duration: 110 } }
         Text {
             id: sbTxt; anchors.centerIn: parent
+            // Kept loaded while icon-only (empty, invisible): its line height is
+            // what makes the square square, so it has to keep measuring.
+            visible: !sb.iconOnly
             textFormat: Text.PlainText; text: sb.label
             color: sb.danger ? root.red
                  : sb.warn ? root.gold
@@ -6457,6 +6968,12 @@ ApplicationWindow {
             font.family: sb.compact ? root.mono : root.uiFont
             font.pixelSize: sb.compact ? 10 : 13; font.bold: true
             font.letterSpacing: sb.compact ? 1.4 : root.btnTrack
+        }
+        Ico {
+            visible: sb.icon !== ""
+            anchors.centerIn: parent
+            name: sb.icon; size: sb.compact ? 11 : 14; bold: 8
+            color: sbTxt.color   // one recipe for the word and the glyph, hover included
         }
         MouseArea {
             id: sbMa; anchors.fill: parent; hoverEnabled: true
@@ -7547,13 +8064,24 @@ ApplicationWindow {
         // album (LibList sets reuseItems) would download the PREVIOUS album's
         // selection; expanded/trackList live in global maps for that reason,
         // the per-delegate selection resets instead.
-        onAlbumIdChanged: sel = ({})
+        // True only while a press is folding this row's panel shut (the panel
+        // below explains why it has to outlive the press). Cleared on recycle:
+        // a delegate rebinding to another album must not carry a fold that
+        // belonged to the row it used to be.
+        property bool folding: false
+        onAlbumIdChanged: { sel = ({}); folding = false }
         readonly property var trackList: root.trackCache[albumId] || []
         // Tier split once the tracks are known (expand fetches them), flips
         // the quality badge to MIXED when the album spans tiers.
         readonly property var qualMix: root.qualMixList(trackList)
         readonly property int selCount: Object.keys(sel).length
         readonly property bool allSelected: trackList.length > 0 && selCount === trackList.length
+        // The gap under the row belongs to the panel, so it has to go with it:
+        // a fixed 6 stayed until the folded panel left the layout and then
+        // vanished in one frame, a small extra collapse after the motion had
+        // already ended. Shrinking it over the panel's last 6px keeps the
+        // whole close continuous.
+        spacing: Math.min(6, abPanel.height)
         // The artists this block should link: the side-map array when the
         // payload carried one, else a single entry from artistName/artistId
         // (same fallback as cardLeadArtists, so search albums always show a
@@ -7563,16 +8091,18 @@ ApplicationWindow {
             if (a.length > 0) return a
             return artistName !== "" ? [{ id: artistId, name: artistName }] : []
         }
-        spacing: 6
 
         function toggle() {
             var e = Object.assign({}, root.expandedAlbums)
-            if (e[albumId]) { delete e[albumId] }
-            else { e[albumId] = true; if (!root.trackCache[albumId]) waves.loadAlbumTracks(albumId) }
+            if (e[albumId]) { delete e[albumId]; folding = true }
+            else { e[albumId] = true; folding = false; if (!root.trackCache[albumId]) waves.loadAlbumTracks(albumId) }
             root.expandedAlbums = e
             // After the panel exists (next event loop turn, so its height is
-            // laid out), bring the row up to the expand anchor line.
-            if (e[albumId]) Qt.callLater(function() { if (ab.expanded) root.scrollExpandedIntoView(ab) })
+            // laid out), bring the row up to the expand anchor line, keeping
+            // the spot the view left so the collapse can return to it.
+            var key = albumId
+            if (e[albumId]) Qt.callLater(function() { if (ab.expanded) root.rememberExpandReturn(key, root.scrollExpandedIntoView(ab)) })
+            else root.scrollCollapsedBack(key, ab)
         }
         function setSel(tid, v) { var s = Object.assign({}, sel); if (v) s[tid] = true; else delete s[tid]; sel = s }
         function toggleAll() {
@@ -7642,11 +8172,19 @@ ApplicationWindow {
                 // Badge slot like the track rows: sized to the widest real badge,
                 // badge right-aligned, so the popularity column doesn't stagger
                 // with badge width. A wider MIXED tag gets its natural width.
+                // 14px of slack on top, the room the badge grows into for its
+                // caret when hovered (see TrackRow's slot).
                 Item {
                     QualTag { id: abQtMetric; visible: false; q: "LOSSLESS" }
-                    Layout.preferredWidth: Math.max(abQtMetric.implicitWidth, abQt.implicitWidth)
+                    Layout.preferredWidth: Math.max(abQtMetric.implicitWidth, abQt.implicitWidth) + 14
                     Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
-                    QualTag { id: abQt; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; q: quality; mix: qualMix }
+                    QualPick {
+                        id: abQt
+                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        // ab.albumId, qualified: a bare albumId here is the
+                        // picker's own (empty) inheritance property.
+                        mediaId: ab.albumId; catalog: ab.quality; mix: ab.qualMix
+                    }
                 }
                 DownloadButton {
                     Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"
@@ -7670,10 +8208,29 @@ ApplicationWindow {
 
         // --- Expanded rich panel ---
         Rectangle {
+            id: abPanel
             width: parent.width
-            visible: expanded
-            height: visible ? expandedCol.height + 24 : 0
-            Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            // The panel stays on screen while it folds shut. A Column drops an
+            // invisible child from its layout outright, so `visible: expanded`
+            // closed the whole gap in one frame while the view was still
+            // gliding back to where the expand had left it: the page snapped
+            // and the scroll trailed after it. Folding on the same clock as
+            // that scroll makes the two one motion. `folding` marks a real
+            // collapse (the press that closed the row sets it, the fold
+            // reaching zero clears it), so a recycled delegate rebinding to a
+            // collapsed album still blanks at once.
+            visible: expanded || ab.folding
+            height: expanded ? expandedCol.height + 24 : 0
+            // Fades with the fold: the column inside keeps its full height
+            // while the panel shrinks, and an unclipped panel would otherwise
+            // draw the tracks over the rows closing in below them.
+            opacity: expanded ? 1 : 0
+            // A panel on its way out takes no more presses: the band still
+            // closing under the cursor must not fire a download.
+            enabled: expanded
+            onHeightChanged: if (!expanded && height <= 0.5) ab.folding = false
+            Behavior on height { NumberAnimation { duration: root.expandMoveMs; easing.type: Easing.OutCubic } }
+            Behavior on opacity { NumberAnimation { duration: root.expandMoveMs; easing.type: Easing.OutCubic } }
             color: root.surface0
             border.color: root.border1
             radius: 10
@@ -7727,7 +8284,7 @@ ApplicationWindow {
                     Column {
                         id: abPanelMeta
                         spacing: 8; topPadding: 4
-                        QualTag { anchors.right: parent.right; q: quality; mix: qualMix }
+                        QualPick { anchors.right: parent.right; mediaId: ab.albumId; catalog: ab.quality; mix: ab.qualMix }
                         PopMeter { anchors.right: parent.right; value: popularity }
                     }
                 }
@@ -7800,7 +8357,10 @@ ApplicationWindow {
         // false). Same recycling rationale as AlbumBlock: expand state global,
         // selection per delegate.
         property var sel: ({})
-        onPlIdChanged: sel = ({})
+        // Same as AlbumBlock.folding: true only while a press folds the panel
+        // shut, so a recycled delegate blanks instead of folding.
+        property bool folding: false
+        onPlIdChanged: { sel = ({}); folding = false }
         readonly property var trackList: root.playlistTrackCache[plId] || []
         // Row indices only mean something against the list they were picked
         // from, and a re-expand refetches (playlists mutate). A replaced list
@@ -7825,14 +8385,17 @@ ApplicationWindow {
         readonly property int selCount: Object.keys(sel).length
         readonly property bool allSelected: trackList.length > 0 && selCount === trackList.length
         readonly property string subLabel: (trackCount > 0 ? trackCount + " tracks" : "Playlist") + (creator ? "  ·  " + creator : "")
-        spacing: 6
+        // Shrinks with the panel's last 6px, as on AlbumBlock above.
+        spacing: Math.min(6, pbPanel.height)
 
         function toggle() {
             var e = Object.assign({}, root.expandedPlaylists)
-            if (e[plId]) { delete e[plId] }
-            else { e[plId] = true; waves.loadPlaylistTracks(plId) }
+            if (e[plId]) { delete e[plId]; folding = true }
+            else { e[plId] = true; folding = false; waves.loadPlaylistTracks(plId) }
             root.expandedPlaylists = e
-            if (e[plId]) Qt.callLater(function() { if (pb.expanded) root.scrollExpandedIntoView(pb) })
+            var key = plId
+            if (e[plId]) Qt.callLater(function() { if (pb.expanded) root.rememberExpandReturn(key, root.scrollExpandedIntoView(pb)) })
+            else root.scrollCollapsedBack(key, pb)
         }
         function setSel(row, kind, v) { var s = Object.assign({}, sel); if (v) s[row] = kind; else delete s[row]; sel = s }
         function toggleAll() {
@@ -7892,10 +8455,17 @@ ApplicationWindow {
 
         // --- Expanded rich panel ---
         Rectangle {
+            id: pbPanel
             width: parent.width
-            visible: expanded
-            height: visible ? pbExpandedCol.height + 24 : 0
-            Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            // Folds shut on the same clock as the scroll back, for the reason
+            // spelled out on the album panel above.
+            visible: expanded || pb.folding
+            height: expanded ? pbExpandedCol.height + 24 : 0
+            opacity: expanded ? 1 : 0
+            enabled: expanded
+            onHeightChanged: if (!expanded && height <= 0.5) pb.folding = false
+            Behavior on height { NumberAnimation { duration: root.expandMoveMs; easing.type: Easing.OutCubic } }
+            Behavior on opacity { NumberAnimation { duration: root.expandMoveMs; easing.type: Easing.OutCubic } }
             color: root.surface0
             border.color: root.border1
             radius: 10
@@ -8323,10 +8893,16 @@ ApplicationWindow {
                 // short badges (HI-RES) leave the slack on their left, not as a
                 // hole between badge and button. Sized to the widest real badge
                 // (LOSSLESS 16/44.1) via a hidden metric, no padded guess.
+                // 14px of slack on top: the badge grows leftwards by that much
+                // to admit its caret when hovered, without moving the row.
                 Item {
                     QualTag { id: qtMetric; visible: false; q: "LOSSLESS" }
-                    Layout.preferredWidth: qtMetric.implicitWidth; Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
-                    QualTag { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; q: quality }
+                    Layout.preferredWidth: qtMetric.implicitWidth + 14; Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
+                    QualPick {
+                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        mediaId: trow.tId; albumId: trow.albumId; catalog: trow.quality
+                        pickable: trow.kind !== "video"
+                    }
                 }
                 DownloadButton {
                     Layout.alignment: Qt.AlignVCenter; mediaId: tId; ownedCheck: true
@@ -11137,7 +11713,7 @@ ApplicationWindow {
             root.artistOpen = false
             root.libraryOpen = false
             root.trackCache = ({})
-            root.expandedAlbums = ({})
+            root.resetExpandedAlbums({})
             // Playlist rows expand the same way, and their cache has to go with
             // them: playlists mutate, so a row left expanded across searches
             // would show yesterday's tracks with no refetch to correct them.
@@ -11220,11 +11796,11 @@ ApplicationWindow {
             var pr = root._artistRestoreState
             root._artistRestoreState = null
             if (pr && pr.id === ("" + p.id)) {
-                root.expandedAlbums = pr.ex || ({})
+                root.resetExpandedAlbums(pr.ex)
                 root.bioExpanded = !!pr.bio
             } else {
                 root.bioExpanded = false
-                root.expandedAlbums = ({})
+                root.resetExpandedAlbums({})
             }
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
             root.libraryOpen = false
@@ -13990,6 +14566,7 @@ ApplicationWindow {
                 // forward. Both are SpecBtn, so the fill, the border and the
                 // hover lift are the exit prompt's, not a local imitation.
                 SpecBtn {
+                    id: queuePauseBtn
                     visible: queueModel.count > 0
                     warn: !waves.paused
                     primary: waves.paused
@@ -14004,6 +14581,17 @@ ApplicationWindow {
                     visible: root.activeQueueCount > 0 || waves.scanning
                     danger: true; label: "STOP"
                     onClicked: waves.stopAll()
+                }
+                // Shut the drawer. Clicking the page behind it already does
+                // this, but that is a gesture you have to know: the panel needs
+                // a way out you can see. Last in the row so it sits in the
+                // corner every window puts a close in, and always there, since
+                // an empty queue (where PAUSE and STOP are both gone) is
+                // exactly when the way out is hardest to guess.
+                SpecBtn {
+                    id: queueCloseBtn
+                    icon: "close"
+                    onClicked: queueDrawer.close()
                 }
             }
             Text { textFormat: Text.PlainText; text: queueModel.count + (queueModel.count === 1 ? " item" : " items"); color: root.textLo; font.family: root.mono; font.pixelSize: 12 }
