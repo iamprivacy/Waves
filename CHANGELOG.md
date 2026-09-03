@@ -22,6 +22,24 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.27 (2026-09-02)
+
+### ✨ Added
+
+- 🎚️ Download one album or song in a different quality without touching Settings: click its quality badge and pick a tier from the menu. The badge keeps showing your choice, and downloads of that item keep asking for it, until you pick another tier or close Waves; a choice made on an album applies to every song in it ([issue #36](https://github.com/iamprivacy/Waves/issues/36)).
+
+- 📚 The quality menu marks the tier you already have on disk, so a song or album is not downloaded again in a quality you are holding ([issue #36](https://github.com/iamprivacy/Waves/issues/36)).
+
+- ✖️ The download queue has its own close button, so you no longer have to click the page behind it to put the panel away.
+
+### 🔧 Changed
+
+- ↩️ Collapsing an expanded album or playlist row folds it shut as the page scrolls back to where it was before you opened it, instead of snapping shut and leaving you further down the page.
+
+### 🐛 Fixed
+
+- ⬇️ The small download button on a song row is dark green again, like every other button, instead of a white tile.
+
 ## 🗂️ v0.1.26 (2026-09-01)
 
 ### 🔧 Changed
