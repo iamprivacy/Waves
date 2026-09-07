@@ -22,6 +22,36 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.28 (2026-09-07)
+
+### ✨ Added
+
+- 🎼 A new Settings switch, "Show every edition on artist pages", lists every edition again when "Most-complete edition only" is on and the page would otherwise hide some.
+
+### 🔧 Changed
+
+- 🎼 With "Most-complete edition only" on, an artist page no longer lists an edition whose songs are all inside a fuller edition of the same album, so the page shows what a discography download would actually fetch.
+
+- ⚡ Album covers you have already loaded are kept, so a page you come back to draws its artwork straight away instead of fetching it again.
+
+- ⚡ Resting the pointer on an artist card starts loading that artist, so the page is usually ready by the time you click it.
+
+- ⚡ A search Waves can already answer from what it is holding paints at once and corrects itself when the full results arrive, instead of showing nothing until they do.
+
+### 🐛 Fixed
+
+- 📚 A large music library kept on a network share is read correctly on macOS. Some shares hand back only part of the folder list, which left albums you already had looking missing, so they could be downloaded a second time. Waves now spots a short listing, finds the missing folders by name, and reads the share again over a fresh connection.
+
+- 🎬 The video results grid no longer leaves a gap in its last row.
+
+- ⚙️ If your settings file is ever damaged (a power cut or a crash mid-save), Waves keeps a copy of it beside the original and starts on the defaults, instead of quietly saving the defaults over your only copy.
+
+- 📚 On a share that treats two spellings of a name as two folders, both artists stay in your library instead of one being dropped as a duplicate.
+
+- 📚 An album downloaded by a version before 0.1.17 into a folder with a replaced character is recognised as already yours again, so it is not fetched a second time.
+
+- 🎛️ The two controls on a browse console card no longer draw through each other.
+
 ## 🗂️ v0.1.27 (2026-09-02)
 
 ### ✨ Added
