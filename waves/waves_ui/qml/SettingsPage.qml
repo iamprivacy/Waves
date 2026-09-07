@@ -87,6 +87,15 @@ Item {
     // looks identical to an empty library. See backend.libraryScanStatus().
     property string libraryScanStatus: waves.libraryScanStatus()
     property var libraryScanProgress: waves.libraryScanProgress()
+    // True when the last scan met a folder listing it could not trust (a
+    // network share whose directory paging repeats): the scan still says "ok",
+    // but badges for artists not yet opened may be blank until asked for.
+    property bool libraryScanPartial: waves.libraryScanPartial()
+    property bool libraryListingReconciled: waves.libraryListingReconciled()
+    // How badly the folder listing was truncated: {entries, distinct}. The
+    // note below turns it into real numbers, because "incomplete" on its own
+    // told the user nothing they could act on.
+    property var libraryListingShape: waves.libraryListingShape()
     // SAVED library state, mirrored for the composite "library" card: the master
     // switch, the chosen source, the separate folder path, and the download
     // folder (scanned when the source follows it). The card's controls stage
@@ -108,6 +117,9 @@ Item {
     function syncLibraryMirrors() {
         libraryScanStatus = waves.libraryScanStatus()
         libraryScanProgress = waves.libraryScanProgress()
+        libraryScanPartial = waves.libraryScanPartial()
+        libraryListingReconciled = waves.libraryListingReconciled()
+        libraryListingShape = waves.libraryListingShape()
         libraryEnabledLive = waves.wavesPref("library_enabled") === true
         libraryBulkSkipLive = waves.wavesPref("library_bulk_skip") !== false
         libraryMbArbiterLive = waves.wavesPref("library_mb_arbiter") === true
@@ -120,6 +132,9 @@ Item {
         function onLibraryScanStatusChanged() {
             page.libraryScanStatus = waves.libraryScanStatus()
             page.libraryScanProgress = waves.libraryScanProgress()
+            page.libraryScanPartial = waves.libraryScanPartial()
+            page.libraryListingReconciled = waves.libraryListingReconciled()
+            page.libraryListingShape = waves.libraryListingShape()
             page.downloadFolderLive = waves.libraryDownloadFolder()
         }
         function onLibrarySourceChanged() {
@@ -134,6 +149,35 @@ Item {
     }
     // The scanning note's text: real progress, not a bare spinner. During the
     // folder walk it counts discoveries live; once reads start it shows
+    // What "incomplete" actually means, in the numbers the scan measured. Some
+    // network shares answer "list this folder" with the same page of names over
+    // and over, so the system reports thousands of entries that are only a few
+    // hundred different folders, and everything past that page is invisible to
+    // every app on this Mac, not just Waves. Waves works around it by asking for
+    // artists by name, which the share does answer correctly, so anything it has
+    // a name for still resolves. No folder name and no artist name goes in here.
+    function libTruncationNote() {
+        var shape = page.libraryListingShape || ({})
+        var entries = shape.entries || 0
+        var distinct = shape.distinct || 0
+        var measured = entries > distinct && distinct > 0
+        return (measured
+                ? ("This folder does not list properly. The system offers " + entries
+                   + " entries for it but only " + distinct
+                   + " of them are different folders, so the rest never reach Waves. ")
+                : "This folder's listing comes back incomplete, which some network shares do. ")
+            + "Everything inside the folders it did name is indexed. Waves finds the others by asking for "
+            + "artists by name, which it does whenever you search, open a page, or start a download, and "
+            + "what it finds is kept. Artists you have never looked up may show no badge yet."
+    }
+    // Whether the truncation is worth a word at all. A listing the recovery
+    // has already made good (every folder the fresh mount named is indexed)
+    // needs nothing from the user, and anything on the card in the warning
+    // colour reads as an error whatever it says, so it shows nothing. The
+    // moment a recovery leaves a folder out, the warning is back.
+    readonly property bool libTruncationShown: libraryScanPartial && !libraryListingReconciled
+                                               && libraryScanStatus === "ok"
+
     // done/total, what remains, and an ETA computed from the observed read rate.
     function libScanNote() {
         // Compact on purpose: the read-phase note shares one line with the
@@ -2571,6 +2615,7 @@ Item {
                                                 visible: (libraryCol.scanning && !page.libScanReading)
                                                          || page.libraryScanStatus === "unreadable"
                                                          || (page.libraryScanStatus === "missing" && libraryCol.root !== "")
+                                                         || (page.libTruncationShown && libraryCol.root !== "")
                                                 width: parent.width; wrapMode: Text.WordWrap
                                                 textFormat: Text.PlainText
                                                 font.pixelSize: 13; font.weight: Font.Medium
@@ -2581,7 +2626,9 @@ Item {
                                                       ? (Qt.platform.os === "osx"
                                                          ? "Waves doesn't have permission to read this folder. It is likely on a network share or external drive that macOS protects. Allow access when macOS asks, or if you already declined, turn Waves on under System Settings, Privacy & Security, then reopen Settings."
                                                          : "Waves doesn't have permission to read this folder. Check the folder's permissions (and, on a network share, that the mount allows this user to read it), then reopen Settings.")
-                                                      : "This folder isn't available right now. If it lives on an external drive or NAS, connect it and reopen Settings."
+                                                      : page.libraryScanStatus === "missing"
+                                                      ? "This folder isn't available right now. If it lives on an external drive or NAS, connect it and reopen Settings."
+                                                      : page.libTruncationNote()
                                             }
                                             // The download buttons' dot matrix in the download buttons'
                                             // clothes: the same green-filled, green-edged pill a running

@@ -728,8 +728,10 @@ ApplicationWindow {
     }
     // A per-section cap for the mixed All view: the section's first 5 rows, or
     // everything once it is expanded; a specific section filter is never capped.
-    function searchRowVisible(name, count, index, expanded) {
-        return sectionVisible(name, count) && (filterType !== "all" || expanded || index < 5)
+    // `cap` is the mixed view's default row count, 5 unless the section
+    // says otherwise (the video grid rounds it up to whole rows).
+    function searchRowVisible(name, count, index, expanded, cap) {
+        return sectionVisible(name, count) && (filterType !== "all" || expanded || index < (cap || 5))
     }
     // ---- Download state (mirrors the bridge) ----------------------------
     // mediaId -> a small reactive holder { real pct; string st }, created lazily
@@ -3286,15 +3288,17 @@ ApplicationWindow {
     // must not fetch every card it passes). Leaving the card before the
     // dwell ends cancels it. Track rows ask for a longer dwell: clicking
     // one opens its album page, but a pointer parked on a row while
-    // reading is not a click coming. Artist cards are not here: their page
-    // is a different, heavier path (loadArtist) with its own cache.
+    // reading is not a click coming. Artist cards take the same dwell to
+    // their own builder (prefetchArtist): a heavier page, cached on disk
+    // across launches, so only an artist never visited pays, and the
+    // hover pays it before the click.
     property string _hoverPrefetchKey: ""
     property var _hoverPrefetchCard: null
     function _cardPrefetchKey(card) {
         if (!card) return ""
         var kind = card.kind || ""
         if (kind === "track") return card.album_id ? "album:" + card.album_id : ""
-        if (kind === "playlist" || kind === "mix" || kind === "album") return card.id ? kind + ":" + card.id : ""
+        if (kind === "playlist" || kind === "mix" || kind === "album" || kind === "artist") return card.id ? kind + ":" + card.id : ""
         // An album ROW (AlbumBlock): the click that follows expands it in
         // place, so what is warmed is its inline track list, not its page.
         if (kind === "album_tracks") return card.id && !root.trackCache[card.id] ? "album_tracks:" + card.id : ""
@@ -3306,6 +3310,7 @@ ApplicationWindow {
         if (!root.signedIn) return
         var k = _cardPrefetchKey(card)
         if (k === "" || root.browsePageKey === "item:" + k) return   // not a page, or already on it
+        if (root.artistOpen && root.artistData && k === "artist:" + root.artistData.id) return   // the page under the pointer
         _hoverPrefetchKey = k; _hoverPrefetchCard = card
         hoverPrefetchTimer.interval = dwell > 0 ? dwell : 200
         hoverPrefetchTimer.restart()
@@ -3327,12 +3332,15 @@ ApplicationWindow {
             var c = root._hoverPrefetchCard, k = root._hoverPrefetchKey
             root._hoverPrefetchKey = ""; root._hoverPrefetchCard = null
             if (!c || k === "") return
-            // The page hero is a 180px Art, decodeW 360: warm the card's
-            // cover at that size so the stand-in is a pixmap hit.
-            if (c.art) root.warmArt("" + c.art, 360, 360)
+            // The page hero is a 180px Art, decodeW 360 (the artist page's
+            // photo is 150px, decodeW 300): warm the card's cover at that
+            // size so the stand-in is a pixmap hit.
             var cut = k.indexOf(":")
-            if (k.substring(0, cut) === "album_tracks") waves.prefetchAlbumTracks(k.substring(cut + 1))
-            else waves.prefetchBrowseItem(k.substring(0, cut), k.substring(cut + 1))
+            var kind = k.substring(0, cut), id = k.substring(cut + 1)
+            if (c.art) root.warmArt("" + c.art, kind === "artist" ? 300 : 360, kind === "artist" ? 300 : 360)
+            if (kind === "album_tracks") waves.prefetchAlbumTracks(id)
+            else if (kind === "artist") waves.prefetchArtist(id)
+            else waves.prefetchBrowseItem(kind, id)
         }
     }
 
@@ -4868,6 +4876,10 @@ ApplicationWindow {
     // with a thin bottom progress line while running.
     component DownIcon: Rectangle {
         id: di
+        // Named so the scenario test can find the compact download control in
+        // a track row without matching on the properties it shares with the
+        // full button.
+        objectName: "downIcon"
         property var onTap: (function(){})
         property string mediaId: ""
         // Opt-in: mediaId is an album/playlist/mix id, not a track id, so it
@@ -4898,9 +4910,83 @@ ApplicationWindow {
             var o = di.mediaId !== "" ? waves.ownershipOf(di.mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
         }
-        Component.onCompleted: refreshOwned()
+        // The library twin of `owned`, the same shape (and the same wording,
+        // colours and click-through) DownloadButton carries. This icon is the
+        // download control of the expanded album and playlist panels, and it
+        // was the one download control in the app that never asked the scan:
+        // a song already on disk read a plain arrow here while the badge on
+        // the row above it said the opposite.
+        //
+        // ONE object per grain, never four properties: see DownloadButton's
+        // libAlbum for the call budget that shape exists to keep.
+        property var libAlbum: null
+        // The track twin ({artist, title, album, year}), for the rows that
+        // download ONE song. Never set for a video: the scan only holds audio.
+        property var libTrack: null
+        // Kept as a derived read for the Connections guard below: a row that
+        // names nothing must not run a handler per committed batch of a
+        // running scan.
+        readonly property string libTitle: {
+            if (libAlbum && libAlbum.title) return "" + libAlbum.title
+            if (libTrack && libTrack.title) return "" + libTrack.title
+            return ""
+        }
+        property bool libPresent: false
+        property bool libPartial: false
+        property bool libSure: false
+        // The matched local folder, carried so the click-through can name it.
+        property string libPath: ""
+        property bool _libResolved: false
+        function refreshLibPresent() {
+            _libResolved = true
+            var a = di.libAlbum
+            if (!a || !a.title) {
+                var t = di.libTrack
+                if (!t || !t.title) { libPresent = false; libPartial = false; libSure = false; libPath = ""; return }
+                var tp = waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                                                    "" + (t.album || ""), "" + (t.year || ""),
+                                                    t.duration_sec || 0)
+                // A track has no coverage axis: presence alone is the done
+                // shape, and identity alone picks green from gold.
+                libPresent = !!(tp && tp.present === true)
+                libPartial = false
+                libSure = !!(tp && tp.sure === true)
+                libPath = libPresent ? ("" + (tp.local_album_id || "")) : ""
+                return
+            }
+            var p = waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                               "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
+            libPresent = !!(p && p.present === true && p.full === true)
+            libPartial = !!(p && p.present === true && p.full !== true)
+            libSure = !!(p && p.sure === true)
+            libPath = libPresent ? ("" + (p.local_album_id || "")) : ""
+        }
+        // A tag match, not a record of a download Waves made: it wears the
+        // done face but keeps a way through, exactly as on the full button.
+        readonly property bool libClaim: liveSt === "" && !owned && libPresent
+        // The gold face: only the UNPROVEN matches. A sure one falls through
+        // to the green done styling (state is the colour) while libClaim keeps
+        // routing its click to the gate.
+        readonly property bool libGuess: libClaim && !libSure
+        // Cyan, and still a live download: completing an album is not a
+        // duplicate. Only reachable from libAlbum (a track is never partial).
+        readonly property bool libPartialClaim: liveSt === "" && !owned && libPartial
+        function openLibraryClaim() {
+            root.openLibraryClaim(di.mediaId, di.libTitle, di.libPath,
+                                  di.libAlbum ? "album" : "track")
+        }
+        // Only if the libTrack/libAlbum binding has not already answered: an
+        // unconditional resolve here is a second call per row.
+        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent() }
         onMediaIdChanged: refreshOwned()
         onCollectionCheckChanged: refreshOwned()
+        onLibAlbumChanged: refreshLibPresent()
+        onLibTrackChanged: refreshLibPresent()
+        Connections {
+            target: waves
+            enabled: di.libTitle !== ""
+            function onLibraryPresenceChanged() { di.refreshLibPresent() }
+        }
         Connections {
             target: waves
             // Empty id = broadcast (the quality setting changed).
@@ -4914,13 +5000,15 @@ ApplicationWindow {
             function onCollectionMembershipChanged(cid) { if (di.collectionCheck && cid === di.mediaId) di.refreshOwned() }
         }
         readonly property string liveSt: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
-        readonly property string st: liveSt !== "" ? liveSt : (owned ? "done" : "")
+        readonly property string st: liveSt !== "" ? liveSt : ((owned || libPresent) ? "done" : "")
         readonly property real pct: di.mediaId !== "" ? root.dlPct(di.mediaId) : -1
         implicitWidth: 32; implicitHeight: 30
         radius: root.btnRad; clip: true
-        color: st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
+        color: libGuess ? root.goldCont : libPartialClaim ? root.cyanCont
+             : st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
         border.width: root.btnBorderW
-        border.color: st === "failed" ? root.red : st === "done" ? root.greenDim : root.accentDim
+        border.color: libGuess ? root.goldDim : libPartialClaim ? root.cyanDim
+                    : st === "failed" ? root.red : st === "done" ? root.greenDim : root.accentDim
         scale: 1
         Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
         // RUNNING: an LED matrix backdrop fills the button edge to edge (cells
@@ -4996,7 +5084,8 @@ ApplicationWindow {
         Ico {
             anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed" && !di.waiting
             name: di.st === "done" ? "check" : "arrow-down"
-            color: di.st === "done" ? root.green : root.accent
+            color: di.libGuess ? root.gold : di.libPartialClaim ? root.cyan
+                 : di.st === "done" ? root.green : root.accent
             size: 15; bold: di.st === "done" ? 0 : 10
         }
         // Queued: click acknowledged, waiting for a download slot; the stack
@@ -5004,11 +5093,21 @@ ApplicationWindow {
         QueueStack { visible: di.waiting; barW: 13; anchors.centerIn: parent }
         RetryMark { anchors.centerIn: parent; visible: di.st === "failed"; color: root.red; box: 15 }
         MouseArea {
+            // Named so the scenario test can drive the REAL tap area rather
+            // than the function behind it (the wiring is the thing at risk).
+            objectName: "diTapArea"
             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: di.scale = 0.85
             onReleased: di.scale = 1.0
             onCanceled: di.scale = 1.0
-            onClicked: { if (di.st === "running" || di.st === "done" || di.waiting) return; di.onTap() }
+            // A library claim is a guess, so it answers instead of ignoring:
+            // the same conversation the full button opens, with DOWNLOAD
+            // ANYWAY one click away.
+            onClicked: {
+                if (di.libClaim) { di.openLibraryClaim(); return }
+                if (di.st === "running" || di.st === "done" || di.waiting) return
+                di.onTap()
+            }
         }
     }
 
@@ -5912,8 +6011,29 @@ ApplicationWindow {
         // end of the conversation. Never set for a video: the scan only ever
         // holds audio.
         property var libTrack: null
+        // The artist grain: just the NAME, because the rollup
+        // (artistLibraryPresence) is keyed on nothing else. The two
+        // artist-wide buttons, "Download discography" on the artist page and
+        // "Download artist" on a search card, were the last download controls
+        // that never asked, so an artist whose whole catalogue was already on
+        // disk still offered a plain DOWNLOAD.
+        //
+        // It is a second crossing on a surface whose ArtistBadges strip also
+        // asks, and deliberately so: the budget this app keeps is one call per
+        // thing that ASKS, not one per row (see tests/test_presence_call_budget
+        // and the track row, whose pill and button both count). The rollup
+        // itself is derived once and cached per index, so the repeat is a
+        // dict.get behind the crossing.
+        //
+        // Ownership cannot stand in for it: ownedCheck looks its mediaId up as
+        // a TRACK id, and an artist id is not one.
+        property string libArtist: ""
         // Kept as a derived read for the Connections guard below (and so a test
-        // can find a button by the album or track it is showing).
+        // can find a button by the album or track it is showing). The artist
+        // grain is deliberately NOT folded in: it has no title, it can never
+        // reach the claim gate that reads this, and an artist button counted
+        // as an album consumer would loosen the album call budget by a whole
+        // page of cards.
         readonly property string libTitle: {
             if (libAlbum && libAlbum.title) return "" + libAlbum.title
             if (libTrack && libTrack.title) return "" + libTrack.title
@@ -5940,7 +6060,23 @@ ApplicationWindow {
             var a = db.libAlbum
             if (!a || !a.title) {
                 var t = db.libTrack
-                if (!t || !t.title) { libPresent = false; libPartial = false; libSure = false; libPath = ""; return }
+                if (!t || !t.title) {
+                    if (db.libArtist === "") { libPresent = false; libPartial = false; libSure = false; libPath = ""; return }
+                    // The artist grain. A discography has no completeness
+                    // axis: nobody, this app least of all, can say what "all
+                    // of it" is, so the rollup can only ever reach the PARTIAL
+                    // face, a still-live download button coloured to say part
+                    // of this is already here. Reporting it as present + full
+                    // would make an inert DOWNLOADED out of a question that
+                    // has no answer, and there is no single folder to reveal,
+                    // so an artist button never opens the claim gate either.
+                    var ap = waves.artistLibraryPresence(db.libArtist)
+                    libPresent = false
+                    libPartial = !!(ap && ap.present === true)
+                    libSure = false
+                    libPath = ""
+                    return
+                }
                 var tp = waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
                                                     "" + (t.album || ""), "" + (t.year || ""),
                                                     t.duration_sec || 0)
@@ -6032,9 +6168,10 @@ ApplicationWindow {
         onCollectionCheckChanged: refreshOwned()
         onLibAlbumChanged: refreshLibPresent()
         onLibTrackChanged: refreshLibPresent()
+        onLibArtistChanged: refreshLibPresent()
         Connections {
             target: waves
-            enabled: db.libTitle !== ""
+            enabled: db.libTitle !== "" || db.libArtist !== ""
             function onLibraryPresenceChanged() { db.refreshLibPresent() }
         }
         Connections {
@@ -6071,7 +6208,7 @@ ApplicationWindow {
         // row columns aligned and avoids layout jumps mid-download.
         implicitWidth: Math.max(dbRow.implicitWidth, dbMetric.implicitWidth,
                                 dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth,
-                                db.libAlbum ? dbMetricLib.implicitWidth
+                                (db.libAlbum || db.libArtist !== "") ? dbMetricLib.implicitWidth
                                             : db.libTrack ? dbMetricLibTrack.implicitWidth : 0) + root.btnPadH * 2
         Row {
             id: dbMetric
@@ -6089,9 +6226,9 @@ ApplicationWindow {
         // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
         // width must not move when a claim resolves, or one matched album in a
         // list would shunt its own row's button out of line with every
-        // neighbour. Counted ONLY for album-capable buttons (libAlbum set),
-        // since a track button can never reach either state and must not
-        // reserve width for them.
+        // neighbour. Counted for the buttons that can reach the partial face,
+        // album and artist, since a track button can never reach either state
+        // and must not reserve width for them.
         Row {
             id: dbMetricLib
             visible: false; spacing: 7
@@ -7417,8 +7554,9 @@ ApplicationWindow {
     // flips (and persists) that section's expanded flag via toggleSearchSection.
     component SearchSectionMore: ShowAllLabel {
         property string section: ""
+        property int cap: 5
         opacity: root.searchReveal
-        visible: root.filterType === "all" && count > 5
+        visible: root.filterType === "all" && count > cap
         onToggled: root.toggleSearchSection(section)
     }
 
@@ -8327,7 +8465,15 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
                                 PopMeter { value: modelData.popularity; showNum: false }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
-                                DownIcon { mediaId: modelData.id; onTap: function(){ waves.downloadTrack(modelData.id) } }
+                                DownIcon {
+                                    mediaId: modelData.id
+                                    // The panel knows the release these rows
+                                    // belong to, so a match here can be PROVEN
+                                    // (green) rather than hedged by title alone.
+                                    libTrack: ({ artist: ab.artistName, title: modelData.title,
+                                                 album: ab.title, year: ab.year })
+                                    onTap: function(){ waves.downloadTrack(modelData.id) }
+                                }
                             }
                         }
                     }
@@ -8547,7 +8693,16 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: modelData.artist; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 220 }
                                 PopMeter { value: modelData.popularity; showNum: false }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
-                                DownIcon { mediaId: modelData.id; onTap: function(){ if (modelData.kind === "video") waves.downloadVideo(modelData.id); else waves.downloadTrack(modelData.id) } }
+                                DownIcon {
+                                    mediaId: modelData.id
+                                    // A playlist row carries its own artist but
+                                    // names no release, so the match keeps its
+                                    // hedge (gold). Never for a video: the
+                                    // library scan only ever holds audio.
+                                    libTrack: modelData.kind === "video" ? null
+                                            : ({ artist: modelData.artist, title: modelData.title })
+                                    onTap: function(){ if (modelData.kind === "video") waves.downloadVideo(modelData.id); else waves.downloadTrack(modelData.id) }
+                                }
                             }
                         }
                     }
@@ -9011,11 +9166,18 @@ ApplicationWindow {
     // (not model roles): a top-level component sits outside the Repeater delegate
     // scope, so the delegate wires model.art/name/popularity/id into these.
     component ArtistSearchCard: Rectangle {
+        id: asc
         property string aArt: ""
         property string aName: ""
         property real aPop: 0
         property string aId: ""
         radius: 12; color: root.surface; border.color: root.border1
+        // Resting anywhere on the card has its page ready before the click
+        // (see hoverPrefetch). Its own handler, the way BrowseCard's is.
+        readonly property var prefetchCard: ({ kind: "artist", id: asc.aId, art: asc.aArt })
+        HoverHandler {
+            onHoveredChanged: hovered ? root.hoverPrefetch(asc.prefetchCard) : root.hoverPrefetchCancel(asc.prefetchCard)
+        }
         // Size to the content (plus the 8px top and bottom margins) so the card
         // height matches art + name + meter + preview + download exactly.
         implicitHeight: cardCol.implicitHeight + 16
@@ -9049,6 +9211,10 @@ ApplicationWindow {
             DownloadButton {
                 width: parent.width
                 mediaId: aId; label: "Download artist"
+                // What the strip on the cover already says, said again by the
+                // control that would act on it: a catalogue you partly hold
+                // is not a fresh grab.
+                libArtist: aName
                 onTap: function(){ waves.downloadArtist(aId) }
             }
         }
@@ -9077,6 +9243,70 @@ ApplicationWindow {
         readonly property string pvSt: previewable ? root.pvSt(bc.kind, bc.card.id || "") : ""
         readonly property string dlSt: root.dlSt(bc.card.id || "")
         readonly property real dlPct: root.dlPct(bc.card.id || "")
+        // The library verdict this card carries, resolved ONCE per card, the
+        // same shape and the same economy as ArtCard's. The console style's
+        // card was the one browse card that printed DOWNLOAD over an album
+        // already on disk: it read live job state and nothing else. Albums
+        // only, since a playlist or a mix has no album identity to ask about
+        // and must never wear one's verdict.
+        property var libPresence: null
+        property bool _libResolved: false
+        function resolveLibPresence() {
+            _libResolved = true
+            var c = bc.card
+            libPresence = (bc.kind === "album" && c && c.title)
+                ? waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
+                                             "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
+                : null
+        }
+        onCardChanged: resolveLibPresence()
+        // Only if the binding above has not already answered: an unconditional
+        // resolve here is a second QML->Python call per card on a shelf.
+        Component.onCompleted: if (!_libResolved) resolveLibPresence()
+        Connections {
+            target: waves
+            // A shelf builds this card for every kind, so the ones that will
+            // never ask must not run a handler per card per committed batch
+            // of a running scan.
+            enabled: bc.kind === "album"
+            function onLibraryPresenceChanged() { bc.resolveLibPresence() }
+        }
+        readonly property bool libPresent: !!(bc.libPresence && bc.libPresence.present === true)
+        readonly property bool libFull: !!(bc.libPresence && bc.libPresence.full === true)
+        readonly property bool libSure: !!(bc.libPresence && bc.libPresence.sure === true)
+        // The three states the art card's strip already names: a proven
+        // complete copy, an unproven one, and a partial copy (which stays a
+        // plain live download, since completing an album is not a duplicate).
+        readonly property string libState: !bc.libPresent ? ""
+                                           : !bc.libFull ? "partial"
+                                           : bc.libSure ? "proven" : "maybe"
+        // A FULL claim gates its click the way every other surface does:
+        // explain the match, name the folder, leave Download anyway one click
+        // away. A tag match must never be the end of the conversation.
+        readonly property bool libClaim: bc.libState === "proven" || bc.libState === "maybe"
+        // The art card's words, for the art card's reason: this control line is
+        // roughly 90px of a 140px row shared with PREVIEW, so the full button's
+        // "PARTIALLY IN LIBRARY" could never ride here. These are the shortest
+        // forms that still say which of the three is true, and a partial copy
+        // spends them on the count, which is the thing worth knowing.
+        readonly property string libWord: {
+            if (bc.libState === "proven") return "IN LIBRARY"
+            if (bc.libState === "maybe") return "MAYBE"
+            if (bc.libState === "partial") {
+                var p = bc.libPresence
+                var held = p.local_tracks || 0
+                var declared = p.local_declared || 0
+                var want = declared > held ? declared : (bc.card.tracks || 0)
+                if (want > held) return held + " OF " + want
+            }
+            return "DOWNLOAD"
+        }
+        // The pill's tier colours, so the two things this card can say never
+        // disagree about what a colour means: green proven, gold guess, cyan
+        // partial, accent for a plain download.
+        readonly property color libInk: bc.libState === "proven" ? root.green
+                                      : bc.libState === "maybe" ? root.gold
+                                      : bc.libState === "partial" ? root.cyan : root.accent
         Column {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
             anchors.margins: 8; spacing: 5
@@ -9124,9 +9354,29 @@ ApplicationWindow {
             anchors.margins: 8; height: 16
             // ---- preview: ▶ PREVIEW -> ■ + mono elapsed while active ----
             Item {
+                id: bcPv
+                // Named so the fit guard can measure the two halves of this
+                // line against each other, not just the box.
+                objectName: "bcPreview"
                 visible: bc.previewable
                 anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                 width: bcPvRow.implicitWidth; height: 16
+                // This line is 140px (a 156px card less its margins) and the
+                // download box owns the right edge, reserving its widest
+                // state, so the preview control only ever gets what is left.
+                // Both are anchored, so nothing pushes back: when the words
+                // outgrow the room they simply draw through each other. So the
+                // preview gives way, the way the art card's strip gives up its
+                // padding: the word stands down and the glyph carries the
+                // control alone, which always fits. Measured off the parts
+                // rather than the Row, because the Row's implicitWidth is what
+                // hiding the word changes (reading it here would be a loop).
+                readonly property real gapW: 6
+                readonly property real icoW: 10
+                readonly property real stopW: bcPvStop.visible ? bcPvRow.spacing + bcPvStop.implicitWidth : 0
+                readonly property real availW: parent.width - bcDlBox.width - gapW
+                readonly property real naturalW: icoW + bcPvRow.spacing + bcPvWord.implicitWidth + stopW
+                readonly property bool tight: naturalW > availW
                 Row {
                     id: bcPvRow
                     anchors.verticalCenter: parent.verticalCenter; spacing: 4
@@ -9140,6 +9390,8 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                     }
                     Text {
+                        id: bcPvWord
+                        visible: !bcPv.tight
                         textFormat: Text.PlainText
                         text: bc.pvSt === "" ? "PREVIEW"
                             : bc.pvSt === "loading" ? "[buffering]"
@@ -9164,6 +9416,7 @@ ApplicationWindow {
                     // "· STOP" rides after the elapsed counter while a preview
                     // is live; quiet at rest, red on hover, resets to idle.
                     Text {
+                        id: bcPvStop
                         textFormat: Text.PlainText
                         visible: bc.pvSt === "playing" || bc.pvSt === "paused"
                         text: "· STOP"
@@ -9187,20 +9440,50 @@ ApplicationWindow {
             Item {
                 id: bcDlBox
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                width: Math.max(bcDlIdle.implicitWidth, bcDlRun.implicitWidth, bcDlQueued.implicitWidth); height: 16
+                width: Math.max(bcDlIdle.implicitWidth, bcDlWordMetric.implicitWidth,
+                                bcDlLibMetric.implicitWidth, bcDlRun.implicitWidth,
+                                bcDlQueued.implicitWidth)
+                height: 16
                 // "preparing" reads as queued here too: see DownloadButton.waiting.
                 readonly property bool waiting: bc.dlSt === "queued" || bc.dlSt === "preparing"
+                // The word here changes with the job (DONE, RETRY) and with
+                // the library verdict (DOWNLOAD, IN LIBRARY, MAYBE, N OF M),
+                // and this box is anchored to the right edge, so an
+                // unreserved width would walk the control left and right as a
+                // scan lands. Reserve the two widest once, the same metric
+                // trick the full button's dbMetric rows use. The queued row
+                // used to be the widest thing here and did this by accident,
+                // until it gave up the media noun to fit the line.
+                Text {
+                    id: bcDlWordMetric
+                    visible: false; textFormat: Text.PlainText; text: "DOWNLOAD"
+                    font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
+                }
+                Text {
+                    id: bcDlLibMetric
+                    visible: false; textFormat: Text.PlainText; text: "IN LIBRARY"
+                    font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
+                }
                 Text {
                     id: bcDlIdle
+                    // Named so the scenario test can read the WORD the user
+                    // sees, not just the property that is supposed to pick it.
+                    objectName: "bcDlWord"
                     textFormat: Text.PlainText
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                     visible: bc.dlSt !== "running" && !bcDlBox.waiting
-                    text: bc.dlSt === "done" ? "DONE" : bc.dlSt === "failed" ? "RETRY" : "DOWNLOAD"
-                    color: bc.dlSt === "done" ? root.green : bc.dlSt === "failed" ? root.red : root.accent
+                    // A download Waves made is the freshest fact this line can
+                    // state, so DONE outranks any library verdict; only an idle
+                    // card falls through to what the scan found.
+                    text: bc.dlSt === "done" ? "DONE" : bc.dlSt === "failed" ? "RETRY" : bc.libWord
+                    color: bc.dlSt === "done" ? root.green : bc.dlSt === "failed" ? root.red : bc.libInk
                     font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
                 }
-                // Queued: the stack glyph + the media noun, same language as
-                // the full DownloadButton's queued state.
+                // Queued: the stack glyph and the word, the same language as
+                // the full DownloadButton's queued state. The media noun the
+                // full button carries is dropped here: the card is already the
+                // noun, and "QUEUED ALBUM" plus the glyph came to 101px of a
+                // 140px line the preview control also has to live on.
                 Row {
                     id: bcDlQueued
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -9208,7 +9491,7 @@ ApplicationWindow {
                     QueueStack { barW: 9; anchors.verticalCenter: parent.verticalCenter }
                     Text {
                         textFormat: Text.PlainText
-                        text: "QUEUED" + (bc.kind ? " " + bc.kind.toUpperCase() : "")
+                        text: "QUEUED"
                         color: root.accentDim
                         font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
                         anchors.verticalCenter: parent.verticalCenter
@@ -9232,7 +9515,19 @@ ApplicationWindow {
                 }
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: { if (bc.dlSt === "running" || bc.dlSt === "done" || bcDlBox.waiting) return; root.browseCardDownload(bc.card) }
+                    onClicked: {
+                        if (bc.dlSt === "running" || bc.dlSt === "done" || bcDlBox.waiting) return
+                        // A full claim opens the claim gate, the same click the
+                        // full button and the art card's strip give it. A
+                        // partial copy downloads: with the bulk skip gate on,
+                        // that fetches the rest.
+                        if (bc.libClaim) {
+                            root.openLibraryClaim(bc.card.id || "", "" + (bc.card.title || ""),
+                                                  "" + (bc.libPresence.local_album_id || ""), "album")
+                            return
+                        }
+                        root.browseCardDownload(bc.card)
+                    }
                 }
             }
         }
@@ -9689,6 +9984,10 @@ ApplicationWindow {
                 }
             }
             Column {
+                id: acHeroCap
+                // Named so the scenario test can prove the artist strip stacks
+                // ABOVE this caption rather than back onto its edge.
+                objectName: "acHeroCaption"
                 visible: ac.hero && opacity > 0
                 opacity: acArt.controlsOn ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
@@ -9729,13 +10028,21 @@ ApplicationWindow {
             ArtistBadges {
                 bar: true
                 width: parent.width
-                anchors.bottom: parent.bottom
+                // A hero carries its own caption on the cover's bottom edge,
+                // so the strip STACKS above it instead of standing down. It
+                // used to stand down, which made the biggest card on the
+                // landing's first shelf the one card there that could not say
+                // what you already hold, the opposite of what that card is
+                // for. Nothing about the strip needs the very edge: it is a
+                // gradient that melts into whatever is behind it, so it gets
+                // its floor wherever it is put.
+                anchors.bottom: ac.hero ? acHeroCap.top : parent.bottom
+                anchors.bottomMargin: ac.hero ? 2 : 0
                 // Gated by the NAME, never by an outer visible binding: the
                 // badge hides itself when the rollup says nothing, and
                 // overriding `visible` here would replace that with an
-                // always-shown strip. A hero card carries its own caption on
-                // this exact edge, so it stands down rather than stack on it.
-                artistName: (ac.kind === "artist" && !ac.hero)
+                // always-shown strip.
+                artistName: ac.kind === "artist"
                             ? ("" + (ac.card.name || ac.card.title || "")) : ""
             }
             // Hover controls. Collections (album / playlist / mix) get the
@@ -11319,6 +11626,44 @@ ApplicationWindow {
     }
     function fillMedia(model, arr) { model.clear(); appendMedia(model, arr) }
 
+    // In-place refill keyed by id, for the search page's stale-then-refresh.
+    //
+    // fill() clears and rebuilds, which destroys and recreates every delegate.
+    // The refresh path deliberately runs with searchBuilding false (no veil,
+    // no loading flash, the page the user is reading just becomes current), and
+    // the Loaders read that same flag for their asynchronous property, so every
+    // one of those rebuilds happens SYNCHRONOUSLY on the GUI thread. A full
+    // result set measured 272 to 316ms of frozen window against 13 to 14ms for
+    // the fresh handler, on the one path whose whole purpose was to feel
+    // instant. A refresh normally differs by a row or two, so almost every
+    // delegate here is kept and only the fields that really changed are
+    // written. Rows are matched by id, so a row that merely MOVED is moved
+    // rather than rebuilt.
+    //
+    // ``media`` mirrors appendMedia: the artists list is lifted out of the row
+    // into artistsById rather than stored as a nested ListModel.
+    function reconcileById(model, arr, media) {
+        arr = arr || []
+        var m = media ? Object.assign({}, root.artistsById) : null
+        for (var j = 0; j < arr.length; ++j) {
+            var it = arr[j]
+            var row = {}
+            for (var k in it) if (!media || k !== "artists") row[k] = it[k]
+            if (media && it.artists) m[it.id] = it.artists
+            var at = -1
+            for (var i = j; i < model.count; ++i) if (model.get(i).id === it.id) { at = i; break }
+            if (at < 0) { model.insert(j, row); continue }
+            if (at !== j) model.move(at, j, 1)
+            var cur = model.get(j)
+            for (var f in row) if (cur[f] !== row[f]) model.setProperty(j, f, row[f])
+        }
+        if (model.count > arr.length) model.remove(arr.length, model.count - arr.length)
+        // A fresh object, never the same reference back: assigning artistsById
+        // to itself notifies nothing, and with the rows no longer rebuilt there
+        // is nothing else to make a stale credit list correct itself.
+        if (media) root.artistsById = m
+    }
+
     // ---- My Tidal: model routing + infinite-scroll prefetch ----------------
     function libModelFor(cat) {
         return cat === "albums" ? libAlbumsModel : cat === "tracks" ? libTracksModel
@@ -11698,6 +12043,34 @@ ApplicationWindow {
             // in the backend's search cache, re-searching is instant.
             if (root._searchSeq !== root._navSeq
                 || root.browseOpen || root.libraryOpen || root.settingsOpen) return
+            if (r.refresh) {
+                // The wire's answer to a search painted from an older result
+                // (the backend's stale-then-revalidate, see search()): the
+                // rows swap in place and nothing else moves. No history
+                // entry, no scroll reset, no build veil, no cache reset: the
+                // page the user is already reading just becomes current.
+                root.searchTop = r.top || null
+                if (root.searchTop && root.searchTop.artists) {
+                    // A fresh object: assigning the same reference back
+                    // notifies nothing, so every binding on artistsById kept
+                    // the previous credits.
+                    var abm2 = Object.assign({}, root.artistsById)
+                    abm2[root.searchTop.id] = root.searchTop.artists
+                    root.artistsById = abm2
+                }
+                // Reconciled, not refilled. This branch runs with the build
+                // veil down, so a clear+rebuild would incubate every card
+                // synchronously on the GUI thread and freeze the window for
+                // the length of it. See reconcileById.
+                root.reconcileById(artistsModel, r.artists, false)
+                root.albumsRaw = r.albums || []
+                root.tracksRaw = r.tracks || []
+                root.videosRaw = r.videos || []
+                root.applySort(true)
+                root.reconcileById(playlistsModel, r.playlists, false)
+                root.reconcileById(mixesModel, r.mixes, false)
+                return
+            }
             root.navPush()
             root.markRender("search render")
             root.searchSaved = null   // a fresh search replaces the saved drill-in
@@ -13088,6 +13461,11 @@ ApplicationWindow {
                 // ALBUMS
                 SectionHeader { id: albumsHead; opacity: root.searchReveal; visible: root.sectionVisible("albums", albumsModel.count); label: "ALBUMS"; count: albumsModel.count }
                 Repeater {
+                    // Named so a scenario can ask whether a refresh KEPT these
+                    // delegates or rebuilt them: that is the whole difference
+                    // between the in-place reconcile and a refill, and it is
+                    // invisible in the model's contents.
+                    id: albumsRep
                     model: albumsModel
                     delegate: Loader {
                         // The section filter must hide the LOADER (the Column
@@ -13140,10 +13518,15 @@ ApplicationWindow {
                     spacing: 18
                     readonly property int cols: Math.max(2, Math.floor(width / 320))
                     readonly property real cellW: (width - (cols - 1) * spacing) / cols
+                    // The mixed view's five, rounded up to whole rows: a grid
+                    // three wide showed five cells and left the sixth blank,
+                    // a hole SHOW ALL then filled. Six at three columns, six
+                    // at two, eight at four.
+                    readonly property int cap: cols * Math.ceil(5 / cols)
                     Repeater {
                         model: videosModel
                         delegate: Loader {
-                            visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded)
+                            visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded, videoGrid.cap)
                             width: videoGrid.cellW
                             height: Math.round(videoGrid.cellW * 9 / 16) + 54
                             asynchronous: root.searchBuilding
@@ -13161,7 +13544,7 @@ ApplicationWindow {
                         }
                     }
                 }
-                SearchSectionMore { section: "videos"; sectionTop: videosHead; count: videosModel.count; expanded: root.searchVideosExpanded }
+                SearchSectionMore { section: "videos"; sectionTop: videosHead; count: videosModel.count; expanded: root.searchVideosExpanded; cap: videoGrid.cap }
 
                 // PLAYLISTS
                 SectionHeader { id: playlistsHead; opacity: root.searchReveal; visible: root.sectionVisible("playlists", playlistsModel.count); label: "PLAYLISTS"; count: playlistsModel.count }
@@ -13339,6 +13722,9 @@ ApplicationWindow {
                             DownloadButton {
                                 mediaId: root.artistData.id || ""
                                 label: "Download discography"
+                                // The badge directly above says what is held;
+                                // this says what a click would add to.
+                                libArtist: root.artistData.name || ""
                                 onTap: function(){ waves.downloadArtist(root.artistData.id) }
                             }
                             // A library-scoped artist page (opened from My Tidal)
@@ -13724,8 +14110,15 @@ ApplicationWindow {
                     onContentHeightChanged: { applyRestore(); root.libMaybeLoadMore(libArtistsGrid, "artists") }
                     onHeightChanged: root.libMaybeLoadMore(libArtistsGrid, "artists")
                     delegate: Item {
+                        id: agCell
                         required property var model
                         width: libArtistsGrid.cellWidth; height: libArtistsGrid.cellHeight
+                        // Resting on a followed artist has the page ready
+                        // before the click (see hoverPrefetch).
+                        readonly property var prefetchCard: ({ kind: "artist", id: "" + (model.id || ""), art: "" + (model.art || "") })
+                        HoverHandler {
+                            onHoveredChanged: hovered ? root.hoverPrefetch(agCell.prefetchCard) : root.hoverPrefetchCancel(agCell.prefetchCard)
+                        }
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 5; radius: 10
                             color: agMa.containsMouse ? root.surface2 : root.surface; border.color: root.border1
@@ -14527,7 +14920,7 @@ ApplicationWindow {
     // search is after: a single released this week has a popularity of 0
     // and sat under every older track that shared one word with the query,
     // while TIDAL had ranked it first. Popularity is its own option now.
-    function applySort() {
+    function applySort(inPlace) {
         var dir = root.sortAsc ? 1 : -1
         function ordered(raw, hasPop) {
             var arr = (raw || []).slice()
@@ -14537,9 +14930,19 @@ ApplicationWindow {
             else if (root.sortAsc) arr.reverse()  // Relevance (or no popularity data): the API's order, the arrow flips it
             return arr
         }
-        root.fillMedia(albumsModel, ordered(root.albumsRaw, true))
-        root.fillMedia(tracksModel, ordered(root.tracksRaw, true))
-        root.fillMedia(videosModel, ordered(root.videosRaw, false))
+        // inPlace: a refresh swapping rows under a page the user is already
+        // reading, where a clear+rebuild would freeze the window (see
+        // reconcileById). Every other caller, the sort control included, is a
+        // deliberate full rebuild of a small model.
+        if (inPlace) {
+            root.reconcileById(albumsModel, ordered(root.albumsRaw, true), true)
+            root.reconcileById(tracksModel, ordered(root.tracksRaw, true), true)
+            root.reconcileById(videosModel, ordered(root.videosRaw, false), true)
+        } else {
+            root.fillMedia(albumsModel, ordered(root.albumsRaw, true))
+            root.fillMedia(tracksModel, ordered(root.tracksRaw, true))
+            root.fillMedia(videosModel, ordered(root.videosRaw, false))
+        }
     }
 
     // ====================================================================
