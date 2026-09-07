@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.27"
+version = "0.1.28"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -143,10 +143,17 @@ ignore = [
 # Measures import-time metadata cost in a fresh interpreter: this interpreter
 # runs a literal probe script (S603, fixed argv).
 "tests/test_lazy_metadata.py" = ["S603"]
+# The exit-time cancel of the freeze-watchdog countdown can only be observed
+# in a fresh interpreter: this one runs a literal probe script (S603, fixed argv).
+"tests/test_freeze_watchdog_quit.py" = ["S603"]
 # The quality badge menu scenario re-runs itself in a subprocess to isolate the
 # Qt boot (S603, fixed argv).
 "tests/test_quality_pick_qml.py" = ["S603"]
 "tests/test_album_collapse_returns_the_view.py" = ["S603"]
+# The search in-place refresh scenario re-runs itself in a subprocess to
+# isolate the Qt boot (S603, fixed argv), and its build -> correct -> assert
+# scenario is one deliberately linear function (C901).
+"tests/test_search_refresh_in_place.py" = ["S603", "C901"]
 # The library scanner's directory walk (_walk_album_dirs) is a small state
 # machine over each folder's probe result (unchanged / relist / transient error /
 # vanished / root offline); the branching is the point and the function was kept
@@ -184,6 +191,8 @@ ignore = [
 "tests/test_library_downloaded_state.py" = ["S603", "C901"]
 "tests/test_qml_loads.py" = ["S603", "C901"]
 "tests/test_presence_call_budget.py" = ["S603", "C901"]
+"tests/test_library_presence_surfaces.py" = ["S603", "C901"]
+"tests/test_browse_card_line_fits.py" = ["S603", "C901"]
 # Imports the download engine in a clean interpreter to check its import closure
 # (S603, fixed argv: sys.executable -c with a literal probe).
 "tests/test_library_bridge.py" = ["S603"]
@@ -236,6 +245,10 @@ ignore = [
 # its downsample/transcode raises carry deliberately descriptive messages (TRY003),
 # same rationale as ffmpeg_manager/updater above.
 "waves/download.py" = ["TRY003"]
+# The untrusted-listing recovery mounts a share a second time to read the names
+# the first mount will not list, so it intentionally shells out to the system's
+# own mount and umount binaries (S603, fixed argv, no shell).
+"waves/waves_ui/smb_relist.py" = ["S603"]
 
 [tool.black]
 # https://github.com/psf/black
