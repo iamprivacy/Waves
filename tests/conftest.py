@@ -18,6 +18,29 @@ Deliberately NOT centralized:
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
+
+# Every test in this suite runs against a throwaway config directory.
+#
+# A test that builds a real WavesBridge otherwise reads and WRITES the config
+# of the machine it runs on: __init__ alone stamps waves.json (see
+# _migrate_video_flag), so one suite run could overwrite a real install's
+# library switch, folder and MusicBrainz choice, its window geometry and its
+# explicit-version setting with whatever the test happened to hold. Nothing in
+# a test may touch a person's own settings, whether or not the test remembers
+# to sandbox itself.
+#
+# path_config_base honors XDG_CONFIG_HOME on every platform, and this runs at
+# conftest import, before any test module is imported and before any path is
+# resolved from it. The subprocess scenarios copy this environment, so they
+# land in the same throwaway home unless they name one of their own.
+_TEST_CONFIG_HOME = tempfile.mkdtemp(prefix="waves-test-config-")
+os.environ["XDG_CONFIG_HOME"] = _TEST_CONFIG_HOME
+atexit.register(shutil.rmtree, _TEST_CONFIG_HOME, True)
+
 
 class _Signal:
     """Stand-in for a Qt signal that records what was emitted.

@@ -156,12 +156,16 @@ def test_hover_prefetch_is_one_shared_dwell_that_warms_the_hero_and_asks_the_bac
     assert "hoverPrefetchTimer.interval = dwell > 0 ? dwell : 200" in body, "a caller may ask for a longer rest"
     timer = MAIN_QML.split("id: hoverPrefetchTimer", 1)[1].split("\n    }", 1)[0]
     assert "interval: 200" in timer
-    assert 'root.warmArt("" + c.art, 360, 360)' in timer, "the hero decodes at 360 (180px Art)"
+    assert (
+        'root.warmArt("" + c.art, kind === "artist" ? 300 : 360, kind === "artist" ? 300 : 360)' in timer
+    ), "the item hero decodes at 360 (180px Art), the artist photo at 300 (150px)"
     assert "waves.prefetchBrowseItem(" in timer
+    assert "waves.prefetchArtist(" in timer, "an artist card's dwell builds its page too"
     keyfn = _body("    function _cardPrefetchKey(card) {")
     assert '"album:" + card.album_id' in keyfn, "a track card prefetches its album page"
-    assert 'kind === "playlist" || kind === "mix" || kind === "album"' in keyfn
-    assert '"artist"' not in keyfn, "artist pages are a different, heavier path: not prefetched"
+    assert 'kind === "artist"' in keyfn, "artist cards are in the family"
+    assert 'k === "artist:" + root.artistData.id' in body, "hovering the artist page you are on must not refetch it"
+    assert 'kind === "playlist" || kind === "mix" || kind === "album" || kind === "artist"' in keyfn
 
 
 def test_cards_and_rows_arm_the_prefetch_on_hover():

@@ -24,6 +24,9 @@ Pinned here:
 from __future__ import annotations
 
 import faulthandler
+import os
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -137,3 +140,40 @@ def test_shutdown_stops_the_watchdog_before_it_drains_the_pools():
     assert order.index("watchdog-stopped") < min(
         i for i, step in enumerate(order) if step.startswith("drain:")
     ), f"the watchdog was still armed while the pools drained: {order}"
+
+
+_EXIT_PROBE = """
+import faulthandler, sys
+from PySide6.QtCore import QCoreApplication
+from waves.waves_ui import diagnostics
+
+app = QCoreApplication([])
+real_cancel = faulthandler.cancel_dump_traceback_later
+def cancel():
+    print("CANCELLED-AT-EXIT", flush=True)
+    real_cancel()
+faulthandler.cancel_dump_traceback_later = cancel
+diagnostics._watchdog.start(None)  # arms the countdown, and nothing stops it
+"""
+
+
+def test_a_countdown_still_armed_at_exit_is_cancelled_before_teardown():
+    """A countdown left armed when the interpreter exits fires from inside
+    Py_FinalizeEx, where faulthandler walks frames that are already being
+    freed and can spin forever: the process prints its last line and then sits
+    at 100% CPU. That is how the test suite itself hung after one in-process
+    bridge started the watchdog. shutdown() covers the normal quit; this pins
+    the net for every other exit: the module cancels the dump at atexit, which
+    runs before faulthandler's own teardown."""
+    pytest.importorskip("PySide6")
+    proc = subprocess.run(
+        [sys.executable, "-c", _EXIT_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    assert "CANCELLED-AT-EXIT" in proc.stdout, (
+        "the armed freeze-watchdog countdown was never cancelled at interpreter exit:\n" + proc.stderr[-800:]
+    )

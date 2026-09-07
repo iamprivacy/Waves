@@ -22,6 +22,11 @@ has TWO consumers of that answer, the pill beside the title and the download
 button's claim face, and both are counted, so the budget stays "one call per
 thing that asks" rather than one per row.
 
+The ARTIST rollup (artistLibraryPresence) is the third axis, and it has the
+same two consumers per card: the badge strip on the cover and the card's
+Download button, which is coloured by what the rollup found. Counted the same
+way, for the same reason.
+
 Runs in a SUBPROCESS like the other Main.qml scenarios: building the bridge
 installs process-global handlers that must not leak into the suite.
 """
@@ -302,8 +307,10 @@ def _run_scenario() -> int:  # (a linear boot -> drive -> measure scenario)
         print(f"only {track_consumers} track consumers built for {_ROWS} rows", file=sys.stderr)
         return _EXIT_PRECONDITION
 
-    # Artist consumers: the library strip on an artist card, identified by the
-    # name it holds. One per card, and it rides EVERY artist card on a search
+    # Artist consumers: the library strip on an artist card (identified by the
+    # name it holds) and, like the track row, the card's own Download button
+    # (its libArtist name plus a button's st), which colours itself from the
+    # same rollup. Two per card, and they ride EVERY artist card on a search
     # page, so a per-property fan-out here would cost the same as the album
     # one it was modelled on.
     artist_consumers = int(
@@ -311,12 +318,13 @@ def _run_scenario() -> int:  # (a linear boot -> drive -> measure scenario)
             "(function(){ var n = 0;"
             " function walk(it){ if (!it) return;"
             "  if (it.artistName !== undefined && it.artistName !== '' && it.presence !== undefined) n++;"
+            "  if (it.libArtist !== undefined && it.libArtist !== '' && it.st !== undefined) n++;"
             "  for (var i = 0; i < it.children.length; i++) walk(it.children[i].item || it.children[i]); }"
             " walk(contentCol); return n; })()"
         )
         or 0
     )
-    if artist_consumers < _ROWS:
+    if artist_consumers < _ROWS * 2:
         print(f"only {artist_consumers} artist consumers built for {_ROWS} rows", file=sys.stderr)
         return _EXIT_PRECONDITION
 

@@ -149,11 +149,15 @@ class _FlakyArtist:
 
 class _LoadArtistStub:
     loadArtist = WavesBridge.loadArtist
+    _start_artist_build = WavesBridge._start_artist_build
 
     def __init__(self, artist, cached=None):
         self._artist = artist
         self._artist_cache = dict(cached or {})
         self._artist_loading: set = set()
+        self._artist_prefetch = None
+        self._artist_prefetch_claimed = False
+        self._prefetch_lock = Lock()
         self._browse_gen = 0
         self.threadpool = _InlinePool()
         self.artistLoaded = _Signal()
@@ -171,6 +175,9 @@ class _LoadArtistStub:
 
     def _dedup_albums(self, albums):
         return albums
+
+    def _artist_page_collapses_editions(self):
+        return False
 
     def _dedup_tracks(self, tracks):
         return tracks
@@ -242,6 +249,7 @@ class _AlbumTracksStub:
 
     def __init__(self, album):
         self._album_tracks_cache: dict = {}
+        self._edition_tracks_cache: dict = {}
         self._prefetch_lock = Lock()
         self._album_tracks_inflight: dict = {}
         self._album_tracks_unrecorded: set = set()

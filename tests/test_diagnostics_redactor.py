@@ -137,6 +137,28 @@ def test_registered_share_origin_never_survives(diag):
     assert "‹share-origin›" in out
 
 
+def test_smb_relist_share_and_mount_point_never_survive(diag):
+    """The private-relist workaround (smb_relist) derives a share URL and makes
+    a mount point under the config dir, and hands the URL to mount_smbfs. A
+    timeout there renders the whole argv, and an OSError renders the path, so
+    both are registered where they are made. Neither may reach a log, in any
+    form the exception text would print them.
+    """
+    url = "smb://carol@nas-box._smb._tcp.local/Media"
+    point = "/Users/carol/Library/Application Support/Waves/relist-mounts/pid-4821"
+    diag.register_secret(url, "‹share-origin›")
+    diag.register_secret(point, "‹mount-point›")
+    out = diag.scrub(
+        f"Command '['/sbin/mount_smbfs', '-N', '-o', 'ro,nobrowse,soft', '{url}', '{point}']'"
+        f" timed out after 20 seconds; listing {point}/Music failed"
+    )
+    assert "carol" not in out
+    assert "nas-box" not in out
+    assert "relist-mounts" not in out
+    assert "‹share-origin›" in out
+    assert "‹mount-point›" in out
+
+
 def test_short_secrets_are_ignored(diag):
     diag.register_secret("ab")  # too short: literal-replacing it would shred text
     assert diag.scrub("about") == "about"

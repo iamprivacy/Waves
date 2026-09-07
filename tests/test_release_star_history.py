@@ -173,3 +173,40 @@ def test_a_stale_chart_in_the_private_tree_loses_to_the_public_one(sandbox: Path
     tree = _release(sandbox)
     chart = _git(sandbox, "show", f"{tree}:assets/star-history/chart.svg")
     assert chart == "<svg/>", f"the release published the dev tree's stale chart: {chart!r}"
+
+
+# ---- the exclude guard must survive a tree big enough to fill a pipe ----
+
+
+def test_a_nested_excluded_path_is_refused_even_on_a_large_tree(sandbox: Path):
+    """The re-check at the end of release.sh is the only thing guarding a copy
+    of an excluded file that is not at the top level: the `git rm` above it
+    takes rooted pathspecs, so `docs/RELEASING.md` sails straight past it.
+
+    The tree is padded on purpose. The guard used to pipe `git ls-tree` into
+    `grep -q`, and once the listing outgrows the pipe buffer git dies of
+    SIGPIPE, which `set -o pipefail` turns into a non-zero pipeline, which the
+    `if` reads as "not found". A guard that fails open needs a fixture big
+    enough to make it fail; four paths can never catch this.
+    """
+    _write(sandbox / "docs" / "RELEASING.md", "smuggled\n")
+    for i in range(1500):
+        _write(sandbox / "filler" / f"module_{i:05d}.py", "x\n")
+    _git(sandbox, "add", "-A")
+    _git(sandbox, "commit", "-m", "a tree past one pipe buffer")
+
+    listing = _git(sandbox, "ls-tree", "-r", "--name-only", "master^{tree}")
+    assert len(listing) > 32_000, "the fixture is too small to exercise the failure"
+
+    proc = subprocess.run(
+        ["bash", str(RELEASE_SH), "a release", "master"],
+        cwd=sandbox,
+        env=dict(os.environ, RELEASE_DRY_RUN="1"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        "the guard passed a nested excluded path; it failed open:\n" f"{proc.stdout}\n{proc.stderr}"
+    )
+    assert "survived the exclude step" in proc.stderr

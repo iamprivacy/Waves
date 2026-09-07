@@ -85,6 +85,7 @@ class _LogoutStub:
         self._artist_cache: dict = {}
         self._artist_loading: set = set()
         self._album_tracks_cache: dict = {}
+        self._edition_tracks_cache: dict = {}
         self._home_cache = None
         self._home_loading = False
         self._home_reval_ts = 1.0

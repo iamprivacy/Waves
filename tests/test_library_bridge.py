@@ -40,6 +40,10 @@ _METHODS = (
     "libraryAlbumPresence",
     "libraryTrackPresence",
     "artistLibraryPresence",
+    # The three slots above route an unanswerable question through this one
+    # guarded hop, which is a no-op unless the probe methods are bound too
+    # (test_library_probe_fallback.py binds them).
+    "_library_probe_miss",
     "libraryIndexReady",
     "_library_root",
     "_waves_pref_bool",
@@ -73,6 +77,9 @@ _METHODS = (
     # a recorder.
     "_library_share_remount",
     "_library_share_alive",
+    # Runs straight after every scan and returns 0 at once unless that scan
+    # flagged a listing (see tests/test_smb_relist.py for its own guard).
+    "_library_recover_untrusted",
 )
 
 
@@ -133,6 +140,17 @@ def _make(
     s._library_index_pending = False
     s._library_force_full_pending = False
     s._library_index_lock = threading.Lock()
+    # The probe-by-name queue (bridge_library, "Probe by name"). Every
+    # publish re-arms whatever a running scan made it defer, so the state
+    # has to exist on every stub, not only the probe test's.
+    s._library_scan_partial = False
+    s._library_probe_memo = {}
+    s._library_probe_inflight = set()
+    s._library_probe_pending = {}
+    s._library_probe_deferred = {}
+    s._library_probe_draining = False
+    s._library_probe_gate = threading.Lock()
+    s._library_backfill_done = False
     s._library_scanning = None
     s._library_gen = 0
     s._library_scan_status = "unset"

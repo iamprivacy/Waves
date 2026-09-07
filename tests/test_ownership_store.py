@@ -7,6 +7,7 @@ the live filesystem, so every test writes and deletes real files under tmp_path.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 
@@ -218,3 +219,41 @@ def test_add_falsy_ids_are_skipped(tmp_path):
     store = _store(tmp_path)
     store.record_members_add("album1", ["1", "", None])
     assert store.members_of("album1") == ["1"]
+
+
+def test_folder_names_under_lists_the_artist_folders_it_wrote(tmp_path):
+    """The seed list for a share whose directory listing is broken: these are
+    the exact folder names Waves wrote, so they can be looked up by name even
+    when the folder never appears in any listing."""
+    store = _store(tmp_path)
+    base = str(tmp_path / "music")
+    for i, rel in enumerate(
+        ("Doomcrusher/[2022] One/1.flac", "Doomcrusher/[2023] Two/1.flac", "Other/[2020] X/1.flac")
+    ):
+        path = os.path.join(base, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        store.record(str(i), path, "LOSSLESS")
+    assert sorted(store.folder_names_under(base)) == ["Doomcrusher", "Other"]
+
+
+def test_folder_names_under_ignores_another_folders_downloads(tmp_path):
+    """Switching library folders must never leak the old one's names."""
+    store = _store(tmp_path)
+    path = str(tmp_path / "elsewhere" / "Artist" / "[2020] Album" / "1.flac")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").close()
+    store.record("1", path, "LOSSLESS")
+    assert store.folder_names_under(str(tmp_path / "music")) == []
+    assert store.folder_names_under("") == []
+
+
+def test_folder_names_under_respects_its_limit(tmp_path):
+    store = _store(tmp_path)
+    base = str(tmp_path / "music")
+    for i in range(8):
+        path = os.path.join(base, f"Artist {i}", "Album", "1.flac")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        store.record(str(i), path, "LOSSLESS")
+    assert len(store.folder_names_under(base, limit=3)) == 3

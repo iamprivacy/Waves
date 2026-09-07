@@ -186,6 +186,7 @@ def _cache_bridge(tmp_path):
     b._browse_root_cache = None
     b._browse_pages = {}
     b._artist_cache = {}
+    b._search_cache = {}
     b._home_cache = None
     b._page_cache_path = str(tmp_path / "page_cache.json")
     b._page_cache_lock = Lock()

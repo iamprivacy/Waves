@@ -552,6 +552,27 @@ def test_a_finished_forced_job_clears_its_redownload_mark():
     assert s._redownload_overrides == set(), "the mark was one job's force, not a standing policy"
 
 
+def test_a_finished_job_clears_its_download_anyway_mark_too():
+    """registerRedownload sets the claim override alongside the force, and
+    downloadAlbumAnyway sets it alone. Only the force was dropped on success,
+    so an album downloaded ANYWAY stayed exempt from the per-track claim gate
+    for as long as its done row sat in Completed. Same lifetime as the force:
+    one job's, released the moment that job finishes."""
+    s = _body_stub(fail=False)
+    s._library_claim_overrides = {"m1"}
+    with patch.object(backend, "_ProgressSignals", lambda *a, **k: object()):
+        s._download(_track_obj(), "track", "Song", "T", False, "m1")
+    assert s._library_claim_overrides == set(), "the DOWNLOAD ANYWAY mark outlived its job"
+
+
+def test_a_failed_job_keeps_its_download_anyway_mark_so_the_retry_is_not_second_guessed():
+    s = _body_stub(fail=True)
+    s._library_claim_overrides = {"m1"}
+    with patch.object(backend, "_ProgressSignals", lambda *a, **k: object()):
+        s._download(_track_obj(), "track", "Song", "T", False, "m1")
+    assert s._library_claim_overrides == {"m1"}
+
+
 def test_a_failed_forced_job_keeps_its_mark_so_the_retry_stays_forced():
     s = _body_stub(fail=True)
     with patch.object(backend, "_ProgressSignals", lambda *a, **k: object()):

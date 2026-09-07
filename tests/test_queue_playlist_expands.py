@@ -66,9 +66,21 @@ def _bridge_for_fetch(monkeypatch):
 
     QGuiApplication.instance() or QGuiApplication([])
     from waves.waves_ui import backend as be
+    from waves.waves_ui import diagnostics
+    from waves.waves_ui.session import WavesTidal
 
+    # This bridge lives in the pytest process, so it must not read the
+    # developer's real waves.json: with verbose diagnostics on there, __init__
+    # started the real freeze watchdog, whose QTimer re-armed a faulthandler
+    # countdown from every later in-process event loop, and the one still
+    # pending at exit fired inside interpreter teardown and spun forever
+    # (the suite printed its summary and never exited). Default prefs, no live
+    # login, and a check that the watchdog stayed off.
+    monkeypatch.setattr(WavesTidal, "login_token", lambda self: False)
+    monkeypatch.setattr(be.WavesBridge, "_load_waves_prefs", lambda self: self._default_waves_prefs())
     monkeypatch.setattr(be, "name_builder_title", lambda t: getattr(t, "name", ""))
     bridge = be.WavesBridge(tidal=None)
+    assert diagnostics._watchdog._timer is None, "a bridge built with default prefs must not start the freeze watchdog"
 
     class _Inline:
         def start(self, w):

@@ -125,6 +125,7 @@ class _PrefsStub:
         for name in (
             "_default_waves_prefs",
             "_load_waves_prefs",
+            "_preserve_unreadable_prefs",
             "_waves_pref_bool",
             "windowSaveGeometry",
             "windowRestoreGeometry",
@@ -311,6 +312,50 @@ def test_unparseable_prefs_file_falls_back_to_defaults(tmp_path):
     stub = _PrefsStub(tmp_path)
     assert stub._waves_prefs["win_w"] == 0  # fell back to the default schema
     assert stub.windowRestoreGeometry() == {}
+
+
+def test_an_unreadable_prefs_file_is_kept_before_defaults_are_saved_over_it(tmp_path):
+    """Falling back to defaults must not destroy the settings it could not read.
+    A save follows within the same __init__ (the video-flag migration), so the
+    broken file has to be somewhere else by the time it lands."""
+    broken = tmp_path / "waves.json"
+    broken.write_text('{"library_enabled": tru', encoding="utf-8")
+    stub = _PrefsStub(tmp_path)
+    kept = tmp_path / "waves.json.bak"
+    assert kept.read_text(encoding="utf-8") == '{"library_enabled": tru'
+    # The save that follows writes defaults to the real name, not over the copy.
+    stub.windowSaveGeometry(10, 20, 900, 700, False)
+    assert json.loads(broken.read_text(encoding="utf-8"))["win_w"] == 900
+    assert kept.read_text(encoding="utf-8") == '{"library_enabled": tru'
+
+
+def test_a_second_unreadable_file_never_overwrites_the_first_rescue(tmp_path):
+    """The older copy is usually the more complete one, so it stays put and the
+    new one lands beside it under a stamped name."""
+    (tmp_path / "waves.json.bak").write_text('{"the": "older rescue"}', encoding="utf-8")
+    (tmp_path / "waves.json").write_text("{ broken again", encoding="utf-8")
+    _PrefsStub(tmp_path)
+    assert (tmp_path / "waves.json.bak").read_text(encoding="utf-8") == '{"the": "older rescue"}'
+    stamped = [p for p in tmp_path.iterdir() if p.name.startswith("waves.json.bak-")]
+    assert len(stamped) == 1, sorted(p.name for p in tmp_path.iterdir())
+    assert stamped[0].read_text(encoding="utf-8") == "{ broken again"
+
+
+def test_prefs_that_could_not_be_kept_are_never_saved_over(tmp_path, monkeypatch):
+    """A broken file that cannot even be renamed (a read-only folder, another
+    process holding it) is the only copy of those settings there is: this run
+    keeps its prefs in memory rather than cementing defaults over them."""
+    broken = tmp_path / "waves.json"
+    broken.write_text("{ not valid json", encoding="utf-8")
+
+    def _no_rename(src, dst):
+        raise PermissionError("read-only config folder")
+
+    monkeypatch.setattr(backend.os, "replace", _no_rename)
+    stub = _PrefsStub(tmp_path)
+    assert stub._prefs_unsavable is True
+    stub.windowSaveGeometry(10, 20, 900, 700, False)
+    assert broken.read_text(encoding="utf-8") == "{ not valid json"
 
 
 # ---------------------------------------------------------------------------

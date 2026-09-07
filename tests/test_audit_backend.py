@@ -63,6 +63,7 @@ class _Stub:
         self._lib_sort: dict = {}
         self._fav_ids: dict = {}
         self._album_tracks_cache: dict = {}
+        self._edition_tracks_cache: dict = {}
         self._home_cache: list | None = None
         self._home_loading = False
         self._home_reval_ts = 0.0
@@ -416,6 +417,7 @@ def _cache_stub(path, user_id):
     stub._browse_root_cache = None
     stub._browse_pages = {}
     stub._artist_cache = {}
+    stub._search_cache = {}
     stub._lib_cache = {}
     return stub
 

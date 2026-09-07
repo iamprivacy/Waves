@@ -139,6 +139,9 @@ class _SearchStub:
     def _set_busy(self, on):
         self.busy.append(bool(on))
 
+    def _save_page_cache(self):
+        pass
+
     def _remember(self, kind, key, obj):
         self._objs[kind][key] = obj
 
@@ -266,6 +269,7 @@ class _AlbumExpandStub:
     def __init__(self):
         self.threadpool = _HoldingPool()
         self._album_tracks_cache = {"al1": [{"id": "t1"}]}
+        self._edition_tracks_cache = {"al1": ([("t", 1)], True)}
         self._prefetch_lock = Lock()
         self._album_tracks_unrecorded = {"al1"}
         self._album_tracks_inflight: dict = {}

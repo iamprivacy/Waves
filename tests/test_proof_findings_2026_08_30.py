@@ -126,6 +126,7 @@ def _logout_stub(tmp_path):
         "_artist_cache",
         "_artist_loading",
         "_album_tracks_cache",
+        "_edition_tracks_cache",
         "_lib_reval_ts",
         "_search_cache",
         "_artist_pop_cache",

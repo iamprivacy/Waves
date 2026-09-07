@@ -206,6 +206,7 @@ class _SaveStub:
         self._browse_pages = {}
         self._artist_cache = {}
         self._home_cache = {}
+        self._search_cache = {}
         self._page_cache_lock = threading.Lock()
         self._page_cache_path = str(path)
 

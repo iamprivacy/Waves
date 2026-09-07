@@ -81,12 +81,16 @@ class _Artist:
 # --------------------------------------------------------------------------- #
 class _LoadArtistStub(_StubBase):
     loadArtist = WavesBridge.loadArtist
+    _start_artist_build = WavesBridge._start_artist_build
 
     def __init__(self, artist):
         super().__init__()
         self._artist = artist
         self._artist_cache: dict = {}
         self._artist_loading: set = set()
+        self._artist_prefetch = None
+        self._artist_prefetch_claimed = False
+        self._prefetch_lock = Lock()
         self.artistLoaded = _Signal()
         self.artistLoadFailed = _Signal()
 
@@ -95,6 +99,9 @@ class _LoadArtistStub(_StubBase):
 
     def _dedup_albums(self, albums):
         return albums
+
+    def _artist_page_collapses_editions(self):
+        return False
 
     def _dedup_tracks(self, tracks):
         return tracks
