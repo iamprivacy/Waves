@@ -116,6 +116,14 @@ the app treats the run as a dev environment and opens against the separate
 The QML plain-text guard test fails if any dynamic `Text` in Main.qml can
 render rich text (remote strings must never inject markup).
 
+`tests/conftest.py` points `XDG_CONFIG_HOME` at a throwaway directory at
+import time, before any test module loads, so the whole suite (subprocess
+scenarios included) resolves its config out of a sandbox. Never resolve a path
+from `path_config_base()` in a test without that sandbox: a `WavesBridge`
+writes `waves.json` in `__init__`, so an unsandboxed test overwrites the real
+settings of whoever runs the suite. Patching a loader to return defaults is not
+enough while the writer still knows the real path.
+
 ## More detail
 
 - `waves/waves_ui/README.md`: layout, key concepts, architecture notes.
