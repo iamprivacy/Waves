@@ -73,6 +73,16 @@ a cached or already-in-flight album is a no-op. One unwatched fetch at a time:
 a second hover while one is running is DROPPED, never queued, because the same
 pool serves real clicks.
 
+`prefetchArtist(artistId)` is the artist-card half: a dwell on an artist card
+(search results, browse shelves, the library's Artists grid) builds the artist
+page so the click that follows paints it from `_artist_cache` instead of
+"Loading artist…". Silent like the album-row half (nothing emitted, no busy,
+no status), one in flight at a time with a second hover dropped, and a page
+already cached under the current edition rule is a no-op (the click paints it
+at once and revalidates). A click on the hovered card mid-flight claims the
+build (`loadArtist`), which then lands as that click's, status and busy
+included. It shares `_start_artist_build` with the click.
+
 ## Download queue
 
 | Signal                                                                       | Fires when                                                                                                                                 |

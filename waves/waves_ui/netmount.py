@@ -65,14 +65,20 @@ def _libc():
     return ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
 
 
-def mount_origin(mount_point: str) -> tuple[str, str]:
-    """(fstype, from_name) for a mounted path, e.g. ("smbfs",
-    "//user@nas._smb._tcp.local/Media"). ("", "") when the path is not a
-    mount, statfs fails, or this is not macOS. The from-name is identity
-    (host, maybe user): the caller registers it as a secret before storing.
+def mount_info(path: str) -> tuple[str, str, str]:
+    """(fstype, from_name, mount_point) for any path, e.g. ("smbfs",
+    "//user@nas._smb._tcp.local/Media", "/Volumes/Media"). ("", "", "") when
+    statfs fails or this is not macOS.
+
+    Unlike :func:`mount_origin` the path need not BE the mount point: statfs
+    answers for the volume holding it, so a library folder several levels
+    down still names the share it lives on and where that share is mounted.
+    Both the from-name and the mount point are identity (host, maybe user, and
+    the share name): callers register them as secrets before storing or
+    logging them.
     """
     if sys.platform != "darwin":
-        return ("", "")
+        return ("", "", "")
     try:
         libc = _libc()
         # Intel macOS exports the 64-bit-inode call under a suffixed name;
@@ -82,15 +88,26 @@ def mount_origin(mount_point: str) -> tuple[str, str]:
         except (KeyError, AttributeError):
             statfs = libc.statfs
         buf = _StatFS()
-        if statfs(mount_point.encode("utf-8"), ctypes.byref(buf)) != 0:
-            return ("", "")
+        if statfs(path.encode("utf-8"), ctypes.byref(buf)) != 0:
+            return ("", "", "")
         return (
             buf.f_fstypename.decode("utf-8", "replace"),
             buf.f_mntfromname.decode("utf-8", "replace"),
+            buf.f_mntonname.decode("utf-8", "replace"),
         )
     except Exception:
         logger.debug("statfs origin lookup failed", exc_info=True)
-        return ("", "")
+        return ("", "", "")
+
+
+def mount_origin(mount_point: str) -> tuple[str, str]:
+    """(fstype, from_name) for a mounted path, e.g. ("smbfs",
+    "//user@nas._smb._tcp.local/Media"). ("", "") when the path is not a
+    mount, statfs fails, or this is not macOS. The from-name is identity
+    (host, maybe user): the caller registers it as a secret before storing.
+    """
+    fstype, from_name, _point = mount_info(mount_point)
+    return (fstype, from_name)
 
 
 def origin_url(fstype: str, from_name: str) -> str:

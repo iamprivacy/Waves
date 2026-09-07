@@ -44,8 +44,11 @@ from PySide6 import QtCore, QtGui
 from PySide6.QtCore import Signal, Slot
 
 import waves.matching as matching
+from waves.helper.path import folder_name_candidates, safe_filename_replacement, safe_filename_replacement_map
 from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, root_comparison_key
 from waves.worker import Worker
+
+from . import smb_relist
 
 # The subsystem child logger (per the diagnostics conventions): propagates into
 # the root "waves" breadcrumb ring while letting verbose logs slice per subsystem.
@@ -87,6 +90,73 @@ _BOOT_LIBRARY_SCAN_FAILSAFE_MS = 15 * 1000
 # watcher's 30s: this fires while downloads are actively competing for the same
 # disk, so once every two minutes is the right trade against scanning cost.
 _LIBRARY_DL_MAX_DEBOUNCE_S = 120.0
+# The probe by name (see the "Probe by name" section): how long a miss for one
+# artist is remembered before the disk is asked again (a folder can appear in
+# the meantime, so it is a rest, not a verdict), and how long a download gate
+# waits for a running scan to release the cache before deciding without it.
+_LIBRARY_PROBE_MEMO_S = 300.0
+_LIBRARY_PROBE_GATE_WAIT_S = 15.0
+# How long a BULK GATE waits before asking again after a scan told it the cache
+# was busy. Deliberately not the memo window and deliberately not in the memo:
+# a deferral must leave the memo clean so a badge stays free to ask the moment
+# it wants to. This stamp is read only by the download gates, which are the
+# callers that would otherwise line up fifty deep behind the same wait for the
+# same non-answer. _library_probe_rearm drops it as soon as a publish lands.
+_LIBRARY_GATE_COOLDOWN_S = 30.0
+# Names per probe_folders call. Big enough that a page of results is one
+# question, small enough that a scan waiting behind the cache lock is not
+# held off for long (the lock is released between batches).
+_LIBRARY_PROBE_CHUNK = 192
+# How long the untrusted-listing recovery waits for the cache lock. The scan it
+# runs behind has just released it, so this is only ever paid when another
+# caller slipped in between, and giving up simply leaves the recovery to the
+# next scan.
+_LIBRARY_RELIST_LOCK_WAIT_S = 20.0
+# Distinct spellings kept per artist key, and the ceiling on the whole queue:
+# a runaway page must never turn into unbounded state or unbounded disk asks.
+_LIBRARY_PROBE_SPELLINGS = 3
+_LIBRARY_PROBE_QUEUE_MAX = 4000
+# Where an artist name sits in each kind of catalogue row (see
+# LibraryMixin._library_probe_page). Playlists and mixes are absent on
+# purpose: their titles are not artists and not folder names.
+_PAGE_ARTIST_FIELDS = (
+    ("artists", "name"),
+    ("albums", "artist"),
+    ("eps", "artist"),
+    ("tracks", "artist"),
+    ("videos", "artist"),
+)
+
+
+def _nonblank(value) -> bool:
+    """A usable name: a string with something in it."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _page_artist_names(payload: dict) -> list[str]:
+    """Every artist named by the per-kind lists of a results payload."""
+    return [
+        row[field]
+        for group, field in _PAGE_ARTIST_FIELDS
+        for row in payload.get(group) or ()
+        if isinstance(row, dict) and _nonblank(row.get(field))
+    ]
+
+
+def _shelf_artist_names(items) -> list[str]:
+    """Every artist named by one browse shelf. A shelf mixes kinds, so the
+    artist sits under "artist" on an album or track tile and under "name" on an
+    artist tile; a playlist or mix tile names neither and is skipped."""
+    out: list[str] = []
+    for item in items or ():
+        if not isinstance(item, dict):
+            continue
+        if _nonblank(item.get("artist")):
+            out.append(item["artist"])
+        elif item.get("kind") == "artist" and _nonblank(item.get("name")):
+            out.append(item["name"])
+    return out
+
 
 # Filesystem-type prefixes (as QStorageInfo reports them, lowercased) that mean a
 # LOCAL disk, where the QFileSystemWatcher is worth attaching. Anything else
@@ -153,6 +223,36 @@ def _is_remote_windows_device(device: str) -> bool:
     \\\\?\\ prefix) or a /dev node, never a bare \\\\server\\share."""
     d = str(device or "").strip()
     return d.startswith("\\\\") and not d.startswith("\\\\?\\")
+
+
+def _listing_shape(lib) -> tuple[int, int]:
+    """(entries handed over, distinct names) for the worst listing the cache's
+    last scan met, or (0, 0). Read off the index object on the scan worker and
+    mirrored onto the bridge, so a slot never reaches into the cache."""
+    reader = getattr(lib, "untrusted_listing_shape", None)
+    if reader is None:
+        return (0, 0)
+    try:
+        handed, distinct = reader()
+    except Exception:
+        logger.debug("Library listing shape unavailable", exc_info=True)
+        return (0, 0)
+    return (int(handed), int(distinct)) if handed > distinct >= 0 else (0, 0)
+
+
+def _listing_reconciled(lib) -> bool:
+    """Has the recovery filled in everything the untrusted listing left out?
+    Read off the index object on the scan worker and mirrored onto the bridge,
+    the same way _listing_shape is, so a slot never reaches into the cache."""
+    return bool(getattr(lib, "last_listing_reconciled", False))
+
+
+def _rearm(bridge) -> None:
+    """Re-ask whatever a running scan made the probe defer. Guarded because the
+    partial stubs the bridge tests build bind a fixed list of methods."""
+    hook = getattr(bridge, "_library_probe_rearm", None)
+    if hook is not None:
+        hook()
 
 
 class LibraryMixin:
@@ -238,6 +338,18 @@ class LibraryMixin:
         self._library_index = None
         self._library_track_index = None
         self._library_scan_status = "unset"
+        self._library_scan_partial = False
+        self._library_listing_shape = (0, 0)
+        self._library_listing_reconciled = False
+        gate = getattr(self, "_library_probe_gate", None)  # absent on partial test stubs
+        with gate if gate is not None else contextlib.nullcontext():
+            self._library_probe_memo = {}
+            self._library_probe_inflight = set()
+            # Questions asked about the folder being left behind must not be
+            # answered against the new one. The drainer is left to notice the
+            # empty queue and stand down by itself.
+            self._library_probe_pending = {}
+            self._library_probe_deferred = {}
         self._library_scan_progress = {}
         self.libraryPresenceChanged.emit()
         self.libraryScanStatusChanged.emit()
@@ -384,8 +496,16 @@ class LibraryMixin:
                 return
             self._library_index = seeded
             self._library_track_index = seeded_tracks
+            self._library_probe_memo = {}
+        # The cache remembers what its last scan could not trust, so a badge
+        # seeded from it can already ask the disk by name (see the probe
+        # section) while the change-check scan runs underneath.
+        self._library_scan_partial = bool(getattr(lib, "last_scan_partial", False))
+        self._library_listing_shape = _listing_shape(lib)
+        self._library_listing_reconciled = _listing_reconciled(lib)
         self._publish_artist_rollup(seeded)
         self._emit_from_worker("libraryPresenceChanged")
+        _rearm(self)
 
     def _seed_library_badges(self) -> None:
         """(GUI thread, launch) Light the badges from the committed cache
@@ -560,8 +680,13 @@ class LibraryMixin:
                     with self._library_index_lock:
                         self._library_index = fresh
                         self._library_track_index = fresh_tracks
+                        self._library_probe_memo = {}
+                    self._library_scan_partial = bool(getattr(lib, "last_scan_partial", False))
+                    self._library_listing_shape = _listing_shape(lib)
+                    self._library_listing_reconciled = _listing_reconciled(lib)
                     self._publish_artist_rollup(fresh)
                     self._emit_from_worker("libraryPresenceChanged")
+                    _rearm(self)
             self._library_scan_progress = p
             self._emit_from_worker("libraryScanStatusChanged")
 
@@ -596,6 +721,9 @@ class LibraryMixin:
                     )
                     status = lib.last_scan_status
                     self._library_share_alive(root, status)
+                    # Before the index is built, so a recovery lands in the
+                    # very first publish rather than a second one.
+                    self._library_recover_untrusted(lib, root, lambda: gen == self._library_gen, on_progress)
                     index, track_index = build_index()
                 except Exception:
                     if getattr(lib, "is_closed", False):
@@ -621,13 +749,22 @@ class LibraryMixin:
                         with self._library_index_lock:
                             self._library_index = index
                             self._library_track_index = track_index
+                            self._library_probe_memo = {}
                         self._publish_artist_rollup(index)
                         self._library_scan_progress = {"phase": "done", "indexed": count, "eta_secs": -1}
                         self._emit_from_worker("libraryPresenceChanged")
+                        _rearm(self)
                     # Surface why a scan found nothing (unreadable folder vs empty) so
                     # Settings can explain a permission-blocked folder, not a silent blank.
                     if status is not None:
                         self._library_scan_status = status
+                        # ...and whether the folder LISTED but could not be
+                        # trusted (a share whose directory paging repeats),
+                        # which is a successful scan that still needs the
+                        # probe by name behind every badge miss.
+                        self._library_scan_partial = bool(getattr(lib, "last_scan_partial", False))
+                        self._library_listing_shape = _listing_shape(lib)
+                        self._library_listing_reconciled = _listing_reconciled(lib)
             finally:
                 # The building flag must clear on EVERY exit: the Worker wrapper
                 # swallows exceptions, so a raise anywhere above would otherwise
@@ -927,6 +1064,35 @@ class LibraryMixin:
         return self._library_scan_status
 
     @Slot(result=bool)
+    def libraryListingReconciled(self) -> bool:
+        """True when the folders an untrusted listing left out have all been
+        recovered through a fresh mount, so the library is complete even though
+        the listing was not. Settings tells the two states apart: one is a
+        warning that badges may be missing, the other is a note that they are
+        not."""
+        return bool(getattr(self, "_library_listing_reconciled", False))
+
+    @Slot(result=bool)
+    def libraryScanPartial(self) -> bool:
+        """Did the last scan meet a folder listing it could not trust? True on
+        a share whose directory enumeration repeats or truncates (the scan
+        still reports 'ok': the folder WAS listed, just not completely). The
+        badges then ask the disk by name behind every miss, and Settings says
+        so in words, so a blank badge on such a share is explained instead of
+        silently wrong."""
+        return bool(self._library_scan_partial)
+
+    @Slot(result="QVariant")
+    def libraryListingShape(self) -> dict:
+        """How badly the folder listing was truncated: {entries, distinct},
+        the number of entries the system handed over and how many of them were
+        different folders. Both 0 when every listing was trusted. This is what
+        lets Settings say what "incomplete" actually means instead of leaving
+        the user to guess."""
+        handed, distinct = getattr(self, "_library_listing_shape", (0, 0))
+        return {"entries": int(handed), "distinct": int(distinct)}
+
+    @Slot(result=bool)
     def libraryIndexReady(self) -> bool:
         """Has the presence index answered even once yet? Every presence slot
         reports 'not present' until the first publish, so a page BUILT in that
@@ -1030,6 +1196,7 @@ class LibraryMixin:
         four-argument overload and years remain the only proof."""
         idx = self._library_index
         if idx is None:
+            self._library_probe_miss(artist)
             return {"present": False}
         # Memoized per index object: a republish makes EVERY visible pill
         # re-ask, and scrolling re-asks per row, all against the same index,
@@ -1050,6 +1217,15 @@ class LibraryMixin:
             if len(self._presence_memo) >= _PRESENCE_MEMO_MAX:
                 self._presence_memo.pop(next(iter(self._presence_memo)))
             self._presence_memo[key] = verdict
+        if not verdict.get("present"):
+            # A miss on a share whose listing cannot be trusted is not an
+            # answer yet: ask the disk by name (see the probe section). A
+            # hit republishes and this pill re-asks; nothing else happens
+            # on the GUI thread. getattr: partial test stubs bind this slot
+            # without the probe family.
+            probe = getattr(self, "_library_probe_async", None)
+            if probe is not None:
+                probe(artist)
         return self._mb_arbitrated(verdict, title, artist, year, num_tracks, duration)
 
     @Slot(str, str, result="QVariant")
@@ -1076,6 +1252,7 @@ class LibraryMixin:
         exists for exactly that case."""
         idx = self._library_track_index
         if idx is None:
+            self._library_probe_miss(artist)
             return {"present": False, "sure": False}
         # Same memo shape as the album slot above, per track index object.
         if self._track_presence_memo_src is not idx:
@@ -1088,6 +1265,10 @@ class LibraryMixin:
             if len(self._track_presence_memo) >= _PRESENCE_MEMO_MAX:
                 self._track_presence_memo.pop(next(iter(self._track_presence_memo)))
             self._track_presence_memo[key] = verdict
+        if not verdict.get("present"):
+            probe = getattr(self, "_library_probe_async", None)  # as the album pill above
+            if probe is not None:
+                probe(artist)
         return verdict
 
     # ---- MusicBrainz arbitration (library_mb_arbiter, default off) -----------
@@ -1203,7 +1384,11 @@ class LibraryMixin:
     # the same in-memory indexes the badges read, so they are safe on worker
     # threads (the indexes are replaced atomically, never mutated in place) and
     # they inherit the badges' honesty rules: no index means no claims, and a
-    # claim is only ever "don't fetch this", never "touch that file".
+    # claim is only ever "don't fetch this", never "touch that file". On a
+    # share whose listing cannot be trusted they first ask the disk by name
+    # (the probe section below), which CAN write a found artist's subtree into
+    # the scan cache; they are worker-only, so that write never sits on the
+    # GUI thread, and it is the one write a gate makes.
 
     def _library_bulk_skip_on(self) -> bool:
         """Whether bulk downloads consult the library scan at all: the master
@@ -1226,12 +1411,20 @@ class LibraryMixin:
         bars differ because their mistakes cost different things. A wrong badge
         costs a re-click, so it can afford to speak up; a wrong skip costs the
         user an album they never find out was missing, so it may not."""
-        idx = self._library_index
-        if not idx or album is None:
+        if album is None:
             return False
         title = str(getattr(album, "name", "") or "")
         artist = str(getattr(getattr(album, "artist", None), "name", "") or "")
         if not title or not artist:
+            return False
+        # Before deciding on an index the listing may have left this artist
+        # out of: a hit republishes, so the index is re-read after. getattr:
+        # partial test stubs bind the gate without the probe family.
+        probe = getattr(self, "_library_probe_sync", None)
+        if probe is not None:
+            probe(artist)
+        idx = self._library_index
+        if not idx:
             return False
         year = str(getattr(album, "year", "") or "")
         try:
@@ -1276,8 +1469,13 @@ class LibraryMixin:
         Same bar, same reasoning as _library_claims_album: a wrong skip costs
         the user a track they never find out was missing, so it may not
         happen on a guess."""
+        if not title or not artist:
+            return None
+        probe = getattr(self, "_library_probe_sync", None)  # as in _library_claims_album
+        if probe is not None:
+            probe(artist)
         idx = self._library_track_index
-        if not idx or not title or not artist:
+        if not idx:
             return None
         try:
             v = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
@@ -1285,6 +1483,443 @@ class LibraryMixin:
             logger.debug("Track claim lookup failed; not gating", exc_info=True)
             return None
         return v if bool(v.get("present")) and bool(v.get("sure")) else None
+
+    # ---- Probe by name: what an untrusted listing hides -------------------------
+    # A network share whose directory paging is broken lists the same first
+    # page of artist folders over and over (see library_index._scandir_one),
+    # so the walk never sees the artists past it, and every badge and every
+    # gate read "not in library" for a library the user owns: duplicates were
+    # downloaded on that answer. The scan flags such a listing, and from then
+    # on a MISS for an artist the index has never seen is answered by asking
+    # the disk directly, by name, in the spellings the naming settings would
+    # write (LibraryIndex.probe_folders). A hit indexes that artist's subtree
+    # and republishes a NEW index object, so every surface (both pills, the
+    # artist badge, the four gates) flips without a rescan and every memo
+    # keyed on the index resets. Healthy libraries never enter this path: the
+    # flag is the gate, so they pay nothing. The memo and in-flight set are
+    # touched from the GUI thread (pill asks) and pool threads (the job's
+    # finally, the gates); each touch is one dict or set operation, and the
+    # worst a race can do is one extra stat.
+
+    def _library_recover_untrusted(self, lib, root: str, alive, on_progress=None) -> int:
+        """(POOL THREAD, straight after a scan) Ask a freshly mounted copy of
+        the share for the folder names its own mount would not list, and index
+        whatever comes back. Returns how many folders were recovered.
+
+        Only ever reached when the scan just flagged a listing as untrusted, so
+        a healthy library pays one boolean for this. Everything after that gate
+        is best effort: no better listing, no credential, a server asleep, a
+        fresh listing that repeated itself too, all return 0 and leave the app
+        behaving exactly as it does today. The probe by name behind every badge
+        miss stays in place either way, and still covers whatever this misses.
+
+        The names go to probe_folders as their own spellings, because they came
+        off the disk: no naming-settings guesswork is needed for a name the
+        filesystem just handed over. That call stats each one under every
+        flagged folder, skipping the ones the cache already holds, walks the
+        subtree of each hit and writes it under the flagged folder as parent,
+        which is exactly what the scan would have done had the listing named
+        them. ``on_progress`` is the scan's own progress sink: a share's worth
+        of recovered artists is minutes of reading, and the bar must keep
+        moving through it."""
+        if not bool(getattr(lib, "last_scan_partial", False)):
+            return 0
+        if not alive():
+            return 0
+        try:
+            targets = list(lib.unreliable_dirs())
+            if not targets:
+                return 0
+            config_dir = os.path.dirname(self.settings.file_path)
+            # A mount point a crashed run left behind is cleaned up here rather
+            # than at startup: this is the first moment one could get in the
+            # way, and boot has better things to do than stat a directory for
+            # a case almost nobody is in.
+            smb_relist.sweep_stale(config_dir)
+            recovered = smb_relist.relist_folders(
+                targets,
+                config_dir=config_dir,
+                known={t: lib.child_names(t) for t in targets},
+            )
+            if not recovered or not alive():
+                return 0
+            wanted = sorted({name for names in recovered.values() for name in names})
+            found = lib.probe_folders(
+                root,
+                wanted,
+                alive,
+                candidates=lambda name: (name,),
+                timeout=_LIBRARY_RELIST_LOCK_WAIT_S,
+                on_progress=on_progress,
+            )
+        except Exception:
+            logger.debug("Recovering an untrusted listing failed; leaving the scan as it was", exc_info=True)
+            return 0
+        hits = int(found or 0)
+        # Whether anything the fresh mount named is STILL missing from the
+        # cache. The listing stays untrusted either way (the probe by name
+        # stays armed behind every badge miss), but a folder that is fully
+        # recovered is not an incomplete library, and Settings must not warn
+        # about badges that are all there. Checked against the cache, not
+        # against the hit count: most of these names were already indexed by
+        # an earlier recovery, so a run that indexes nothing new is the normal
+        # steady state, not a failure.
+        try:
+            complete = all(lib.listing_holds_all(target, names) for target, names in recovered.items())
+        except Exception:
+            logger.debug("Checking a recovered listing against the cache failed", exc_info=True)
+            complete = False
+        with contextlib.suppress(Exception):  # a stub index without the setter
+            lib.note_listing_reconciled(complete)
+        logger.info(
+            "untrusted listing recovery: %d names read from a fresh mount, %d folders indexed, nothing left out: %s",
+            len(wanted),
+            hits,
+            complete,
+        )
+        return hits
+
+    def _library_probe_candidates(self, name: str) -> list[str]:
+        """The folder spellings to try for an artist, from the naming settings
+        this install writes with (so a folder Waves itself created is found
+        first) plus the older and raw spellings; see folder_name_candidates."""
+        try:
+            data = self.settings.data
+            replacement = safe_filename_replacement(getattr(data, "filename_illegal_replacement", "") or "")
+            mapping = safe_filename_replacement_map(getattr(data, "filename_illegal_map", None) or {})
+        except Exception:
+            replacement, mapping = "", {}
+        return folder_name_candidates(name, replacement, mapping)
+
+    def _library_probe_wanted(self, name: str) -> str | None:
+        """(any thread, lookups only) The artist key a probe is worth making
+        for, or None: the last scan trusted its listings, the artist is
+        already in the index, a probe for it is in flight, or one answered
+        within the memo window. Various Artists is never an artist folder."""
+        # getattr on the state: partial test stubs reach this through a slot
+        # without the bridge's full init, and a missing flag means "trusted".
+        if not getattr(self, "_library_scan_partial", False) or not name:
+            return None
+        if matching.is_various_artists(name):
+            return None
+        key = matching.norm_artist(matching.canon(name))
+        if not key:
+            return None
+        idx = self._library_index
+        if idx:
+            if self._library_artist_index_src is not idx:
+                # The rollup is precomputed at every publish; this is the same
+                # race fallback artistLibraryPresence keeps.
+                self._library_artist_index = matching.build_artist_rollup(idx)
+                self._library_artist_index_src = idx
+            if key in self._library_artist_index:
+                return None
+        if key in getattr(self, "_library_probe_inflight", ()):
+            return None
+        deadline = getattr(self, "_library_probe_memo", {}).get(key)
+        if deadline is not None and deadline > time.monotonic():
+            return None
+        return key
+
+    def _library_probe_run(self, batch: dict[str, str], timeout: float) -> bool:
+        """(worker thread) Ask the cache to look for a WHOLE BATCH of artist
+        names at once and, on a hit, republish both presence indexes. Returns
+        whether the index changed.
+
+        One call per batch is the point. probe_folders takes the cache lock,
+        reads the directory tree and writes once per call, so twenty names cost
+        barely more than one; twenty separate calls would instead have nineteen
+        of them bounce off the lock and answer None, which is not an answer at
+        all. A cache held by a running scan (None within ``timeout``) is not an
+        answer either: those names go to the deferred set and are asked again
+        the moment the scan publishes, so nothing is silently dropped."""
+        with self._library_index_lock:
+            gen = self._library_gen
+            lib = self._library
+        root = self._library_root()
+        found: int | None = None
+        try:
+            if not root or lib is None:
+                return False
+            found = lib.probe_folders(
+                root,
+                [name for spellings in batch.values() for name in spellings],
+                lambda: gen == self._library_gen,
+                candidates=self._library_probe_candidates,
+                timeout=timeout,
+            )
+            if not found or gen != self._library_gen:
+                return False
+            fresh, fresh_tracks = self._build_presence_indexes(lib)
+            if gen != self._library_gen:
+                return False
+            with self._library_index_lock:
+                self._library_index = fresh
+                self._library_track_index = fresh_tracks
+                self._library_probe_memo = {}
+            self._publish_artist_rollup(fresh)
+            self._emit_from_worker("libraryPresenceChanged")
+        except Exception:
+            logger.debug("Library probe by name failed; leaving the badge as it was", exc_info=True)
+            return False
+        else:
+            return True
+        finally:
+            deadline = time.monotonic() + _LIBRARY_PROBE_MEMO_S
+            with self._library_probe_gate:
+                for key, spellings in batch.items():
+                    if found is None:
+                        # Never asked (no root, a scan still holding the cache,
+                        # or a raise before the answer): remembering that as a
+                        # miss would blind the badge for the memo window over a
+                        # question the disk was never put. Hold it for the next
+                        # publish instead.
+                        if len(self._library_probe_deferred) < _LIBRARY_PROBE_QUEUE_MAX:
+                            self._library_probe_deferred[key] = spellings
+                    else:
+                        self._library_probe_memo[key] = deadline
+                    self._library_probe_inflight.discard(key)
+
+    def _library_probe_enqueue(self, names) -> None:
+        """(any thread) Queue every name worth asking about and make sure one
+        drain worker is running. Cheap and lookup-only for a healthy library:
+        _library_probe_wanted refuses everything when the last scan trusted its
+        listings, so nothing is ever queued and no worker is ever started."""
+        queued = False
+        with self._library_probe_gate:
+            if len(self._library_probe_pending) >= _LIBRARY_PROBE_QUEUE_MAX:
+                return
+            for name in names:
+                key = self._library_probe_wanted(name)
+                if key is None:
+                    continue
+                spellings = self._library_probe_pending.setdefault(key, [])
+                text = str(name)
+                if text in spellings or len(spellings) >= _LIBRARY_PROBE_SPELLINGS:
+                    continue
+                # One memo key covers several credits ("A", "A feat. B"), and the
+                # folder is spelled like exactly one of them, so every distinct
+                # spelling is asked rather than only the first one seen.
+                spellings.append(text)
+                queued = True
+            if not queued or self._library_probe_draining:
+                return
+            self._library_probe_draining = True
+        self.threadpool.start(Worker(self._library_probe_drain))
+
+    def _library_probe_drain(self) -> None:
+        """(worker thread) Ask about everything queued, in batches, until the
+        queue is empty. Draining on ONE worker is deliberate: probe_folders is
+        serialised on the cache anyway, so more workers would only produce more
+        None answers, and a single drainer also lets a burst of misses coalesce
+        into one question instead of one per badge."""
+        try:
+            while True:
+                with self._library_probe_gate:
+                    if not self._library_probe_pending:
+                        self._library_probe_draining = False
+                        return
+                    batch = {}
+                    for key in list(self._library_probe_pending)[:_LIBRARY_PROBE_CHUNK]:
+                        batch[key] = self._library_probe_pending.pop(key)
+                    self._library_probe_inflight.update(batch)
+                self._library_probe_run(batch, 0.0)
+        except Exception:
+            logger.debug("Library probe drain failed", exc_info=True)
+            with self._library_probe_gate:
+                self._library_probe_draining = False
+
+    def _library_probe_rearm(self) -> None:
+        """(worker thread, after any publish) Re-ask whatever a running scan
+        made us defer. The scan has just released the cache and republished, so
+        these names can be answered now; without this they would wait for a
+        badge to miss again, which is exactly what never happens on a page the
+        user has already scrolled past."""
+        with self._library_probe_gate:
+            deferred = self._library_probe_deferred
+            self._library_probe_deferred = {}
+            # The cache has just been released, so the reason the bulk gate
+            # was told to stop asking is gone. Clearing it here rather than
+            # letting it lapse means a download started right after a scan
+            # finishes gets a real answer instead of the tail of a cooldown.
+            cooldown = getattr(self, "_library_gate_cooldown", None)
+            if cooldown is not None:
+                for key in deferred:
+                    cooldown.pop(key, None)
+        if deferred:
+            self._library_probe_enqueue(name for spellings in deferred.values() for name in spellings)
+        self._library_probe_backfill()
+
+    def _library_probe_backfill(self) -> None:
+        """(worker thread, once per session) Seed the queue with the artist
+        folders Waves itself wrote into this library.
+
+        A truncated listing hides folders, but the download record holds their
+        exact names, so these are the artists the user is likeliest to be told
+        they do not own when they do, and the ones a duplicate download would
+        hurt most. Names already known to the cache cost nothing: probe_folders
+        skips a spelling that matches a stored child before it stats anything,
+        so a healthy or already-recovered library pays no disk asks at all."""
+        if not self._library_scan_partial:
+            return
+        # Claimed under the gate: the launch seed and the scan both publish, on
+        # different workers, and a plain check-then-set let both of them run the
+        # whole seed (seen in the log as the same names queued twice).
+        with self._library_probe_gate:
+            if getattr(self, "_library_backfill_done", False):
+                return
+            self._library_backfill_done = True
+        store = getattr(self, "_ownership", None)
+        root = self._library_root()
+        if store is None or not root:
+            return
+        # The download folder counts too, even when it is not the library. Waves
+        # names an artist's folder the same wherever it writes it, so the names
+        # it used while downloading are the names to look for inside the library.
+        bases = [root]
+        with contextlib.suppress(Exception):
+            elsewhere = str(getattr(self.settings.data, "download_base_path", "") or "").strip()
+            if elsewhere:
+                bases.append(os.path.expanduser(elsewhere).rstrip(os.sep))
+        names: list[str] = []
+        try:
+            for base in dict.fromkeys(bases):
+                names.extend(store.folder_names_under(base))
+        except Exception:
+            logger.debug("Library backfill seed unavailable", exc_info=True)
+            return
+        if names:
+            # Counts only. The names themselves are user content and are never logged.
+            logger.info("library backfill: %d recorded folder names queued", len(names))
+            self._library_probe_enqueue(names)
+
+    def _library_probe_miss(self, name) -> None:
+        """(any thread) A presence question that could not be answered from the
+        index. Safe to call from anywhere and on any bridge, including the
+        partial stubs the tests build, and free on a healthy library."""
+        probe = getattr(self, "_library_probe_async", None)
+        if probe is not None and isinstance(name, str) and name:
+            probe(name)
+
+    def _library_probe_async(self, name: str) -> None:
+        """(GUI thread, from a pill's miss) Queue this artist for the batch
+        drainer, never blocking the caller and never waiting on a scan."""
+        self._library_probe_enqueue((name,))
+
+    def _library_probe_many(self, names) -> None:
+        """(any thread) Queue a whole page of names at once: every artist a set
+        of search results, a browse shelf or a discography names. This is what
+        keeps a badge correct without the user opening the artist first, and it
+        is why the search page now answers the same as the artist page."""
+        self._library_probe_enqueue(names)
+
+    def _library_probe_page(self, payload) -> None:
+        """(any thread) Ask about every artist a page of catalogue results
+        names, as ONE batch.
+
+        This is what makes a search answer the same as an artist page. A badge
+        that misses can only ask about itself, and on a share whose listing is
+        truncated the first thing the user does is search for an artist they
+        own, look at a row with no mark on it and download it again. So the
+        page asks on the whole set's behalf, before anything is clicked. Only
+        the rows that carry an artist are used: a playlist or a mix names
+        neither an artist nor a folder."""
+        if not isinstance(payload, dict):
+            return
+        names = _page_artist_names(payload)
+        # A browse page keeps its rows in shelves, each with its own items.
+        for section in payload.get("sections") or ():
+            if isinstance(section, dict):
+                names.extend(_shelf_artist_names(section.get("items")))
+        top = payload.get("top")
+        if isinstance(top, dict):
+            names.extend(top[f] for f in ("artist", "name") if _nonblank(top.get(f)))
+        if names:
+            self._library_probe_many(names)
+
+    def _library_gate_ready(self, key: str) -> bool:
+        """(worker thread) Whether a download gate should spend a wait on this
+        artist, or has just been told the cache is busy. Only the gates consult
+        this: a badge that misses may always ask again, which is why a deferral
+        never touches the memo."""
+        deadline = getattr(self, "_library_gate_cooldown", {}).get(key)
+        return deadline is None or deadline <= time.monotonic()
+
+    def _library_gate_defer(self, keys) -> None:
+        """(worker thread) Remember that the cache was busy for these keys, so
+        the rest of a bulk action stops paying the gate wait to be told the
+        same thing. Only keys the run actually deferred are stamped."""
+        cooldown = getattr(self, "_library_gate_cooldown", None)
+        if cooldown is None:
+            # A partial test stub reaches the gates without the bridge's full
+            # init. Created on the writer rather than demanded of the caller,
+            # so the suppression behaves the same wherever the gate runs.
+            cooldown = {}
+            self._library_gate_cooldown = cooldown
+        deadline = time.monotonic() + _LIBRARY_GATE_COOLDOWN_S
+        with self._library_probe_gate:
+            for key in keys:
+                if key in self._library_probe_deferred:
+                    cooldown[key] = deadline
+
+    def _library_probe_sync(self, name: str) -> None:
+        """(worker thread only: the download gates) Probe before deciding,
+        waiting a bounded time for a running scan to release the cache. Past
+        the wait the gate decides on what it has, which is the direction a
+        gate already errs in (a wrong skip costs an album, a download does
+        not). Keyed by artist and memoised, so a discography loop pays one
+        probe for all its albums."""
+        key = self._library_probe_wanted(name)
+        if key is None or not self._library_gate_ready(key):
+            return
+        with self._library_probe_gate:
+            self._library_probe_pending.pop(key, None)
+            self._library_probe_inflight.add(key)
+        self._library_probe_run({key: [name]}, _LIBRARY_PROBE_GATE_WAIT_S)
+        self._library_gate_defer([key])
+
+    def _library_probe_sync_many(self, names) -> None:
+        """(worker thread only: the bulk download gates) One probe for a whole
+        set of artists, made before the gate is asked about the first album.
+
+        _library_probe_sync is keyed per artist, so a discography loop already
+        pays one probe for all its albums. A bulk action over a PLAYLIST is a
+        different shape: sixty albums by sixty artists is sixty probes, each
+        taking the cache lock on its own and each waiting out a running scan on
+        its own. Asked together they cost one lock, one directory read and one
+        wait, which is the same reason probe_folders takes a batch at all."""
+        batch: dict[str, list[str]] = {}
+        for name in names:
+            key = self._library_probe_wanted(name)
+            if key is None or not self._library_gate_ready(key):
+                continue
+            spellings = batch.setdefault(key, [])
+            text = str(name)
+            # One key covers several credits ("A", "A feat. B") and the folder
+            # is spelled like exactly one of them, so each is asked.
+            if text not in spellings and len(spellings) < _LIBRARY_PROBE_SPELLINGS:
+                spellings.append(text)
+        if not batch:
+            return
+        with self._library_probe_gate:
+            for key in batch:
+                self._library_probe_pending.pop(key, None)
+                self._library_probe_inflight.add(key)
+        self._library_probe_run(batch, _LIBRARY_PROBE_GATE_WAIT_S)
+        self._library_gate_defer(batch)
+
+    def _library_probe_track_rows(self, _ident, rows) -> None:
+        """(any thread) Ask about every artist a flat list of track rows names.
+
+        The playlist page is the one bulk-download surface whose rows never
+        reached _library_probe_page: its signal carries a track list rather
+        than a results payload, so the shape did not fit. It is also the
+        surface where asking early pays most, since a playlist's tracks are by
+        many different artists and the download gate would otherwise meet every
+        one of them cold."""
+        names = _shelf_artist_names(rows)
+        if names:
+            self._library_probe_many(names)
 
     @Slot(str, result="QVariant")
     def artistLibraryPresence(self, name):
@@ -1297,17 +1932,20 @@ class LibraryMixin:
         index is rebuilt (a fresh dict object), so repeat calls are a dict.get."""
         idx = self._library_index
         if not idx or not name:
+            self._library_probe_miss(name)
             return {"present": False, "albums": 0, "tracks": 0}
         if self._library_artist_index_src is not idx:
             self._library_artist_index = matching.build_artist_rollup(idx)
             self._library_artist_index_src = idx
         if matching.is_various_artists(name):
             return {"present": False, "albums": 0, "tracks": 0}
-        return self._library_artist_index.get(matching.norm_artist(matching.canon(name))) or {
-            "present": False,
-            "albums": 0,
-            "tracks": 0,
-        }
+        hit = self._library_artist_index.get(matching.norm_artist(matching.canon(name)))
+        if hit:
+            return hit
+        probe = getattr(self, "_library_probe_async", None)  # a miss on an untrusted listing: ask the disk
+        if probe is not None:
+            probe(name)
+        return {"present": False, "albums": 0, "tracks": 0}
 
     @Slot(str)
     def revealLibraryAlbum(self, path: str) -> None:

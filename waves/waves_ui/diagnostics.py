@@ -573,6 +573,13 @@ _stream_handler: logging.StreamHandler | None = None
 _crumbs = _BreadcrumbHandler()
 _watchdog = _Watchdog()
 _sampler = _PerfSampler()
+# A countdown still armed when the interpreter exits fires from inside
+# Py_FinalizeEx, where faulthandler walks frames that are already being torn
+# down and can spin forever (the process then sits at 100% CPU and never
+# exits). shutdown() stops the watchdog on the normal quit path; this is the
+# net for every other way out, including a test process that built a bridge
+# with verbose diagnostics on. atexit runs before faulthandler's own teardown.
+atexit.register(_watchdog.stop)
 _crash_file = None
 _verbose = False
 

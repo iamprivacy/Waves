@@ -20,7 +20,7 @@ import time
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QDateTime, QTimer, QUrl
 from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QWindow
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest, QSslConfiguration
 from PySide6.QtQml import QQmlApplicationEngine, QQmlIncubationController, QQmlNetworkAccessManagerFactory
@@ -107,6 +107,29 @@ def _warm_tls() -> None:
         logging.getLogger(__name__).debug("TLS warm-up failed", exc_info=True)
 
 
+class _ImmutableArtCache(QNetworkDiskCache):
+    """A disk cache that never lets a stored cover expire.
+
+    The cover CDN answers with ``Cache-Control: max-age=3600``, so Qt stamps
+    every stored cover as stale an hour later. From then on the cache-first
+    policy still sends a conditional GET per cover before painting it (a
+    304 round trip, ~100 ms each measured, 1955 of 2238 held covers on one
+    machine were in that state), which is why a page of covers the app has
+    shown many times still crept in one by one. The URLs are content
+    addressed and immutable, so the freshness question has one answer: a
+    held cover is fresh. The read side is what Qt's freshness check asks,
+    ``metaData(url)``, so the expiry is rewritten there, which also covers
+    every cover stored before this class existed."""
+
+    _FRESH_YEARS = 10
+
+    def metaData(self, url):  # (Qt virtual)
+        md = super().metaData(url)
+        if md.isValid():
+            md.setExpirationDate(QDateTime.currentDateTimeUtc().addYears(self._FRESH_YEARS))
+        return md
+
+
 class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
     """Give the QML image loader a cache-first HTTP disk cache.
 
@@ -125,7 +148,7 @@ class _ArtCacheFactory(QQmlNetworkAccessManagerFactory):
 
     def create(self, parent) -> QNetworkAccessManager:
         nam = _CacheFirstNAM(parent)
-        cache = QNetworkDiskCache(nam)
+        cache = _ImmutableArtCache(nam)
         cache.setCacheDirectory(self._cache_dir)
         # ~1 GB. Covers are tens of KB each, so this holds tens of thousands:
         # a season of browsing rather than one session. Measured at the old
