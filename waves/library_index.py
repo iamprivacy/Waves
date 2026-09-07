@@ -36,7 +36,7 @@ import stat as stat_mod
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from threading import Lock
@@ -110,6 +110,36 @@ _SKIP_DIR_NAMES = frozenset(
     }
 )
 
+
+def _is_skipped_dir_name(name: str) -> bool:
+    """True for a folder name a walk never descends into: dot-prefixed (the
+    hidden-directory rule) or one of the metadata names above.
+
+    Shared on purpose. _scandir_one applies this to what a listing hands over,
+    and probe_folders has to apply the SAME rule to what it is asked to look up
+    by name: a probe that indexes a folder the walk excludes creates a row no
+    later listing can ever match, so the parent is flagged untrusted forever and
+    a Synology's @eaDir arrives in the library as an owned album.
+    """
+    return name.startswith(".") or name in _SKIP_DIR_NAMES
+
+
+def _has_skipped_segment(path: str, root: str) -> bool:
+    """True when ``path`` sits under a folder the walk never descends into.
+
+    Only the segments BELOW ``root`` are judged. A library root may perfectly
+    well live inside a hidden folder, and its own spelling is the user's
+    choice: this rule condemns what a probe reached past the root, nothing
+    else. False for anything not under ``root``, and for the root itself.
+    """
+    if not root or path == root:
+        return False
+    prefix = root.rstrip(os.sep) + os.sep
+    if not path.startswith(prefix):
+        return False
+    return any(_is_skipped_dir_name(seg) for seg in path[len(prefix) :].split(os.sep) if seg)
+
+
 # Concurrent tag reads during a cold scan. The reads are pure IO latency (open +
 # header read of one file per album), so on a NAS this multiplies throughput
 # nearly linearly; 8 stays polite to an SMB server while cutting a multi-
@@ -162,6 +192,25 @@ POLL_GAUGE = PoolGauge(_WALK_WORKERS)
 # "the folder exists but the OS won't let me read it" (a silently-swallowed
 # permission error otherwise looks identical to an empty folder and blanks every
 # badge). Stored on the instance as ``last_scan_status`` after each refresh.
+# The meta marker saying this cache's root has been re-listed at least once
+# since listings started being judged for repeats (see LibraryIndex.__init__).
+_ROOT_JUDGED_KEY = "root_listing_judged"
+# The worst directory listing the last scan met, as "handed/distinct". Set
+# only when a listing repeated names; read back at open so a relaunch can
+# explain the incomplete state before it has scanned anything.
+_LISTING_SHAPE_KEY = "untrusted_listing_shape"
+# Set once a cache has had the chance to measure that shape, so the one-time
+# re-list it buys is never bought twice.
+_SHAPE_MEASURED_KEY = "listing_shape_measured"
+# Set once a cache has had the folders an older probe_folders wrongly indexed
+# swept out of its tree (see _has_skipped_segment).
+_SKIPPED_PRUNED_KEY = "skipped_dirs_pruned"
+# "1" once a recovery through a fresh mount was checked and found to have left
+# nothing out: the untrusted listing is still untrusted, but everything the
+# share names under it is indexed. Persisted so a relaunch can say so before it
+# has scanned anything.
+_RECONCILED_KEY = "listing_reconciled"
+
 SCAN_OK = "ok"  # the root was listed; the index reflects it
 SCAN_UNSET = "unset"  # no library folder is configured
 SCAN_MISSING = "missing"  # the configured folder is absent (offline drive, wrong path)
@@ -182,6 +231,42 @@ def root_comparison_key(root: str) -> str:
     and wiped its dirs tree as a "root change"."""
     norm = os.path.expanduser(str(root or "")).rstrip(os.sep + (os.altsep or ""))
     return unicodedata.normalize("NFC", norm).casefold()
+
+
+def _name_key(name: str) -> str:
+    """One folder NAME as a case- and normalisation-folding filesystem compares
+    it (the same fold as waves.helper.path.name_comparison_key, kept local so
+    this module stays free of that module's tidalapi import). FOR COMPARISON
+    ONLY: nothing is ever written under a folded spelling."""
+    return unicodedata.normalize("NFC", str(name or "")).casefold()
+
+
+def _is_one_folder(stored: str, listed: str) -> bool:
+    """True when two spellings name ONE folder on disk.
+
+    A folded name match is not enough to decide this. On a case-folding
+    filesystem `Blur` and `blur` really are one folder under two spellings, and
+    the stored row has to retire or the artist is counted twice. On a
+    case-sensitive share they are two folders, both of them the user's, and
+    condemning either one deletes a library that is still there. Names cannot
+    tell those apart; inode identity can.
+
+    A stored spelling that no longer stats is gone, so it is reported as the
+    respelling case: it retires, which is what a prune would have done with it
+    anyway. If the LISTED path is the one that cannot be stat'd, nothing has
+    been established, so the caller is told they are different and the stored
+    child takes the ordinary missing-child route instead of being condemned on
+    a guess.
+    """
+    try:
+        a = os.stat(stored)
+    except OSError:
+        return True
+    try:
+        b = os.stat(listed)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
 def cache_file_for_root(config_dir: str, root: str) -> str:
@@ -441,6 +526,28 @@ class LibraryIndex:
         # Outcome of the most recent refresh() (see the SCAN_* constants). Read by
         # the backend on the same worker that refreshed, so no cross-thread race.
         self.last_scan_status = SCAN_UNSET
+        # Whether the most recent refresh() met a directory listing it could not
+        # trust (see _scandir_one and the walk's verify step). The index is then
+        # incomplete in a way no SCAN_* status describes: the scan still counts
+        # as SCAN_OK (the root WAS listed), and the bridge answers what the
+        # listing left out with a direct probe by name (probe_folders). Read
+        # like last_scan_status, on the worker that refreshed.
+        self.last_scan_partial = False
+        # How badly the worst listing of the last scan was truncated, as
+        # (entries handed over, distinct names among them). A healthy scan
+        # leaves (0, 0). Settings turns this into the one sentence that makes
+        # "incomplete" mean something: the OS offered N entries and only M of
+        # them were different folders. Counts only, never a path or a name.
+        self._untrusted_shape = (0, 0)
+        # Whether the folders an untrusted listing left out have since been
+        # recovered in full (see note_listing_reconciled). True means the badge
+        # answers are complete despite the listing, which is the difference
+        # between a warning and a note in Settings.
+        self.last_listing_reconciled = False
+        # Held for the whole of a scan's write phase and by probe_folders, so a
+        # probe never interleaves with a walk: the walk's in-memory tree would
+        # not know the probe's rows, and the generation stamps would drift.
+        self._scan_busy = Lock()
         # Pool sizes for the scan phases, re-sized by every refresh() from its
         # root_is_local verdict; full-size here so direct calls into the walk
         # or read phase (tests) behave as they always did.
@@ -522,6 +629,16 @@ class LibraryIndex:
                        seen_gen  INTEGER NOT NULL DEFAULT 0
                    )""")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_dirs_parent ON dirs(parent)")
+            # Whether this folder's last listing could not be trusted: it
+            # repeated a name (impossible on a healthy filesystem), or it left
+            # out a child that a direct stat then found. A network share whose
+            # directory paging is broken hands the OS the same first page over
+            # and over, so everything past it is invisible to the walk while
+            # still reachable by name. The flag tells the walk not to read
+            # "absent from the listing" as "gone", and tells probe_folders
+            # where a lookup by name is worth trying.
+            with contextlib.suppress(sqlite3.OperationalError):  # column already exists
+                self._conn.execute("ALTER TABLE dirs ADD COLUMN unreliable INTEGER NOT NULL DEFAULT 0")
             # One row per audio FILE read, behind the track-level presence pill:
             # the file's own title and (track) artist plus its stream quality.
             # Created empty on a pre-tracks cache; an album row with no track
@@ -547,7 +664,65 @@ class LibraryIndex:
             # Small key/value store: the scan root last walked (a change wipes the
             # tree so the new root walks fresh) and the monotonic scan generation.
             self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if self._meta_get(_ROOT_JUDGED_KEY) is None:
+                # A cache from before listings were judged has never had its
+                # root's listing looked at for repeats, and a warm scan REUSES
+                # every listing whose folder mtime has not moved, so on a
+                # library that never changes the root would never be listed
+                # again and a broken listing would stay unflagged forever
+                # (measured on such a share: scanned clean, 0 listings
+                # untrusted, the artist still missing). Zeroing the root's
+                # stored mtime makes the next scan re-list exactly that one
+                # folder, where the trouble shows; the 12h deep sweep re-lists
+                # everything else in due course. Keyed on a meta marker, not
+                # on the column's arrival: a cache the column reached through
+                # a scan that reused the root (the very case) must still get
+                # its one look. A fresh cache has no rows and nothing happens.
+                self._conn.execute(
+                    "UPDATE dirs SET mtime = 0 WHERE path IN (SELECT value FROM meta WHERE key = 'scan_root')"
+                )
+                self._meta_set(_ROOT_JUDGED_KEY, "1")
+            elif self._meta_get(_SHAPE_MEASURED_KEY) is None and self._meta_get(_LISTING_SHAPE_KEY) is None:
+                # The same trap one step further on. A cache flagged by an
+                # earlier version knows WHICH folder could not be trusted but
+                # not by how much, and the counts only exist while a listing is
+                # being made, so a warm scan that reuses that listing can never
+                # recover them. Zero the mtime of just the flagged folders to
+                # buy one re-list, which is what lets Settings say how many
+                # entries the folder reported against how few were different.
+                self._conn.execute("UPDATE dirs SET mtime = 0 WHERE unreliable = 1")
+            self._meta_set(_SHAPE_MEASURED_KEY, "1")
+            if self._meta_get(_SKIPPED_PRUNED_KEY) is None:
+                # A cache written before probe_folders applied the walk's own
+                # skip rule can hold @eaDir and #recycle subtrees that no
+                # listing will ever name again. Left alone they would age out
+                # over two clean generations, but until then they keep their
+                # parent flagged untrusted and they show in the library as
+                # albums the user never downloaded, so sweep them once here.
+                # Guarded by the emptiness check: on a fresh or pre-dirs cache
+                # there is nothing to condemn and the album cascade below must
+                # not run against an empty tree.
+                doomed = [
+                    (p,)
+                    for (p,) in self._conn.execute("SELECT path FROM dirs").fetchall()
+                    if _has_skipped_segment(p, self._meta_get("scan_root") or "")
+                ]
+                if doomed:
+                    self._conn.executemany("DELETE FROM dirs WHERE path = ?", doomed)
+                    self._conn.execute(
+                        "DELETE FROM albums WHERE folder_path NOT IN (SELECT path FROM dirs WHERE is_album = 1)"
+                    )
+                    self._conn.execute("DELETE FROM tracks WHERE folder_path NOT IN (SELECT folder_path FROM albums)")
+                    logger.info("dropped %d cached folder(s) the scan never walks", len(doomed))
+                self._meta_set(_SKIPPED_PRUNED_KEY, "1")
             self._conn.commit()
+        # A relaunch opens the cache the last scan left: what that scan could
+        # not trust is still not trusted, so the badges seeded from this cache
+        # (before any scan runs) already know to ask the disk by name.
+        self.last_scan_partial = bool(self.unreliable_dirs())
+        self._untrusted_shape = self._read_listing_shape()
+        with self._lock:
+            self.last_listing_reconciled = self._meta_get(_RECONCILED_KEY) == "1"
 
     @staticmethod
     def _probe_root(root: str) -> str:
@@ -668,6 +843,22 @@ class LibraryIndex:
         # reaches, and _begin_scan's root-change wipe would empty that cache's
         # dirs tree and stamp the old root into it before the walk's first
         # liveness poll could bail.
+        # The write phase runs under the scan lock probe_folders also takes, so
+        # a probe by name never interleaves with a walk of the same cache.
+        with self._scan_busy:
+            return self._refresh_scan(root, alive, emit, force_full, started)
+
+    def _refresh_scan(
+        self,
+        root: str,
+        alive: Callable[[], bool],
+        emit: Callable[..., None],
+        force_full: bool,
+        started: float,
+    ) -> int:
+        """The write half of refresh(): open the generation, walk, read, prune.
+        Split out so the whole of it runs under ``_scan_busy`` while refresh()
+        keeps the probe-and-bail preamble, which must never wait on a scan."""
         # A root switch wipes the tree so the new root walks fresh; every scan
         # gets a fresh generation stamp so vanished folders can be pruned.
         gen = self._begin_scan(root)
@@ -679,7 +870,7 @@ class LibraryIndex:
                 "library scan bailed after %.1fs (status %s)", time.monotonic() - started, self.last_scan_status
             )
             return self._count()
-        candidates, albums_seen, condemned = walked
+        candidates, albums_seen, condemned, partial = walked
         if albums_seen:
             # A walk that saw albums also witnesses which FILESYSTEM the root
             # sits on: the device id is what tells a later empty walk apart
@@ -746,12 +937,28 @@ class LibraryIndex:
                 if force_full or self._meta_get("last_full_scan") is None:
                     self._meta_set("last_full_scan", str(time.time()))
                     self._conn.commit()
+        # What the walk could not trust, this scan or a reused earlier listing
+        # (the flag rides along on an unchanged folder): the bridge reads this
+        # to decide whether a badge miss is worth a probe by name.
+        untrusted = len(self.unreliable_dirs()) if alive() else 0
+        self.last_scan_partial = partial or untrusted > 0
+        if alive():
+            # A share that heals must stop explaining a truncation that is
+            # over, so a trusted scan clears the stored shape as well.
+            if not self.last_scan_partial:
+                self._untrusted_shape = (0, 0)
+                self.note_listing_reconciled(False)
+            if self._untrusted_shape[0] or not self.last_scan_partial:
+                with self._lock:
+                    self._meta_set(_LISTING_SHAPE_KEY, "%d/%d" % self._untrusted_shape)
+                    self._conn.commit()
         count = self._count()
         logger.info(
-            "library scan finished in %.1fs: %d albums indexed, %d re-read",
+            "library scan finished in %.1fs: %d albums indexed, %d re-read, %d listings untrusted",
             time.monotonic() - started,
             count,
             len(to_read),
+            untrusted,
         )
         return count
 
@@ -907,6 +1114,229 @@ class LibraryIndex:
             stored = self._meta_get("scan_root")
         return stored is not None and root_comparison_key(stored) == root_comparison_key(root)
 
+    def _read_listing_shape(self) -> tuple[int, int]:
+        """The stored worst listing shape, or (0, 0)."""
+        with self._lock:
+            raw = self._meta_get(_LISTING_SHAPE_KEY)
+        try:
+            handed, distinct = (int(x) for x in str(raw or "").split("/", 1))
+        except (TypeError, ValueError):
+            return (0, 0)
+        return (handed, distinct) if handed > distinct >= 0 else (0, 0)
+
+    def untrusted_listing_shape(self) -> tuple[int, int]:
+        """(entries handed over, distinct names) for the worst listing the
+        last scan met, or (0, 0) when every listing was trusted. This is what
+        lets the app say how much of a folder it was actually shown instead of
+        the bare word "incomplete"."""
+        return self._untrusted_shape
+
+    def note_listing_reconciled(self, done: bool) -> None:
+        """Record whether the folders an untrusted listing left out are all in
+        the cache now (see listing_holds_all). Called by the recovery after it
+        has checked, and with False by a scan that ended with every listing
+        trusted, where there is nothing left to reconcile.
+
+        Persisted, because the answer is about the CACHE, not about the run
+        that measured it: a relaunch that has not recovered anything yet still
+        holds every folder the last recovery wrote."""
+        done = bool(done)
+        self.last_listing_reconciled = done
+        with self._lock:
+            self._meta_set(_RECONCILED_KEY, "1" if done else "0")
+            self._conn.commit()
+
+    def listing_holds_all(self, parent: str, names: Iterable[str]) -> bool:
+        """True when the cache already holds a child folder for every one of
+        ``names`` under ``parent``.
+
+        What "the recovery left nothing out" means, asked here because the fold
+        and the walk's skip rule both live in this module: a name the walk would
+        never descend into (@eaDir, a dot folder) is not missing when it is
+        absent, and a name is matched the way a filesystem compares it, not by
+        its exact spelling. Names only; nothing is logged."""
+        have = {_name_key(n) for n in self.child_names(parent)}
+        return all(_name_key(n) in have for n in names if not _is_skipped_dir_name(str(n)))
+
+    def unreliable_dirs(self) -> list[str]:
+        """The folders whose last listing could not be trusted (see the
+        ``unreliable`` column): where probe_folders looks by name. Internal and
+        for tests; the paths are never logged."""
+        with self._lock:
+            rows = self._conn.execute("SELECT path FROM dirs WHERE unreliable = 1 ORDER BY path").fetchall()
+        return [p for (p,) in rows]
+
+    def child_names(self, parent: str) -> list[str]:
+        """The folder names the cache already holds directly under ``parent``.
+
+        What a recovered listing is checked against: a fresh listing that has
+        lost a folder this cache has already indexed and read is not a better
+        listing, whatever else it gained. Names only, so the caller never has
+        to handle a path; the paths are never logged."""
+        with self._lock:
+            rows = self._conn.execute("SELECT path FROM dirs WHERE parent = ?", (parent,)).fetchall()
+        return [os.path.basename(p) for (p,) in rows if p]
+
+    def probe_folders(
+        self,
+        root: str,
+        names: Iterable[str],
+        should_continue: Callable[[], bool] | None = None,
+        *,
+        candidates: Callable[[str], Iterable[str]],
+        timeout: float = 0.0,
+        on_progress: Callable[[dict], None] | None = None,
+        progress_interval: float = 0.15,
+    ) -> int | None:
+        """Look for artist folders BY NAME under every folder whose listing could
+        not be trusted, and index whatever is found. Returns how many FOLDERS
+        were found (0 when nothing was, or when nothing needed looking for),
+        or None when a scan holds the cache right now (the caller decides
+        whether to wait, via ``timeout``, or to try again later). A found
+        folder whose albums the cache already holds unchanged still counts:
+        rows were written for it, so the caller must republish either way.
+
+        ``names`` is a BATCH on purpose. One call takes the cache lock once,
+        reads the directory tree once and writes once, so asking about a whole
+        page of search results costs barely more than asking about one artist.
+        Asking one name at a time is the expensive way round, and it also loses
+        races: every other caller gets None back while the first holds the lock.
+
+        The walk can only index what a listing names. A network share whose
+        directory paging is broken names the same first page over and over, so
+        a whole artist can be absent from every listing while
+        ``os.stat(root/Artist)`` finds it at once, with its albums listing
+        perfectly (they are small folders). Every badge and every download
+        gate has the artist's name in hand, so for a folder flagged untrusted
+        the name is tried directly, in the spellings ``candidates`` returns
+        (the caller derives them from the download naming settings; this
+        module does not import them). One stat per spelling, nothing listed
+        at the untrusted level; on a hit the subtree walks and reads exactly as
+        the scan would have, stamped with the CURRENT generation and written
+        under the untrusted folder as parent, which is what keeps it alive: the
+        next walk re-queues that folder's stored children instead of trusting
+        its listing, and re-stamps them (see _walk_album_dirs). No prune here;
+        only a completed walk prunes.
+
+        Refused (0, nothing written) unless the cache was scanned for this very
+        root: a probe must never stamp rows into a tree that belongs to another
+        folder, or to no scan at all. A spelling that only differs by case or
+        normalisation from a stored child is skipped, so a folder is never
+        indexed twice under two spellings. Layouts without an artist folder
+        (albums straight under the root) gain nothing here; the warning in
+        Settings says so in plain words.
+
+        ``on_progress`` takes the same events refresh() sends, so a probe that
+        has hundreds of folders to read (a whole share's worth of recovered
+        artists, minutes over a network) moves the same bar the scan moved
+        instead of leaving it parked on the scan's last count. The walk events
+        count across every folder found so far, so the numbers only climb.
+        A badge's one-name probe passes nothing and stays silent."""
+        root = os.path.expanduser(str(root or "")).rstrip(os.sep)
+        wanted = [str(n) for n in names if str(n or "").strip()]
+        if not wanted:
+            return 0
+        if not self._scan_busy.acquire(timeout=max(0.0, float(timeout))):
+            return None
+        try:
+            with self._lock:
+                stamped = self._meta_get("scan_gen")
+            if stamped is None or not self.matches_scan_root(root):
+                return 0
+            gen = int(stamped)
+            parents = self.unreliable_dirs()
+            if not parents:
+                return 0
+            alive = should_continue or (lambda: True)
+            emit = _RateLimitedEmit(on_progress, progress_interval)
+            _known, children = self._load_dir_tree()
+            found: list[_Candidate] = []
+            hits = 0
+            # Two banked totals plus whatever the walk in flight last reported.
+            # Each hit walks on its own with counters that restart at zero, so
+            # its numbers have to be added to a running total of the SAME kind.
+            # That is the part this used to get wrong: "found" counts album
+            # folders SEEN, which is not the length of the read list (an
+            # unchanged album is seen and never re-read), and "checked" counts
+            # folders VISITED, which is not walked[1] (that is the album total).
+            # Adding each to the other's total made the emitted count fall
+            # between hits, and a bar that goes backwards reads as a hang, which
+            # is the exact symptom this progress feed was added to cure.
+            seen_albums = 0
+            seen_folders = 0
+            live_albums = 0
+            live_folders = 0
+
+            def walk_emit(payload: dict, *, force: bool = False) -> None:
+                nonlocal live_albums, live_folders
+                live_albums = int(payload.get("found", 0))
+                live_folders = int(payload.get("checked", 0))
+                emit(
+                    {
+                        "phase": "walk",
+                        "found": seen_albums + live_albums,
+                        "checked": seen_folders + live_folders,
+                    },
+                    force=force,
+                )
+
+            for parent in parents:
+                taken = {_name_key(os.path.basename(c)) for c in children.get(parent, ())}
+                for name in wanted:
+                    for spelling in candidates(name):
+                        spelling = str(spelling or "").strip()
+                        if not spelling or spelling in (".", "..") or os.sep in spelling:
+                            continue
+                        if os.altsep and os.altsep in spelling:
+                            continue
+                        if _is_skipped_dir_name(spelling):
+                            # The walk would never descend into this folder, so
+                            # a row for it is one every later listing "loses",
+                            # which re-flags the parent untrusted on every scan
+                            # from here on. Not hypothetical: the untrusted
+                            # recovery path asks for whatever names it read off
+                            # a fresh mount, and a NAS puts its own metadata
+                            # folders in that list.
+                            continue
+                        key = _name_key(spelling)
+                        if key in taken:
+                            continue
+                        if not alive():
+                            return hits
+                        path = os.path.join(parent, spelling)
+                        try:
+                            st = os.stat(path)
+                        except OSError:
+                            continue
+                        if not stat_mod.S_ISDIR(st.st_mode):
+                            continue
+                        walked = self._walk_album_dirs(path, alive, walk_emit, gen, subtree=True)
+                        # Banked before the None check on purpose: a walk that
+                        # returned nothing usable still visited folders, and
+                        # dropping its counts would make the next hit start from
+                        # a total lower than the one already on screen.
+                        seen_albums += live_albums
+                        seen_folders += live_folders
+                        live_albums = live_folders = 0
+                        if walked is None:
+                            continue
+                        found.extend(walked[0])
+                        taken.add(key)
+                        hits += 1
+                        break  # one folder per name per parent: the rest are respellings
+            if hits:
+                # The same verdict pass as refresh(): a folder the cache already
+                # holds unchanged (a re-probe after a respelling) is not re-read.
+                known_rows = self._unchanged_rows()
+                to_read = [c for c in found if not self._unchanged_verdict(known_rows.get(c[0]), c[2], c[3])]
+                if to_read:
+                    emit({"phase": "read", "done": 0, "total": len(to_read), "indexed": self._count()}, force=True)
+                self._read_and_upsert(to_read, alive, emit)
+            logger.info("library probe: %d names asked, %d folders found, %d albums", len(wanted), hits, len(found))
+            return hits
+        finally:
+            self._scan_busy.release()
+
     def _walk_album_dirs(
         self,
         root: str,
@@ -914,14 +1344,23 @@ class LibraryIndex:
         emit: Callable[..., None],
         gen: int,
         force_full: bool = False,
-    ) -> tuple[list[_Candidate], int, list[str]] | None:
+        *,
+        subtree: bool = False,
+    ) -> tuple[list[_Candidate], int, list[str], bool] | None:
         """Concurrent, incremental, resumable discovery of album folders.
 
-        Returns the album folders that need a tag read AND how many album folders
-        this walk saw in total. The two differ on every warm scan: an unchanged
-        album is seen but not re-listed, so the read list is empty while the
-        library is perfectly healthy. Only the total says whether anything is
-        there, which is what the empty-library guard in refresh() must judge.
+        Returns the album folders that need a tag read, how many album folders
+        this walk saw in total, the folders positively gone, and whether any
+        listing on the way could not be trusted. The first two differ on every
+        warm scan: an unchanged album is seen but not re-listed, so the read
+        list is empty while the library is perfectly healthy. Only the total
+        says whether anything is there, which is what the empty-library guard
+        in refresh() must judge.
+
+        ``subtree`` walks from a folder INSIDE the library (probe_folders found
+        it by name where the root's listing never showed it): the same walk,
+        stamping the same generation, but it never writes ``last_scan_status``,
+        which describes the root, not one artist folder.
 
         Loads the persisted directory tree once, then walks from ``root`` on a
         thread pool. For each folder a worker stats it (one round trip on a NAS):
@@ -939,6 +1378,14 @@ class LibraryIndex:
         candidates that need consideration, or None if superseded mid-walk (the
         partial tree is checkpointed first, so the next scan resumes).
         """
+        if not subtree:
+            # Seeded from what the cache stored, not zeroed. A warm scan REUSES
+            # the untrusted folder's stored listing (the flag rides along), so
+            # the counts are never measured again, and zeroing here dropped
+            # Settings back to "came back incomplete" with no numbers a scan or
+            # two after the one that measured them. A scan that ends trusted
+            # clears the stored shape below, so nothing stale survives a heal.
+            self._untrusted_shape = self._read_listing_shape()
         known, children = self._load_dir_tree()
         album_mtimes = self._load_album_mtimes()
 
@@ -953,7 +1400,7 @@ class LibraryIndex:
             row = known.get(path)
             if row is None:
                 return None  # never seen: must list
-            mtime, listed, is_album = row
+            mtime, listed, is_album, _unreliable = row
             if not listed:
                 return None  # discovered but not yet listed (resume frontier)
             if is_album:
@@ -975,6 +1422,14 @@ class LibraryIndex:
         # one-generation grace (see _prune_by_gen); a fresh listing is direct
         # evidence, so these prune this very scan.
         condemned: list[str] = []
+        # Stored children a TRUSTED fresh listing did not name, stat'd before
+        # they are believed gone (see the loop): a listing that leaves out a
+        # folder which is right there is a broken listing, not a deletion.
+        verify: set[str] = set()
+        # Folders whose listing was caught doing exactly that: flagged untrusted
+        # in the table (with the rows, see _commit_dirs) so the next walk knows.
+        marks: list[str] = []
+        partial = False
 
         pool = ThreadPoolExecutor(max_workers=self._workers_walk)
         done_q: SimpleQueue = SimpleQueue()
@@ -1015,7 +1470,7 @@ class LibraryIndex:
             submit(root)
             while outstanding:
                 if not alive() or pool_dead:
-                    self._commit_dirs(writes)  # checkpoint the frontier, then bail
+                    self._commit_dirs(writes, marks)  # checkpoint the frontier, then bail
                     return None
                 res = done_q.get().result()
                 outstanding -= 1
@@ -1029,9 +1484,29 @@ class LibraryIndex:
                     # probe passed (a network mount dropping mid-walk). Leave the
                     # cache intact and mark it offline rather than let the prune wipe
                     # every badge: this is the temporarily-offline-NAS invariant.
-                    self._commit_dirs(writes)
-                    self.last_scan_status = SCAN_MISSING
+                    self._commit_dirs(writes, marks)
+                    if not subtree:
+                        self.last_scan_status = SCAN_MISSING
                     return None
+                if path in verify:
+                    # The parent's fresh listing did not name this stored child,
+                    # and the stat has now answered. ENOENT is the deletion the
+                    # listing described: condemned, pruned this scan, exactly as
+                    # a fresh listing's word used to be taken outright. Anything
+                    # else means the folder is there and the LISTING lied (a
+                    # share that pages its enumeration wrongly leaves out every
+                    # folder past its first page): the child keeps its place and
+                    # walks on below, and the parent is flagged so the next walk
+                    # trusts its listing no more than this one did. A transient
+                    # error proves neither and the error branch keeps the row.
+                    verify.discard(path)
+                    if gone:
+                        condemned.append(path)
+                        emit({"phase": "walk", "found": len(seen_albums), "checked": checked})
+                        continue
+                    if not error:
+                        marks.append(parent)
+                        partial = True
                 if gone:
                     # A child genuinely vanished (ENOENT) between discovery and
                     # listing: leave it unstamped so the generation prune drops it
@@ -1054,8 +1529,8 @@ class LibraryIndex:
                     # retried on the next scan.
                     row = known.get(path)
                     if row is not None:
-                        old_mtime, listed, is_album = row
-                        writes.append((path, parent, old_mtime, listed, int(is_album), gen))
+                        old_mtime, listed, is_album, unreliable = row
+                        writes.append((path, parent, old_mtime, listed, int(is_album), gen, unreliable))
                         if is_album:
                             seen_albums.add(path)
                         for child in children.get(path, ()):
@@ -1063,8 +1538,10 @@ class LibraryIndex:
                     emit({"phase": "walk", "found": len(seen_albums), "checked": checked})
                     continue
                 if res.get("unchanged"):
-                    is_album = bool(known.get(path, (0, 0, 0))[2])
-                    writes.append((path, parent, res["mtime"], 1, int(is_album), gen))
+                    _mtime, _listed, is_album, unreliable = known.get(path, (0.0, 0, 0, 0))
+                    # The flag rides along unchanged: a reused listing is the
+                    # stored one, trusted exactly as much as when it was stored.
+                    writes.append((path, parent, res["mtime"], 1, int(is_album), gen, unreliable))
                     if is_album:
                         seen_albums.add(path)
                     for child in children.get(path, ()):  # known listing, re-queue it
@@ -1072,19 +1549,58 @@ class LibraryIndex:
                 else:
                     candidate = res["candidate"]
                     is_album = candidate is not None
-                    writes.append((path, parent, res["mtime"], 1, int(is_album), gen))
+                    unreliable = bool(res.get("unreliable"))
+                    if unreliable:
+                        partial = True
+                        # The worst listing of the scan, so Settings can say how
+                        # much of the folder the OS actually showed. Counts only:
+                        # never the folder, never a name.
+                        handed = int(res.get("handed") or 0)
+                        if handed > self._untrusted_shape[0]:
+                            self._untrusted_shape = (handed, int(res.get("distinct") or 0))
+                    writes.append((path, parent, res["mtime"], 1, int(is_album), gen, int(unreliable)))
                     if is_album:
                         seen_albums.add(path)
                         candidates.append(candidate)
                     fresh = set(res["subdirs"])
+                    # Stored children the fresh listing did not name. A listing
+                    # that repeated names cannot vouch for absence, so its
+                    # missing children walk on as if the listing were reused;
+                    # a clean listing's missing children are stat'd first (the
+                    # verify step above) instead of being condemned on its
+                    # word. Either way a folder the walk can still reach keeps
+                    # its albums, and a real deletion is still pruned this scan.
+                    fresh_by_key: dict[str, str] = {}
+                    for sd in res["subdirs"]:
+                        fresh_by_key.setdefault(_name_key(os.path.basename(sd)), sd)
                     for child in children.get(path, ()):
-                        if child not in fresh:
+                        if child in fresh:
+                            continue
+                        twin = fresh_by_key.get(_name_key(os.path.basename(child)))
+                        if twin is not None and _is_one_folder(child, twin):
+                            # The same folder under another spelling (a probe by
+                            # name wrote the row before any listing showed it,
+                            # on a filesystem that folds case): the listing
+                            # decides the spelling, the stored one retires, and
+                            # its albums re-read under the listed path. Without
+                            # this the rollup counted the artist twice.
+                            #
+                            # Confirmed by inode, not by the folded name: a
+                            # case-sensitive share can hold `Blur` and `blur` as
+                            # two real folders, and a truncated listing that
+                            # names only one of them would otherwise condemn the
+                            # other, deleting rows for a folder still on disk.
                             condemned.append(child)
+                        elif unreliable:
+                            submit(child)
+                        else:
+                            verify.add(child)
+                            submit(child)
                     for sd in res["subdirs"]:
                         if sd not in known:
                             # Record the frontier before descending so a crash here
                             # still knows this child exists and must be listed.
-                            writes.append((sd, path, 0.0, 0, 0, gen))
+                            writes.append((sd, path, 0.0, 0, 0, gen, 0))
                         submit(sd)
                 # "checked" is the number that visibly moves the whole time:
                 # breadth-first reaches every artist folder before any album
@@ -1092,9 +1608,10 @@ class LibraryIndex:
                 # and reads as a hang.
                 emit({"phase": "walk", "found": len(seen_albums), "checked": checked})
                 if len(writes) >= _WALK_COMMIT_EVERY:
-                    self._commit_dirs(writes)
+                    self._commit_dirs(writes, marks)
                     writes = []
-            self._commit_dirs(writes)
+                    marks = []
+            self._commit_dirs(writes, marks)
             # The rate limiter may have swallowed the last burst; land the final
             # walk numbers so the UI never understates what was discovered.
             emit({"phase": "walk", "found": len(seen_albums), "checked": checked}, force=True)
@@ -1109,13 +1626,14 @@ class LibraryIndex:
                 # there.
                 status = self._probe_root(root)
                 if status != SCAN_OK:
-                    self.last_scan_status = status
-                    logger.info("library scan bailed: root became %s during the walk", status)
+                    if not subtree:
+                        self.last_scan_status = status
+                        logger.info("library scan bailed: root became %s during the walk", status)
                     return None
         finally:
             # A superseded walk must not keep hammering the NAS in the background.
             pool.shutdown(wait=False, cancel_futures=True)
-        return candidates, len(seen_albums), condemned
+        return candidates, len(seen_albums), condemned, partial
 
     def _probe(self, path: str, expected: float | None) -> dict:
         """(pool worker) Stat ``path`` and, unless its mtime matches ``expected``
@@ -1148,7 +1666,7 @@ class LibraryIndex:
             # empty folder. Do not surface a fresh mtime (the caller must keep the
             # old one so the change is re-listed once the error clears).
             return {"path": path, "exists": True, "error": True}
-        subdirs, candidate = listed
+        subdirs, candidate, handed, distinct = listed
         return {
             "path": path,
             "exists": True,
@@ -1156,18 +1674,37 @@ class LibraryIndex:
             "unchanged": False,
             "subdirs": subdirs,
             "candidate": candidate,
+            "unreliable": handed != distinct,
+            "handed": handed,
+            "distinct": distinct,
         }
 
-    def _scandir_one(self, d: str, mtime: float) -> tuple[list[str], _Candidate | None] | None:
+    def _scandir_one(self, d: str, mtime: float) -> tuple[list[str], _Candidate | None, int, int] | None:
         """One directory's listing: its walkable subfolders (skip rules applied,
-        symlinks not followed) and, if it directly holds audio, the album candidate
+        symlinks not followed), the album candidate if it directly holds audio
         (dirpath, first audio file, the already-known dir mtime, audio count, and
-        the full sorted audio listing for the per-file read).
-        Returns None (distinct from an empty ``([], None)``) when the directory
-        cannot be read, so a transient failure is never mistaken for a real empty
-        folder and never orphans a cached subtree."""
-        subdirs: list[str] = []
-        audio: list[str] = []
+        the full sorted audio listing for the per-file read), then how many
+        entries the listing HANDED OVER and how many of them were DISTINCT.
+        A repeat (handed over more than distinct) is the broken-enumeration
+        signal; the two counts are kept rather than reduced to a boolean so
+        the app can tell the user how much of the folder it was shown.
+        Returns None (distinct from an empty ``([], None, 0, 0)``) when the
+        directory cannot be read, so a transient failure is never mistaken for a
+        real empty folder and never orphans a cached subtree.
+
+        A healthy filesystem never names one entry twice, so a repeat is proof
+        the enumeration is broken, not a quirk to smooth over: a network share
+        whose directory paging fails hands the OS the same first page again and
+        again (one library root listed as 10000 entries of 1000 names), and
+        everything past that page is unreachable by listing while still there by
+        name. The repeats are dropped here (first occurrence wins, so a folder
+        is walked once and a file is read once, where the raw list walked the
+        root's children ten times over and wrote every track row ten times),
+        and the flag lets the walk stop reading "not in the listing" as "gone"
+        for this folder."""
+        subdirs: dict[str, None] = {}
+        audio: dict[str, None] = {}
+        raw = 0
         try:
             with os.scandir(d) as it:
                 for entry in it:
@@ -1184,7 +1721,7 @@ class LibraryIndex:
                     if name.startswith("."):
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        if name in _SKIP_DIR_NAMES:
+                        if _is_skipped_dir_name(name):  # dot names are gone above
                             continue
                         # A non-UTF-8 folder name cannot be stored in sqlite; skip it
                         # rather than let one bad name crash (and re-crash) the whole
@@ -1194,26 +1731,30 @@ class LibraryIndex:
                             entry.path.encode("utf-8")
                         except UnicodeEncodeError:
                             continue
-                        subdirs.append(entry.path)
+                        raw += 1
+                        subdirs[entry.path] = None
                     elif self._is_audio(name):
-                        audio.append(name)
+                        raw += 1
+                        audio[name] = None
         except OSError:
             return None
+        distinct = len(subdirs) + len(audio)
         if not audio:
-            return subdirs, None
-        audio.sort()
-        return subdirs, (d, audio[0], mtime, len(audio), tuple(audio))
+            return list(subdirs), None, raw, distinct
+        names = sorted(audio)
+        return list(subdirs), (d, names[0], mtime, len(names), tuple(names)), raw, distinct
 
-    def _load_dir_tree(self) -> tuple[dict[str, tuple[float, int, int]], dict[str, list[str]]]:
+    def _load_dir_tree(self) -> tuple[dict[str, tuple[float, int, int, int]], dict[str, list[str]]]:
         """The persisted tree as two in-memory maps: ``{path: (mtime, listed,
-        is_album)}`` for O(1) skip decisions, and ``{parent: [child, ...]}`` so an
-        unchanged folder's children can be re-queued without a listing."""
-        known: dict[str, tuple[float, int, int]] = {}
+        is_album, unreliable)}`` for O(1) skip decisions, and ``{parent: [child,
+        ...]}`` so an unchanged folder's children can be re-queued without a
+        listing."""
+        known: dict[str, tuple[float, int, int, int]] = {}
         children: dict[str, list[str]] = defaultdict(list)
         with self._lock:
-            rows = self._conn.execute("SELECT path, parent, mtime, listed, is_album FROM dirs").fetchall()
-        for path, parent, mtime, listed, is_album in rows:
-            known[path] = (mtime, int(listed), int(is_album))
+            rows = self._conn.execute("SELECT path, parent, mtime, listed, is_album, unreliable FROM dirs").fetchall()
+        for path, parent, mtime, listed, is_album, unreliable in rows:
+            known[path] = (mtime, int(listed), int(is_album), int(unreliable or 0))
             if parent:
                 children[parent].append(path)
         return known, children
@@ -1241,22 +1782,28 @@ class LibraryIndex:
             out[path] = (mtime, fresh and tracks > 0 and (tracks >= count or resting))
         return out
 
-    def _commit_dirs(self, writes: list[tuple]) -> None:
+    def _commit_dirs(self, writes: list[tuple], marks: list[str] | tuple[str, ...] = ()) -> None:
         """Flush a batch of directory rows. A folder's own row (listed=1) and its
         newly discovered child rows (listed=0) are appended together, so a commit
-        boundary never splits a folder from its frontier."""
-        if not writes:
+        boundary never splits a folder from its frontier. ``marks`` are folders
+        whose listing was caught leaving out a child that is right there (see
+        the walk's verify step): flagged untrusted after the rows land, in the
+        same commit, since the folder's own row may sit in this very batch."""
+        if not writes and not marks:
             return
         with self._lock:
-            self._conn.executemany(
-                """INSERT INTO dirs (path, parent, mtime, listed, is_album, seen_gen)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(path) DO UPDATE SET
-                       parent=excluded.parent, mtime=excluded.mtime,
-                       listed=excluded.listed, is_album=excluded.is_album,
-                       seen_gen=excluded.seen_gen""",
-                writes,
-            )
+            if writes:
+                self._conn.executemany(
+                    """INSERT INTO dirs (path, parent, mtime, listed, is_album, seen_gen, unreliable)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(path) DO UPDATE SET
+                           parent=excluded.parent, mtime=excluded.mtime,
+                           listed=excluded.listed, is_album=excluded.is_album,
+                           seen_gen=excluded.seen_gen, unreliable=excluded.unreliable""",
+                    writes,
+                )
+            if marks:
+                self._conn.executemany("UPDATE dirs SET unreliable = 1 WHERE path = ?", [(p,) for p in marks])
             self._conn.commit()
 
     def _read_and_upsert(

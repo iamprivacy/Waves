@@ -348,6 +348,73 @@ def sanitize_name_component(
     return _tidy_spacing(result) if tidy_spacing else result
 
 
+def folder_name_candidates(
+    name: str, illegal_replacement: str = "", illegal_map: dict[str, str] | None = None
+) -> list[str]:
+    """The spellings an artist's folder may have on disk, most likely first.
+
+    For the library scan's probe by name (waves.library_index.probe_folders):
+    when a folder listing cannot be trusted, the artist is looked up directly,
+    and the lookup has to guess how the folder was spelled. The raw name comes
+    first (a library another tool organised, or a name with nothing to
+    sanitize), then the name as this install writes it (the user's stand-ins),
+    then the older spellings a download from an earlier version could have
+    left behind (the general stand-in alone, plain removal, and the untidied
+    spacing of releases before 0.1.17), and for a name that begins with "The"
+    the "Name, The" form some library managers file under. The same four
+    sanitizer spellings are built inline where a download picks its folder
+    (download.py's _destination_path); this is their read-side twin.
+
+    Empty results are dropped, as is any spelling holding a path separator (a
+    raw "AC/DC" is two folders to every filesystem, never one), and the list is
+    deduplicated by name_comparison_key, so a filesystem that folds case is
+    asked once per folder. Comparison keys are never returned: the spellings
+    are the ones to stat, exactly as written.
+
+    Args:
+        name (str): The artist's name as the catalogue spells it.
+        illegal_replacement (str, optional): The general stand-in this install
+            writes. Defaults to "".
+        illegal_map (dict[str, str] | None, optional): The per-character stand-ins
+            this install writes. Defaults to None.
+
+    Returns:
+        list[str]: Folder names to try, in order, without duplicates.
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        return []
+    spellings = [
+        raw,
+        sanitize_name_component(raw, illegal_replacement, illegal_map),
+        sanitize_name_component(raw, illegal_replacement),
+        sanitize_name_component(raw),
+        # Untidied, and with NO stand-ins, because that is what the write side's
+        # fourth spelling is: download.py's build(False) takes the default empty
+        # replacement and no map. Building this one with the install's current
+        # stand-ins instead asks about a folder no version ever wrote, so the
+        # pre-0.1.17 folder that _keep_existing_layout still writes into is
+        # never stat'd, the artist stays invisible to the badges and to
+        # _library_claims_album, and a download already on disk is issued again.
+        sanitize_name_component(raw, "", None, tidy_spacing=False),
+    ]
+    lowered = raw.casefold()
+    if lowered.startswith("the ") and len(raw) > 4:
+        spellings.extend(f"{s[4:]}, {s[:3]}" for s in list(spellings) if s.casefold().startswith("the ") and len(s) > 4)
+    out: list[str] = []
+    seen: set[str] = set()
+    for spelling in spellings:
+        spelling = spelling.strip()
+        if not spelling or "/" in spelling or "\\" in spelling:
+            continue
+        key = name_comparison_key(spelling)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(spelling)
+    return out
+
+
 def _album_field(media, field):
     """One field of a track's album: None when the album has no such field to
     give, and None when there is no album there at all.

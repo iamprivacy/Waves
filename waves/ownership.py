@@ -364,6 +364,36 @@ class OwnershipStore:
                 }
         return None
 
+    def folder_names_under(self, base: str, limit: int = 5000) -> list[str]:
+        """The first folder name under ``base`` of every path this store has
+        recorded, newest first, deduplicated.
+
+        These are not guesses. They are the exact directory names Waves itself
+        wrote on that disk, which makes them the one seed list worth having when
+        a share's directory listing is broken and the folders can only be found
+        by asking for them by name (see LibraryIndex.probe_folders). A path that
+        does not live under ``base`` is skipped, so switching library folders
+        never leaks names from the old one."""
+        base = os.path.normpath(os.path.expanduser(str(base or ""))).rstrip(os.sep)
+        if not base:
+            return []
+        prefix = base + os.sep
+        names: dict[str, None] = {}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path FROM downloads WHERE path IS NOT NULL ORDER BY recorded_at DESC"
+            ).fetchall()
+        for (path,) in rows:
+            text = str(path or "")
+            if not text.startswith(prefix):
+                continue
+            head = text[len(prefix) :].split(os.sep, 1)[0].strip()
+            if head and head not in (".", ".."):
+                names.setdefault(head, None)
+                if len(names) >= max(1, int(limit)):
+                    break
+        return list(names)
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
