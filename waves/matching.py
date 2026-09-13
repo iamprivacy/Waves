@@ -1213,33 +1213,7 @@ def build_artist_rollup(album_index: dict) -> dict:
     for (_title_key, artist_key), facts in (album_index or {}).items():
         if not artist_key or is_various_artists(artist_key):
             continue
-        # A multi-disc set indexes one folder PER DISC, all in this one
-        # bucket, and a bare max() dedups them like editions: an 18-track
-        # double album tallied 9. Sum the set's distinct disc positions (best
-        # copy per position, so duplicate editions of a disc still count
-        # once), then let a single-folder copy outbid the sum if it holds
-        # more.
-        #
-        # Disc positions only sum WITHIN one release: the bucket also holds
-        # every collapse-class edition of the title, and one shared dict let
-        # an 18-track standard copy tagged 1/1 fold into a two-disc Legacy
-        # Edition (12+12) as a 30-track tally no copy on disk can back. Group
-        # the disc rows by the raw tagged title and the declared disc total
-        # (what separates editions while keeping one set's folders together),
-        # sum each group, and let the best group win.
-        groups: dict[tuple, dict[int, int]] = {}
-        plain = 0
-        for f in facts:
-            n = _as_int(f.get("tracks"))
-            d = _as_int(f.get("disc_no"))
-            if d > 0:
-                edition = (str(f.get("title", "") or "").casefold(), _as_int(f.get("disc_total")))
-                discs = groups.setdefault(edition, {})
-                discs[d] = max(discs.get(d, 0), n)
-            else:
-                plain = max(plain, n)
-        best_tracks = max([plain, *(sum(discs.values()) for discs in groups.values())])
-        lossless = any(str(f.get("codec", "") or "").lower() in LOSSLESS_CODECS for f in facts)
+        best_tracks, lossless = artist_rollup_facts(facts)
         r = rollup.get(artist_key)
         if r is None:
             rollup[artist_key] = {"present": True, "albums": 1, "tracks": best_tracks, "lossless": lossless}
@@ -1248,3 +1222,53 @@ def build_artist_rollup(album_index: dict) -> dict:
             r["tracks"] += best_tracks
             r["lossless"] = r["lossless"] or lossless
     return rollup
+
+
+def artist_rollup_entry(buckets) -> dict | None:
+    """One artist's rollup entry from that artist's album buckets (an
+    iterable of fact lists, one per presence key), the exact tally
+    build_artist_rollup makes for the same artist, or None for no albums.
+    The sqlite-backed index answers one artist at a time through this, so
+    no whole-library pass ever runs in the app."""
+    entry = None
+    for facts in buckets:
+        best_tracks, lossless = artist_rollup_facts(facts)
+        if entry is None:
+            entry = {"present": True, "albums": 1, "tracks": best_tracks, "lossless": lossless}
+        else:
+            entry["albums"] += 1
+            entry["tracks"] += best_tracks
+            entry["lossless"] = entry["lossless"] or lossless
+    return entry
+
+
+def artist_rollup_facts(facts) -> tuple[int, bool]:
+    """(best track tally, any lossless copy) for one presence-key bucket."""
+    # A multi-disc set indexes one folder PER DISC, all in this one
+    # bucket, and a bare max() dedups them like editions: an 18-track
+    # double album tallied 9. Sum the set's distinct disc positions (best
+    # copy per position, so duplicate editions of a disc still count
+    # once), then let a single-folder copy outbid the sum if it holds
+    # more.
+    #
+    # Disc positions only sum WITHIN one release: the bucket also holds
+    # every collapse-class edition of the title, and one shared dict let
+    # an 18-track standard copy tagged 1/1 fold into a two-disc Legacy
+    # Edition (12+12) as a 30-track tally no copy on disk can back. Group
+    # the disc rows by the raw tagged title and the declared disc total
+    # (what separates editions while keeping one set's folders together),
+    # sum each group, and let the best group win.
+    groups: dict[tuple, dict[int, int]] = {}
+    plain = 0
+    for f in facts:
+        n = _as_int(f.get("tracks"))
+        d = _as_int(f.get("disc_no"))
+        if d > 0:
+            edition = (str(f.get("title", "") or "").casefold(), _as_int(f.get("disc_total")))
+            discs = groups.setdefault(edition, {})
+            discs[d] = max(discs.get(d, 0), n)
+        else:
+            plain = max(plain, n)
+    best_tracks = max([plain, *(sum(discs.values()) for discs in groups.values())])
+    lossless = any(str(f.get("codec", "") or "").lower() in LOSSLESS_CODECS for f in facts)
+    return best_tracks, lossless

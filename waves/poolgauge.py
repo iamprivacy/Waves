@@ -60,6 +60,21 @@ class PoolGauge:
     def maxThreadCount(self) -> int:
         return self._max
 
+    def mirror(self, busy: int, maximum: int, peak: int) -> None:
+        """Take a reading from a gauge in ANOTHER process.
+
+        The library walk and the tag reads happen in the scanner process now,
+        so the gauge objects they drive are the child's copies and this
+        process's own stayed at zero: a verbose report showed the two busiest
+        pools in the app as permanently idle. The counts are plain integers
+        (see the module note), so the child sends its readings along with the
+        progress it already reports and they land here. The peak only ever
+        climbs, so a fresh child cannot walk back what an earlier one did."""
+        with self._lock:
+            self._busy = max(0, int(busy))
+            self._max = max(1, int(maximum))
+            self.peak = max(self.peak, int(peak))
+
     def limit(self, maximum: int) -> None:
         """Record the cap the CURRENT job actually runs under, so a throttled
         run reports 2/2 (saturated, as intended) rather than 2/8 (looking

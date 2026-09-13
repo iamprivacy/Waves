@@ -35,12 +35,14 @@ import sqlite3
 import stat as stat_mod
 import time
 import unicodedata
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
-from threading import Lock
+from threading import Lock, local
 
+import waves.matching as matching
 from waves.poolgauge import PoolGauge
 
 # Child of the "waves" logger so scan milestones feed the breadcrumb ring crash
@@ -483,6 +485,51 @@ class _RateLimitedEmit:
         self._callback(payload)
 
 
+class _Reader:
+    """One thread's read connection, held by that thread's local storage.
+
+    A plain sqlite3.Connection cannot be weakly referenced, and the cache has
+    to be able to find every live reader (see close) without becoming the
+    thing that keeps a dead thread's connection open. This wrapper can, so
+    the strong reference stays exactly where it was: with the thread."""
+
+    __slots__ = ("__weakref__", "conn")
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+
+def _album_keys(album, artist) -> tuple[str, str]:
+    """The stored presence key halves for an album row, or EMPTY halves for a
+    Various-Artists credit: the app refuses those rows on the raw tag (a
+    compilation must never answer for a real artist), so they carry no key
+    and no lookup can reach them.
+
+    Empty, not NULL, and that distinction is the whole point of the column:
+    NULL means "written before the key columns existed" and is what
+    keys_missing() counts, so a row the scanner deliberately leaves keyless
+    must not wear that mark. Stamped NULL, one Various-Artists album made
+    keys_missing() answer forever and every scan re-ran the whole backfill
+    over rows that were already as keyed as they will ever be."""
+    artist = str(artist or "")
+    if matching.is_various_artists(artist):
+        return "", ""
+    title_key, artist_key = matching.presence_key(str(album or ""), artist)
+    return title_key or "", artist_key or ""
+
+
+def _track_keys(title, artist) -> tuple[str, str]:
+    """The stored track key halves, or EMPTY halves for an untagged file
+    (matches nothing, honestly) or a Various-Artists credit (as above, and
+    for the same reason they are not NULL)."""
+    title = str(title or "")
+    artist = str(artist or "")
+    if not title or not artist or matching.is_various_artists(artist):
+        return "", ""
+    title_key, artist_key = matching.track_key(title, artist)
+    return title_key or "", artist_key or ""
+
+
 class LibraryIndex:
     """A sqlite cache of album folders found under a library root: one row per
     folder that directly holds audio, storing the tag-read album/artist/date, the
@@ -556,6 +603,19 @@ class LibraryIndex:
         self._lock = Lock()
         self._closed = False
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        # Presence lookups (see presence_facts and friends) read on a
+        # connection of their own per thread: WAL lets them run beside the
+        # scan's writes, and they never queue on ``_lock`` behind a walk.
+        self._readers = local()
+        # Weak references to every reader handed out. The thread-local alone
+        # only ever reaches the CALLING thread's connection, so close() left
+        # one open per pool thread that had answered a badge question; on
+        # Windows an open handle refuses a delete outright, and a factory
+        # reset closes this cache and then unlinks its file, so the listing
+        # of the whole music folder that the reset promises to remove stayed
+        # on disk. WEAK, so a thread that goes still takes its connection
+        # with it the moment it goes, exactly as before.
+        self._reader_refs: set = set()
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS albums (
@@ -613,6 +673,22 @@ class LibraryIndex:
             # the mixed folders compare changed once and re-read, which
             # records their real raw_count.
             self._conn.execute("UPDATE albums SET raw_count = track_count WHERE raw_count IS NULL")
+            # The presence keys, stored with the row so the app never derives
+            # them: the album key (matching.presence_key) and, on tracks, the
+            # track key (matching.track_key), each as its two halves. Before
+            # this the app rebuilt both presence indexes as Python dicts from
+            # the whole table on every publish, hundreds of thousands of key
+            # derivations holding the interpreter for seconds while the launch
+            # water waited for it. With the keys on the rows the index IS the
+            # table, one indexed lookup per question. Rows from an older cache
+            # have NULL keys until backfill_keys (run by the scanner) fills
+            # them; the lookups cannot reach a NULL key, so the badges for
+            # those rows simply stay dark until the first scan after the
+            # upgrade.
+            for col in ("pkey_title TEXT", "pkey_artist TEXT"):
+                with contextlib.suppress(sqlite3.OperationalError):  # column already exists
+                    self._conn.execute(f"ALTER TABLE albums ADD COLUMN {col}")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_albums_pkey ON albums(pkey_artist, pkey_title)")
             # The directory tree behind incremental + resumable discovery. One row
             # per folder walked: mtime as of its last listing, ``listed`` (1 once
             # fully scandir'd; 0 marks a discovered-but-not-yet-listed folder, the
@@ -661,6 +737,10 @@ class LibraryIndex:
             with contextlib.suppress(sqlite3.OperationalError):  # column already exists
                 self._conn.execute("ALTER TABLE tracks ADD COLUMN length INTEGER NOT NULL DEFAULT 0")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_path)")
+            for col in ("tkey_title TEXT", "tkey_artist TEXT"):
+                with contextlib.suppress(sqlite3.OperationalError):  # column already exists
+                    self._conn.execute(f"ALTER TABLE tracks ADD COLUMN {col}")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_tkey ON tracks(tkey_artist, tkey_title)")
             # Small key/value store: the scan root last walked (a change wipes the
             # tree so the new root walks fresh) and the monotonic scan generation.
             self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -837,12 +917,14 @@ class LibraryIndex:
             # caller's generation guard discards this scan's outcome anyway.
             logger.info("library scan superseded before it began")
             return self._count()
-        # A superseded scan must die BEFORE _begin_scan, not merely inside the
-        # walk: a worker that sat queued across a library-folder switch would
-        # otherwise open a scan of the OLD root against whatever index object it
-        # reaches, and _begin_scan's root-change wipe would empty that cache's
-        # dirs tree and stamp the old root into it before the walk's first
-        # liveness poll could bail.
+        # Rows from a cache older than the key columns get theirs here, before
+        # the walk: the presence lookups cannot reach a keyless row at all, so
+        # a scan that skipped this would report success over a library whose
+        # badges all stay dark. It lives in refresh(), not in a caller, because
+        # there are two scan paths (the scanner process and the in-process
+        # fallback) and only refresh() is on both; it costs two counts against
+        # the cache, and on every scan after the first upgrade it does nothing.
+        self._backfill_missing_keys(alive)
         # The write phase runs under the scan lock probe_folders also takes, so
         # a probe by name never interleaves with a walk of the same cache.
         with self._scan_busy:
@@ -2010,6 +2092,193 @@ class LibraryIndex:
             tuple(tracks),
         )
 
+    # --- Presence lookups: the index IS the table ------------------------
+    # One indexed query per question, on this thread's own connection, the
+    # rows shaped exactly as the app's in-memory presence indexes used to be
+    # (the album bucket entries and the track bucket entries), so the matcher
+    # is handed the same facts it always was.
+    _ALBUM_FACT_COLUMNS = (
+        "album, year, track_count, folder_path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime"
+    )
+
+    def _read(self, sql: str, params: tuple = ()) -> list:
+        """Run a read on this thread's own connection. An in-memory store
+        cannot be shared across connections, and a closed one must answer
+        with sqlite's own error rather than a fresh connection to nothing:
+        both fall back to the shared connection under the lock."""
+        if self._path == ":memory:" or self._closed:
+            with self._lock:
+                return self._conn.execute(sql, params).fetchall()
+        reader = getattr(self._readers, "reader", None)
+        if reader is None:
+            # check_same_thread off so close() can take it from the thread
+            # that is quitting. Each connection is still only ever USED by
+            # the thread it was made on, which is what the flag guards.
+            reader = _Reader(sqlite3.connect(self._path, check_same_thread=False))
+            self._readers.reader = reader
+            # discard as the callback: the entry goes the moment the owning
+            # thread does, on that thread, with no lock to wait for.
+            self._reader_refs.add(weakref.ref(reader, self._reader_refs.discard))
+        return reader.conn.execute(sql, params).fetchall()
+
+    @staticmethod
+    def _album_fact(row) -> dict:
+        album, year, tracks, path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime = row
+        return {
+            "title": str(album or ""),
+            "year": str(year or ""),
+            "tracks": int(tracks or 0),
+            "id": str(path or ""),
+            "codec": str(codec or ""),
+            "bitrate": int(bitrate or 0),
+            "bits": int(bits or 0),
+            "rate": int(rate or 0),
+            "declared": int(declared or 0),
+            "disc_no": int(disc_no or 0),
+            "disc_total": int(disc_total or 0),
+            "runtime": int(runtime or 0),
+        }
+
+    def presence_facts(self, key) -> list[dict]:
+        """The album bucket for one presence key: every indexed folder whose
+        stored key matches, as the matcher's fact dicts. Empty for a key no
+        row carries."""
+        try:
+            title_key, artist_key = key
+        except (TypeError, ValueError):
+            return []
+        # An empty artist half is the mark the scanner puts on a row that is
+        # keyless by design (Various Artists, an untagged file), so a lookup
+        # carrying one would collect every one of them as if they were a
+        # match. Nothing may reach those rows, which is what makes leaving
+        # them unkeyed safe: see _album_keys.
+        if not artist_key:
+            return []
+        rows = self._read(
+            f"SELECT {self._ALBUM_FACT_COLUMNS} FROM albums WHERE pkey_artist = ? AND pkey_title = ?",  # noqa: S608 (a column list, the keys are bound)
+            (artist_key, title_key),
+        )
+        return [self._album_fact(r) for r in rows]
+
+    def track_facts(self, key) -> list[dict]:
+        """The track bucket for one track key, each row joined with its
+        holding folder's identity and carrying its featuring credit, exactly
+        as the in-memory track index used to hold them."""
+        try:
+            title_key, artist_key = key
+        except (TypeError, ValueError):
+            return []
+        if not artist_key:  # the keyless mark, as in presence_facts
+            return []
+        rows = self._read(
+            "SELECT t.title, t.artist, t.folder_path, t.codec, t.bitrate, t.bits, t.rate, t.length, "
+            "a.album, a.year "
+            "FROM tracks t LEFT JOIN albums a ON a.folder_path = t.folder_path "
+            "WHERE t.tkey_artist = ? AND t.tkey_title = ?",
+            (artist_key, title_key),
+        )
+        out = []
+        for title, artist, path, codec, bitrate, bits, rate, length, album, album_year in rows:
+            out.append(
+                {
+                    "id": str(path or ""),
+                    "codec": str(codec or ""),
+                    "bitrate": int(bitrate or 0),
+                    "bits": int(bits or 0),
+                    "rate": int(rate or 0),
+                    "album": str(album or ""),
+                    "album_year": str(album_year or ""),
+                    "length": int(length or 0),
+                    "guests": sorted(matching.feat_guests(str(title or ""), str(artist or ""))),
+                }
+            )
+        return out
+
+    def artist_buckets(self, artist_key: str) -> list[list[dict]]:
+        """Every album bucket of one artist (one list per presence key), the
+        input of matching.artist_rollup_entry."""
+        if not artist_key:  # the keyless mark, as in presence_facts
+            return []
+        rows = self._read(
+            f"SELECT pkey_title, {self._ALBUM_FACT_COLUMNS} FROM albums WHERE pkey_artist = ? ORDER BY pkey_title",  # noqa: S608 (a column list, the keys are bound)
+            (artist_key,),
+        )
+        buckets: dict[str, list[dict]] = {}
+        for row in rows:
+            buckets.setdefault(str(row[0] or ""), []).append(self._album_fact(row[1:]))
+        return list(buckets.values())
+
+    def artist_known(self, artist_key: str) -> bool:
+        if not artist_key:  # the keyless mark, as in presence_facts
+            return False
+        return bool(self._read("SELECT 1 FROM albums WHERE pkey_artist = ? LIMIT 1", (artist_key,)))
+
+    def has_presence_rows(self) -> bool:
+        """Whether any album row carries a key, which is what makes the
+        presence lookups able to answer at all."""
+        return bool(self._read("SELECT 1 FROM albums WHERE pkey_artist IS NOT NULL AND pkey_artist != '' LIMIT 1"))
+
+    def keys_missing(self) -> int:
+        """Rows written before the key columns existed (see __init__)."""
+        (n,) = self._read("SELECT COUNT(*) FROM albums WHERE pkey_title IS NULL AND pkey_artist IS NULL")[0]
+        (m,) = self._read("SELECT COUNT(*) FROM tracks WHERE tkey_title IS NULL AND tkey_artist IS NULL")[0]
+        return int(n or 0) + int(m or 0)
+
+    def _backfill_missing_keys(self, alive: Callable[[], bool]) -> int:
+        """Key any rows the cache still holds keyless, and say so. Called by
+        refresh() so both scan paths get it; ``alive`` is threaded through so
+        a quit during a long first backfill stops it like any other scan
+        work, instead of leaving a child writing to a cache nobody owns."""
+        if not self.keys_missing():
+            return 0
+        keyed = self.backfill_keys(alive)
+        logger.info("presence keys backfilled for %d cached rows", keyed)
+        return keyed
+
+    def backfill_keys(self, alive: Callable[[], bool] = lambda: True, batch: int = 500) -> int:
+        """Derive and store the keys of rows written before the key columns
+        existed. Run by the scanner (off the app's interpreter), in batches
+        that each commit, so a stop mid-way loses nothing. Returns the rows
+        keyed. Rows that stay keyless by design (Various Artists, untagged
+        files) are stamped with empty keys so they are not re-asked."""
+        done = 0
+        while alive():
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT folder_path, album, artist FROM albums"
+                    " WHERE pkey_title IS NULL AND pkey_artist IS NULL LIMIT ?",
+                    (batch,),
+                ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for path, album, artist in rows:
+                title_key, artist_key = _album_keys(album, artist)
+                updates.append((title_key or "", artist_key or "", path))
+            with self._lock:
+                self._conn.executemany(
+                    "UPDATE albums SET pkey_title = ?, pkey_artist = ? WHERE folder_path = ?", updates
+                )
+                self._conn.commit()
+            done += len(updates)
+        while alive():
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT rowid, title, artist FROM tracks WHERE tkey_title IS NULL AND tkey_artist IS NULL LIMIT ?",
+                    (batch,),
+                ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for rowid, title, artist in rows:
+                title_key, artist_key = _track_keys(title, artist)
+                updates.append((title_key or "", artist_key or "", rowid))
+            with self._lock:
+                self._conn.executemany("UPDATE tracks SET tkey_title = ?, tkey_artist = ? WHERE rowid = ?", updates)
+                self._conn.commit()
+            done += len(updates)
+        return done
+
     def iter_albums(self) -> Iterator[dict]:
         """Yield each indexed album as a raw dict the bridge can normalise:
         ``{title, artist, year, tracks, id}`` (id is the folder path, so the
@@ -2224,12 +2493,17 @@ class LibraryIndex:
     def _upsert(self, batch: list[tuple]) -> None:
         if not batch:
             return
+        # The presence keys are derived here, once per row written, on the
+        # scanner's thread (see the key columns in __init__).
+        albums = [(*row[:16], *_album_keys(row[1], row[2])) for row in batch]
+        tracks = [(*t, *_track_keys(t[1], t[2])) for row in batch for t in row[16]]
         with self._lock:
             self._conn.executemany(
                 """INSERT INTO albums
                        (folder_path, album, artist, year, track_count, dir_mtime, recorded_at,
-                        codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, raw_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, raw_count,
+                        pkey_title, pkey_artist)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(folder_path) DO UPDATE SET
                        album=excluded.album, artist=excluded.artist, year=excluded.year,
                        track_count=excluded.track_count, dir_mtime=excluded.dir_mtime,
@@ -2237,17 +2511,19 @@ class LibraryIndex:
                        bitrate=excluded.bitrate, bits=excluded.bits, rate=excluded.rate,
                        declared=excluded.declared, disc_no=excluded.disc_no,
                        disc_total=excluded.disc_total, runtime=excluded.runtime,
-                       raw_count=excluded.raw_count""",
-                [row[:16] for row in batch],
+                       raw_count=excluded.raw_count,
+                       pkey_title=excluded.pkey_title, pkey_artist=excluded.pkey_artist""",
+                albums,
             )
             # Replace, not merge: the read is of the whole folder, so its track
             # rows are the whole truth for that folder and stale rows (a renamed
             # or re-tagged file) must not linger beside the fresh ones.
             self._conn.executemany("DELETE FROM tracks WHERE folder_path = ?", [(row[0],) for row in batch])
             self._conn.executemany(
-                "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [t for row in batch for t in row[16]],
+                "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length,"
+                " tkey_title, tkey_artist)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tracks,
             )
             self._conn.commit()
 
@@ -2289,6 +2565,22 @@ class LibraryIndex:
             return int(self._conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0])
 
     @property
+    def path(self) -> str:
+        """The cache file, which the scanner process opens for itself."""
+        return self._path
+
+    def adopt_scan_outcome(self, status: str, *, partial: bool, shape, reconciled: bool) -> None:
+        """Take on the outcome of a scan another process ran on this same
+        file (waves.library_worker): exactly the attributes refresh() would
+        have set here, so every reader of this object sees one scan."""
+        self.last_scan_status = str(status or "")
+        self.last_scan_partial = bool(partial)
+        try:
+            self._untrusted_shape = (int(shape[0]), int(shape[1]))
+        except Exception:
+            self._untrusted_shape = (0, 0)
+        self.last_listing_reconciled = bool(reconciled)
+
     def is_closed(self) -> bool:
         """True once close() ran. A scan worker wedged in a network stat can
         outlive the bounded shutdown wait and hit the closed connection when
@@ -2300,3 +2592,24 @@ class LibraryIndex:
         with self._lock:
             self._closed = True
             self._conn.close()
+            readers, self._reader_refs = list(self._reader_refs), set()
+        # EVERY read connection, not just this thread's. Waiting for the
+        # owning threads left one open per pool thread that had answered a
+        # badge question, and a file with an open handle refuses to be deleted
+        # on Windows: the factory reset that closes this cache and then unlinks
+        # its file quietly left it behind.
+        #
+        # Closed here, explicitly, and BEFORE this thread's own reference is
+        # dropped: releasing the thread-local first leaves the close to the
+        # collector, which also leaves the WAL unfolded beside the database.
+        # Suppressed one at a time because a straggler read can be inside its
+        # own connection as this runs, which sqlite answers for itself (the
+        # close defers until the statement finishes) and which the callers
+        # already treat as the orderly end arriving late.
+        for ref in readers:
+            reader = ref()
+            if reader is None:
+                continue  # its thread already took it
+            with contextlib.suppress(Exception):
+                reader.conn.close()
+        self._readers.reader = None

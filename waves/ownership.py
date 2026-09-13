@@ -10,6 +10,10 @@ deleted and wants again is offered for re-download with no "clear history" step.
 A history table that just says "downloaded before" would lie the moment a file
 is deleted; re-checking the filesystem every time is what keeps it honest.
 
+It also never looks anywhere but the folders the app hands it (set_roots): the
+download folder and the library folder. A copy recorded somewhere else, such as
+an earlier download folder, is not a copy the user has, so it is not checked.
+
 Pure standard library (sqlite3), with no Qt and no tidalapi import, so it unit
 tests without the GUI stack and never couples the download engine to the UI.
 """
@@ -19,8 +23,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import sys
 import time
-from threading import Lock
+from threading import Lock, local
 
 # Delivered-quality tiers, lowest to highest, keyed by the TIDAL tier string
 # (tidalapi Quality values: LOW < HIGH < LOSSLESS < HI_RES_LOSSLESS). A caller
@@ -39,6 +44,32 @@ def _nonempty_file(path: str) -> bool:
         return os.path.isfile(path) and os.path.getsize(path) > 0
     except OSError:
         return False
+
+
+def path_under(path: str, root: str) -> bool:
+    """Does ``path`` lie at or under the folder ``root``? A string compare of
+    the two spellings, never a stat (a stat on a dead network mount can hang
+    for seconds). Both sides go through abspath, which is how a download's
+    path is recorded, so a relative download folder still matches its files.
+
+    Case is folded where the platform's volumes fold it by default: normcase
+    does it on Windows, and macOS volumes (APFS and HFS+) are case-insensitive
+    unless the user opted out, so /Music and /music name the same folder
+    there. The opt-in exception is rare enough that no stat is spent on it."""
+    p = (path or "").strip()
+    r = (root or "").strip()
+    if not p or not r:
+        return False
+    try:
+        p = os.path.normcase(os.path.abspath(os.path.expanduser(p)))
+        r = os.path.normcase(os.path.abspath(os.path.expanduser(r)))
+    except Exception:
+        return False
+    if sys.platform == "darwin":
+        p, r = p.lower(), r.lower()
+    # A drive or volume root already ends in its separator ("N:\\", "/").
+    prefix = r if r.endswith(os.sep) else r + os.sep
+    return p == r or p.startswith(prefix)
 
 
 # Columns beyond the primary key, with the type used to ADD them to an older DB.
@@ -82,6 +113,41 @@ def quality_rank(tier: str | None) -> int:
     return QUALITY_RANK.get((tier or "").upper(), -1)
 
 
+def _best_surviving(rows, roots: list[str] | None = None) -> dict | None:
+    """The first row (highest delivered quality first, then most recent) whose
+    path still exists on disk, as the ownership record, or None.
+
+    The existence check stats the disk, so it runs after the query, never
+    inside one (a read must never hold up a worker-thread write). A zero-byte
+    survivor is a truncation artifact, not a copy: skip it (not removed, like
+    a deleted path) so the track reads as wanted again.
+
+    With ``roots`` given, a row whose path is under none of them is skipped
+    before any stat: it is never looked at, whatever is still on that disk.
+    None means unscoped (a bare store nobody configured)."""
+    for path, tier, rank, mode, depth, rate, codecs, recorded_at, requested, ceiling, degraded in rows:
+        if not path:
+            continue
+        if roots is not None and not any(path_under(path, r) for r in roots):
+            continue
+        if _nonempty_file(path):
+            return {
+                "owned": True,
+                "path": path,
+                "quality_tier": tier,
+                "quality_rank": rank,
+                "audio_mode": mode,
+                "bit_depth": depth,
+                "sample_rate": rate,
+                "codecs": codecs,
+                "recorded_at": recorded_at,
+                "requested_rank": requested,
+                "ceiling_rank": ceiling,
+                "degraded_tries": degraded,
+            }
+    return None
+
+
 class OwnershipStore:
     """A small sqlite record of downloaded tracks: (track_id, final path) plus the
     delivered quality. One row per distinct on-disk path, so a re-download to a
@@ -102,6 +168,19 @@ class OwnershipStore:
             os.makedirs(parent, exist_ok=True)
         self._lock = Lock()
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        # Readers never queue behind a writer, or behind each other: each
+        # thread that reads gets its own connection (WAL lets any number of
+        # them read while one writes). Before this every read went through
+        # the one connection under ``_lock``, so a card asking members_of on
+        # the GUI thread waited for whichever refresh worker held the lock
+        # for its own query; sampled live at launch, that wait was most of
+        # the time the cards' creation spent blocked (the launch water
+        # dropping frames on it). An in-memory database cannot be shared
+        # across connections, so that one case keeps the shared connection.
+        self._readers = local()
+        self._closed = False
+        # The folders ownership answers are confined to (see set_roots).
+        self._roots = None
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS downloads (
@@ -166,6 +245,20 @@ class OwnershipStore:
                 if name not in present:
                     raise
                 logger.debug("ownership: %s was added by another copy of Waves", name)
+
+    def _read(self, sql: str, params: tuple = ()) -> list:
+        """Run a read on this thread's own connection (see __init__). Falls
+        back to the shared connection, under the lock, for an in-memory
+        store or once the store is closed (so a late reader gets sqlite's
+        own "closed" error rather than a fresh connection to nothing)."""
+        if self._path == ":memory:" or self._closed:
+            with self._lock:
+                return self._conn.execute(sql, params).fetchall()
+        conn = getattr(self._readers, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._path)
+            self._readers.conn = conn
+        return conn.execute(sql, params).fetchall()
 
     def record(
         self,
@@ -306,14 +399,33 @@ class OwnershipStore:
         stat here, so this never risks hanging on a dropped network mount and
         is safe to call directly.
         """
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT track_id FROM collection_members WHERE collection_id = ?",
-                (str(collection_id),),
-            ).fetchall()
+        rows = self._read(
+            "SELECT track_id FROM collection_members WHERE collection_id = ?",
+            (str(collection_id),),
+        )
         if not rows:
             return None
         return [r[0] for r in rows]
+
+    def set_roots(self, provider) -> None:
+        """Confine every ownership answer to the folders ``provider()`` names
+        (the app passes the download folder and the library folder). Asked on
+        every lookup rather than stored, so a folder changed in Settings takes
+        effect on the next question with no restart. A recorded copy outside
+        all of them is not owned, and its path is never statted."""
+        self._roots = provider
+
+    def _scope(self) -> list[str] | None:
+        """The folders a lookup may look in, or None when unscoped. A provider
+        that fails confines the answer to nothing rather than to everywhere."""
+        provider = self._roots
+        if provider is None:
+            return None
+        try:
+            return [str(r) for r in provider() or [] if str(r or "").strip()]
+        except Exception:
+            logger.debug("ownership: could not read the download and library folders", exc_info=True)
+            return []
 
     def ownership_of(self, track_id: str, *, user_id: str | None = None) -> dict | None:
         """Best surviving copy of ``track_id`` that still exists on disk right now,
@@ -322,47 +434,65 @@ class OwnershipStore:
         Rows are considered highest delivered quality first, then most recent, and
         the first whose path passes a live existence check wins. The deleted-path
         row is skipped, not removed, so re-creating the file makes it own again.
+        Only paths inside the configured folders are considered (set_roots).
         """
-        with self._lock:
-            if user_id is None:
-                rows = self._conn.execute(
-                    """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
-                              degraded_tries
-                       FROM downloads WHERE track_id = ?
-                       ORDER BY quality_rank DESC, recorded_at DESC""",
-                    (str(track_id),),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
-                              sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
-                              degraded_tries
-                       FROM downloads WHERE track_id = ? AND user_id = ?
-                       ORDER BY quality_rank DESC, recorded_at DESC""",
-                    (str(track_id), str(user_id)),
-                ).fetchall()
-        # Existence check is intentionally OUTSIDE the lock: it can stat the disk,
-        # and a read must never hold up a worker-thread write behind it. A
-        # zero-byte survivor is a truncation artifact, not a copy: skip it (not
-        # removed, like a deleted path) so the track reads as wanted again.
-        for path, tier, rank, mode, depth, rate, codecs, recorded_at, requested, ceiling, degraded in rows:
-            if path and _nonempty_file(path):
-                return {
-                    "owned": True,
-                    "path": path,
-                    "quality_tier": tier,
-                    "quality_rank": rank,
-                    "audio_mode": mode,
-                    "bit_depth": depth,
-                    "sample_rate": rate,
-                    "codecs": codecs,
-                    "recorded_at": recorded_at,
-                    "requested_rank": requested,
-                    "ceiling_rank": ceiling,
-                    "degraded_tries": degraded,
-                }
-        return None
+        if user_id is None:
+            rows = self._read(
+                """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
+                          sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
+                          degraded_tries
+                   FROM downloads WHERE track_id = ?
+                   ORDER BY quality_rank DESC, recorded_at DESC""",
+                (str(track_id),),
+            )
+        else:
+            rows = self._read(
+                """SELECT path, quality_tier, quality_rank, audio_mode, bit_depth,
+                          sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
+                          degraded_tries
+                   FROM downloads WHERE track_id = ? AND user_id = ?
+                   ORDER BY quality_rank DESC, recorded_at DESC""",
+                (str(track_id), str(user_id)),
+            )
+        return _best_surviving(rows, self._scope())
+
+    # sqlite's default variable limit is 999; a page of collections asks for
+    # far fewer at a time, but the query is chunked regardless.
+    _MANY_CHUNK = 400
+
+    def ownership_of_many(self, track_ids) -> dict[str, dict | None]:
+        """ownership_of for a whole batch of ids, one query per chunk instead
+        of one per id, with exactly the same per-id answer.
+
+        The landing's cards ask for the members of every collection they show
+        (hundreds of ids at launch), and one query per id meant one prepared
+        statement, one interpreter hold and one result conversion each, on
+        the refresh pool, while the GUI thread waited for the interpreter to
+        paint the launch water (sampled live: three pool threads inside
+        sqlite for the whole build). The disk stat per surviving row is
+        unchanged: it happens outside any query, per id, as before."""
+        ids = [str(t) for t in dict.fromkeys(track_ids)]
+        out: dict[str, dict | None] = {}
+        roots = self._scope()
+        for i in range(0, len(ids), self._MANY_CHUNK):
+            chunk = ids[i : i + self._MANY_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            # The only text spliced into the statement is the placeholder list;
+            # every id travels as a bound parameter.
+            rows = self._read(
+                f"""SELECT track_id, path, quality_tier, quality_rank, audio_mode, bit_depth,
+                          sample_rate, codecs, recorded_at, requested_rank, ceiling_rank,
+                          degraded_tries
+                   FROM downloads WHERE track_id IN ({marks})
+                   ORDER BY quality_rank DESC, recorded_at DESC""",  # noqa: S608
+                tuple(chunk),
+            )
+            by_id: dict[str, list] = {}
+            for row in rows:
+                by_id.setdefault(str(row[0]), []).append(row[1:])
+            for tid in chunk:
+                out[tid] = _best_surviving(by_id.get(tid, []), roots)
+        return out
 
     def folder_names_under(self, base: str, limit: int = 5000) -> list[str]:
         """The first folder name under ``base`` of every path this store has
@@ -379,10 +509,7 @@ class OwnershipStore:
             return []
         prefix = base + os.sep
         names: dict[str, None] = {}
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT path FROM downloads WHERE path IS NOT NULL ORDER BY recorded_at DESC"
-            ).fetchall()
+        rows = self._read("SELECT path FROM downloads WHERE path IS NOT NULL ORDER BY recorded_at DESC")
         for (path,) in rows:
             text = str(path or "")
             if not text.startswith(prefix):
@@ -396,4 +523,11 @@ class OwnershipStore:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._conn.close()
+        # Other threads' read connections close with their threads; this
+        # thread's own goes now so the file handle is not held past quit.
+        conn = getattr(self._readers, "conn", None)
+        if conn is not None:
+            self._readers.conn = None
+            conn.close()
