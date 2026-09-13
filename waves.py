@@ -59,6 +59,8 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # under plugins/multimedia) so QML MediaPlayer/AudioOutput have a working engine
 # for the in-app track/artist preview.
 # nuitka-project: --include-qt-plugins=qml,multimedia
+# The library scanner process re-executes this binary with --library-worker.
+# nuitka-project: --include-module=waves.library_worker
 # Qt 6.11 added a Qt.labs.assetdownloader QML module that ships ONLY as a
 # static library, which Nuitka cannot process. It arrives through the qml
 # plugin scan rather than the DLL list, so --noinclude-dlls does not reach
@@ -141,9 +143,19 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # nuitka-project: --product-name=Waves
 # nuitka-project: --copyright=(C) 2026 iamprivacy, licensed under AGPL-3.0
 
+import sys
+
 
 def main() -> int:
-    """Launch the Waves QML UI and return its exit code."""
+    """Launch the Waves QML UI and return its exit code.
+
+    ``--library-worker`` runs the library scanner instead (the app starts
+    its own binary this way, see waves.library_worker): decided before any
+    Qt import, since the scanner must never load Qt."""
+    if "--library-worker" in sys.argv[1:]:
+        from waves.library_worker import main as worker_main
+
+        return worker_main(sys.argv[1:])
     try:
         from waves.waves_ui.app import waves_activate
     except ImportError as e:
