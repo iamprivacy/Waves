@@ -443,17 +443,41 @@ def _run_scenario() -> int:
         verdicts["download_anyway_downloads"] = downloaded == ["al-owned"]
         verdicts["proceeding_closes_the_gate"] = not q("libraryClaimGate.shown")
 
-        # An ownership-store DOWNLOADED is a RECORD, not a guess: it stays
-        # inert and opens nothing, so the click-through cannot creep into it.
-        q("(function(){" + _find("Owned Album") + " b.owned = true; })()")
+        # An ownership-store DOWNLOADED is a RECORD, not a guess, and it used
+        # to be inert: a copy the user could not find had no way back (issue
+        # #38). It now opens the owned gate, naming where the copy lives, and
+        # REDOWNLOAD forces the job and starts it.
+        q("(function(){" + _find("Owned Album") + " b.owned = true; b.ownFolder = '/old/dl/Owned Album'; })()")
         settle(50)
         tap("Owned Album")
         settle(50)
-        verdicts["ownership_done_stays_inert"] = (
+        verdicts["ownership_done_opens_the_redownload_gate"] = (
             button("Owned Album", "'' + b.libClaim") == "false"
             and button_state("Owned Album") == "done"
-            and not q("libraryClaimGate.shown")
-            and downloaded == ["al-owned"]  # the tap started nothing new
+            and bool(q("libraryClaimGate.shown"))
+            and str(q("libraryClaimGate.mode")) == "owned"
+            and str(q("libraryClaimGate.folder")) == "/old/dl/Owned Album"
+            and str(q("libraryClaimGate.albumTitle")) == "Owned Album"
+            and downloaded == ["al-owned"]  # the tap alone started nothing
+        )
+        q("libraryClaimGate.proceed()")
+        settle(50)
+        verdicts["redownload_forces_and_downloads"] = (
+            downloaded == ["al-owned", "al-owned"] and "al-owned" in bridge._redownload_overrides
+        )
+
+        # The face follows the recorded copy, not the download folder: a copy
+        # outside the library reads DOWNLOADED even while downloads now land
+        # inside it, and IN LIBRARY once the copy itself is inside.
+        q("root.libraryOn = true")
+        q("root.dlInLibrary = true")
+        q("(function(){" + _find("Owned Album") + " b.libPresent = false; b.ownInLibrary = false; })()")
+        settle(50)
+        outside_face = face_text("Owned Album")
+        q("(function(){" + _find("Owned Album") + " b.ownInLibrary = true; })()")
+        settle(50)
+        verdicts["face_follows_the_recorded_copy"] = (
+            outside_face == "ALBUM DOWNLOADED" and face_text("Owned Album") == "ALBUM IN LIBRARY"
         )
 
     # The queued face stays FROZEN through "running": the row is riding the

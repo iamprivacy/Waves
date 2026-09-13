@@ -197,7 +197,8 @@ def test_the_group_is_namespaced_away_from_the_playlist_button():
     assert GID in stub._artist_groups
     assert "pl1" not in stub._artist_groups, "a bare playlist-id group would collide with the playlist button"
     assert stub._artist_groups[GID]["keys"] == {"1"}
-    assert (GID, "running") in stub.downloadState.emits
+    # QUEUED: the albums are in line, none has started.
+    assert (GID, "queued") in stub.downloadState.emits
     assert all(e[0] != "pl1" for e in stub.downloadState.emits)
 
 

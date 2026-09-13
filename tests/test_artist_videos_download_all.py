@@ -124,8 +124,9 @@ def test_the_group_is_namespaced_away_from_the_discography_button():
     assert GID in stub._artist_groups
     assert "art1" not in stub._artist_groups, "a bare artist-id group would collide with downloadArtist's"
     assert stub._artist_groups[GID]["keys"] == {"v1"}
-    # The button's state is published under the same namespaced id.
-    assert (GID, "running") in stub.downloadState.emits
+    # The button's state is published under the same namespaced id. QUEUED:
+    # nothing has started yet, and the button says so until a member does.
+    assert (GID, "queued") in stub.downloadState.emits
 
 
 def test_a_long_videography_is_paged_through_not_truncated():

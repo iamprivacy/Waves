@@ -181,6 +181,9 @@ def _run_scenario() -> int:  # noqa: C901 (one straight scenario)
     # list. t2's catalog tier is LOSSLESS, so its HI-RES row is the widest a
     # menu row gets, NOT OFFERED and in the library at once.
     owned_dir = Path(tempfile.mkdtemp(prefix="waves-quality-pick-owned-"))
+    # Ownership is only ever answered from the download folder (and the
+    # library folder, none here), so the copies live in the download folder.
+    bridge.settings.data.download_base_path = str(owned_dir)
     for tid in ("t1", "t2"):
         f = owned_dir / f"{tid}.flac"
         f.write_text("audio")

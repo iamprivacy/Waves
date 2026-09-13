@@ -691,3 +691,65 @@ def test_owned_tier_of_never_stats_on_the_calling_thread(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os.path, "isfile", _no_stat)
     assert stub.ownedTierOf("a1") == "LOSSLESS"
+
+
+def test_owned_answer_names_its_folder_and_library_placement(tmp_path):
+    """Issue #38: the done face words itself by where THIS copy lives, and the
+    redownload gate names the folder. Without the library mixin (this stub)
+    the answer still lands, just never inside a library."""
+    stub = _BridgeStub(tmp_path)
+    f = tmp_path / "old" / "A" / "01.flac"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"audio")
+    stub._ownership.record("901", str(f), "LOSSLESS")
+    o = stub.own("901")
+    assert o["owned"] is True
+    assert o["folder"] == str(f.parent)
+    assert o["in_library"] is False
+
+    stub._path_inside_library = lambda p: p.startswith(str(tmp_path / "old"))
+    stub._own_cache.clear()
+    assert stub.own("901")["in_library"] is True
+
+
+def _scoped_stub(tmp_path, library_root=""):
+    stub = _BridgeStub(tmp_path)
+    stub.settings.data.download_base_path = str(tmp_path / "downloads")
+    stub._library_root = lambda: library_root
+    for name in ("_ownership_roots", "_forget_ownership_answers"):
+        setattr(stub, name, getattr(WavesBridge, name).__get__(stub, _BridgeStub))
+    stub._ownership.set_roots(stub._ownership_roots)
+    return stub
+
+
+def test_the_bridge_looks_only_in_the_download_and_library_folders(tmp_path):
+    """Issue #38: a copy left in an earlier download folder is not owned."""
+    stub = _scoped_stub(tmp_path, library_root=str(tmp_path / "library"))
+    assert stub._ownership_roots() == [str(tmp_path / "downloads"), str(tmp_path / "library")]
+    for tid, folder in (("1", "old"), ("2", "downloads"), ("3", "library")):
+        f = tmp_path / folder / "A" / "01.flac"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"audio")
+        stub._ownership.record(tid, str(f), "LOSSLESS")
+    assert stub.own("1") == {"owned": False}
+    assert stub.own("2")["owned"] is True
+    assert stub.own("3")["owned"] is True
+
+
+def test_the_library_folder_is_one_root_when_it_is_the_download_folder(tmp_path):
+    stub = _scoped_stub(tmp_path, library_root=str(tmp_path / "downloads"))
+    assert stub._ownership_roots() == [str(tmp_path / "downloads")]
+
+
+def test_a_moved_folder_re_asks_every_cached_answer(tmp_path):
+    stub = _scoped_stub(tmp_path)
+    f = tmp_path / "music" / "01.flac"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"audio")
+    stub._ownership.record("7", str(f), "LOSSLESS")
+    assert stub.own("7") == {"owned": False}
+
+    stub.settings.data.download_base_path = str(tmp_path / "music")
+    stub._forget_ownership_answers()
+    assert "7" in stub._own_announce
+    assert stub.own("7")["owned"] is True

@@ -12,6 +12,9 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
+from waves import matching
 from waves.library_index import (
     _EMPTY_STRIKE_GAP_S,
     _NETWORK_WORKERS,
@@ -2076,4 +2079,200 @@ def test_a_scan_quit_during_the_WALK_is_finished_by_the_next_plain_scan(tmp_path
 
     idx = _index(tmp_path, tags)
     assert idx.refresh(lib) == 8, "a walk cut short left folders the next plain scan never listed"
+    idx.close()
+
+
+# --- the presence keys are filled by whichever process scans ----------------
+
+
+def _strip_keys(idx):
+    """Put a cache back the way one written before the key columns reads."""
+    with idx._lock:
+        idx._conn.execute("UPDATE albums SET pkey_title = NULL, pkey_artist = NULL")
+        idx._conn.execute("UPDATE tracks SET tkey_title = NULL, tkey_artist = NULL")
+        idx._conn.commit()
+
+
+def test_a_scan_keys_the_rows_an_older_cache_left_keyless(tmp_path):
+    """The presence lookups cannot reach a row without a key, so a cache from
+    before the key columns leaves every badge dark until something fills them.
+    That backfill lives in refresh(), which means it happens whether the scan
+    ran in the scanner process or in-process: it used to be called only by the
+    child, so a fallback scan reported success over a library that then had no
+    badges at all, for good."""
+    lib = _mk(tmp_path, "lib", [])
+    d1 = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    idx = _index(tmp_path, {d1: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}})
+    idx.refresh(lib, force_full=True)
+
+    _strip_keys(idx)
+    assert idx.keys_missing() > 0, "the cache now looks like a pre-key one"
+    assert idx.has_presence_rows() is False, "and its rows are unreachable"
+
+    idx.refresh(lib)  # an ordinary incremental scan, nothing on disk changed
+
+    assert idx.keys_missing() == 0, "the scan keyed them"
+    assert idx.has_presence_rows() is True, "so the badges can answer again"
+
+
+def test_a_quit_stops_the_backfill_instead_of_outliving_the_app(tmp_path):
+    """``alive`` is threaded into the backfill for the same reason it is
+    threaded into the walk: the scanner is a child process, and a backfill
+    that ignored the parent-gone flag kept writing to a cache nobody owned
+    after a force quit."""
+    lib = _mk(tmp_path, "lib", [])
+    d1 = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    idx = _index(tmp_path, {d1: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}})
+    idx.refresh(lib, force_full=True)
+    _strip_keys(idx)
+    missing = idx.keys_missing()
+
+    idx.refresh(lib, should_continue=lambda: False)
+
+    assert idx.keys_missing() == missing, "a scan that was already dead keyed nothing"
+
+
+# --- a compilation never earns a real artist's badge ------------------------
+
+
+def test_the_sqlite_artist_rollup_refuses_various_artists_keys(tmp_path):
+    """The whole-library pass this replaced dropped Various-Artists buckets on
+    the NORMALISED key, and the raw-tag refusal in _album_keys cannot stand in
+    for it: that one runs before norm_artist, so a tag reading "The Various"
+    (the leading "the " is dropped) or "V.A.; Some DJ" (split at the ";")
+    walks past it and only normalises into a compilation afterwards. Both nets
+    were deliberate. Without this one a compilation credit is rolled up as a
+    real artist, badge and tally included."""
+    from waves.waves_ui.bridge_library import SqlArtistRollup
+
+    lib = _mk(tmp_path, "lib", [])
+    real = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    comp = _mk(tmp_path, "lib/The Various/Some Compilation", ["01.flac"])
+    idx = _index(
+        tmp_path,
+        {
+            real: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"},
+            comp: {"album": "Some Compilation", "artist": "The Various", "date": "2010"},
+        },
+    )
+    idx.refresh(lib, force_full=True)
+    rollup = SqlArtistRollup(idx)
+
+    assert rollup.get(matching.norm_artist(matching.canon("Lorna Shore"))), "a real artist still rolls up"
+    for placeholder in ("The Various", "V.A.; Some DJ", "Various Artists"):
+        key = matching.norm_artist(matching.canon(placeholder))
+        assert rollup.get(key) is None, f"{placeholder!r} normalises to {key!r} and must not roll up"
+        assert key not in rollup
+
+
+# --- a keyless-by-design row is not a keyless-by-age one ---------------------
+
+
+def test_a_compilation_does_not_leave_the_cache_looking_unkeyed_forever(tmp_path):
+    """NULL keys mean ONE thing: a row written before the key columns existed.
+    That is what keys_missing() counts and what the backfill in refresh() is
+    for. Rows the scanner refuses to key on purpose (a Various-Artists credit,
+    an untagged file) are stamped EMPTY instead, because stamped NULL a single
+    compilation made keys_missing() answer forever: the full backfill ran on
+    every scan for the life of the library, and said out loud each time that it
+    had keyed rows an old cache left behind."""
+    lib = _mk(tmp_path, "lib", [])
+    real = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    comp = _mk(tmp_path, "lib/Various Artists/Some Compilation", ["01.flac"])
+    untagged = _mk(tmp_path, "lib/Unknown/Untitled", ["01.flac"])
+    idx = _index(
+        tmp_path,
+        {
+            real: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"},
+            comp: {"album": "Some Compilation", "artist": "Various Artists", "date": "2010"},
+            untagged: {"album": "", "artist": "", "date": ""},
+        },
+    )
+    idx.refresh(lib, force_full=True)
+
+    assert idx.keys_missing() == 0, "the scan left rows looking like a pre-key cache"
+    assert idx.has_presence_rows() is True, "and the real album is still reachable"
+
+
+def test_nothing_can_look_up_the_rows_the_scanner_left_keyless(tmp_path):
+    """The empty stamp is only safe because no lookup carries one: an empty
+    artist half would otherwise collect every compilation and every untagged
+    file in the library as one bucket and hand it to the matcher."""
+    lib = _mk(tmp_path, "lib", [])
+    comp = _mk(tmp_path, "lib/Various Artists/Some Compilation", ["01.flac"])
+    idx = _index(tmp_path, {comp: {"album": "Some Compilation", "artist": "Various Artists", "date": "2010"}})
+    idx.refresh(lib, force_full=True)
+
+    assert idx.presence_facts(("", "")) == []
+    assert idx.presence_facts(("some compilation", "")) == []
+    assert idx.track_facts(("", "")) == []
+    assert idx.artist_buckets("") == []
+    assert idx.artist_known("") is False
+
+
+# --- the cache lets go of its file ------------------------------------------
+
+
+def test_close_takes_every_thread_s_read_connection_not_just_its_own(tmp_path):
+    """Presence lookups read on a connection per thread, and the thread-local
+    holding them only ever reaches the CALLING thread. Left to close with
+    their threads, a pool thread that had answered one badge question kept a
+    handle on the cache file open: on Windows an open handle refuses a delete,
+    and factoryReset closes this cache and then unlinks its file, so the
+    listing of the whole music folder that the reset promises to remove
+    survived it."""
+    import sqlite3
+    import threading
+
+    lib = _mk(tmp_path, "lib", [])
+    d1 = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    idx = _index(tmp_path, {d1: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}})
+    idx.refresh(lib, force_full=True)
+
+    # A pool thread that answers a badge question and then parks, exactly as a
+    # QThreadPool thread does between jobs.
+    parked = threading.Event()
+    release = threading.Event()
+
+    def reader():
+        idx.presence_facts(matching.presence_key("Pain Remains", "Lorna Shore"))
+        parked.set()
+        release.wait(10)
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    assert parked.wait(10), "the reader never answered"
+    closed_over = [r.conn for r in (ref() for ref in idx._reader_refs) if r is not None]
+    assert len(closed_over) >= 2, "the parked reader was never registered"
+
+    idx.close()
+
+    assert idx._reader_refs == set(), "the cache still holds readers after close()"
+    assert closed_over, "close() forgot the readers instead of shutting them"
+    for conn in closed_over:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+    release.set()
+    t.join(10)
+
+
+def test_a_reader_whose_thread_has_gone_is_dropped_at_the_next_read(tmp_path):
+    """The other half: the registry must not become the thing that keeps a
+    dead thread's connection open. It is the only strong reference left, so
+    the entry is pruned on the next read and the connection goes with it."""
+    import threading
+
+    lib = _mk(tmp_path, "lib", [])
+    d1 = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    idx = _index(tmp_path, {d1: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}})
+    idx.refresh(lib, force_full=True)
+    key = matching.presence_key("Pain Remains", "Lorna Shore")
+
+    before = len(idx._reader_refs)
+    t = threading.Thread(target=lambda: idx.presence_facts(key))
+    t.start()
+    t.join(10)
+
+    assert len(idx._reader_refs) == before, "a dead thread's reader is held open by the cache"
+    assert all(ref() is not None for ref in idx._reader_refs)
     idx.close()

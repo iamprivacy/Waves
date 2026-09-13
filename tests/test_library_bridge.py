@@ -26,9 +26,15 @@ _METHODS = (
     "_emit_from_worker",
     "_rebuild_library_index",
     "_invalidate_library_index",
-    # Every publish precomputes the artist rollup off the GUI thread before
-    # the presence signal fires (the slot keeps a lazy derive as fallback).
-    "_publish_artist_rollup",
+    "_library_scan_once",
+    "_library_worker_scan",
+    "_library_worker_probe",
+    # Every publish swaps the index and the artist rollup derived from it
+    # together, off the GUI thread; the slot keeps a lazy derive only for the
+    # case where a publish lands between its two reads.
+    "_publish_index",
+    "_bump_library_stamp",
+    "_artist_rollup",
     # The scan's index builder and the launch badge seed, extracted from
     # _rebuild_library_index so the seed can run at construction while the
     # sweep itself waits for the boot reveal; the rebuild's closures delegate
@@ -36,7 +42,6 @@ _METHODS = (
     "_build_presence_indexes",
     "_seed_library_badges_job",
     "_seed_library_badges",
-    "_start_boot_library_scan",
     "libraryAlbumPresence",
     "libraryTrackPresence",
     "artistLibraryPresence",
@@ -45,6 +50,8 @@ _METHODS = (
     # (test_library_probe_fallback.py binds them).
     "_library_probe_miss",
     "libraryIndexReady",
+    # Which published index a baked card verdict came from.
+    "libraryStamp",
     "_library_root",
     "_waves_pref_bool",
     "rescanLibrary",
@@ -53,6 +60,7 @@ _METHODS = (
     "libraryDownloadFolder",
     "_library_bulk_skip_on",
     "downloadsInsideLibrary",
+    "_path_inside_library",
     "_library_claims_album",
     "_library_claims_track",
     "_library_track_claim",
@@ -1322,8 +1330,11 @@ def test_va_credited_folders_never_enter_the_indexes(tmp_path):
         tagmap={d: {"album": "Summer Hits", "artist": "V / A", "date": "2000", "title": "Song", "codec": "flac"}},
     )
     s._rebuild_library_index()
-    assert s._library_index == {}
-    assert s._library_track_index == {}
+    # The cache-backed indexes read empty (no row carries a key), exactly as
+    # the dict builds used to be empty.
+    assert not s._library_index
+    assert not s._library_track_index
+    assert s.libraryAlbumPresence("V / A", "Summer Hits", "2000", 1)["present"] is False
     assert s.artistLibraryPresence("V")["present"] is False
 
 
@@ -1415,3 +1426,170 @@ def test_downloads_inside_library_false_when_scan_off_or_unconfigured(tmp_path):
     assert off.downloadsInsideLibrary() is False
     nobase = _make(tmp_path, library_folder=lib, download_base="")
     assert nobase.downloadsInsideLibrary() is False
+
+
+# --- the answers a published index gives stay honest ------------------------
+
+
+def test_a_read_that_failed_once_is_not_remembered_as_an_empty_library(tmp_path):
+    """The truthiness of a cache-backed index is what every presence slot uses
+    to decide whether the index is built at all, and it is resolved once and
+    kept. Keeping a FAILURE there (a cache locked by a writer, a share that
+    blinked) turned one transient error into "you own nothing" for the whole
+    life of that index: every badge dark until the next publish."""
+    from waves.waves_ui.bridge_library import SqlPresenceIndex
+
+    class _Flaky:
+        def __init__(self):
+            self.asked = 0
+
+        def has_presence_rows(self):
+            self.asked += 1
+            if self.asked == 1:
+                raise RuntimeError("database is locked")
+            return True
+
+    lib = _Flaky()
+    idx = SqlPresenceIndex(lib)
+    assert bool(idx) is False, "the failed read answers 'not built', which is the safe answer"
+    assert bool(idx) is True, "and the next question asks the cache again"
+    assert lib.asked == 2
+
+
+def test_a_settled_answer_is_still_only_resolved_once(tmp_path):
+    """The other half: a real answer is kept, or every badge on the page pays
+    for a table read that cannot change until the next publish."""
+    from waves.waves_ui.bridge_library import SqlPresenceIndex
+
+    class _Counting:
+        def __init__(self):
+            self.asked = 0
+
+        def has_presence_rows(self):
+            self.asked += 1
+            return True
+
+    lib = _Counting()
+    idx = SqlPresenceIndex(lib)
+    assert bool(idx) and bool(idx) and bool(idx)
+    assert lib.asked == 1
+
+
+def test_a_capped_memo_holds_its_cap_while_several_threads_fill_it():
+    """These memos are asked from the GUI thread (one call per badge) AND from
+    pool threads (the browse payload dressing, one call per card), so the
+    eviction is a read of the first key followed by a delete with two threads
+    in it. Under the lock it cannot lose the cap or raise mid-iteration; the
+    backend's own caches solve it the same way."""
+    from waves.waves_ui.bridge_library import _remember
+
+    d: dict = {}
+    errors: list[str] = []
+
+    def fill(tag):
+        try:
+            for i in range(4000):
+                _remember(d, (tag, i), i, 8)
+                assert len(d) <= 8
+        except Exception as exc:  # pragma: no cover - the regression this pins
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=fill, args=(t,)) for t in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert len(d) == 8, "the cap is the point of the helper"
+
+
+def test_the_slot_can_still_derive_a_rollup_for_a_cache_backed_index(tmp_path):
+    """artistLibraryPresence keeps a lazy derive for the one case a publish
+    landing between its two reads produces. A cache-backed index has no
+    .items() to walk, so reaching for the whole-library pass there was an
+    exception inside a GUI-thread slot rather than a missing badge."""
+    root = _album(tmp_path, "lib", [])
+    album = _album(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    s = _make(
+        tmp_path,
+        library_folder=root,
+        tagmap={album: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}},
+    )
+    s._library.refresh(root, force_full=True)
+    idx, tracks = s._build_presence_indexes(s._library)
+    s._library_index = idx
+    s._library_track_index = tracks
+    # Exactly the state a publish landing mid-slot leaves behind: the index on
+    # screen is not the one the cached rollup was derived from.
+    s._library_artist_index = {}
+    s._library_artist_index_src = object()
+
+    answer = s.artistLibraryPresence("Lorna Shore")
+
+    assert answer["present"] is True, "the slot answered nothing for a real artist"
+    assert s._library_artist_index_src is idx
+
+
+def test_a_publish_sweeps_before_it_freezes(tmp_path, monkeypatch):
+    """gc.freeze() never collects what it freezes, so cyclic garbage alive at
+    a publish would be kept for the rest of the session, and a publish happens
+    on every scan, every probe hit and every library change. The sweep only
+    walks what is not already frozen. The FIRST publish skips it: nothing is
+    frozen yet, so it would be a full collection, and at launch that lands
+    under the water."""
+    import gc as _gc
+
+    from waves.waves_ui import bridge_library as bl
+
+    calls: list[str] = []
+    frozen = [0]
+    monkeypatch.setattr(bl.gc, "collect", lambda *a, **k: calls.append("collect"))
+    monkeypatch.setattr(bl.gc, "freeze", lambda: (calls.append("freeze"), frozen.__setitem__(0, 1)))
+    monkeypatch.setattr(bl.gc, "get_freeze_count", lambda: frozen[0])
+
+    s = _make(tmp_path)
+    s._publish_index({}, {})
+    assert calls == ["freeze"], "the first publish must not run a full collection"
+
+    calls.clear()
+    s._publish_index({}, {})
+    assert calls == ["collect", "freeze"], "a later publish promotes only what is still reachable"
+    assert _gc.get_freeze_count() >= 0  # the real gc is untouched by this test
+
+
+def test_every_publish_moves_the_stamp_a_dressed_card_compares_against(tmp_path):
+    """A browse payload is dressed with its library verdicts on a worker and
+    its cards are built from it later; a publish in between leaves a brand new
+    card holding a verdict from before it, with the signal that would have
+    made it re-ask already fired. The card compares this number."""
+    s = _make(tmp_path)
+    s._library_stamp = 0
+    assert s.libraryStamp() == 0
+    s._publish_index({}, {})
+    assert s.libraryStamp() == 1
+    s._publish_index({}, {})
+    assert s.libraryStamp() == 2
+    # A publish that loses the last-writer race changes nothing on screen, so
+    # it must not invalidate answers that are still current.
+    assert s._publish_index({}, {}, only_if_unset=True) is False
+    assert s.libraryStamp() == 2
+
+
+def test_clearing_the_index_moves_the_stamp_too(tmp_path):
+    """A folder change clears the index without publishing; a card built after
+    it must not trust an IN LIBRARY baked from the folder that was left."""
+    s = _make(tmp_path)
+    s._library_stamp = 0
+    s._publish_index({}, {})
+    s._invalidate_library_index()
+    assert s.libraryStamp() == 2
+
+
+def test_path_inside_library_answers_for_one_recorded_copy(tmp_path):
+    lib = str(tmp_path / "lib")
+    s = _make(tmp_path, library_folder=lib, download_base=str(tmp_path / "dl"))
+    assert s._path_inside_library(os.path.join(lib, "A", "01.flac")) is True
+    assert s._path_inside_library(str(tmp_path / "old" / "01.flac")) is False
+    assert s._path_inside_library(str(tmp_path / "lib2" / "01.flac")) is False
+    assert s._path_inside_library("") is False

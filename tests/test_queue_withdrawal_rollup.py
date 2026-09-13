@@ -98,6 +98,7 @@ def _queue_stub(statuses):
         "clearQueued",
         "clearFailed",
         "cancelQueueItem",
+        "cancelQueuedGroup",
         "removeQueueItem",
         "stopAll",
         "_bump_download_groups",
@@ -148,6 +149,43 @@ def test_remove_row_settles_it_too():
     s._bump_download_groups("m1", 100.0, "done")
     assert s._artist_groups == {}
     assert ("art1", "failed") in s.downloadState.emits
+
+
+# --------------------------------------------------------------------------- #
+# The rollup's OWN cancel: one button standing over N rows.
+# --------------------------------------------------------------------------- #
+def test_a_queued_rollup_cancels_every_row_it_queued():
+    """The discography button's X had nothing to cancel: cancelQueuedMedia
+    looks for a queue row whose media_id is the button's, and an artist id is
+    never one. The rollup slot cancels the rows the group actually holds."""
+    s = _queue_stub(["queued", "queued", "queued"])
+    s.cancelQueuedGroup("art1")
+    assert s._queue == [], "every row the discography queued must be gone"
+    # Dropped first, so the members' withdrawal cannot credit three failures
+    # against a batch the user deliberately called off.
+    assert s._artist_groups == {}
+    assert s.downloadState.emits[-1] == ("art1", ""), "the button goes back to idle, not to RETRY"
+    assert ("art1", "failed") not in s.downloadState.emits
+
+
+def test_cancelling_a_rollup_leaves_other_queue_rows_alone():
+    s = _queue_stub(["queued", "queued"])
+    s._queue.append({"qid": 9, "media_id": "other", "status": "queued", "type": "album", "name": "r9"})
+    s._queue_index[9] = s._queue[-1]
+    s._job_specs[9] = object()
+    s.cancelQueuedGroup("art1")
+    assert [it["qid"] for it in s._queue] == [9]
+
+
+def test_an_unknown_id_is_a_no_op():
+    """Every download button's X routes here when it owns no queue row, so a
+    plain media id that simply lost its row must change nothing."""
+    s = _queue_stub(["queued", "queued"])
+    s.cancelQueuedGroup("not-a-group")
+    s.cancelQueuedGroup("")
+    assert len(s._queue) == 2
+    assert "art1" in s._artist_groups
+    assert s.downloadState.emits == []
 
 
 def test_cancel_of_a_running_row_leaves_the_credit_to_its_worker():
@@ -653,3 +691,95 @@ def test_a_settled_row_dismissed_from_the_drawer_releases_it_too():
     s.clearFailed()
 
     assert s._redownload_overrides == set()
+
+
+# --- a rollup nobody has started yet keeps its QUEUED face ------------------
+# The rollups register as QUEUED and flip to running on the first member that
+# really starts. A withdrawal is a tick like any other, so calling off one
+# album of a queued discography announced the whole batch as RUNNING: an empty
+# progress matrix over work that had not begun, and with it the cancel X the
+# QUEUED face carries (it is bound to st === "queued"), so the batch could no
+# longer be called off at all.
+
+
+class _StartedStub:
+    _bump_artist_group = WavesBridge._bump_artist_group
+    _bump_folder_group = WavesBridge._bump_folder_group
+
+    def __init__(self, keys=("m1", "m2")):
+        grp = {"keys": set(keys), "done": set(), "failed": set(), "prog": {}}
+        self._artist_groups = {"art1": grp}
+        self._folder_groups = {
+            "fold1": dict(grp, keys=set(keys), weights=dict.fromkeys(keys, 1), total=len(keys)),
+        }
+        self._artist_lock = Lock()
+        self._folder_lock = Lock()
+        self._scan_gen = 0
+        self.downloadProgress = _Sig()
+        self.downloadState = _Sig()
+        self.folderRemaining = _Sig()
+
+
+def test_cancelling_a_member_leaves_a_never_started_discography_queued():
+    s = _StartedStub()
+
+    s._bump_artist_group("m1", None, "failed")
+
+    assert s.downloadState.emits == [
+        ("art1", "queued")
+    ], "nothing had started, so the rollup must keep the face that carries its cancel"
+
+
+def test_cancelling_a_member_leaves_a_never_started_folder_queued():
+    s = _StartedStub()
+
+    s._bump_folder_group("m1", None, "failed")
+
+    assert s.downloadState.emits == [("fold1", "queued")]
+
+
+def test_the_first_member_that_really_starts_still_flips_it_to_running():
+    s = _StartedStub()
+
+    s._bump_artist_group("m1", 12.0, None)
+
+    assert s.downloadState.emits == [("art1", "running")]
+
+
+def test_a_member_that_landed_counts_as_started_for_the_rest_of_the_batch():
+    """A three-member batch where one finished and one was then cancelled:
+    the batch really is under way, so it must not fall back to QUEUED."""
+    s = _StartedStub(keys=("m1", "m2", "m3"))
+
+    s._bump_artist_group("m1", None, "done")
+    s._bump_artist_group("m2", None, "failed")
+
+    assert s.downloadState.emits == [("art1", "running"), ("art1", "running")]
+
+
+def test_cancelling_a_rollup_reaches_its_held_members_too():
+    """A member HELD for recovery has no queue row at all: its row was
+    withdrawn and the work waits in the stash. cancelQueuedGroup swept the
+    QUEUE, so the hold was invisible to it and survived the cancel. The share
+    came back, the replay fired, and an album the user had called off
+    downloaded itself, with its group already popped so it could never report
+    anything. Cancelling a whole rollup has to reach the stash the way
+    cancelling one row does."""
+    s = _queue_stub(["queued", "queued"])
+    # A third member of the same discography, held rather than queued.
+    s._artist_groups["art1"]["keys"].add("m3")
+    s._pending_downloads.append(("m3", lambda: None))
+
+    s.cancelQueuedGroup("art1")
+
+    assert s._queue == [], "the visible rows are gone"
+    assert s._pending_downloads == [], "and so is the held member's replay"
+
+
+def test_cancelling_a_rollup_leaves_another_batchs_hold_alone():
+    s = _queue_stub(["queued"])
+    s._pending_downloads.append(("somebody-else", lambda: None))
+
+    s.cancelQueuedGroup("art1")
+
+    assert [mid for mid, _fn in s._pending_downloads] == ["somebody-else"]

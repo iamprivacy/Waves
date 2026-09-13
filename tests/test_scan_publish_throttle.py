@@ -13,8 +13,10 @@ nothing committed is ever left unpublished.
 R9: the artist rollup (a full pass over the album index) was derived lazily
 inside the synchronous artistLibraryPresence slot, on the GUI thread, on the
 first ask after every republish. Every publish now precomputes it on the
-worker (_publish_artist_rollup) before libraryPresenceChanged fires; the
-slot keeps the lazy derive only as a race fallback.
+worker (_publish_index, one swap with the index itself) before
+libraryPresenceChanged fires; the slot keeps the lazy derive only as a race
+fallback, and takes it through _artist_rollup so a cache-backed index does
+not reach the whole-library pass.
 
 The scan is driven through a fake lib whose refresh fires a burst of
 committed events, over a REAL LibraryIndex's rows (the fake delegates

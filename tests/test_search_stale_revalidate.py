@@ -201,6 +201,7 @@ def _cache_bridge(tmp_path):
     b._search_cache = {}
     b._home_cache = None
     b._page_cache_path = str(tmp_path / "page_cache.json")
+    b._search_cache_path = str(tmp_path / "search_cache.json")
     b._page_cache_lock = Lock()
     b.tidal = MagicMock()
     b.tidal.session.user.id = "42"
@@ -212,13 +213,18 @@ def test_the_newest_searches_outlive_the_process_and_come_back_stale(tmp_path):
     for i in range(_SEARCH_DISK_MAX + 3):
         saver._search_cache[f"needle {i}"] = (float(i), _payload((f"al{i}",)))
     saver._save_page_cache()
+    # Their own file: the launch-time page cache load must not pay for them.
     with open(saver._page_cache_path) as fh:
+        assert "searches" not in json.load(fh)
+    with open(saver._search_cache_path) as fh:
         on_disk = json.load(fh)["searches"]
     assert len(on_disk) == _SEARCH_DISK_MAX and "needle 0" not in on_disk and "needle 14" in on_disk
     assert on_disk["needle 14"] == _payload(("al14",)), "the payload alone, no stamp"
 
     loader = _cache_bridge(tmp_path)
     loader._load_page_cache()
+    assert loader._search_cache == {}, "the page cache load leaves the searches to their own loader"
+    loader._load_search_cache()
     assert len(loader._search_cache) == _SEARCH_DISK_MAX
     stamp, page = loader._search_cache["needle 14"]
     assert stamp == _STALE_STAMP and page == _payload(("al14",))
@@ -230,5 +236,5 @@ def test_a_live_search_is_never_clobbered_by_the_snapshot(tmp_path):
     saver._save_page_cache()
     loader = _cache_bridge(tmp_path)
     loader._search_cache["needle"] = (5.0, _payload(("live",)))
-    loader._load_page_cache()
+    loader._load_search_cache()
     assert loader._search_cache["needle"] == (5.0, _payload(("live",)))

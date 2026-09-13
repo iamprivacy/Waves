@@ -193,3 +193,33 @@ def test_a_member_stored_below_the_target_rank_un_says_the_album(tmp_path):
     _warm(b, ids)
     assert b._rollup_verdict(ids) == "owned"
     assert b.collectionOwnershipFor([101, 102, 103]) == "owned"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #38: where the owned copies live words the face and names the folder.
+# --------------------------------------------------------------------------- #
+def _detail(answers: dict, ids=None) -> dict:
+    stub = _LookupStub(answers)
+    stub._rollup_verdict = WavesBridge._rollup_verdict.__get__(stub, _LookupStub)
+    return WavesBridge._rollup_detail(stub, list(answers) if ids is None else ids)
+
+
+def _at(folder, inside):
+    return {**OWNED_CURRENT, "in_library": inside, "folder": folder}
+
+
+def test_detail_every_copy_inside_reads_in_library_with_the_folder():
+    d = _detail({"1": _at("/lib/A", True), "2": _at("/lib/A", True)})
+    assert d == {"verdict": "owned", "in_library": True, "folder": "/lib/A"}
+
+
+def test_detail_one_copy_outside_is_not_in_library():
+    d = _detail({"1": _at("/lib/A", True), "2": _at("/old/A", False)})
+    assert d["verdict"] == "owned"
+    assert d["in_library"] is False
+    assert d["folder"] == "/lib/A"
+
+
+def test_detail_nothing_owned_names_no_folder():
+    assert _detail({"1": NOT_OWNED}) == {"verdict": "no", "in_library": False, "folder": ""}
+    assert _detail({}, ids=[]) == {"verdict": "no", "in_library": False, "folder": ""}

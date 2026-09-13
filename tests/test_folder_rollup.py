@@ -218,7 +218,10 @@ def test_download_folder_is_recursive_weighted_and_mirrored():
     assert grp["weights"] == {"p1": 12, "p2": 30}
     assert grp["total"] == 2
     assert stub.folderRemaining.emits == [("f1", 2, 2)]
-    assert stub.downloadState.emits == [("f1", "running")]
+    # QUEUED, not running: the rows it just queued have not been picked up by
+    # a download slot yet, and the button says so (with a live cancel) until a
+    # member really starts.
+    assert stub.downloadState.emits == [("f1", "queued")]
     # BADGE FIRST, the order downloadPlaylistCategory documents. The badge is
     # hidden while the button is idle and the count map is never pruned between
     # runs, so announcing "running" first shows the PREVIOUS run's count (or its

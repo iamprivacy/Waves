@@ -47,22 +47,18 @@ def _stub(handback=None):
     return s
 
 
-def test_the_count_virtual_accepts_the_bindings_argument():
-    seen = []
-    s = _stub()
-    s._notify = seen.append
-    _BootPacedIncubation.incubatingObjectCountChanged(s, 3)
-    _BootPacedIncubation.incubatingObjectCountChanged(s)
-    assert seen == [7, 7], "both call spellings must reach the notifier with the queried count"
+def test_the_count_virtual_is_not_overridden():
+    """Qt calls incubatingObjectCountChanged on every incubation start and
+    finish, and a Python override made Shiboken take the interpreter for
+    each call: one wait per card behind the launch workers, inside the frame
+    (sampled 2026-09-12). With no override the wrapper caches the miss and
+    never crosses again; the count is polled through count_reader instead."""
+    assert "incubatingObjectCountChanged" not in _BootPacedIncubation.__dict__
 
 
-def test_the_count_virtual_never_touches_the_timer():
-    # Pacing must not depend on this virtual firing (it is the exact call
-    # that silently died); the timer is driven by __init__ and release only.
+def test_the_count_reader_answers_the_live_count():
     s = _stub()
-    s._timer = None
-    _BootPacedIncubation.incubatingObjectCountChanged(s, 1)
-    _BootPacedIncubation.incubatingObjectCountChanged(s)
+    assert _BootPacedIncubation.count_reader(s)() == 7
 
 
 def test_release_stops_the_timer_only_after_a_successful_handback():

@@ -59,7 +59,7 @@ def test_a_republish_resets_the_memo(tmp_path, monkeypatch):
     assert len(calls) == 1
     # A republish swaps the index OBJECT (equal content is irrelevant): the
     # memo must not answer for the previous scan's index.
-    s._library_index = dict(s._library_index)
+    s._library_index, _ = s._build_presence_indexes(s._library)
     s.libraryAlbumPresence("Lorna Shore", "Pain Remains", "2022", 3)
     assert len(calls) == 2
 
@@ -85,6 +85,6 @@ def test_track_asks_memoize_the_same_way(tmp_path, monkeypatch):
     b = s.libraryTrackPresence("Lorna Shore", "Sun//Eater", "Pain Remains", "2022")
     assert a == b
     assert len(calls) == 1
-    s._library_track_index = dict(s._library_track_index)
+    _, s._library_track_index = s._build_presence_indexes(s._library)
     s.libraryTrackPresence("Lorna Shore", "Sun//Eater", "Pain Remains", "2022")
     assert len(calls) == 2
