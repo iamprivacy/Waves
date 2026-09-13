@@ -329,6 +329,18 @@ ApplicationWindow {
                                        || tracksModel.count > 0 || videosModel.count > 0
                                        || playlistsModel.count > 0 || mixesModel.count > 0
                                        || searchTop !== null
+    // The query as it is sent: every run of whitespace (a pasted line break
+    // or tab the single-line field never shows) becomes one space (issue #39).
+    function searchQueryText(t) { return ("" + (t || "")).replace(/\s+/g, " ").trim() }
+    // The last query submitted, and the one that answered with nothing: the
+    // empty state then says so instead of still inviting a first search.
+    property string lastSearchQuery: ""
+    property string searchNoResultsFor: ""
+    function submitSearch(q) {
+        root._searchSeq = root._navSeq
+        root.lastSearchQuery = q
+        waves.search(q)
+    }
     // ---- Search results / artist page / My Tidal ------------------------
     // Result rows live in the *Model ListModels (declared further down) and
     // are replaced wholesale on each search; these hold the sort order and
@@ -812,8 +824,16 @@ ApplicationWindow {
 
     // ---- Download-queue grouping (Completed / Failed / Stopped / Downloading / Queued)
     // A finished row lingers 5s with its ✓ DONE chip, then slides up into the
-    // collapsible Completed group. These counts feed the sticky section headers;
-    // compBump ticks on each promotion so the Completed header count can pulse.
+    // collapsible Completed group. These counts feed the sticky section headers,
+    // and each header pulses its own number when that number rises.
+    // Which section header should pulse its count, and a tick to fire on. The
+    // pulse is addressed to a SECTION, never to a header instance: the view
+    // pools those and re-sections them as rows move between groups, and a
+    // pulse started on the instance that was Completed at that instant played
+    // out on the same instance after it had been handed to Downloading. What
+    // the user saw was DOWNLOADING bouncing as its count fell.
+    property string pulseSection: ""
+    property int pulseTick: 0
     property bool completedCollapsed: true
     property int completedCount: 0
     // Failed rows get their own section (between Completed and Downloading)
@@ -828,7 +848,6 @@ ApplicationWindow {
     // stop never reads as an error and a failure is never lost in a stop.
     property int stoppedCount: 0
     property int queuedCount: 0
-    property int compBump: 0
     // Queue-row album expansion: which rows are open (by qid) and each row's
     // ordered per-track list ({qid: [{id,num,title,duration,status,pct}]}),
     // streamed live from the bridge while the album downloads.
@@ -964,6 +983,56 @@ ApplicationWindow {
                  && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
         onTriggered: waves.refreshBrowse()   // silent, throttled; repaints only on change
     }
+    // --- NEW mark on recent releases --------------------------------------
+    // A release wears NEW for its first fortnight: two release Fridays, so a
+    // weekly visit catches it and the mark stays rare enough to mean something.
+    // The verdict is never stored. Payloads, and page_cache.json behind them,
+    // carry only the release DATE, which does not decay; the comparison is
+    // made here against a cutoff this clock moves, so a page parked for weeks
+    // or restored from disk loses its marks on the right day with no
+    // republish. ISO dates compare correctly as strings, so a row costs one
+    // compare. Every surface asks isNewRelease; none compares dates itself
+    // (tests/test_new_release_mark.py holds that).
+    readonly property int newDays: 14
+    // One breath of the NEW dot, in ms. Slow, so it reads as calm rather than
+    // as an alert, and one shared beat, so every dot on screen breathes together.
+    readonly property int newPulseMs: 3200
+    // The oldest date still new, and tomorrow: a future-dated pre-release is
+    // not new yet, and the extra day keeps timezone skew from hiding a release
+    // that has already landed somewhere. Both "YYYY-MM-DD".
+    property string newCutoff: ""
+    property string newHorizon: ""
+    function _isoDay(d) {
+        return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2)
+    }
+    function refreshNewCutoff() {
+        // Calendar arithmetic, not milliseconds: a fortnight that spans a DST
+        // change is not 14 * 86400000 ms, and near midnight that slips a day.
+        var t = new Date()
+        var cut = root._isoDay(new Date(t.getFullYear(), t.getMonth(), t.getDate() - root.newDays))
+        var hor = root._isoDay(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1))
+        if (cut !== root.newCutoff) root.newCutoff = cut
+        if (hor !== root.newHorizon) root.newHorizon = hor
+    }
+    function isNewRelease(date) {
+        var s = ("" + (date || "")).slice(0, 10)
+        return s.length === 10 && root.newCutoff !== "" && s >= root.newCutoff && s <= root.newHorizon
+    }
+    Timer {
+        id: newCutoffClock
+        // Every minute: a sleeping Mac reports no change of any kind on wake,
+        // so a slower clock left the mark up to its interval late after a
+        // night asleep. The refresh is two date strings and writes nothing
+        // unless the day moved.
+        interval: 60 * 1000
+        repeat: true; running: true; triggeredOnStart: true
+        onTriggered: root.refreshNewCutoff()
+    }
+    Connections {
+        target: root
+        // A window hidden across midnight corrects the moment it is shown.
+        function onOnScreenChanged() { if (root.onScreen) root.refreshNewCutoff() }
+    }
     // --- Search results build veil ----------------------------------------
     // Same treatment for a fresh search: every result card (artists, albums,
     // tracks, videos, playlists, mixes) incubates through an asynchronous
@@ -1054,6 +1123,15 @@ ApplicationWindow {
     // index not built, badge hidden). Re-resolved whenever the page changes
     // and whenever the library scan publishes (onLibraryPresenceChanged).
     property var libraryPresence: null
+    // Which published presence index this window's baked answers came from.
+    // A browse payload is dressed with its library verdicts on a worker and
+    // its cards are built from it later, so a publish in between leaves a
+    // brand new card holding a verdict from before it, with the signal that
+    // would have made it re-ask already fired. A card compares this against
+    // the stamp baked into its own payload and asks live when they differ.
+    // Read from the bridge ONCE per publish here, never per card: the whole
+    // point of the dressing is that a card's creation makes no bridge call.
+    property int libStamp: waves.libraryStamp()
     // browsePage is assigned from a dozen places (a fresh load, Back, forward,
     // a tab restore, a revalidate). Resolving presence only where the page is
     // LOADED left Back and tab-restore showing the previous album's badge on
@@ -1219,6 +1297,37 @@ ApplicationWindow {
         // the water reads through, then settles it here (see bootOverlay).
         opacity: root.bootScrimLevel
     }
+    // The mouse's back and forward side buttons, taken here at the top of
+    // the scene (above every page and popup) and nowhere else. They used to
+    // be read by a Python event filter on the window, which then saw EVERY
+    // event the window receives, the per-frame update request included, and
+    // each of those crossings waited for the interpreter behind whatever
+    // worker held it: sampled live at launch, that wait was the single
+    // largest GUI-thread cost while the landing built (the boot water
+    // dropped frames on it). Only these two buttons are accepted, so every
+    // other press, wheel and hover passes straight through to the page. A
+    // rapid pair is two taps (tapCount 1 and 2), both delivered, so nothing
+    // is dropped.
+    // A handler on a plain Item, not a MouseArea: an Item takes no press
+    // it is not asked for, sets no cursor and takes no hover, so the page
+    // beneath keeps its pointing hand and every other button.
+    // It sits in the window's own content, so a modal popup's overlay is above
+    // it and the side buttons do nothing while a dialog is open. That is the
+    // wanted behaviour, not a gap: navigating the page underneath a modal
+    // question is how you answer it by accident. Reviewed and deliberately
+    // left alone.
+    Item {
+        anchors.fill: parent
+        z: 1000000
+        TapHandler {
+            acceptedButtons: Qt.BackButton | Qt.ForwardButton
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: function(point, button) {
+                if (button === Qt.BackButton) root.navBack()
+                else if (button === Qt.ForwardButton) root.navForward()
+            }
+        }
+    }
 
     // One shared 20 Hz "breathe" clock for the next-to-fill cell in every LED
     // matrix (the download button, queue rows, progress bars). A per-frame
@@ -1337,7 +1446,7 @@ ApplicationWindow {
     }
     function cardSubMeta(card) {
         var kind = card.kind || ""
-        return kind === "album" ? (card.date || card.year || "") + ""
+        return kind === "album" ? (card.listed || card.date || card.year || "") + ""
              : kind === "playlist" ? (card.tracks > 0 ? card.tracks + " tracks" : (card.creator || "Playlist"))
              : ""
     }
@@ -1355,10 +1464,17 @@ ApplicationWindow {
         property int px: 11
         property bool center: false
         property color metaColor: root.textHi
+        // The card says you have it (see NewTag.settled).
+        property bool settled: false
         readonly property string lead: root.cardSubLead(card)
         readonly property string meta: root.cardSubMeta(card)
         readonly property string fallback: lead === "" && meta === "" ? root.cardSubtitle(card) : ""
+        // Albums test the date their caption shows; a track card shows none,
+        // so the mark is its only recency cue.
+        readonly property bool fresh: card.kind === "album" ? root.isNewRelease(card.listed || card.date)
+                                    : card.kind === "track" ? root.isNewRelease(card.date) : false
         implicitHeight: capRow.implicitHeight
+        FontMetrics { id: capFm; font.pixelSize: cap.px }
         Row {
             id: capRow
             spacing: 4
@@ -1368,7 +1484,8 @@ ApplicationWindow {
                 visible: cap.lead !== ""
                 artists: cap.lead !== "" ? root.cardLeadArtists(cap.card) : []
                 px: cap.px
-                width: Math.min(implicitWidth, cap.width - (cap.meta !== "" ? capMeta.implicitWidth + capDot.implicitWidth + 8 : 0))
+                width: Math.min(implicitWidth, cap.width - (cap.meta !== "" ? capMeta.implicitWidth + capDot.implicitWidth + 8 : 0)
+                                               - (cap.fresh ? capNew.implicitWidth + 4 : 0))
             }
             Text { id: capDot; textFormat: Text.PlainText; visible: cap.lead !== "" && cap.meta !== ""; text: "\u00b7"; color: root.textDim; font.pixelSize: cap.px }
             Text {
@@ -1377,6 +1494,15 @@ ApplicationWindow {
                 visible: cap.meta !== ""
                 text: cap.meta
                 color: cap.metaColor; font.pixelSize: cap.px
+            }
+            // Never taller than the caption's own text line: at 11px that line
+            // is 13px, and a 14px mark grew it, nudging everything under the
+            // card's caption down by a pixel on the marked cards only.
+            NewTag {
+                id: capNew
+                compact: true; visible: cap.fresh; settled: cap.settled
+                height: Math.min(implicitHeight, Math.floor(capFm.height))
+                anchors.verticalCenter: parent.verticalCenter
             }
             Text {
                 textFormat: Text.PlainText
@@ -1394,6 +1520,7 @@ ApplicationWindow {
         else if (kind === "playlist") waves.downloadPlaylist(card.id)
         else if (kind === "mix") waves.downloadMix(card.id)
         else if (kind === "track") waves.downloadTrack(card.id)
+        else if (kind === "video") waves.downloadVideo(card.id)
         else if (kind === "artist") waves.downloadArtist(card.id)
     }
 
@@ -1487,7 +1614,11 @@ ApplicationWindow {
     }
     function cancelQueuedMedia(id) {
         var qid = queuedQid(id)
-        if (qid >= 0) waves.cancelQueueItem(qid)
+        if (qid >= 0) { waves.cancelQueueItem(qid); return }
+        // No row of its own: the id may be a ROLLUP (a discography, a folder
+        // "download all"), one button standing over the N rows it queued. The
+        // bridge knows which rows those are; it is a no-op for any other id.
+        waves.cancelQueuedGroup(id)
     }
 
     // Flat list of every track/video id across a browse page's sections
@@ -3240,8 +3371,11 @@ ApplicationWindow {
     // pop-in that made every visit feel like a first load). This invisible
     // pool holds a live Image for the last ~220 covers shown, keeping their
     // decoded pixels referenced in the pixmap cache, a rebuilt delegate with
-    // the same url+sourceSize then paints instantly. LRU-capped; worst case
-    // ~100 MB of RAM at typical tile sizes, usually far less.
+    // the same url+sourceSize+fillMode then paints instantly. Oldest warmed
+    // out first (a cover shown again does not move back to the end). The pool
+    // shares each pixmap with whatever is on screen rather than holding a copy
+    // of it, so what it costs is only the covers that have left the page:
+    // worst case ~100 MB of RAM at typical tile sizes, usually far less.
     // The track disc's decode size, in one place: PreviewArt asks for it and
     // the prefetch handler warms at it, and the pool keys on the exact size,
     // so two literals that drift apart would silently warm nothing.
@@ -3268,6 +3402,20 @@ ApplicationWindow {
                 source: model.u
                 sourceSize.width: model.w
                 sourceSize.height: model.h
+                // Qt keys the pixmap cache on the FILL MODE as well as the url
+                // and the decode size: PreserveAspectCrop and PreserveAspectFit
+                // each raise their own flag in the load request, and an entry
+                // stored under one is never handed to the other. Left at the
+                // default (Stretch) this pool therefore fetched and decoded a
+                // SECOND copy of every cover and pinned that, while the copy
+                // the page had actually painted stayed unpinned and fell out
+                // of Qt's ~2 MB budget for no-longer-shown pixmaps (measured
+                // here: 40-60 thumbnails, i.e. one page of results), so a
+                // revisit went back to the loading placeholder exactly as if
+                // the pool did not exist. Every art surface crops (Art,
+                // PreviewArt, MosaicCell, the browse header), so cropping here
+                // is what pins the pixmap the next page will ask for.
+                fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
                 visible: false
@@ -3819,6 +3967,41 @@ ApplicationWindow {
         for (var i = 0; i < keys.length; ++i)
             if (batch.indexOf(keys[i]) !== -1) return true
         return false
+    }
+    // The art cards' ownership re-ask, batched: when a batch of first
+    // answers lands, every card whose members are in it used to re-ask the
+    // bridge for its own rollup, one QML-to-Python call per card (~130 on a
+    // fresh landing, each waiting its turn for the interpreter behind the
+    // launch workers, sampled 2026-09-12 as a run of 50-80 ms GUI-thread
+    // holds right after the cards appeared). Cards register their
+    // collection id and member keys here instead; one call answers every
+    // hit card at once, and the cards read their answer off ownAnswers.
+    property var _ownCards: ({})      // cid -> [",id,", ...] member keys (or null)
+    property var ownAnswers: ({})     // cid -> {ids, verdict}, the last batch's answers
+    property int ownAnswersGen: 0
+    function ownCardRegister(cid, keys) { if (cid) _ownCards[cid] = keys || null }
+    function ownCardForget(cid) { if (cid && cid in _ownCards) delete _ownCards[cid] }
+    function ownCardsBatch(batch) {
+        var hit = []
+        for (var cid in _ownCards) {
+            var keys = _ownCards[cid]
+            if (!keys) continue
+            for (var i = 0; i < keys.length; ++i)
+                if (batch.indexOf(keys[i]) !== -1) { hit.push(cid); break }
+        }
+        if (hit.length === 0) return
+        ownAnswers = waves.collectionOwnershipMany(hit)
+        ownAnswersGen++
+    }
+    // Which forgetting of every ownership answer the window has heard of: a
+    // dressed card compares its baked card.ownGen against it (see refreshOwned).
+    property int ownGen: waves.ownershipGeneration()
+    Connections {
+        target: waves
+        function onOwnershipChangedBatch(batch) {
+            root.ownGen = waves.ownershipGeneration()
+            root.ownCardsBatch(batch)
+        }
     }
 
     component QualTag: Row {
@@ -4455,14 +4638,17 @@ ApplicationWindow {
     // is not "is the match right" but "fetch it again?". REDOWNLOAD forces
     // the whole job (the ownership gate would otherwise skip every track and
     // the job would fetch nothing). Takes the card so the confirm can start
-    // the right kind of download (album, playlist or mix).
-    function openRedownloadGate(card) {
+    // the right kind of download (album, playlist, mix, track or video).
+    // `folder` is where the recorded copy lives, when the caller knows: a copy
+    // written before the download folder moved can sit anywhere, and naming
+    // it is the only way the user finds it (issue #38).
+    function openRedownloadGate(card, folder) {
         libraryClaimGate.mode = "owned"
         libraryClaimGate.card = card
         libraryClaimGate.albumId = "" + (card.id || "")
         libraryClaimGate.albumTitle = "" + (card.title || "")
-        libraryClaimGate.folder = ""
-        libraryClaimGate.kind = "album"
+        libraryClaimGate.folder = folder ? "" + folder : ""
+        libraryClaimGate.kind = (card.kind === "track" || card.kind === "video") ? "track" : "album"
         libraryClaimGate.shown = true
     }
     function pillClassFg(c) {
@@ -5960,6 +6146,24 @@ ApplicationWindow {
             return ""
         }
         property var onTap: (function(){})
+        // Where the recorded copy behind `owned` lives (refreshOwned fills
+        // both): ownInLibrary words the done face by THAT copy's location,
+        // not by where downloads go today, and ownFolder is what the
+        // redownload gate names (issue #38).
+        property bool ownInLibrary: false
+        property string ownFolder: ""
+        // What an owned done click redownloads. Derived from the done noun;
+        // set gateKind where the noun does not name a downloadable kind.
+        // Empty means the owned face stays inert (a "Download all" has no
+        // single thing to fetch again).
+        property string gateKind: ""
+        property string gateTitle: ""
+        readonly property string ownGateKind: {
+            if (gateKind !== "") return gateKind
+            var n = doneNoun
+            return n === "TRACK" ? "track" : n === "VIDEO" ? "video" : n === "ALBUM" ? "album"
+                 : n === "PLAYLIST" ? "playlist" : n === "MIX" ? "mix" : ""
+        }
         // Opt-in for track-scoped buttons only: the ownership store is keyed by
         // exact track id, so a plain album/playlist/artist mediaId must not be
         // looked up as if it were one.
@@ -6118,6 +6322,14 @@ ApplicationWindow {
             root.openLibraryClaim(db.mediaId, db.libTitle, db.libPath,
                                   db.libAlbum ? "album" : "track")
         }
+        // The owned twin: a record of a download Waves made. It used to be
+        // inert, which left a copy the user could not find with no way to
+        // fetch it again; the gate names its folder and offers REDOWNLOAD.
+        readonly property bool canRedownload: liveSt === "" && owned && ownGateKind !== "" && mediaId !== ""
+        function openRedownload() {
+            root.openRedownloadGate({ kind: db.ownGateKind, id: db.mediaId,
+                                      title: db.gateTitle !== "" ? db.gateTitle : db.libTitle }, db.ownFolder)
+        }
         // "pending" = at least one member's ownership has never been answered
         // this session (the cache is cold and a worker is fetching); a single
         // firm "not owned" settles the rollup to false no matter what is
@@ -6137,18 +6349,25 @@ ApplicationWindow {
             var r
             if (collectionIds !== null) {
                 _ownKeys = root.ownKeys(collectionIds)
-                r = _rollupWord(waves.collectionOwnershipFor(collectionIds))
+                var cd = waves.collectionOwnershipDetail(collectionIds)
+                r = _rollupWord(cd ? cd.verdict : "no")
+                ownInLibrary = !!(cd && cd.in_library === true)
+                ownFolder = cd && cd.folder ? "" + cd.folder : ""
             }
             else if (collectionCheck && mediaId !== "") {
                 var co = waves.collectionOwnership(mediaId)
                 _ownIds = co ? co.ids : null
                 _ownKeys = root.ownKeys(_ownIds)
                 r = _rollupWord(co ? co.verdict : "no")
+                ownInLibrary = !!(co && co.in_library === true)
+                ownFolder = co && co.folder ? "" + co.folder : ""
             }
             else {
                 _ownKeys = ownedCheck && mediaId !== "" ? [ "," + mediaId + "," ] : null
                 var o = ownedCheck && mediaId !== "" ? waves.ownershipOf(mediaId) : ({})
                 r = o.pending === true ? "pending" : (o.owned === true && o.up_to_date === true)
+                ownInLibrary = o.in_library === true
+                ownFolder = o.folder ? "" + o.folder : ""
             }
             ownPending = (r === "pending")
             owned = (r === true)
@@ -6220,7 +6439,7 @@ ApplicationWindow {
             id: dbMetricDone
             visible: false; spacing: 7
             Ico { name: "check"; color: root.accent; size: 14 }
-            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || root.dlInLibrary) ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || (db.owned ? db.ownInLibrary : root.dlInLibrary)) ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // The longest library-claim label ("PARTIALLY IN LIBRARY" beats "MAYBE
         // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
@@ -6525,16 +6744,18 @@ ApplicationWindow {
                 // green DOWNLOADED, the word explains why they differ.
                 // With the library scan on, the done state reads IN LIBRARY
                 // instead of DOWNLOADED, but only when the library actually
-                // holds the copy: downloads land inside the library root
-                // (dlInLibrary) or the scan proved this one present
-                // (libPresent). A download to a folder OUTSIDE the library
-                // stays DOWNLOADED; move the files in and the rescan flips
-                // the word. Green still marks a recorded fact (gold MAYBE
+                // holds the copy: the scan proved it present (libPresent), the
+                // recorded copy itself sits under the library root
+                // (ownInLibrary), or, for a download that just finished and
+                // has no record read yet, downloads land inside the root
+                // (dlInLibrary). A copy OUTSIDE the library stays DOWNLOADED,
+                // wherever downloads go today; move the files in and the
+                // rescan flips the word. Green still marks a recorded fact (gold MAYBE
                 // and cyan PARTIALLY are the guesses).
                 // "running" keeps the queued face frozen: the row is riding the
                 // exit belt as the matrix arrives, and letting the text fall
                 // through to the idle label would restart the roll mid-exit.
-                text: db.libGuess ? "MAYBE IN LIBRARY" : db.st === "done" ? ((db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || root.dlInLibrary) ? "IN LIBRARY" : "DOWNLOADED")) : db.st === "failed" ? "RETRY" : (db.waiting || db.st === "running") ? db.queuedLabel : db.libPartialClaim ? "PARTIALLY IN LIBRARY" : db.label.toUpperCase()
+                text: db.libGuess ? "MAYBE IN LIBRARY" : db.st === "done" ? ((db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || (db.owned ? db.ownInLibrary : root.dlInLibrary)) ? "IN LIBRARY" : "DOWNLOADED")) : db.st === "failed" ? "RETRY" : (db.waiting || db.st === "running") ? db.queuedLabel : db.libPartialClaim ? "PARTIALLY IN LIBRARY" : db.label.toUpperCase()
                 color: db.libGuess ? root.gold : db.st === "done" ? root.accent : db.st === "failed" ? root.red : (db.waiting || db.st === "running") ? root.accentDim : db.libPartialClaim ? root.cyan : root.accent
                 Behavior on color { ColorAnimation { duration: root.hoverMotion ? 420 : 0; easing.type: Easing.InOutQuad } }
                 font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack
@@ -6582,6 +6803,8 @@ ApplicationWindow {
             onClicked: {
                 // A library claim is a guess, so it answers instead of ignoring.
                 if (db.libClaim) { db.openLibraryClaim(); return }
+                // A recorded copy answers too: where it is, and REDOWNLOAD.
+                if (db.st === "done" && db.canRedownload) { db.openRedownload(); return }
                 if (db.st === "running" || db.st === "done" || db.waiting) return
                 db.onTap()
             }
@@ -7182,7 +7405,7 @@ ApplicationWindow {
         }
         function run(t) {
             if (!t) return
-            t = ("" + t).trim()
+            t = ("" + t).replace(/\s+/g, " ").trim()
             if (!t.length) return
             _final = t; _locked = 0; decoding = true
             begun()
@@ -8190,6 +8413,7 @@ ApplicationWindow {
         property string art: ""
         property string year: ""
         property string releaseDate: ""
+        property string listedDate: ""   // the day a reissue was really listed, "" otherwise: shown over releaseDate
         property int trackCount: 0
         property int durationSec: 0      // raw seconds, the presence matcher's duration witness
         property string quality: ""
@@ -8276,7 +8500,8 @@ ApplicationWindow {
                         textFormat: Text.PlainText; text: title
                         color: abRowTitleMa.containsMouse ? "#ffffff" : root.textHi
                         font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true
-                        rightPadding: abRowPill.visible ? abRowPill.width + 8 : 0
+                        rightPadding: (abRowPill.visible ? abRowPill.width + 8 : 0)
+                                      + (abRowNew.visible ? abRowNew.width + (abRowPill.visible ? 6 : 8) : 0)
                         // Title -> the album's dedicated page (row click still expands)
                         MouseArea {
                             id: abRowTitleMa
@@ -8294,16 +8519,27 @@ ApplicationWindow {
                         AlbumPresencePill {
                             id: abRowPill
                             anchors.verticalCenter: parent.verticalCenter
-                            x: Math.min(abRowTitle.contentWidth + 8, abRowTitle.width - width)
+                            x: Math.min(abRowTitle.contentWidth + 8,
+                                        abRowTitle.width - width - (abRowNew.visible ? abRowNew.width + 6 : 0))
                             album: ({ artist: ab.artistName, title: ab.title,
                                       year: ab.year, tracks: ab.trackCount,
                                       duration_sec: ab.durationSec })
+                        }
+                        // Tested on the date the row shows (a reissue's listed
+                        // day over TIDAL's original), so the two never disagree.
+                        NewTag {
+                            id: abRowNew
+                            visible: root.isNewRelease(ab.listedDate !== "" ? ab.listedDate : ab.releaseDate)
+                            settled: abDl.st === "done"
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: abRowPill.visible ? abRowPill.x + abRowPill.width + 6
+                                                 : Math.min(abRowTitle.contentWidth + 8, abRowTitle.width - width)
                         }
                     }
                     ArtistLinks {
                         Layout.fillWidth: true
                         artists: ab.leadArtists
-                        suffix: (releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " trks" : "")
+                        suffix: (listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " trks" : "")
                     }
                 }
                 PopMeter { value: popularity; Layout.alignment: Qt.AlignVCenter }
@@ -8325,6 +8561,7 @@ ApplicationWindow {
                     }
                 }
                 DownloadButton {
+                    id: abDl
                     Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"
                     libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec })
                     onTap: function(){ waves.downloadAlbum(albumId) }
@@ -8399,7 +8636,7 @@ ApplicationWindow {
                             width: parent.width
                             px: 14
                             artists: ab.leadArtists
-                            suffix: (releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
+                            suffix: (listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
                         }
                         Row {
                             spacing: 10; topPadding: 6
@@ -8849,6 +9086,69 @@ ApplicationWindow {
         }
     }
 
+    // Recent-release mark: a mint dot and the word, no chip. Every other badge
+    // is a bordered pill about what you HAVE (library, quality); this one is
+    // about the calendar, so it stays out of their shape. The dot, breathing
+    // gently, keeps the word from reading as part of the date it usually
+    // follows. It decides
+    // nothing: callers bind visible to root.isNewRelease(). compact is the
+    // card caption size. settled is the caller saying you already have it
+    // (downloaded, or a full copy in the library): the mark stays, the breath
+    // stops, because the release is still new but no longer asking for you.
+    component NewTag: Item {
+        id: nt
+        objectName: "newTag"
+        property bool compact: false
+        property bool settled: false
+        readonly property bool pulsing: ntPulse.running
+        // Where the word's capitals sit, measured from the glyphs, so a caller
+        // beside much larger type can line the two up by eye rather than by
+        // their boxes (a 26px title's box centre is not its capitals' centre).
+        readonly property real capMiddle: ntWord.y + ntWord.baselineOffset - ntFm.tightBoundingRect("NEW").height / 2
+        FontMetrics { id: ntFm; font: ntWord.font }
+        implicitHeight: compact ? 14 : 18
+        implicitWidth: ntDot.width + ntWord.anchors.leftMargin + ntWord.implicitWidth
+        Rectangle {
+            id: ntDot
+            width: parent.compact ? 4 : 5; height: width; radius: width / 2
+            color: root.accentContTx
+            anchors.verticalCenter: parent.verticalCenter
+            // A very gentle breath, on the render thread: an OpacityAnimator
+            // costs the GUI thread nothing per frame, where a NumberAnimation
+            // on every marked row and card would evaluate on it at display
+            // rate. It runs only while it can be seen, never under the launch
+            // reveal, and starts on the next shared beat of the wall clock, so
+            // a shelf of dots breathes in step instead of twinkling out of phase.
+            readonly property bool breathing: visible && root.onScreen && root.bootContentShown >= 1 && !nt.settled
+            function breathe() {
+                ntPulse.stop()
+                ntBeat.stop()
+                opacity = 1
+                if (!breathing) return
+                ntBeat.interval = Math.max(1, root.newPulseMs - Date.now() % root.newPulseMs)
+                ntBeat.start()
+            }
+            onBreathingChanged: breathe()
+            Component.onCompleted: breathe()
+            Timer { id: ntBeat; repeat: false; onTriggered: ntPulse.start() }
+            SequentialAnimation {
+                id: ntPulse
+                loops: Animation.Infinite
+                OpacityAnimator { target: ntDot; from: 1; to: 0.5; duration: root.newPulseMs / 2; easing.type: Easing.InOutSine }
+                OpacityAnimator { target: ntDot; from: 0.5; to: 1; duration: root.newPulseMs / 2; easing.type: Easing.InOutSine }
+            }
+        }
+        Text {
+            id: ntWord
+            anchors.left: ntDot.right; anchors.leftMargin: parent.compact ? 4 : 5
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: "NEW"
+            color: root.accentContTx
+            font.family: root.mono; font.pixelSize: parent.compact ? 10 : 11
+            font.bold: true; font.letterSpacing: 0.8
+        }
+    }
+
     // A line of comma-separated artist names, each individually clickable.
     component ArtistLinks: Row {
         id: al
@@ -9014,7 +9314,8 @@ ApplicationWindow {
                         // inside the full-width Text, exactly like the album
                         // row's pill: the title keeps its layout size and
                         // elides only for real overflow.
-                        rightPadding: trPill.visible ? trPill.width + 8 : 0
+                        rightPadding: (trPill.visible ? trPill.width + 8 : 0)
+                                      + (trNew.visible ? trNew.width + (trPill.visible ? 6 : 8) : 0)
                         // Title -> the track's album page (highlighting this track);
                         // for a video row it opens the in-app video player instead.
                         MouseArea {
@@ -9032,11 +9333,23 @@ ApplicationWindow {
                         TrackPresencePill {
                             id: trPill
                             anchors.verticalCenter: parent.verticalCenter
-                            x: Math.min(trTitle.contentWidth + 8, trTitle.width - width)
+                            x: Math.min(trTitle.contentWidth + 8,
+                                        trTitle.width - width - (trNew.visible ? trNew.width + 6 : 0))
                             track: trow.kind === "video" ? null
                                    : ({ artist: trow.artistName, title: trow.title,
                                         album: trow.album, year: trow.year,
                                         duration_sec: trow.durationSec })
+                        }
+                        // On the album's own page too: each row goes steady on
+                        // its own as that track lands, which the header alone
+                        // cannot say.
+                        NewTag {
+                            id: trNew
+                            visible: trow.kind !== "video" && root.isNewRelease(trow.date)
+                            settled: trDl.st === "done"
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: trPill.visible ? trPill.x + trPill.width + 6
+                                              : Math.min(trTitle.contentWidth + 8, trTitle.width - width)
                         }
                     }
                     ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[tId] || []; suffix: album; albumId: trow.albumId }
@@ -9060,6 +9373,7 @@ ApplicationWindow {
                     }
                 }
                 DownloadButton {
+                    id: trDl
                     Layout.alignment: Qt.AlignVCenter; mediaId: tId; ownedCheck: true
                     label: trow.kind === "video" ? "Download video" : "Download track"
                     // The same identity the pill beside the title resolves, so
@@ -9251,25 +9565,29 @@ ApplicationWindow {
         // and must never wear one's verdict.
         property var libPresence: null
         property bool _libResolved: false
-        function resolveLibPresence() {
+        // The payload's own answer (card.lib) serves the creation, a later
+        // publish asks live: see ArtCard.resolveLibPresence for why a bridge
+        // call inside an incubation slice is the launch water's enemy.
+        function resolveLibPresence(live) {
             _libResolved = true
             var c = bc.card
-            libPresence = (bc.kind === "album" && c && c.title)
-                ? waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
+            if (!(bc.kind === "album" && c && c.title)) { libPresence = null; return }
+            libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
+                ? c.lib
+                : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
                                              "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
-                : null
         }
-        onCardChanged: resolveLibPresence()
+        onCardChanged: resolveLibPresence(false)
         // Only if the binding above has not already answered: an unconditional
         // resolve here is a second QML->Python call per card on a shelf.
-        Component.onCompleted: if (!_libResolved) resolveLibPresence()
+        Component.onCompleted: if (!_libResolved) resolveLibPresence(false)
         Connections {
             target: waves
             // A shelf builds this card for every kind, so the ones that will
             // never ask must not run a handler per card per committed batch
             // of a running scan.
             enabled: bc.kind === "album"
-            function onLibraryPresenceChanged() { bc.resolveLibPresence() }
+            function onLibraryPresenceChanged() { bc.resolveLibPresence(true) }
         }
         readonly property bool libPresent: !!(bc.libPresence && bc.libPresence.present === true)
         readonly property bool libFull: !!(bc.libPresence && bc.libPresence.full === true)
@@ -9345,7 +9663,7 @@ ApplicationWindow {
             // Full-width caption line: the album's artist link + date (or
             // "N tracks") gets the whole row now that the download control
             // lives on its own line below.
-            CardCaption { card: bc.card; px: 11; width: parent.width }
+            CardCaption { card: bc.card; px: 11; width: parent.width; settled: bc.dlSt === "done" || bc.libClaim }
         }
         // Control line pinned to the bottom edge so shelf rows align:
         // ▶ PREVIEW on the left, bare-text download on the right.
@@ -9875,13 +10193,22 @@ ApplicationWindow {
         // has no album identity to ask about, and must never wear one's badge.
         property var libPresence: null
         property bool _libResolved: false
-        function resolveLibPresence() {
+        // The answer the payload carries (card.lib, resolved on the worker
+        // that built the page) serves the card's creation; only a later
+        // change (a library publish) asks the bridge. A card being created
+        // is inside an incubation slice, and a bridge call there waits its
+        // turn for the interpreter behind every busy worker: sampled live
+        // at launch, that wait was most of what the boot water dropped
+        // frames on. Keys are checked with `in`: a payload built before the
+        // dressing existed simply has no key and asks as before.
+        function resolveLibPresence(live) {
             _libResolved = true
             var c = ac.card
-            libPresence = (ac.kind === "album" && c && c.title)
-                ? waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
+            if (!(ac.kind === "album" && c && c.title)) { libPresence = null; return }
+            libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
+                ? c.lib
+                : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
                                              "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
-                : null
         }
         // The cross-session downloaded fact, the same rollup the full button
         // uses: every member track recorded by a real download and still up
@@ -9899,15 +10226,11 @@ ApplicationWindow {
         property var _ownIds: null
         // Batch keys for those members (root.ownKeys).
         property var _ownKeys: null
-        function refreshOwned() {
-            if (!ac.ownable) { owned = false; return }
-            // One bridge call for the whole collection (member ids + verdict):
-            // a call per member was ~15 interpreter round-trips per card, and
-            // under the launch-time scan each of them queued for its turn.
-            var co = waves.collectionOwnership("" + (ac.card.id || ""))
+        function applyOwn(co) {
             var ids = co ? co.ids : null
             _ownIds = ids
             _ownKeys = root.ownKeys(ids)
+            root.ownCardRegister("" + (ac.card.id || ""), _ownKeys)
             var v = co ? co.verdict : "no"
             if (v === "no") { owned = false; return }
             // Cold answers in flight and nothing firmly against: keep the last
@@ -9915,12 +10238,25 @@ ApplicationWindow {
             // ownership nudge re-asks once the truth lands.
             if (v === "owned") owned = true
         }
-        onCardChanged: { resolveLibPresence(); refreshOwned() }
-        Component.onCompleted: { if (!_libResolved) resolveLibPresence(); refreshOwned() }
+        function refreshOwned(live) {
+            if (!ac.ownable) { owned = false; return }
+            // One bridge call for the whole collection (member ids + verdict):
+            // a call per member was ~15 interpreter round-trips per card, and
+            // under the launch-time scan each of them queued for its turn.
+            // None at all while the card is created: the payload's own
+            // rollup (card.own) answers, see resolveLibPresence. And none per
+            // card when a batch of answers lands: the root asks once for
+            // every hit card (ownCardsBatch) and the card reads its answer.
+            applyOwn((!live && ("own" in ac.card) && ac.card.ownGen === root.ownGen) ? ac.card.own
+                     : waves.collectionOwnership("" + (ac.card.id || "")))
+        }
+        Component.onDestruction: root.ownCardForget("" + (ac.card.id || ""))
+        onCardChanged: { resolveLibPresence(false); refreshOwned(false) }
+        Component.onCompleted: { if (!_libResolved) resolveLibPresence(false); refreshOwned(false) }
         Connections {
             target: waves
             enabled: ac.kind === "album"
-            function onLibraryPresenceChanged() { ac.resolveLibPresence() }
+            function onLibraryPresenceChanged() { ac.resolveLibPresence(true) }
         }
         Connections {
             target: waves
@@ -9931,12 +10267,22 @@ ApplicationWindow {
             function onOwnershipChanged(tid) {
                 if (tid === "" || (ac._ownIds && ac._ownIds.indexOf(tid) !== -1)) acOwnCoalesce.restart()
             }
-            function onOwnershipChangedBatch(batch) { if (root.ownBatchHits(batch, ac._ownKeys)) acOwnCoalesce.restart() }
-            function onCollectionMembershipChanged(cid) { if (cid === "" + (ac.card.id || "")) ac.refreshOwned() }
+            function onCollectionMembershipChanged(cid) { if (cid === "" + (ac.card.id || "")) ac.refreshOwned(true) }
         }
-        Timer { id: acOwnCoalesce; interval: 50; onTriggered: ac.refreshOwned() }
+        Connections {
+            target: root
+            enabled: ac.ownable
+            function onOwnAnswersGenChanged() {
+                var a = root.ownAnswers["" + (ac.card.id || "")]
+                if (a) ac.applyOwn(a)
+            }
+        }
+        Timer { id: acOwnCoalesce; interval: 50; onTriggered: ac.refreshOwned(true) }
         readonly property bool libPresent: !!(ac.libPresence && ac.libPresence.present === true)
         readonly property bool libFull: !!(ac.libPresence && ac.libPresence.full === true)
+        // Downloaded this session, recorded as downloaded, or a full copy on
+        // disk: the NEW mark on the caption stops breathing.
+        readonly property bool haveIt: ac.owned || ac.libFull || root.dlSt(ac.card.id || "") === "done"
         readonly property bool libSure: !!(ac.libPresence && ac.libPresence.sure === true)
         // The three states the strip's download half can wear, exactly the
         // ones DownloadButton names: a proven complete copy, an unproven one,
@@ -9999,7 +10345,7 @@ ApplicationWindow {
                     color: "#f2f4f7"; font.pixelSize: 16; font.bold: true
                     width: parent.width; elide: Text.ElideRight
                 }
-                CardCaption { card: ac.card; px: 12; metaColor: "#f2f4f7"; width: parent.width }
+                CardCaption { card: ac.card; px: 12; metaColor: "#f2f4f7"; width: parent.width; settled: ac.haveIt }
             }
             // The library pill, top-left over the art: the one corner no
             // caption or hover control uses. Unlike the strip it does NOT wait
@@ -10320,7 +10666,7 @@ ApplicationWindow {
                     onClicked: root.openBrowseCard(ac.card)
                 }
             }
-            CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width }
+            CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width; settled: ac.haveIt }
         }
     }
 
@@ -11386,6 +11732,11 @@ ApplicationWindow {
         else if (grp === "stopped") root.stoppedCount += d
         else if (grp === "downloading") root.downloadingCount += d
         else root.queuedCount += d
+        // The one funnel every section count passes through, so it is where
+        // the header pulse is named: the section that GREW. A promotion bumps
+        // two sections in the same tick, one down and one up, and only the
+        // rise is news.
+        if (d > 0) { root.pulseSection = grp; root.pulseTick += 1 }
     }
     // Model index where a group begins: the groups sit in a fixed order and
     // each is contiguous, so a boundary is a sum of counts.
@@ -11608,7 +11959,6 @@ ApplicationWindow {
         queueGroupBump("completed", 1)
         queueLingerDrop(qid)
         queueModelMove(i, 0)
-        root.compBump += 1
     }
 
     // Media rows carry an `artists` array (clickable per-artist); ListModel
@@ -11946,6 +12296,7 @@ ApplicationWindow {
         // The local library-presence index (re)built: re-query for the album on
         // screen so the badge appears/updates with no reload.
         function onLibraryPresenceChanged() {
+            root.libStamp = waves.libraryStamp()
             root._resolveLibraryPresence()
             // A search page waiting behind the veil for its badges can have
             // them now. Handed to a zero-interval timer rather than revealed
@@ -12069,6 +12420,7 @@ ApplicationWindow {
                 root.applySort(true)
                 root.reconcileById(playlistsModel, r.playlists, false)
                 root.reconcileById(mixesModel, r.mixes, false)
+                root.searchNoResultsFor = ""
                 return
             }
             root.navPush()
@@ -12121,6 +12473,10 @@ ApplicationWindow {
             root.applySort()
             root.fill(playlistsModel, r.playlists)
             root.fill(mixesModel, r.mixes)
+            var any = (r.artists || []).length + (r.albums || []).length + (r.tracks || []).length
+                    + (r.videos || []).length + (r.playlists || []).length + (r.mixes || []).length
+                    + (r.top ? 1 : 0)
+            root.searchNoResultsFor = any === 0 ? root.lastSearchQuery : ""
         }
         // Assign a NEW object so the `var` property fires a change notification
         // (mutating + reassigning the same reference does not update bindings).
@@ -12481,8 +12837,7 @@ ApplicationWindow {
                                     if (!searchBox.isTidalUrl(text) && !armed) return
                                     if (seqAtPaste !== root._navSeq
                                         || root.browseOpen || root.libraryOpen || root.settingsOpen) return
-                                    root._searchSeq = root._navSeq
-                                    waves.search(text)
+                                    root.submitSearch(root.searchQueryText(text))
                                 }
                             }
 
@@ -12496,7 +12851,11 @@ ApplicationWindow {
                                     color: searchDecoder.decoding ? root.accent : root.textHi
                                     placeholderTextColor: root.textLo; font.pixelSize: 15
                                     background: Rectangle { color: "transparent" }
-                                    onAccepted: { root._searchSeq = root._navSeq; waves.search(text) }
+                                    onAccepted: {
+                                        var qt = root.searchQueryText(text)
+                                        if (qt !== text) text = qt   // show what is searched
+                                        root.submitSearch(qt)
+                                    }
                                     // A click or Tab into a box that already holds a term selects
                                     // the whole term (deferred one tick past the click's own caret
                                     // placement, which would otherwise clear it) so the next
@@ -13070,7 +13429,8 @@ ApplicationWindow {
                                         text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : root.browseTitleHint
                                         color: root.textHi; font.pixelSize: 26; font.bold: true
                                         width: Math.min(implicitWidth,
-                                                        parent.width - (bihPill.visible ? bihPill.width + 10 : 0))
+                                                        parent.width - (bihPill.visible ? bihPill.width + 10 : 0)
+                                                        - (bihNew.visible ? bihNew.width + 10 : 0))
                                         elide: Text.ElideRight
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
@@ -13091,6 +13451,18 @@ ApplicationWindow {
                                         // match drops the "?" here too.
                                         proven: !!(root.libraryPresence && root.libraryPresence.present
                                                    && root.libraryPresence.sure === true)
+                                    }
+                                    // Capitals on the title's capitals: centred by
+                                    // box, the small mono word sat visibly high
+                                    // beside the 26px title.
+                                    FontMetrics { id: bihTitleFm; font: bihTitle.font }
+                                    NewTag {
+                                        id: bihNew
+                                        y: Math.round(bihTitle.y + bihTitle.baselineOffset
+                                                      - bihTitleFm.tightBoundingRect("H").height / 2 - capMiddle)
+                                        visible: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
+                                                    && root.isNewRelease(browseItemHeader.hd.date))
+                                        settled: bihDl.st === "done"
                                     }
                                 }
                                 Text {
@@ -13129,6 +13501,7 @@ ApplicationWindow {
                                     // Nothing to download until the payload says what.
                                     visible: browseItemHeader.hd !== null
                                     DownloadButton {
+                                        id: bihDl
                                         mediaId: browseItemHeader.hd ? (browseItemHeader.hd.id || "") : ""
                                         label: browseItemHeader.hd
                                                ? (browseItemHeader.hd.kind === "playlist" ? "Download playlist"
@@ -13288,7 +13661,12 @@ ApplicationWindow {
                     id: emptyHint
                     visible: root.signedIn && !root.hasResults
                     width: parent.width; horizontalAlignment: Text.AlignHCenter
-                    text: "Search for an artist, album, or track to begin"
+                    textFormat: Text.PlainText; elide: Text.ElideMiddle
+                    // A search that found nothing says so: the invitation left
+                    // up read as a search that never started (issue #39).
+                    text: root.searchNoResultsFor !== ""
+                          ? "No results for “" + root.searchNoResultsFor + "”"
+                          : "Search for an artist, album, or track to begin"
                     color: root.textLo; font.pixelSize: 22; topPadding: 96
                     // gentle breathing so the empty state feels alive
                     SequentialAnimation on opacity {
@@ -13336,7 +13714,7 @@ ApplicationWindow {
                             id: topAlbumComp
                             AlbumBlock {
                                 albumId: topLd.modelData.id; title: topLd.modelData.title; artistName: topLd.modelData.artist; artistId: topLd.modelData.artist_id || ""
-                                art: topLd.modelData.art; year: "" + (topLd.modelData.year || ""); releaseDate: topLd.modelData.date || ""; trackCount: topLd.modelData.tracks || 0
+                                art: topLd.modelData.art; year: "" + (topLd.modelData.year || ""); releaseDate: topLd.modelData.date || ""; listedDate: topLd.modelData.listed || ""; trackCount: topLd.modelData.tracks || 0
                                 durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
                             }
                         }
@@ -13481,7 +13859,7 @@ ApplicationWindow {
                         onLoaded: root._searchBuildTick()
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                            art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                            art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                         }
                     }
                 }
@@ -13816,7 +14194,7 @@ ApplicationWindow {
                         visible: index < 5 || root.artistAlbumsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 ShowAllLabel {
@@ -13843,7 +14221,7 @@ ApplicationWindow {
                         visible: index < 5 || root.artistEpsExpanded
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 ShowAllLabel {
@@ -14063,7 +14441,7 @@ ApplicationWindow {
                         required property var model
                         width: ListView.view.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
                     }
                 }
                 LibList {
@@ -14924,7 +15302,7 @@ ApplicationWindow {
         var dir = root.sortAsc ? 1 : -1
         function ordered(raw, hasPop) {
             var arr = (raw || []).slice()
-            if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.date || a.year || "").localeCompare(b.date || b.year || "")) })
+            if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.listed || a.date || a.year || "").localeCompare(b.listed || b.date || b.year || "")) })
             else if (sortBox.currentIndex === 2) arr.sort(function(a, b){ return dir * a.title.localeCompare(b.title) })
             else if (sortBox.currentIndex === 3 && hasPop) arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })
             else if (root.sortAsc) arr.reverse()  // Relevance (or no popularity data): the API's order, the arrow flips it
@@ -15008,6 +15386,9 @@ ApplicationWindow {
                 section.criteria: ViewSection.FullString
                 section.delegate: Item {
                     id: secItem
+                    // Named so a scenario can find the headers and prove which
+                    // one the count pulse lands on.
+                    objectName: "queueSectionHeader"
                     required property string section
                     width: ListView.view.width
                     // Two extra pixels of headroom so the header's chips are not
@@ -15088,9 +15469,32 @@ ApplicationWindow {
                     }
                     MouseArea { anchors.fill: parent; enabled: secItem.section === "completed"; cursorShape: Qt.PointingHandCursor
                         onClicked: root.completedCollapsed = !root.completedCollapsed }
-                    Connections { target: root; function onCompBumpChanged() { if (secItem.section === "completed") secPulse.restart() } }
+                    // Armed, not fired: the tick lands mid-move, while the
+                    // view is still handing headers to their new sections, so
+                    // every header waits a frame and then asks whether IT is
+                    // the section that grew. A header re-sectioned mid-pulse
+                    // drops the animation rather than carrying it across.
+                    // A section gaining its FIRST row is covered by this too,
+                    // by the same two properties. The tick arms every header
+                    // that exists NOW, the view then hands one of those pooled
+                    // headers to the brand new section, and the timer fires
+                    // afterwards and asks what section it is holding by then.
+                    // So the header that pulses need never have existed when
+                    // the count moved. Arming on Component.onCompleted as well
+                    // was tried and reverted: it guards nothing (proved in
+                    // tests/test_queue_section_pulse.py) and it would need a
+                    // freshness window to stop a header the view recycles
+                    // minutes later replaying an old pulse.
+                    Connections { target: root; function onPulseTickChanged() { secArm.restart() } }
+                    Timer {
+                        id: secArm
+                        interval: 16
+                        onTriggered: if (secItem.section === root.pulseSection) secPulse.restart()
+                    }
+                    onSectionChanged: { secPulse.stop(); secLbl.scale = 1 }
                     SequentialAnimation {
                         id: secPulse
+                        objectName: "queueSectionPulse"
                         NumberAnimation { target: secLbl; property: "scale"; to: 1.25; duration: 150; easing.type: Easing.OutCubic }
                         NumberAnimation { target: secLbl; property: "scale"; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
                     }
@@ -15111,11 +15515,25 @@ ApplicationWindow {
                     // playlist or mix row had no ledger and no hover peek.
                     // Expansion state lives on root (keyed by qid) so it
                     // survives delegate recycling.
-                    readonly property bool expandable: model.collection === true
+                    // A one-item release is its own ledger: the card already
+                    // names the release, its tier and its progress, so a list
+                    // of one line is nothing a click could reveal. `tracks` is
+                    // the total the row was queued with (_track_count, or the
+                    // merge plan's length), and only an EXACT 1 opts out: 0
+                    // means the count was not known, which is the case that
+                    // still needs the ledger.
+                    readonly property bool expandable: model.collection === true && model.tracks !== 1
+                    readonly property bool single: model.collection === true && model.tracks === 1
                     readonly property bool qexp: expandable && root.queueExpanded[model.qid] === true
                     // Hover peek: a collapsed album card dips open ~30px so the
                     // track view's existence is discoverable without a click.
-                    readonly property bool peeking: expandable && !qexp && cardHover.containsMouse
+                    // A single peeks too, and that is the point: a row that does
+                    // nothing at all under the pointer reads as a broken row,
+                    // so it dips to the same sliver and the sliver says it is a
+                    // single. It still carries no caret, no pointing cursor and
+                    // no track fetch, because there is nothing to open.
+                    readonly property bool peekable: expandable || single
+                    readonly property bool peeking: peekable && !qexp && cardHover.containsMouse
                     // How many track rows the ledger holds, and how many of
                     // them are actually built. A ledger row is not cheap (four
                     // texts, two DecryptText cells, three running Behaviors),
@@ -15130,10 +15548,22 @@ ApplicationWindow {
                     // user did ask for, builds up to root.queueLedgerMax and
                     // says how many rows it is not showing.
                     readonly property int ledgerLen: (root.queueTracks[model.qid] || []).length
+                    // While the sliver is still CLOSING it keeps what it was
+                    // showing. Bound to the hover alone, the ledger emptied on
+                    // the frame the pointer left and the card then spent the
+                    // whole 220ms retract closing on an empty box: the motion
+                    // read as the row swallowing its own content rather than
+                    // as a peek folding away. Only the closing half is held
+                    // (the opening one has nothing yet to keep), and a single's
+                    // sliver, whose whole content is one line of text, was the
+                    // clearest case of all.
+                    readonly property bool ledgerHolding: qexp || peeking || qtrackAnim.running
                     readonly property int ledgerShown: qexp ? Math.min(ledgerLen, root.queueLedgerMax)
-                                                    : peeking ? Math.min(ledgerLen, root.queueLedgerPeek)
+                                                    : ledgerHolding ? Math.min(ledgerLen, root.queueLedgerPeek)
                                                     : 0
                     function qtoggle() {
+                        // A single has no ledger to open; the card is the whole story.
+                        if (!expandable) { return }
                         var e = Object.assign({}, root.queueExpanded)
                         if (e[model.qid]) { delete e[model.qid] }
                         else { e[model.qid] = true; waves.loadQueueTracks(model.qid) }
@@ -15195,7 +15625,7 @@ ApplicationWindow {
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                         height: actCol.implicitHeight + 18
                         radius: 8; color: qrow.isComp ? root.surface : root.surface2
-                        border.color: qrow.isComp ? (cardHover.containsMouse && qrow.expandable ? root.outline : root.line1)
+                        border.color: qrow.isComp ? (cardHover.containsMouse && qrow.peekable ? root.outline : root.line1)
                                       : qrow.st === "done" ? root.greenDim
                                       : cardHover.containsMouse ? root.outline : root.border1
                         clip: true
@@ -15205,8 +15635,10 @@ ApplicationWindow {
                         MouseArea {
                             id: cardHover
                             anchors.fill: parent
-                            enabled: qrow.expandable
-                            hoverEnabled: qrow.expandable
+                            enabled: qrow.peekable
+                            hoverEnabled: qrow.peekable
+                            // The hand is a promise that a click does something,
+                            // so only the rows that can expand wear it.
                             cursorShape: qrow.expandable ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: qrow.qtoggle()
                             // Fetch the track list as soon as the peek starts so the
@@ -15379,15 +15811,31 @@ ApplicationWindow {
                             // show the track view exists, and retracts on hover-out.
                             Item {
                                 id: qtrackClip
+                                // Named so a scenario can watch the sliver
+                                // retract and prove it is not empty on the
+                                // way (see ledgerHolding above).
+                                objectName: "qLedgerClip"
                                 readonly property bool shown: qrow.qexp || qrow.peeking
                                 visible: shown || implicitHeight > 0.5
                                 clip: true
-                                Layout.fillWidth: true; Layout.bottomMargin: shown ? 2 : 0
+                                // Off the ANIMATED height, not off `shown`: bound to
+                                // the flag it added its 2px the instant the pointer
+                                // arrived, a step the card took before the smooth part
+                                // of the motion had begun.
+                                Layout.fillWidth: true; Layout.bottomMargin: implicitHeight > 0.5 ? 2 : 0
                                 implicitHeight: qrow.qexp ? qtrackCol.implicitHeight : (qrow.peeking ? 30 : 0)
                                 Behavior on implicitHeight {
                                     NumberAnimation {
                                         id: qtrackAnim
-                                        duration: 220; easing.type: Easing.OutBack; easing.overshoot: 1.6
+                                        // OutCubic, NOT OutBack. A spring overshoots its
+                                        // target and comes back, which on a peek driven by
+                                        // the POINTER reads as the card opening and then
+                                        // retracting by itself while the pointer sits
+                                        // still, and on hover-out it aims the height below
+                                        // zero before returning to it. Sweeping down a
+                                        // list of rows played that wobble once per row.
+                                        // A hover response has to settle where it stops.
+                                        duration: 220; easing.type: Easing.OutCubic
                                     }
                                 }
                                 ColumnLayout {
@@ -15397,8 +15845,18 @@ ApplicationWindow {
                                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line1 }
                                     Text {
                                         textFormat: Text.PlainText
-                                        visible: qtrackClip.shown && (root.queueTracks[qrow.model.qid] || []).length === 0
+                                        visible: qrow.ledgerHolding && !qrow.single && (root.queueTracks[qrow.model.qid] || []).length === 0
                                         text: "Loading tracks…"; color: root.textDim; font.family: root.mono; font.pixelSize: 10
+                                    }
+                                    // What the single's peek is for: the sliver
+                                    // answers the hover instead of waiting on a
+                                    // track list that would only repeat the card.
+                                    Text {
+                                        objectName: "qSingleNote"
+                                        textFormat: Text.PlainText
+                                        visible: qrow.ledgerHolding && qrow.single
+                                        text: "Single track, nothing to expand"
+                                        color: root.textDim; font.family: root.mono; font.pixelSize: 10
                                     }
                                 Repeater {
                                     // The count, not the array: every live tick
@@ -16870,7 +17328,9 @@ ApplicationWindow {
                         ? ((libraryClaimGate.albumTitle !== ""
                               ? "Waves downloaded “" + libraryClaimGate.albumTitle + "” itself, so this is a record, not a guess."
                               : "Waves downloaded this itself, so this is a record, not a guess.")
-                           + " Redownloading fetches every track fresh and replaces the copies Waves wrote,"
+                           + (libraryClaimGate.isTrack
+                                ? " Redownloading fetches it fresh and replaces the copy Waves wrote,"
+                                : " Redownloading fetches every track fresh and replaces the copies Waves wrote,")
                            + " including a same-named file it cannot tell apart from its own."
                            + " A Dolby Atmos file is never replaced by a stereo download; that lands beside it.")
                         : ((libraryClaimGate.isTrack
