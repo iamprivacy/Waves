@@ -22,6 +22,29 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.29 (2026-09-13)
+
+### ✨ Added
+
+- 🆕 Albums and tracks released in the last two weeks carry a small NEW mark, which stops pulsing once you have them, including on each track of an album page.
+
+### 🔧 Changed
+
+- 📁 Waves only counts copies you already have in your download or library folder.
+
+### 🐛 Fixed
+
+- 📚 A copy you already have reads DOWNLOADED or IN LIBRARY, and its button names the folder it is in ([issue #38](https://github.com/iamprivacy/Waves/issues/38)).
+- 🔍 Pasted searches find results again, and an empty or failed search says so ([issue #39](https://github.com/iamprivacy/Waves/issues/39)).
+- 📅 Album pages show the full release date at the top, not just the year.
+- 🖼️ Cover art you have already seen appears at once instead of loading again.
+- ❌ A queued discography or playlist reads QUEUED until it starts, and its ✕ cancels the whole batch.
+- 🔔 Queue section headings bounce the count that went up, not the one that fell.
+- 🧾 A single in the download queue no longer offers to expand.
+- 🖱️ Moving the pointer down the queue no longer makes cards twitch.
+- 📅 Reissues and anniversary editions show and sort by their own release date.
+- 🌊 The launch wave animation stays smooth while the library is checked.
+
 ## 🗂️ v0.1.28 (2026-09-07)
 
 ### ✨ Added
@@ -48,7 +71,7 @@ issue. A test enforces it.
 
 - 📚 On a share that treats two spellings of a name as two folders, both artists stay in your library instead of one being dropped as a duplicate.
 
-- 📚 An album downloaded by a version before 0.1.17 into a folder with a replaced character is recognised as already yours again, so it is not fetched a second time.
+- 📚 An album downloaded by a version before 0.1.17 into a folder with a replaced character is recognized as already yours again, so it is not fetched a second time.
 
 - 🎛️ The two controls on a browse console card no longer draw through each other.
 
@@ -131,7 +154,7 @@ issue. A test enforces it.
 - 🗂️ An album TIDAL lists no release year for now lands in a folder named after the album alone, instead of one beginning with "[None]".
 - 📻 A download that stops answering can no longer hold the queue up forever waiting on it.
 - 🛑 Pressing STOP while Waves is checking that your download folder is reachable now sticks: the row could go back to Downloading and the button re-light, until the whole list had been read.
-- ♻️ A REDOWNLOAD you cancelled or cleared before it started no longer forces the next download of that item: a later click on it, from a discography or a folder, could re-download and overwrite songs you already had without asking.
+- ♻️ A REDOWNLOAD you canceled or cleared before it started no longer forces the next download of that item: a later click on it, from a discography or a folder, could re-download and overwrite songs you already had without asking.
 - 🔁 RETRY ALL no longer loses the rows behind one that cannot be restarted: the others retry, and the one that could not keeps its place with its RETRY button.
 - 🎨 An artist download whose albums are waiting for a folder that went away now keeps its progress: the artist button went back to plain DOWNLOAD and never reported the albums that downloaded when the folder came back.
 - 🎯 An artist or folder download that finishes with every album saved no longer ends on FAILED because one of them failed on an earlier attempt in the same run.
@@ -159,7 +182,7 @@ issue. A test enforces it.
 
 - 💾 Albums whose best available quality is below your audio quality setting no longer download again on every run: Waves now recognizes that the copy you have is the best TIDAL offers and skips it ([issue #31](https://github.com/iamprivacy/Waves/issues/31)).
 - 🔁 REDOWNLOAD now applies to the download it forces and to its retries; once that download finishes, later downloads of the same item skip what you already have again.
-- 🧹 Clearing or cancelling queued albums out of a discography download no longer leaves the artist's progress bar stuck and the button unclickable until a restart ([issue #32](https://github.com/iamprivacy/Waves/issues/32)).
+- 🧹 Clearing or canceling queued albums out of a discography download no longer leaves the artist's progress bar stuck and the button unclickable until a restart ([issue #32](https://github.com/iamprivacy/Waves/issues/32)).
 - 🛑 Pressing STOP right as a discography finishes scanning no longer queues the whole discography behind the press or leaves the artist button lit.
 - 🧯 A discography scan that fails partway now hands the button back and says so, instead of showing a scan that never ends.
 - 📄 Queueing an item that is already waiting or downloading at the same quality no longer adds a second copy of it to the queue.
@@ -181,7 +204,7 @@ issue. A test enforces it.
 - ⚡ Rest the pointer on a playlist, album or mix card for a moment and the click that follows opens the page at once, covers included. Resting on a song does the same for the album it comes from.
 - 🖼️ An artist's page shows their picture straight away when you open it from a card that already shows it.
 - ⚡ Rest the pointer on an album row for a moment and the click that expands it shows its songs at once, instead of the list popping in after the panel has opened.
-- 🖼️ The round cover on a song row shows a loading mark until it arrives, and says so when a song has no cover at all. It used to be a blank grey circle in both cases.
+- 🖼️ The round cover on a song row shows a loading mark until it arrives, and says so when a song has no cover at all. It used to be a blank gray circle in both cases.
 - 💾 Waves keeps four times as many covers on your computer, so pages you have opened before come back faster.
 - ⏳ While a page loads, a light travels along a row of cells under the "Reading the wire…" line.
 
@@ -281,9 +304,9 @@ issue. A test enforces it.
 
 ### ✨ Added
 
-- 📚 New, experimental: point Waves at your music library (Settings, Library) and albums, artists and tracks you already own wear an IN LIBRARY pill wherever they appear, colour-coded by the quality you hold and one click from the matching folder. The feature is off by default (nothing is scanned until you turn it on and save), and the files you already have are only ever read, never modified, moved or renamed. Clicking the pill opens that album's folder in Finder or Explorer, so a downloaded album is one click from the file manager ([issue #23](https://github.com/iamprivacy/Waves/issues/23)).
-- 🏷️ The scan identifies your albums by their tags, so it recognises a library Waves did not create, whatever your folders are called. A multi-disc set counts as one album, edition names match by meaning ("Deluxe Edition" and "Deluxe Version" are one edition, "(2011 Remaster)" matches "(Remastered 2011)") while a live or acoustic release never matches the studio cut, and a folder short a track is never called complete. Real-world tag noise is absorbed too: accents match plain spellings (a library tagged Bjork finds Björk), "&" and "and" are one word, "The Beatles" and "Beatles" are one artist, featuring credits match however they were written, and one mis-tagged stray file no longer hides a whole album. Rescans re-read only what changed, and every folder you have scanned keeps its own saved index.
-- ⏱️ Play length is part of the match: an undated copy whose track count and total seconds agree with the release is confirmed instead of being left as an unproven "?", a same-count copy minutes apart is recognised as a different recording, and a single track is confirmed by its own seconds. Seconds outrank the year tag, so a remaster tagged with the original album's year still matches.
+- 📚 New, experimental: point Waves at your music library (Settings, Library) and albums, artists and tracks you already own wear an IN LIBRARY pill wherever they appear, color-coded by the quality you hold and one click from the matching folder. The feature is off by default (nothing is scanned until you turn it on and save), and the files you already have are only ever read, never modified, moved or renamed. Clicking the pill opens that album's folder in Finder or Explorer, so a downloaded album is one click from the file manager ([issue #23](https://github.com/iamprivacy/Waves/issues/23)).
+- 🏷️ The scan identifies your albums by their tags, so it recognizes a library Waves did not create, whatever your folders are called. A multi-disc set counts as one album, edition names match by meaning ("Deluxe Edition" and "Deluxe Version" are one edition, "(2011 Remaster)" matches "(Remastered 2011)") while a live or acoustic release never matches the studio cut, and a folder short a track is never called complete. Real-world tag noise is absorbed too: accents match plain spellings (a library tagged Bjork finds Björk), "&" and "and" are one word, "The Beatles" and "Beatles" are one artist, featuring credits match however they were written, and one mis-tagged stray file no longer hides a whole album. Rescans re-read only what changed, and every folder you have scanned keeps its own saved index.
+- ⏱️ Play length is part of the match: an undated copy whose track count and total seconds agree with the release is confirmed instead of being left as an unproven "?", a same-count copy minutes apart is recognized as a different recording, and a single track is confirmed by its own seconds. Seconds outrank the year tag, so a remaster tagged with the original album's year still matches.
 - 🔎 An optional MusicBrainz check (Settings, Library, off by default) confirms matches the scan cannot settle on its own. It sends artist and album titles to musicbrainz.org, one request per second, and caches the answers locally.
 - 🟡 Download buttons say what the scan found: green ALBUM IN LIBRARY for a complete copy it can confirm, gold MAYBE IN LIBRARY for one it cannot, cyan PARTIALLY IN LIBRARY for a copy you hold part of (a click fetches the rest). Single tracks say the same in their own words. Every one of them stays clickable, naming the matched folder with Download anyway behind it, because a tag match is a recognition, not a receipt.
 - 🖼️ Browse cards carry the same verdict on the artwork, without waiting for a hover, and clicking a claimed one explains the match exactly as the full button does.
@@ -323,7 +346,7 @@ issue. A test enforces it.
 ### ✨ Added
 
 - ❌ A queued download can be called off from the button that queued it. The download button carries an ✕ beside QUEUED while a click is waiting its turn: pressing it drops that item from the queue, without opening the queue drawer to find the same row. The button goes back to offering the download.
-- 🔣 Per-character stand-ins (Settings, File organization, under the illegal-character stand-in). One stand-in for every rejected character reads badly on the ones that carry meaning, so each character a file name cannot hold can now be given its own: " · " for ":" writes "Rarities Edition · Live" instead of "Rarities Edition- Live", while "?" still becomes "-" and "/" is simply removed. A character left alone follows the general stand-in, shown greyed in its box, and the table stays folded away until you open it. Like the general stand-in, it applies to future downloads only: folders and files already in your library keep the names they have, including the ones named with the general stand-in before an override was added ([issue #16](https://github.com/iamprivacy/Waves/issues/16)).
+- 🔣 Per-character stand-ins (Settings, File organization, under the illegal-character stand-in). One stand-in for every rejected character reads badly on the ones that carry meaning, so each character a file name cannot hold can now be given its own: " · " for ":" writes "Rarities Edition · Live" instead of "Rarities Edition- Live", while "?" still becomes "-" and "/" is simply removed. A character left alone follows the general stand-in, shown grayed in its box, and the table stays folded away until you open it. Like the general stand-in, it applies to future downloads only: folders and files already in your library keep the names they have, including the ones named with the general stand-in before an override was added ([issue #16](https://github.com/iamprivacy/Waves/issues/16)).
 - 🎁 A recommended set of stand-ins comes with the table: ":" becomes " · ", "/" and "\" become "-", '"' becomes "'", and "?" becomes a full-width "？" so an album called "?" still has a name. A new install starts with them. An existing library is asked first, on the File organization card, because its folders are already spelled the old way: take them, keep removing the characters as before, or set your own. Whichever you pick is remembered, and the card's "Recommended" link brings the set back at any time.
 
 ### 🔧 Changed
@@ -346,9 +369,9 @@ issue. A test enforces it.
 - 📁 A TIDAL playlist folder's name follows the illegal-character stand-ins too, so a folder called "?" keeps its level in your library instead of losing it, and a folder called "Chill: Night" is written with the stand-in you chose for ":" ([issue #16](https://github.com/iamprivacy/Waves/issues/16)).
 - 🏷️ A playlist's file name follows the illegal-character stand-ins like every other name in your library. A playlist called "?" used to lose its name entirely while an album called "?" kept one, and a stand-in such as " · " for ":" was ignored there ([issue #16](https://github.com/iamprivacy/Waves/issues/16)).
 - 🕳️ An empty file left behind by an interrupted download no longer keeps that track out of your library. A crash or a dropped network share between creating a file and writing it leaves a 0-byte file: the download started again, as it should, but the move then read the empty file as somebody else's and refused to land, every time, for good. The finished download now completes the interrupted write. A file that holds anything at all is still never touched.
-- 💯 A track whose name and all 99 of its numbered copies are taken now fails as a download failure and says so, instead of quietly aiming at an occupied name and reporting a collision that was not one.
+- 💯 A track whose name and all 99 of its numbered copies are taken is now reported as a failed download and says so, instead of quietly aiming at an occupied name and reporting a collision that was not one.
 - ♻️ Two same-name tracks keep their own files when the download is allowed to replace what is already there, which happens when "skip existing files" is off and whenever a track is re-fetched at a higher quality. In those modes no name was held, so the two mixes aimed at one file: one was written over the other, and its old copy was left behind at the lower quality under its numbered name. A name a download is holding is now off limits in every mode, while a file already in your library is still replaced when you asked for that.
-- 🔗 With "symlink to track" on, a playlist track whose name collides with a different track already in your artist folder is kept instead of being thrown away. The move into the artist folder recognized a neighbour by its name alone, so it treated a stranger's file as this track: the audio just downloaded was removed and the playlist entry was pointed at the wrong song. Names are now matched by the track they belong to, a genuinely new track lands beside the neighbour as a numbered copy, and two such tracks downloading at once each keep their own file.
+- 🔗 With "symlink to track" on, a playlist track whose name collides with a different track already in your artist folder is kept instead of being thrown away. The move into the artist folder recognized a neighbor by its name alone, so it treated a stranger's file as this track: the audio just downloaded was removed and the playlist entry was pointed at the wrong song. Names are now matched by the track they belong to, a genuinely new track lands beside the neighbor as a numbered copy, and two such tracks downloading at once each keep their own file.
 - 🔢 Re-downloading such an album recognizes the numbered copies it already made, even where one of them was since deleted or where the copies predate the release that started marking tracks with their TIDAL id. Both cases used to fetch a track again and leave a duplicate behind ([issue #15](https://github.com/iamprivacy/Waves/issues/15)).
 - ❓ An album whose title is nothing but characters a filesystem rejects (XXXTENTACION's "?") now gets its own folder when an illegal-character stand-in is set, instead of spilling its tracks loose into the artist folder ([issue #16](https://github.com/iamprivacy/Waves/issues/16)). Such a title leaves nothing behind once the illegal characters are removed, and the guard that keeps an existing library from being restructured mistook the artist folder above it for the album's old home. Tracks already downloaded loose stay exactly where they are, nothing is moved or downloaded twice.
 
@@ -425,13 +448,13 @@ issue. A test enforces it.
 - 👯 Duplicate video listings (the same video re-listed per quality, region or clean/explicit edit) now collapse to one, following the explicit preference, exactly as albums and tracks already did. Same-titled but genuinely different videos are kept.
 - ↕️ The search sort control (Relevance, Release date, Name and the direction arrow) now reorders the tracks and videos sections too, instead of quietly applying to albums only.
 - 🐍 A video preview that is still loading now waits on a "LOADING VIDEO" panel with a small snake circling it, eating the bites laid on its path and growing as it laps (the first bite always lands right ahead of it, so even a quick load shows a catch), instead of blowing the thumbnail up to a size it was never made for.
-- 🔗 The lyrics settings are linked instead of free-floating: the synced-only option lives inside the Save lyrics file tile, and Prefer LRCLIB lyrics greys out while both lyrics switches are off.
+- 🔗 The lyrics settings are linked instead of free-floating: the synced-only option lives inside the Save lyrics file tile, and Prefer LRCLIB lyrics grays out while both lyrics switches are off.
 - 🗂️ Settings sections all start collapsed on a first visit (Downloads is no longer forced open) and remember which ones you open or close, across visits and across launches. Links that jump to a specific section still open it for you.
 
 ### 🐛 Fixed
 
 - 👻 The opening wave animation no longer hides a live, clickable interface: a click on the launch screen used to land on the invisible page behind it and could start a full-volume preview out of nowhere, which read as Waves autoplaying at startup ([issue #13](https://github.com/iamprivacy/Waves/issues/13)). The launch screen now swallows clicks and scrolling, the interface stays inert until it is actually visible, and the cursor no longer turns into a pointing hand over buttons that cannot be seen.
-- ⏳ The launch animation holds its opening frame until your home landing has actually arrived, so a slower sign-in no longer ends the reveal on an empty page that loads in afterwards. A dead network still can't pin the launch screen.
+- ⏳ The launch animation holds its opening frame until your home landing has actually arrived, so a slower sign-in no longer ends the reveal on an empty page that loads in afterward. A dead network still can't pin the launch screen.
 - 🔌 A download folder on a network share that macOS quietly ejected (sleep, a network blip) now gets mounted back automatically, the same request Finder makes when you navigate to the share by hand. Waves remembers where the share came from while it is healthy and asks macOS to reconnect it (using the credentials saved in your keychain) whenever a download, "Try again" or the background recovery watch finds the volume gone, instead of endlessly re-checking a mount point that could never come back on its own.
 - 🧟 A network mount that is still listed but answers nothing (the zombie state a hung SMB session leaves behind) is now force-ejected and mounted back after a few seconds of silence, instead of being watched forever.
 - 🛟 A download that loses its folder mid-flight (share ejected or hung between the start check and the writes) is now held and retried automatically like any other folder outage, instead of turning the button red with a failure no dialog ever explained.
@@ -470,13 +493,13 @@ issue. A test enforces it.
 - 📥 The download queue can no longer lose a just-added row when another download finishes at the same moment, and an album finishing quickly no longer skips recording which tracks belong to it.
 - 🗑️ A failed preview no longer leaves an orphaned temp file behind, and quitting mid-FFmpeg-install no longer orphans a partial archive.
 - 🗄️ Quitting no longer risks "database is closed" errors from ownership records still being written.
-- ❌ Cancelling an app update now also works during the install phase, and a failed update no longer leaves a full extracted app copy in the config folder.
+- ❌ Canceling an app update now also works during the install phase, and a failed update no longer leaves a full extracted app copy in the config folder.
 - 🧩 Path templates: {album_date} and {isrc} without a value no longer write literal braces into folder names, {album_artist} on a release with no artist credit no longer fails the download, and de-duplicated filenames at deep paths are no longer shredded to "\_01.flac".
 - 🌀 A hiccup loading Mixes no longer makes My Tidal report "0 playlists".
 - 🔁 RETRY works on every Browse page again: drilled playlist grids and playlist/mix/album pages used to clear the error, show "loading" and never load; the button now re-requests the right page.
 - ⏳ An expanded album no longer sits on "Loading tracks…" forever after a search; the track list is re-fetched and a failure leaves the row re-expandable instead of dead.
 - 🎯 Fast scrolling through long album lists can no longer carry one album's selected tracks over to another row and download the wrong tracks.
-- ⚙️ Clicking Install twice (in Settings and on the update toast) no longer runs two updaters over the same staging folder, and cancelling an update can no longer be undone by a stray second Install click.
+- ⚙️ Clicking Install twice (in Settings and on the update toast) no longer runs two updaters over the same staging folder, and canceling an update can no longer be undone by a stray second Install click.
 - ♻️ RETRY on a failed download row works even after searching for something else in between; a row whose item cannot be re-fetched keeps its RETRY instead of dying silently.
 - 🐧 On Linux, an update started from a build that was launched out of another application's AppImage environment no longer overwrites that application's file.
 - 🔄 The Settings page now refreshes when the app changes a setting on its own ("Don't ask again", the player's video quality menu, the download folder auto-heal), instead of showing the old value until a manual save.
@@ -497,7 +520,7 @@ issue. A test enforces it.
 - 🛡️ An artist page whose fetch partly failed (for example a rate limit on the albums list) is no longer saved or allowed to wipe the album grid on screen; the last good page stays until a complete fetch succeeds.
 - 🗃️ A failed album track-list fetch no longer erases what Waves had already learned about that album's tracks (ownership badges kept working data).
 - 🔂 A failed playlist-folder scan no longer retries in a loop with the download button spinning forever; it stops, says so, and your next click retries.
-- ✂️ The favourites list used by library-scoped artist pages is no longer silently truncated when TIDAL returns a short page, and a failed load is no longer remembered as "no favourites" for ten minutes.
+- ✂️ The favorites list used by library-scoped artist pages is no longer silently truncated when TIDAL returns a short page, and a failed load is no longer remembered as "no favorites" for ten minutes.
 - 🗂️ A library tab whose very first load failed no longer saves an empty page as the truth; reopening the tab retries instead of showing an empty library.
 - 🚫 Downloading a discography now refuses to run on a partial scan (some release lists failed to load) instead of quietly downloading a truncated discography and reporting success, or claiming "No albums to download".
 - 🎼 A "best of both" album merge no longer skips tracks you already own in a different folder: every track lands in the merged album's own folder, so the album is complete on disk when the download reports done.
@@ -512,12 +535,12 @@ issue. A test enforces it.
 - 🔏 Answering the download-folder question with "keep it", or ticking "Don't ask again" on the bulk-download confirm, no longer silently switches off FLAC extraction and video conversion on disk (the loss only showed up on the next launch), and no longer writes a path containing your username into `settings.json`.
 - 🧽 `crash.log` is now scrubbed the same way every other log is. Crashes could previously write your username, home folder path and the name of the track being handled into that file, which the bug-report template asks you to paste into a public issue.
 - 🙈 "Also hide titles and searches" now actually hides them. The switch had nothing to act on, so an exported report taken with it turned on still contained your search terms and media names.
-- ➿ An album or playlist containing one track that fails to download no longer loops forever, re-downloading and rewriting every other track in it on every pass. The download now finishes and the queue row completes, instead of staying stuck on "running" until cancelled.
+- ➿ An album or playlist containing one track that fails to download no longer loops forever, re-downloading and rewriting every other track in it on every pass. The download now finishes and the queue row completes, instead of staying stuck on "running" until canceled.
 - 👻 Downloading from a Mac to a WebDAV network drive no longer litters the server with hidden 4 KB `._` companion files next to every track, cover and playlist (macOS metadata files that other systems show as ghost files). Generated m3u playlists also no longer pick up any existing `._` files as tracks.
 - 🟢 Album rows in search results now show the artist name, clickable in green like everywhere else, both on the collapsed row and in the expanded album panel.
 - 📜 Playlists longer than 200 tracks now show every track: the track list stopped after two pages of the paged playlist endpoint, truncating long playlists even though the header count was right ([issue #12](https://github.com/iamprivacy/Waves/issues/12)).
-- 🚀 Very long playlists scroll smoothly again. Waves now builds only the rows around what you are looking at and fills the rest in as you scroll, instead of building all of them at once, so a several-hundred-track playlist no longer stays sluggish the whole time you are on it. Download buttons also stopped building their progress bar while nothing is downloading. Together these cut the memory a browsing session holds by roughly eight times.
-- 🔙 Browse and My Tidal keep their pages alive behind the scenes: going Back or Forward between the Browse front page and an open playlist or album is instant and lands exactly where you left off, with nothing visibly assembling, scrolling or reloading, and each My Tidal category (Albums, Tracks, Artists, Playlists, Mixes, Videos) holds its rows, scroll position and expanded albums for as long as the app runs instead of reloading every time you switch. Leaving for another tab and returning is just as seamless, and fresh favourites are still picked up quietly in the background without moving the page under you.
+- 🚀 Very long playlists scroll smoothly again. Waves now builds only the rows around what you are looking at and fills the rest in as you scroll, instead of building all of them at once, so a several-hundred-track playlist no longer stays sluggish the whole time you are on it. Download buttons also stopped building their progress bar while nothing is downloading. Together these cut the memory a browsing session holds to roughly an eighth.
+- 🔙 Browse and My Tidal keep their pages alive behind the scenes: going Back or Forward between the Browse front page and an open playlist or album is instant and lands exactly where you left off, with nothing visibly assembling, scrolling or reloading, and each My Tidal category (Albums, Tracks, Artists, Playlists, Mixes, Videos) holds its rows, scroll position and expanded albums for as long as the app runs instead of reloading every time you switch. Leaving for another tab and returning is just as seamless, and fresh favorites are still picked up quietly in the background without moving the page under you.
 - 🍞 A page reached by returning to its section through the nav tabs no longer leaves you without breadcrumbs: the trail now always begins with the section's home pill (Browse, Search, or My Tidal), so there is always a visible way back up, not just the Back gesture.
 - 🥖 Breadcrumbs no longer wipe in whenever a page opens: crumbs now appear in place, with only a barely-there fade when one is removed.
 - 🌊 The launch animation hands over cleanly again: the version readout always finishes its drain before the wordmark zooms away and the interface fades up, instead of the two overlapping on a busy start.
@@ -588,13 +611,13 @@ issue. A test enforces it.
 ### 🔧 Changed
 
 - 🌊 While a page loads, the finished page now fades in gently over the ambient water animation rather than snapping on in one hard paint. The "Reading the wire…" hint rides that same living water while it works.
-- 🎚️ The mini player in the bottom bar now sits in the right corner while that corner is free, leaving the middle of the bar clear. If an update notice needs the corner, the player slides to the centre in one smooth move and slides back when the corner frees up again.
-- ⚡ The wave-logo box now carries an occasional lightning storm at rest: seven strikes spread across a slow 20-second loop, tall bolts framing the box at the left and right, smaller ones scattered between, and a big centre strike that lights the whole box with a brief flash. Hovering the box still summons the full storm.
+- 🎚️ The mini player in the bottom bar now sits in the right corner while that corner is free, leaving the middle of the bar clear. If an update notice needs the corner, the player slides to the center in one smooth move and slides back when the corner frees up again.
+- ⚡ The wave-logo box now carries an occasional lightning storm at rest: seven strikes spread across a slow 20-second loop, tall bolts framing the box at the left and right, smaller ones scattered between, and a big center strike that lights the whole box with a brief flash. Hovering the box still summons the full storm.
 - 🕶️ The soft darkening at the top and bottom scroll edges now appears only while rows are actually being cut off there. At the top or bottom of a page it fully lifts, so artist artwork, heroes and the back bar are no longer dimmed when the page is not scrolled.
 - 🧭 Collapsing an expanded section with SHOW LESS now brings you back to the top of that section (with a little breathing room above), instead of dropping you at whatever the bottom of the shorter page happens to be.
 - 🔤 Track titles in track rows (search results, top tracks, album pages, recent tracks) are now slightly larger and a touch heavier than the artist and album line beneath them, so the title leads the row at a glance.
 - 📂 The Browse… button next to folder and file settings lights up green while the field is still empty (it is the thing to click) and settles to a faded green once a value is set.
-- ✳️ The SHOW ALL links under top tracks, search sections and the artist strip are now a soft mint green at rest, so it is clear at a glance that they can be clicked (they used to sit grey until hovered).
+- ✳️ The SHOW ALL links under top tracks, search sections and the artist strip are now a soft mint green at rest, so it is clear at a glance that they can be clicked (they used to sit gray until hovered).
 - 🔊 ReplayGain tags are now written by default, so players that support it can level volume across your library without changing the audio. This update switches it on for existing installs too; you can turn it back off any time under Settings > Advanced > Write ReplayGain tags. Tracks TIDAL never measured are left untagged instead of stamped with a wrong level, and gain is written in the standard "-7.36 dB" form.
 - 🔎 Every section on the search page now shows just its first few results with a SHOW ALL beneath it, so the page reads as a quick overview instead of a long page you scroll past: albums, tracks, videos, playlists, and mixes each show their first 5, and artists sit in a single sideways-scrolling row. Whichever sections you open are remembered and stay open on your next search, per section, so you do not have to expand them again each time. Picking a single category from the filters still shows everything in it. Results collapsed behind a SHOW ALL do not download their covers until you expand them, so the art you can actually see loads sooner on a new search.
 
@@ -605,10 +628,10 @@ issue. A test enforces it.
 - 🖱️ The mouse cursor works normally on the search page again: buttons show the pointing hand instead of the plain arrow. The focused search box was quietly overriding the cursor for the whole window.
 - ⌨️ Clicking outside any text field now releases it, the blinking cursor and green outline go away, matching how the search box already behaved. Settings fields like the download folder path used to hold their outline until you clicked another field.
 - 🏷️ The search category filters (All, Artists, Albums, and so on) stay put instead of fading out and back in on every search, and they appear as soon as results arrive instead of only after the result cards finish drawing.
-- 🖼️ Artist artwork no longer flickers to grey boxes while you resize the window; covers hold their image steadily instead of reloading on every frame of the drag.
+- 🖼️ Artist artwork no longer flickers to gray boxes while you resize the window; covers hold their image steadily instead of reloading on every frame of the drag.
 - 🎞️ Result rows no longer hold a stale look after switching tabs or changing the result filter; the subtle curve at the top and bottom edges now settles into place right away instead of only correcting once you scroll.
 - 🪟 Resizing the window on the search page no longer stutters or jumps: the matching and similar artist cards now hold a fixed size, so a resize reveals more or fewer of them instead of rescaling every card on screen as you drag.
-- 🖼️ Track rows in search results no longer show an occasional blank grey circle where the album cover should be. The small round covers now load the same reliable way as the rest of the app (with caching and a retry), instead of a one-shot fetch that could silently fail and leave the circle empty until you reopened the album.
+- 🖼️ Track rows in search results no longer show an occasional blank gray circle where the album cover should be. The small round covers now load the same reliable way as the rest of the app (with caching and a retry), instead of a one-shot fetch that could silently fail and leave the circle empty until you reopened the album.
 - 🧭 Browse stays current while you keep it open. Its New, Top, and For You rows now refresh on a timer as well as when you return to the tab, so an app left running for days follows what TIDAL is featuring instead of staying pinned to whatever loaded when you first opened it.
 
 ## 🚀 v0.1.9 (2026-07-14)
@@ -654,7 +677,7 @@ issue. A test enforces it.
 - 📰 The TIDAL Magazine tile no longer appears in Browse rows like Moods & Activities: it is editorial articles, so opening it always showed an empty page.
 - ⚡ Expanding an album's track list is instant after the first time: track lists are now remembered for the session instead of re-fetched each time.
 - 🏠 My Tidal opens instantly after launch: the Home shelves are remembered from your last session and shown immediately, then quietly refreshed in the background.
-- 🌱 Home and the library lists stay current while the app runs: new favourites show up on their own, no restart needed.
+- 🌱 Home and the library lists stay current while the app runs: new favorites show up on their own, no restart needed.
 - 📜 Scrolling or re-sorting the Playlists and Mixes tabs no longer re-downloads your entire collection for every page, so large collections stay snappy.
 - 🔍 Search results no longer freeze the app while they appear: the cards are built in the background and the finished page appears all at once, same look as before.
 - 🔁 Repeating a recent search shows its results instantly, popularity meters included.
@@ -742,7 +765,7 @@ issue. A test enforces it.
 
 ### 🔧 Changed
 
-- 🔍 The Search tab now remembers where you were. Coming back from My Tidal or Browse returns you to the exact page you left, artist page, expanded album, scroll position and all, instead of dropping you back on the results list. Pressing Search again while already on it starts a fresh, blank search, the same two-step behaviour the Browse tab already had.
+- 🔍 The Search tab now remembers where you were. Coming back from My Tidal or Browse returns you to the exact page you left, artist page, expanded album, scroll position and all, instead of dropping you back on the results list. Pressing Search again while already on it starts a fresh, blank search, the same two-step behavior the Browse tab already had.
 - 📊 Album, playlist, and discography progress bars now move continuously. They used to sit still and then jump each time a whole track finished; the bar (and the matching media buttons) now creeps along with the tracks that are currently downloading, and the "N/total tracks" count only ticks up when a track really completes.
 - 🛠️ When FFmpeg is missing, Waves says so instead of quietly degrading. Without FFmpeg it cannot extract FLAC, convert video, or repair track length, so it now warns once per session, and it records which FFmpeg it used (managed, custom, system, or none) in your settings file so a pasted config shows whether FFmpeg was available. The FFmpeg path field itself is left untouched.
 - 💡 The dot-matrix progress pill's status text now sits on a dark backing plate, so it stays readable as the lit cells fill in behind it (updater cards, FFmpeg installs, and the new update toast all share the fix).
@@ -815,7 +838,7 @@ issue. A test enforces it.
 
 - 🏠 My Tidal opens on a new "Home" tab: a browse-style landing for your own account. A "Recently added" section previews your newest albums and tracks; clicking a card opens that album, and clicking a shelf heading ("Recent albums" or "Recent tracks") jumps to that tab sorted newest-first.
 - ↕️ My Tidal can now be sorted (recently added, name, release date, or artist) with an ascending/descending toggle, the same control as the Search page.
-- 👤 Opening an artist from inside My Tidal now shows an artist page scoped to your library: only the albums and tracks you have saved, not their whole catalogue. A "View full artist page" link opens their complete catalogue when you want it.
+- 👤 Opening an artist from inside My Tidal now shows an artist page scoped to your library: only the albums and tracks you have saved, not their whole catalog. A "View full artist page" link opens their complete catalog when you want it.
 - 🖼️ The embedded cover art and the separate cover.jpg can now use different sizes. Open "Separate cover.jpg size" under Cover size in Settings, Metadata and artwork.
 - 🎵 A separate cover.jpg can now be saved for single-track downloads too, not only full albums. Turn on "Also save for single tracks" under Save cover.jpg in Settings, Metadata and artwork (off by default, so nothing changes unless you ask for it).
 
@@ -832,7 +855,7 @@ issue. A test enforces it.
 - 🔁 A rare server response (an empty but otherwise successful segment) can no longer make a download re-fetch the same track over and over without end. Each part is now downloaded once, and the progress bar still settles at 100%.
 - ⚡ A download no longer drives high CPU usage. The animated LED progress fills (on the download button, the queue rows, and the FFmpeg and updater bars) were redrawing the whole window on every screen refresh while they were active, which could push a CPU core to full load for the length of a download. They now animate on a shared lower-rate timer, so they look the same while using a small fraction of the CPU.
 - ✅ A download that writes no file (for example on an account without an active TIDAL subscription, where playback is refused) now correctly shows as failed with a retry option, instead of incorrectly showing as downloaded.
-- 🎨 The FFmpeg card's "Check for updates" button now uses the standard green button style instead of a grey outline, and "Remove" now uses the red danger style, matching buttons everywhere else in the app.
+- 🎨 The FFmpeg card's "Check for updates" button now uses the standard green button style instead of a gray outline, and "Remove" now uses the red danger style, matching buttons everywhere else in the app.
 - 🌊 My Tidal no longer flashes a placeholder when you open it. It keeps the shelves it has already loaded and shows them instantly on return, and while a category is still loading (or is genuinely empty) the pane simply shows the ambient wave background, with no card or glyph that appears for a beat and fades away.
 - 🎯 Opening a track's album no longer scrolls the page down to the track; it now lands already positioned on it, with no visible jump.
 
@@ -860,7 +883,7 @@ First public release of Waves: a native desktop app for saving music from your o
 - 📚 A Plex-friendly library layout by default (Artist/[Year] Album/...), a clean album-artist tagging mode, and an explicit/clean version preference.
 - ❤️ My TIDAL: favorite albums, tracks, artists, videos, playlists, and mixes with smooth virtualized scrolling.
 - 📥 A grouped download queue (Completed / Downloading / Queued) with live per-track progress and per-album / per-artist roll-ups.
-- 🛠️ One-click managed FFmpeg: Waves downloads a checksum-verified build for your OS and CPU, with a colour-coded status light in Settings.
+- 🛠️ One-click managed FFmpeg: Waves downloads a checksum-verified build for your OS and CPU, with a color-coded status light in Settings.
 - 🔄 Opt-in in-app updates: signed releases (Ed25519, fail-closed verification) installed from Settings with a one-click restart. Update checks are off by default and send no user data.
 - 💾 Persistent page and artwork caches so previously seen pages render instantly, even on a fresh launch.
 
