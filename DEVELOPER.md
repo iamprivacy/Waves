@@ -116,6 +116,25 @@ the app treats the run as a dev environment and opens against the separate
 The QML plain-text guard test fails if any dynamic `Text` in Main.qml can
 render rich text (remote strings must never inject markup).
 
+The launch water (the wave video behind the launch screen) shares the GUI
+thread with the interface, and the GUI thread waits for the interpreter lock
+whenever any Python runs, so a job dispatched before `bootRevealed` competes
+with the picture for every frame it holds the lock. Two things keep it
+smooth: `tests/test_boot_quiet_window.py` allowlists every job that may run
+before the reveal (a new boot job fails the test until it is added with its
+reason), and `tools/launch_probe.py` measures a real launch with Qt's own
+render-loop log, no Python on the measured path, and prints a verdict:
+
+```bash
+poetry run python tools/launch_probe.py        # 12 s, gaps over 45 ms
+```
+
+Run it twice (the first launch after a build is colder) before and after
+anything that touches the boot path. The library walk itself runs in a child
+process (`waves/library_worker.py`, started by `waves/waves_ui/library_proc.py`)
+for the same reason: off the GUI thread was never enough, off the interpreter
+is what the picture needs.
+
 `tests/conftest.py` points `XDG_CONFIG_HOME` at a throwaway directory at
 import time, before any test module loads, so the whole suite (subprocess
 scenarios included) resolves its config out of a sandbox. Never resolve a path
