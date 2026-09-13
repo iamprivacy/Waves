@@ -17,6 +17,7 @@ import contextlib
 import copy
 import dataclasses
 import functools
+import gc
 import json
 import logging
 import os
@@ -108,7 +109,6 @@ from waves.worker import Worker
 from . import __version__ as _WAVES_VERSION
 from . import devlog, diagnostics, netmount
 from .bridge_library import (
-    _BOOT_LIBRARY_SCAN_FAILSAFE_MS,
     _LIBRARY_DEEP_SWEEP_MS,
     _LIBRARY_DL_DEBOUNCE_MS,
     _LIBRARY_POLL_MS,
@@ -116,6 +116,7 @@ from .bridge_library import (
     LibraryMixin,
 )
 from .ffmpeg_manager import FfmpegCancelled, FfmpegManager
+from .library_proc import LibraryWorker
 from .updater import AppUpdater, UpdateCancelled
 
 logger = logging.getLogger("waves")
@@ -2069,6 +2070,112 @@ def _release_date(obj) -> str:
         return str(date)
 
 
+# --- Listed date: the day a reissue was really released --------------------
+# TIDAL gives a reissue two dates that disagree: ``releaseDate`` is the
+# ORIGINAL album's (a 10th anniversary edition reads 2016) and
+# ``streamStartDate`` is the day this listing went live (2026). The second
+# cannot simply win: for the back catalogue it records re-ingest events, a
+# 2012 album reads 2022 and three unrelated albums share one 2019 day. The
+# rule below lifts a row to its stream-start date only where the row itself
+# witnesses a real reissue, with no clock and no sibling context, so it gives
+# the same answer on an artist page, a search row and a browse card, today
+# and in ten years. Everything else keeps the date it has now.
+_LISTED_MIN_LAG_DAYS = 365
+# The on-disk page_cache.json schema; the history is on the writer.
+_PAGE_CACHE_VERSION = 6
+# The first year anywhere in the copyright line, which is what TIDAL's field
+# actually looks like: "2016 Nuclear Blast", or just "Nuclear Blast". It is
+# the ℗ year, but the mark itself is not in the data, so do NOT anchor this
+# on ℗ or (P): every row would then read None and the witness that holds live
+# albums and re-ingest dates back would stop working. Measured against the
+# live corpus in tests/test_listed_date.py.
+_COPYRIGHT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _copyright_year(obj) -> int | None:
+    """The year on the release's copyright line, or None when it names none
+    (newer listings often carry just the label). This is the ℗ year, written
+    without its mark."""
+    m = _COPYRIGHT_YEAR_RE.search(str(getattr(obj, "copyright", "") or ""))
+    return int(m.group(0)) if m else None
+
+
+def _as_date(value):
+    """A date from a datetime of either kind. releaseDate parses naive and
+    streamStartDate tz-aware; comparing the two datetimes raises."""
+    if value is None:
+        return None
+    try:
+        return value.date() if hasattr(value, "date") else value
+    except Exception:
+        return None
+
+
+def _listed_date(obj):
+    """The day a release was really listed, when the row proves it is a
+    reissue, else None.
+
+    Three tests, all on the row itself: the stream start is more than a year
+    after the release date (same-cycle listing lags of days or weeks, and
+    negative lags, never lift); the title or TIDAL's ``version`` marks it a
+    distinct edition (the same keep-words the edition collapse honours); and
+    the ℗ year, when the copyright line carries one, is the stream-start
+    year. A ℗ year equal to the ORIGINAL release year is the re-ingest
+    signature: the master was published back then and only the listing
+    moved, so the row stays put."""
+    released = _as_date(getattr(obj, "release_date", None))
+    listed = _as_date(getattr(obj, "tidal_release_date", None))
+    if released is None or listed is None:
+        return None
+    if (listed - released).days <= _LISTED_MIN_LAG_DAYS:
+        return None
+    version = str(getattr(obj, "version", "") or "").strip()
+    # A version string is deliberately enough on its own, and is NOT filtered
+    # through the keep-words: the real reissue series carry versions the
+    # keep-words do not name ("Re-Armed"), so requiring one there holds back
+    # exactly the rows this exists to lift. The false positives a broad net
+    # lets through ("Live", a language edition) are caught by the copyright
+    # year below, which is where that work belongs. Both halves are measured
+    # against the live corpus in tests/test_listed_date.py.
+    if not version and not _EDITION_KEEP_RE.search(name_builder_title(obj) or ""):
+        return None
+    year = _copyright_year(obj)
+    if year is not None and year != listed.year:
+        return None
+    return listed
+
+
+def _listed_date_str(obj) -> str:
+    listed = _listed_date(obj)
+    return listed.strftime("%Y-%m-%d") if listed is not None else ""
+
+
+def _place_by_listed(rows: list) -> list:
+    """Move every lifted row to where its listed date belongs in a
+    newest-first shelf. Rows that are not lifted keep TIDAL's order exactly;
+    a lifted row goes before the first remaining row whose own date (listed,
+    else released) is earlier, so a reissue listed this week leads the shelf
+    and one listed in 2010 sits among the 2010 releases."""
+    lifted = [(r, _listed_date(r)) for r in rows]
+    # Each row carries its own date through the placement. The scan below asks
+    # every row it walks past what day it belongs to, so resolving that inside
+    # the scan re-parsed the same dates once per lifted row: an artist page is
+    # routinely hundreds of releases, and the parsing, not the walk, was the
+    # cost. A not-lifted row answers with its release date, which is exactly
+    # what the scan used to fall back to.
+    out = [(r, _as_date(_release_obj(r))) for r, d in lifted if d is None]
+    for row, day in lifted:
+        if day is None:
+            continue
+        at = len(out)
+        for i, (_other, other_day) in enumerate(out):
+            if other_day is not None and other_day < day:
+                at = i
+                break
+        out.insert(at, (row, day))
+    return [r for r, _d in out]
+
+
 def _video_spec(video) -> str:
     """Resolution label for a video ("1080p"), from TIDAL's MP4_1080P tier.
 
@@ -2522,6 +2629,26 @@ def _dedup_versions(items, key_fn, mode: str, max_rank: int = 4) -> list:
         else:  # "explicit"
             out.append(best_explicit or best_clean)
     return [x for x in out if x is not None]
+
+
+def _rollup_started(grp: dict) -> bool:
+    """Whether any member of a rollup has actually been picked up.
+
+    'prog' is written by a member reporting progress and by one that landed,
+    and by nothing else: a member that was cancelled, or that failed before it
+    began, is credited to 'done' and 'failed' without ever appearing here. So
+    an empty 'prog' means the batch is still waiting in line, whatever else
+    has happened to it.
+
+    The rollups register as QUEUED and flip to running on the first real tick.
+    Without this test a cancelled member was a tick like any other, so calling
+    off one album of a queued discography announced the whole batch as
+    running: an empty progress matrix over work that had not started, and the
+    QUEUED face's cancel X gone with it.
+
+    Module level, not a method: the rollup stubs in the tests borrow the bump
+    functions one at a time, so a helper on the class is not there for them."""
+    return bool(grp.get("prog"))
 
 
 # --- Album-edition collapsing (opt-in: keep only the most complete edition) ----
@@ -3172,6 +3299,21 @@ def _scrub_browse_payload(payload: dict) -> dict:
     return payload
 
 
+def _record_in_library(bridge, path: str) -> bool:
+    """Is one recorded copy under the library root? A string compare on the
+    configured paths (LibraryMixin._path_inside_library), never a stat. A
+    module function reached through getattr, so the tests' partial bridges
+    that bind ownershipOf alone still answer (False, no library)."""
+    inside = getattr(bridge, "_path_inside_library", None)
+    if inside is None or not path:
+        return False
+    try:
+        return bool(inside(path))
+    except Exception:
+        logger.debug("Could not place a recorded copy against the library root", exc_info=True)
+        return False
+
+
 class WavesBridge(LibraryMixin, QObject):
     """The single object exposed to QML as the ``waves`` context property.
 
@@ -3445,6 +3587,7 @@ class WavesBridge(LibraryMixin, QObject):
         # Live asynchronous-incubation object count, pushed by app.py's
         # controller; read by the boot handover gate (bootIncubationBusy).
         self._incubation_count = 0
+        self._incubation_reader = None
         if fresh_install:
             self._apply_first_run_defaults()
         elif self._migrate_video_template():
@@ -3724,6 +3867,7 @@ class WavesBridge(LibraryMixin, QObject):
         # file is account-tagged and deleted on logout, browse embeds
         # personalized For You rows that must not leak across accounts.
         self._page_cache_path = os.path.join(os.path.dirname(self.settings.file_path), "page_cache.json")
+        self._search_cache_path = os.path.join(os.path.dirname(self.settings.file_path), "search_cache.json")
         self._page_cache_lock = Lock()
         # Serializes insert-plus-evict on the capped caches below: two workers
         # evicting concurrently raced dict iteration (RuntimeError/KeyError in
@@ -3965,6 +4109,11 @@ class WavesBridge(LibraryMixin, QObject):
                 "Could not open the ownership store (%s); this session will not remember downloads", type(exc).__name__
             )
             self._ownership = OwnershipStore(":memory:")
+        # Waves only ever looks for music it has in two places: the download
+        # folder and the library folder. A copy recorded anywhere else (an
+        # earlier download folder, issue #38) is not owned, is never statted,
+        # and never stops a download.
+        self._ownership.set_roots(self._ownership_roots)
         # GUI-facing ownership answers come from this cache, refreshed on a tiny
         # dedicated pool: ownership_of stats the recorded file, and a stat on a
         # dropped network mount can block for many seconds, so it must never run
@@ -4006,10 +4155,16 @@ class WavesBridge(LibraryMixin, QObject):
         self._library_track_index = None
         # Artist rollup ("how many albums / tracks by this artist are in my
         # library"), precomputed off-GUI at every publish and cached until that
-        # index object is swapped for a fresh one (see _publish_artist_rollup
-        # and artistLibraryPresence, which keeps a lazy derive as fallback).
+        # index object is swapped for a fresh one (see _publish_index, which
+        # swaps index and rollup together, and artistLibraryPresence, whose
+        # lazy derive only ever runs when a publish landed mid-slot).
         self._library_artist_index: dict = {}
         self._library_artist_index_src = None
+        # How many times the presence index has been published. Baked into
+        # every dressed browse card so a card built AFTER a publish it was
+        # dressed before asks live instead of wearing a stale verdict (see
+        # libraryStamp).
+        self._library_stamp = 0
         # Presence-verdict memos for the two synchronous badge slots. Every
         # libraryPresenceChanged republish makes ALL visible pills re-ask, and
         # scrolling re-asks per row, always against the same index object, so
@@ -4154,21 +4309,15 @@ class WavesBridge(LibraryMixin, QObject):
         # sweep or a manual Rescan. The seed means this heavier sweep runs behind
         # badges already shown.
         #
-        # The sweep itself is HELD until the boot overlay reveals (bootRevealed
-        # -> _start_boot_library_scan): its walk runs on pool threads that
-        # compete with the GUI thread for the interpreter, and the launch
-        # water visibly stuttered for it (probe 2026-09-01: 59-73 ms GUI
-        # stalls with the walk busy, and the landing-arrival stall doubled).
-        # Only the seed runs now, so the cards incubating behind the veil are
-        # never badge-less; the failsafe timer starts the sweep even if the
-        # reveal never reports (headless embedding, a wedged QML load).
+        # The sweep starts now, at construction, and runs in the scanner
+        # process (waves.library_worker): nothing of it holds this process's
+        # interpreter, so the launch water no longer pays for it and no
+        # deferral is needed. The seed publishes the committed cache's badges
+        # at once, so the cards incubating behind the veil are never
+        # badge-less.
+        self._library_worker = LibraryWorker()
         self._seed_library_badges()
-        self._boot_library_scan_pending = True
-        self._boot_library_scan_timer = QtCore.QTimer(self)
-        self._boot_library_scan_timer.setSingleShot(True)
-        self._boot_library_scan_timer.setInterval(_BOOT_LIBRARY_SCAN_FAILSAFE_MS)
-        self._boot_library_scan_timer.timeout.connect(self._start_boot_library_scan)
-        self._boot_library_scan_timer.start()
+        self._rebuild_library_index(force_full=self._library.due_for_full_scan(_LIBRARY_DEEP_SWEEP_MS / 1000.0))
         _set_clean_album_artist(self._waves_pref_bool("clean_album_artist"))
         # Now that the pref is known, raise diagnostics to verbose if asked
         # (starts the freeze watchdog + perf sampler; GUI thread required).
@@ -4218,54 +4367,26 @@ class WavesBridge(LibraryMixin, QObject):
                 raise
 
     def eventFilter(self, obj, event) -> bool:
-        """Window-level filter for back/forward navigation input.
+        """Back navigation from the discrete macOS three-finger swipe
+        (NativeGesture). Two-finger horizontal scrolling is deliberately NOT
+        treated as back: the browse shelves scroll horizontally, and a
+        scroll-to-back mapping hijacks them; the gesture path always returns
+        False so scrolling is never affected. (NativeGesture events only fire
+        on macOS.) The swipe stays back-only, there is no forward swipe
+        gesture.
 
-        Two triggers map to "back", and one of them also has a "forward"
-        counterpart:
-        - The mouse "back" and "forward" side buttons (XButton1/XButton2 on
-          Windows/Linux mice), each consumed so the press never click-throughs
-          to the view below.
-        - The discrete macOS three-finger swipe (NativeGesture). Two-finger
-          horizontal scrolling is deliberately NOT treated as back, the
-          browse shelves scroll horizontally, and a scroll→back mapping
-          hijacks them; the gesture path always returns False so scrolling
-          is never affected. (NativeGesture events only fire on macOS.) The
-          swipe stays back-only, there is no forward swipe gesture.
-
-        It also swallows the window's activate/deactivate events (see below).
-        Installed on the top-level QQuickWindow (app.py), which is where every
-        one of these events is delivered; an application-wide filter would see
-        the same events and also every other event in the process, each one a
-        C++ to Python crossing on the GUI thread (see the install site).
+        Installed on the window's content item (app.py), which receives only
+        the events no item under the pointer accepted: a Python filter is a
+        crossing into the interpreter per event, and on the window itself
+        that was one per frame (the update request), each waiting for the
+        interpreter behind the launch workers. The mouse side buttons live in
+        a MouseArea at the top of the scene (Main.qml), and the window's
+        activate and deactivate events are no longer swallowed: the per-item
+        walk they trigger cost ~0.3-0.5 s only while an application-wide
+        filter made every hop cross into Python, which no filter does any
+        more (re-measured 2026-09-12 with a driven app-switch storm).
         """
         try:
-            if event.type() in (QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate) and obj.isWindowType():
-                # Swallow the activation-change event before QQuickWindow
-                # forwards it item by item: Qt walks the ENTIRE scene on every
-                # app switch (its active/inactive palette pass), and through
-                # PySide's notify wrapper that walk blocks the GUI thread for
-                # ~0.3-0.5s on a scene this size (sampled live), freezing the
-                # water and every other animation at once, both on losing and
-                # gaining focus. Nothing in Waves styles active vs inactive,
-                # so the walk buys nothing. Window.active bindings and focus
-                # handling are unaffected: they ride the QWindow signal and
-                # the separate focus events, not this event.
-                return True
-            if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
-                # DblClick included: Qt reports a rapid second press as a
-                # double-click, which would otherwise drop every second
-                # back/forward.
-                if event.button() == Qt.MouseButton.BackButton:
-                    self.backRequested.emit()
-                    return True
-                if event.button() == Qt.MouseButton.ForwardButton:
-                    self.forwardRequested.emit()
-                    return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() in (
-                Qt.MouseButton.BackButton,
-                Qt.MouseButton.ForwardButton,
-            ):
-                return True
             if (
                 _IS_MACOS
                 and event.type() == QEvent.Type.NativeGesture
@@ -4511,6 +4632,10 @@ class WavesBridge(LibraryMixin, QObject):
             "art": _image(album),
             "year": _year(album),
             "date": _release_date(album),
+            # The day a reissue was really listed (see _listed_date), "" for
+            # every other row: date and year stay TIDAL's so tagging and the
+            # library presence match are untouched, the UI prefers this one.
+            "listed": _listed_date_str(album),
             "tracks": _track_count(album),
             # The release's total play length in raw seconds (0 when TIDAL
             # never said), for the presence matcher's duration witness; the
@@ -4820,6 +4945,9 @@ class WavesBridge(LibraryMixin, QObject):
         # The disk snapshot holds the old account's personalized pages, drop it.
         with contextlib.suppress(OSError):
             os.remove(self._page_cache_path)
+        # getattr: the partial bridges the tests build predate the path.
+        with contextlib.suppress(OSError, TypeError):
+            os.remove(getattr(self, "_search_cache_path", None))
         # Every worker the generation bumps above just orphaned returns at a
         # bare `if gen != self._..._gen: return`, and each of those sits ABOVE
         # its own _set_busy(False) (search's is at the very end of work()).
@@ -4877,22 +5005,40 @@ class WavesBridge(LibraryMixin, QObject):
                 # snapshots rather than restore a stale order on launch.
                 # v3: playlists rows carry kind/sub/path (folder rows share the
                 # model); older snapshots would render rows the delegate misreads.
-                "version": 3,
+                # v4: album rows carry ``listed`` and artist shelves place a
+                # reissue by it; an older snapshot would show the reissue in
+                # the original album's year until the revalidate landed.
+                # v5: an album page header carries ``date``, which the NEW
+                # mark reads; an older snapshot would open a new album with
+                # no mark until the revalidate landed.
+                # v6: an album page header's subtitle reads the full release
+                # day; an older snapshot would open showing only the year.
+                "version": _PAGE_CACHE_VERSION,
                 "user": self._cache_user_id(),
                 "browse_root": self._browse_root_cache,
                 "browse_pages": self._browse_pages,
                 "artists": self._artist_cache,
                 "library": lib,
                 "home": self._home_cache,
-                # The newest searches, payload only: restored with no stamp,
-                # so the next launch paints them and revalidates (search()).
+            }
+            # The newest searches, payload only: restored with no stamp, so
+            # the next launch paints them and revalidates (search()). Their
+            # own file, so the launch-time page cache load (on the login
+            # worker, holding the interpreter for the parse) stays as small as
+            # the landing needs; _load_search_cache reads this after the boot
+            # reveal.
+            searches = {
+                "version": _PAGE_CACHE_VERSION,
+                "user": data["user"],
                 "searches": {k: v[1] for k, v in list(self._search_cache.items())[-_SEARCH_DISK_MAX:]},
             }
             # Serialized outside the lock (it is the expensive part), written
             # inside it.
             serialized = json.dumps(data)
+            serialized_searches = json.dumps(searches)
             with self._page_cache_lock:
                 _write_text_atomic(self._page_cache_path, serialized)
+                _write_text_atomic(self._search_cache_path, serialized_searches)
         except Exception:
             logger.debug("page cache save failed", exc_info=True)
 
@@ -4911,7 +5057,7 @@ class WavesBridge(LibraryMixin, QObject):
         except Exception:
             logger.debug("page cache load failed", exc_info=True)
             return
-        if not isinstance(data, dict) or data.get("version") != 3:
+        if not isinstance(data, dict) or data.get("version") != _PAGE_CACHE_VERSION:
             return
         if str(data.get("user", "")) != self._cache_user_id():
             return
@@ -4929,18 +5075,35 @@ class WavesBridge(LibraryMixin, QObject):
                 self._lib_cache.setdefault(str(cat), entry)
         if self._home_cache is None and isinstance(data.get("home"), list) and data["home"]:
             self._home_cache = data["home"]
-        for key, page in (data.get("searches") or {}).items():
-            if isinstance(page, dict) and isinstance(page.get("artists"), list):
-                # A stamp no window can cover: every restored search is stale
-                # by definition and takes the paint-then-revalidate path.
-                self._search_cache.setdefault(str(key), (_STALE_STAMP, page))
         devlog.event(
             "cache",
             "page cache restored",
             pages=len(self._browse_pages),
             artists=len(self._artist_cache),
-            searches=len(self._search_cache),
         )
+
+    def _load_search_cache(self) -> None:
+        """(pool thread, after the boot reveal) Restore the last session's
+        searches from their own file (see _save_page_cache). Same account
+        rule as the page cache; a snapshot from an older layout is ignored."""
+        try:
+            with self._page_cache_lock, open(self._search_cache_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.debug("search cache load failed", exc_info=True)
+            return
+        if not isinstance(data, dict) or data.get("version") != _PAGE_CACHE_VERSION:
+            return
+        if str(data.get("user", "")) != self._cache_user_id():
+            return
+        for key, page in (data.get("searches") or {}).items():
+            if isinstance(page, dict) and isinstance(page.get("artists"), list):
+                # A stamp no window can cover: every restored search is stale
+                # by definition and takes the paint-then-revalidate path.
+                self._search_cache.setdefault(str(key), (_STALE_STAMP, page))
+        devlog.event("cache", "search cache restored", searches=len(self._search_cache))
 
     def _remember_capped(self, d: dict, key, value, cap: int) -> None:
         """Insert into a capped cache, evicting oldest-first, under the shared
@@ -5033,7 +5196,10 @@ class WavesBridge(LibraryMixin, QObject):
 
     @Slot(str)
     def search(self, needle: str) -> None:
-        needle = (needle or "").strip()
+        # Interior whitespace collapses too (issue #39): a pasted title with a
+        # line break or tab reads as one line in the single-line field, but
+        # the break reached TIDAL, which answered with nothing.
+        needle = " ".join((needle or "").split())
         if not needle:
             return
         if not self._logged_in:
@@ -5087,8 +5253,14 @@ class WavesBridge(LibraryMixin, QObject):
                 # follow-up round-trips only ever fetched rows discarded here.
                 results = search_results_all(self.tidal.session, needle, single_page=True)
             except Exception:
+                # A fetch that raised is a failure, never "0 results": that
+                # read as a search that found nothing (issue #39). Nothing is
+                # emitted or cached, so a stale page already painted stays.
                 logger.exception("Search failed")
-                results = {}
+                if gen == self._search_gen:
+                    self._set_status("Search failed")
+                    self._set_busy(False)
+                return
             api = devlog.clock() - t0
             if gen != self._search_gen:
                 return  # a newer search superseded this one; drop its results
@@ -5599,6 +5771,13 @@ class WavesBridge(LibraryMixin, QObject):
                     if not refresh and not silent:
                         self._set_status("Scanning editions…")
                     albums, eps = self._hide_subset_editions(albums, eps)
+                # A reissue sits where the day it was really listed belongs,
+                # not in the original album's year (see _listed_date).
+                lifted = sum(1 for a in albums + eps if _listed_date(a) is not None)
+                if lifted:
+                    albums = _place_by_listed(albums)
+                    eps = _place_by_listed(eps)
+                    devlog.event("artist", "listed", lifted=lifted)
                 payload = {
                     "id": artist_id,
                     "name": getattr(artist, "name", ""),
@@ -6650,6 +6829,84 @@ class WavesBridge(LibraryMixin, QObject):
             return
         self._load_browse_root(emit_cached=False)
 
+    # --- Card dressing: the answers a card would otherwise ask for -----------
+    # A browse card asks the bridge two things as it is created: the album's
+    # library verdict (libraryAlbumPresence) and the collection's ownership
+    # rollup (collectionOwnership). Each is a QML-to-Python call, and a card
+    # is created inside an incubation slice on the GUI thread, so every one of
+    # those calls waited its turn for the interpreter behind the workers busy
+    # at launch, and a slice meant to last 12 ms ran for 100-200 ms (sampled
+    # live: 60% of the GUI thread inside incubateFor, most of it blocked in
+    # those two slots). The worker that builds a page now answers both
+    # questions for every card BEFORE the payload is emitted, as ``lib`` and
+    # ``own`` keys the card reads at creation; only a later change (a library
+    # publish, an ownership answer landing) asks the bridge live. The emitted
+    # payload is a copy: the cached dict stays undressed, since a persisted
+    # answer would be a stale one on the next launch.
+    _CARD_DRESS_KINDS = frozenset({"album", "playlist", "mix"})
+
+    def _dress_card(self, card):
+        if not isinstance(card, dict) or (card.get("kind") or "") not in self._CARD_DRESS_KINDS:
+            return card
+        card = dict(card)
+        try:
+            if card["kind"] == "album" and card.get("title"):
+                card["lib"] = self.libraryAlbumPresence(
+                    str(card.get("artist") or ""),
+                    str(card["title"]),
+                    str(card.get("year") or ""),
+                    int(card.get("tracks") or 0),
+                    int(card.get("duration_sec") or 0),
+                )
+                # Which index that verdict came from. A card built after a
+                # later publish compares this against the bridge's own count
+                # and asks live when they differ: the signal that makes a
+                # LIVE card re-ask cannot reach a card that does not exist
+                # yet, and without this the card kept the stale answer until
+                # the next publish, which for a settled library never comes.
+                card["libStamp"] = int(getattr(self, "_library_stamp", 0))
+            card["ownGen"] = int(getattr(self, "_own_generation", 0))
+            card["own"] = self.collectionOwnership(str(card.get("id") or ""))
+        except Exception:
+            # Undressed keys make the card ask live, exactly as before.
+            logger.debug("card dressing failed", exc_info=True)
+        return card
+
+    def _dress_cards(self, payload):
+        """(worker thread) A shallow copy of a browse payload whose cards carry
+        their ``lib`` and ``own`` answers (see above). Handles both shapes:
+        a page (``sections`` of rows) and one grown row (``items``)."""
+        if not isinstance(payload, dict):
+            return payload
+        out = dict(payload)
+        secs = payload.get("sections")
+        if isinstance(secs, list):
+            rows = []
+            for row in secs:
+                if isinstance(row, dict) and row.get("rowKind") == "cards" and isinstance(row.get("items"), list):
+                    row = dict(row)
+                    row["items"] = [self._dress_card(c) for c in row["items"]]
+                rows.append(row)
+            out["sections"] = rows
+        elif isinstance(payload.get("items"), list):
+            out["items"] = [self._dress_card(c) for c in payload["items"]]
+        return out
+
+    def _emit_dressed(self, signal, payload, gen: int) -> None:
+        """(worker thread) Dress a browse payload and emit it, unless the
+        account changed while it was being dressed.
+
+        Every caller already drops a stale load before it gets here, but the
+        dressing itself is one library lookup and one ownership lookup per
+        card, so a page of fifty is a real span of time AFTER that check. A
+        sign-out and sign-in inside it painted the previous account's
+        personalised rows over the new account's page. Re-read last, emit
+        only if it still holds."""
+        dressed = self._dress_cards(payload)
+        if gen != self._browse_gen:
+            return
+        signal.emit(dressed)
+
     def _load_browse_root(self, emit_cached: bool) -> None:
         if not self._logged_in:
             self._set_status("Sign in to browse")
@@ -6671,7 +6928,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # it (and never paint another account's page after a relogin).
                 if gen != self._browse_gen or self._browse_root_cache is not cached:
                     return
-                self.browseLoaded.emit(cached)
+                self._emit_dressed(self.browseLoaded, cached, gen)
                 self._start_tile_art(cached, gen)
 
             self.threadpool.start(Worker(_emit_cached))
@@ -6711,7 +6968,7 @@ class WavesBridge(LibraryMixin, QObject):
                 if not payload["error"] and payload["sections"] and payload != cached:
                     self._browse_root_cache = payload
                     self._save_page_cache()
-                    self.browseLoaded.emit(payload)
+                    self._emit_dressed(self.browseLoaded, payload, gen)
                     self._start_tile_art(payload, gen)
                 devlog.done("browse", "root revalidate", devlog.clock() - t0, n=len(payload["sections"]))
                 return
@@ -6721,7 +6978,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # pinning a chips-only page for the rest of the session.
                 self._browse_root_cache = payload
                 self._save_page_cache()
-            self.browseLoaded.emit(payload)
+            self._emit_dressed(self.browseLoaded, payload, gen)
             self._set_status(
                 f"Browse · {len(payload['sections'])} sections" if not payload["error"] else "Browse failed to load"
             )
@@ -6779,7 +7036,7 @@ class WavesBridge(LibraryMixin, QObject):
             if not payload["error"]:
                 self._browse_grow_cached(data_path, offset, payload["items"], payload["offset"], payload["more"])
             self._browse_loading.discard(load_key)
-            self.browseSectionMore.emit(payload)
+            self._emit_dressed(self.browseSectionMore, payload, gen)
             devlog.done("browse", load_key, devlog.clock() - t0, n=len(payload["items"]))
 
         self.threadpool.start(Worker(work))
@@ -6844,7 +7101,7 @@ class WavesBridge(LibraryMixin, QObject):
                 if not payload["error"] and payload["sections"] and payload != cached:
                     self._remember_capped(self._browse_pages, api_path, payload, self._BROWSE_PAGES_MAX)
                     self._save_page_cache()
-                    self.browsePageLoaded.emit(payload)
+                    self._emit_dressed(self.browsePageLoaded, payload, gen)
                     served = payload
                 # Link tiles carry no image of their own and the QML holds no
                 # per-tile art cache, so even a revisit served straight from
@@ -6858,7 +7115,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # all failed to normalize shouldn't be pinned for the session.
                 self._remember_capped(self._browse_pages, api_path, payload, self._BROWSE_PAGES_MAX)
                 self._save_page_cache()
-            self.browsePageLoaded.emit(payload)
+            self._emit_dressed(self.browsePageLoaded, payload, gen)
             self._set_status(payload["title"] if not payload["error"] else f"Could not load {title}")
             self._set_busy(False)
             devlog.done("browse", api_path, devlog.clock() - t0, n=len(payload["sections"]))
@@ -6941,7 +7198,7 @@ class WavesBridge(LibraryMixin, QObject):
                 if not payload["error"] and payload["sections"] and payload != cached:
                     self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                     self._save_page_cache()
-                    self.browsePageLoaded.emit(payload)
+                    self._emit_dressed(self.browsePageLoaded, payload, gen)
                 devlog.done("browse", f"{key} revalidate", devlog.clock() - t0, n=len(payload["sections"]))
                 return
             if not payload["error"] and payload["sections"]:
@@ -6949,7 +7206,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # all failed to normalize shouldn't be pinned for the session.
                 self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                 self._save_page_cache()
-            self.browsePageLoaded.emit(payload)
+            self._emit_dressed(self.browsePageLoaded, payload, gen)
             self._set_status(payload["title"] if not payload["error"] else f"Could not load {title}")
             self._set_busy(False)
             devlog.done("browse", key, devlog.clock() - t0, n=len(payload["sections"]))
@@ -6997,6 +7254,7 @@ class WavesBridge(LibraryMixin, QObject):
         artist_id = ""
         album_artist = ""
         album_year = ""
+        album_date = ""
         album_quality = ""
         if kind == "mix":
             with self._browse_lock:  # lazy Mix.items() also parses a page
@@ -7018,8 +7276,14 @@ class WavesBridge(LibraryMixin, QObject):
         elif kind == "album":
             album_artist = name_builder_album_artist(obj)
             album_year = _year(obj)
+            # The day the page's rows show: a reissue's listed day over
+            # TIDAL's original, the same preference the album rows make.
+            album_date = _listed_date_str(obj) or _release_date(obj)
             album_quality = _quality_label(obj)  # TIDAL's best tier, static album metadata
-            subtitle = album_artist + (f"  ·  {album_year}" if album_year else "")
+            # The full day, as the album cards show it; the year only when
+            # TIDAL gives no date.
+            when = album_date or album_year
+            subtitle = album_artist + (f"  ·  {when}" if when else "")
             artist_id = _artist_id(obj)
         # "N tracks · 2 hr 14 min", fills the header's stats line.
         total = sum(int(getattr(t, "duration", 0) or 0) for t in tracks)
@@ -7111,6 +7375,7 @@ class WavesBridge(LibraryMixin, QObject):
                 # stored.
                 "artist": album_artist,
                 "year": album_year,
+                "date": album_date,
                 "num_tracks": len(tracks),
                 # Total play length in seconds over the same tracks
                 # num_tracks counts, so the presence matcher's duration
@@ -7205,14 +7470,14 @@ class WavesBridge(LibraryMixin, QObject):
                 if has_items and payload != cached:
                     self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                     self._item_fetch_ts[key] = time.monotonic()
-                    self.browsePageLoaded.emit(payload)
+                    self._emit_dressed(self.browsePageLoaded, payload, gen)
                     self._save_page_cache()
                 devlog.done("browse", f"{key} revalidate", devlog.clock() - t0)
                 return
             if has_items:
                 self._remember_capped(self._browse_pages, key, payload, self._BROWSE_PAGES_MAX)
                 self._item_fetch_ts[key] = time.monotonic()
-            self.browsePageLoaded.emit(payload)
+            self._emit_dressed(self.browsePageLoaded, payload, gen)
             self._set_status(payload["title"] if not payload["error"] else "Could not open that item")
             self._set_busy(False)
             if has_items:
@@ -7298,7 +7563,7 @@ class WavesBridge(LibraryMixin, QObject):
                     # An open, so the membership is recorded as an open's would be.
                     if has_items:
                         self._record_page_members(payload)
-                    self.browsePageLoaded.emit(payload)
+                    self._emit_dressed(self.browsePageLoaded, payload, gen)
                     self._set_status(payload["title"] if not payload["error"] else "Could not open that item")
                     self._set_busy(False)
                 # Last, for the same reason as the open worker: a claimed prefetch
@@ -8496,6 +8761,56 @@ class WavesBridge(LibraryMixin, QObject):
         while len(self._own_cache) > self._OWN_CACHE_MAX:
             del self._own_cache[next(iter(self._own_cache))]
 
+    def _ownership_roots(self) -> list[str]:
+        """The only folders an ownership answer may come from: the download
+        folder, and the library folder when one is configured (the same root
+        the library scan uses, so it may be the download folder itself).
+
+        Read on every lookup, on the ownership pool or a download worker, never
+        the GUI thread. Pure string work, except in symlink-to-track mode: that
+        mode records each copy's resolved path, so each folder's resolved
+        spelling is added too, or a folder reached through a link would own
+        nothing."""
+        roots = [(self.settings.data.download_base_path or "").strip()]
+        library_root = getattr(self, "_library_root", None)
+        if library_root is not None:
+            roots.append(library_root())
+        roots = [r for r in roots if r]
+        if getattr(self.settings.data, "symlink_to_track", False):
+            roots += [os.path.realpath(os.path.expanduser(r)) for r in roots]
+            # Kept for _path_inside_library, which runs on the GUI thread and
+            # may not resolve a link itself: a copy recorded by its resolved
+            # path must still read IN LIBRARY.
+            lib = library_root() if library_root is not None else ""
+            self._library_root_real = os.path.realpath(os.path.expanduser(lib)) if lib else ""
+        else:
+            self._library_root_real = ""
+        return list(dict.fromkeys(roots))
+
+    @Slot(result=int)
+    def ownershipGeneration(self) -> int:
+        """How many times every ownership answer was forgotten. A browse card
+        dressed with its ``own`` answer carries this number and asks live when
+        it differs, since a card built after a folder change never heard the
+        announcements that made the live cards re-ask."""
+        return int(getattr(self, "_own_generation", 0))
+
+    def _forget_ownership_answers(self) -> None:
+        """The download or library folder changed, so every cached ownership
+        answer may be wrong: age them all past the TTL and announce them, so
+        each button re-asks and the refresh answers against the new folders.
+        The old answer stays readable until then (no pending flicker)."""
+        lock = getattr(self, "_own_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._own_generation = int(getattr(self, "_own_generation", 0)) + 1
+            ids = list(self._own_cache)
+            for tid in ids:
+                self._own_cache[tid] = (float("-inf"), self._own_cache[tid][1])
+        for tid in ids:
+            self._announce_ownership(tid)
+
     def _target_quality_rank(self, quality=None) -> int:
         """Rank of the audio quality this run targets, for "already have
         equal-or-better". The Quality enum's value is the TIDAL tier string
@@ -8527,6 +8842,30 @@ class WavesBridge(LibraryMixin, QObject):
         if prev is None or prev[1] != rec:
             self._announce_ownership(tid)
 
+    def _own_refresh_many(self, tids: list[str]) -> None:
+        """Worker-thread cache refresh for a whole batch: one store query
+        (ownership_of_many) instead of a job and a query per id, then the
+        same first-answer announcement per id as _own_refresh."""
+        try:
+            many = getattr(self._ownership, "ownership_of_many", None)
+            recs = many(tids) if many is not None else {t: self._ownership.ownership_of(t) for t in tids}
+        except Exception:
+            logger.debug("Ownership refresh failed", exc_info=True)
+            recs = {}
+        changed = []
+        with self._own_lock:
+            now = time.monotonic()
+            for tid in tids:
+                rec = recs.get(tid)
+                prev = self._own_cache.get(tid)
+                self._own_cache[tid] = (now, rec)
+                self._own_pending.discard(tid)
+                if prev is None or prev[1] != rec:
+                    changed.append(tid)
+            self._evict_own_cache_locked()
+        for tid in changed:
+            self._announce_ownership(tid)
+
     @Slot(str, result="QVariant")
     def ownershipOf(self, track_id: str):
         """Ownership + delivered quality for an exact TIDAL media id, served from
@@ -8555,9 +8894,15 @@ class WavesBridge(LibraryMixin, QObject):
             # from DOWNLOAD to DOWNLOADED when the real answer lands a beat
             # later. A stale-but-known answer stays unmarked on purpose.
             return {"owned": False, "pending": True} if hit is None else {"owned": False}
+        path = str(rec.get("path") or "")
         return {
             **rec,
             "up_to_date": _copy_is_current(rec, self._override_target_rank(tid), self._would_refetch_atmos(rec)),
+            # Where THIS copy lives, not where downloads go now (issue #38): a
+            # copy written before the download folder moved reads DOWNLOADED,
+            # and the redownload gate names its folder.
+            "in_library": _record_in_library(self, path),
+            "folder": os.path.dirname(path) if path else "",
         }
 
     def _would_refetch_atmos(self, rec) -> bool:
@@ -8595,13 +8940,50 @@ class WavesBridge(LibraryMixin, QObject):
         sampled live, that queueing was most of a shelf's ~120ms atomic build,
         which is what the launch animation dropped frames on."""
         ids = self._ownership.members_of(str(collection_id))
-        return {"ids": ids, "verdict": self._rollup_verdict(ids or [])}
+        return {"ids": ids, **self._rollup_detail(ids or [])}
+
+    @Slot("QVariantList", result="QVariant")
+    def collectionOwnershipMany(self, collection_ids):
+        """collectionOwnership for a list of collections in ONE call:
+        {collection_id: {ids, verdict}}. The art cards' answer to a batch of
+        ownership answers landing (see Main.qml's ownCardsBatch): one
+        crossing for the page instead of one per card."""
+        out = {}
+        for cid in collection_ids or []:
+            cid = str(cid)
+            ids = self._ownership.members_of(cid)
+            out[cid] = {"ids": ids, **self._rollup_detail(ids or [])}
+        return out
 
     @Slot("QVariantList", result=str)
     def collectionOwnershipFor(self, ids) -> str:
         """collectionOwnership's verdict for a member list the caller already
         holds (a page that knows its own tracks)."""
         return self._rollup_verdict([str(t) for t in ids or []])
+
+    @Slot("QVariantList", result="QVariant")
+    def collectionOwnershipDetail(self, ids):
+        """collectionOwnershipFor plus where the owned copies live:
+        {verdict, in_library, folder}. One crossing, so a page's header button
+        can word its done face and name the folder in its redownload gate."""
+        return self._rollup_detail([str(t) for t in ids or []])
+
+    def _rollup_detail(self, ids) -> dict:
+        """The rollup verdict plus in_library (every member's copy sits under
+        the library root; only meaningful when the verdict is "owned") and
+        folder (the first owned member's folder, for the redownload gate)."""
+        verdict = self._rollup_verdict(ids)
+        in_library = False
+        folder = ""
+        if verdict == "owned":
+            in_library = True
+            for tid in ids:
+                o = self.ownershipOf(str(tid))
+                if not folder:
+                    folder = str(o.get("folder") or "")
+                if o.get("in_library") is not True:
+                    in_library = False
+        return {"verdict": verdict, "in_library": in_library, "folder": folder}
 
     @Slot(str, result=str)
     def ownedTierOf(self, media_id: str) -> str:
@@ -8652,15 +9034,51 @@ class WavesBridge(LibraryMixin, QObject):
     def _rollup_verdict(self, ids) -> str:
         if not ids:
             return "no"
-        pending = False
-        for tid in ids:
-            o = self.ownershipOf(tid)
-            if o.get("pending") is True:
-                pending = True
-                continue
-            if not (o.get("owned") is True and o.get("up_to_date") is True):
-                return "no"
-        return "pending" if pending else "owned"
+        # Every member the cache cannot answer goes to the refresh pool as
+        # ONE job (one query for the lot), claimed here so the per-id reads
+        # below dispatch nothing. A job per cold member was hundreds of jobs
+        # per landing, each its own prepared statement on the pool while the
+        # GUI thread waited for the interpreter under the launch water.
+        ids = [str(t) for t in ids]
+        # getattr: the tests call this unbound on a stub that states only
+        # its ownershipOf answers.
+        claim = getattr(self, "_own_claim_cold", None)
+        cold = claim(ids) if claim is not None else []
+        try:
+            pending = False
+            for tid in ids:
+                o = self.ownershipOf(tid)
+                if o.get("pending") is True:
+                    pending = True
+                    continue
+                if not (o.get("owned") is True and o.get("up_to_date") is True):
+                    return "no"
+            return "pending" if pending else "owned"
+        finally:
+            # Dispatched AFTER the reads above: a cold member reads "pending"
+            # from this call whatever the pool's timing, and the answers land
+            # through the announce batch as they always did.
+            if cold:
+                self._own_pool.start(Worker(lambda: self._own_refresh_many(cold)))
+
+    def _own_claim_cold(self, ids: list[str]) -> list[str]:
+        """Claim every member the cache cannot answer for one batched
+        refresh (see _rollup_verdict), so the per-id reads that follow
+        dispatch nothing. A partial bridge without the cache (the tests'
+        lookup stubs) claims nothing."""
+        lock = getattr(self, "_own_lock", None)
+        if lock is None:
+            return []
+        now = time.monotonic()
+        ttl = self._OWN_TTL_BUSY if self._downloads_running() else self._OWN_TTL
+        cold = []
+        with lock:
+            for tid in ids:
+                hit = self._own_cache.get(tid)
+                if (hit is None or now - hit[0] >= ttl) and tid not in self._own_pending:
+                    self._own_pending.add(tid)
+                    cold.append(tid)
+        return cold
 
     @Slot()
     def _poll_track_progress(self) -> None:
@@ -9289,16 +9707,25 @@ class WavesBridge(LibraryMixin, QObject):
         self._boot_reveal_hook = fn
 
     def note_incubation_count(self, n: int) -> None:
-        """app.py's incubation controller reports its live object count
-        (GUI thread). The boot handover gate reads it via bootIncubationBusy:
-        under boot pacing the landing's card Loaders finish registering into
-        the QML veil count only after that count has settled, so the veil
-        alone can no longer promise the reveal lands on a finished page."""
+        """The paced incubation controller reports its count here (only 0, at
+        release: see app.py). The live count is read through the reader."""
         self._incubation_count = int(n)
+
+    def set_incubation_count_reader(self, fn) -> None:
+        """A callable answering the controller's live incubation count, polled
+        by the reveal gate: a Python override of the controller's own count
+        virtual would take the interpreter once per incubated object."""
+        self._incubation_reader = fn
 
     @Slot(result=bool)
     def bootIncubationBusy(self) -> bool:
         """True while asynchronous QML incubation is still assembling objects."""
+        reader = getattr(self, "_incubation_reader", None)
+        if reader is not None:
+            try:
+                return int(reader()) > 0
+            except Exception:
+                logger.debug("incubation count read failed", exc_info=True)
         return self._incubation_count > 0
 
     @Slot()
@@ -9308,9 +9735,17 @@ class WavesBridge(LibraryMixin, QObject):
         if hook is not None:
             with contextlib.suppress(Exception):
                 hook()
-        # The launch look is over: the held library sweep may now compete for
-        # the interpreter (see the constructor's boot deferral).
-        self._start_boot_library_scan()
+        # Everything alive now (the QML scene, the page caches, the module
+        # graph) stays alive for the session, and every full collection was
+        # walking all of it with the interpreter held: 36-56 ms each, measured
+        # as dropped frames whenever a burst of allocations (a scan publish, a
+        # page build) tipped the collector over. Frozen objects are skipped.
+        gc.freeze()
+        # The persisted searches are wanted only once the user can search:
+        # parsing them rode the login worker's page cache load at launch
+        # (json.load holds the interpreter for the whole file), so they have
+        # their own file, read now.
+        self.threadpool.start(Worker(self._load_search_cache))
 
     @Slot(result=str)
     def motionVideoUrl(self) -> str:
@@ -9387,6 +9822,13 @@ class WavesBridge(LibraryMixin, QObject):
             value = str(value)
         self._waves_prefs[key] = value
         self._save_waves_prefs()
+        if key in ("library_enabled", "library_source", "library_folder") and value != old:
+            # The library folder is one of the two places ownership is
+            # answered from; a different one re-asks every answer. getattr:
+            # partial test stubs drive this slot without the ownership family.
+            forget = getattr(self, "_forget_ownership_answers", None)
+            if forget is not None:
+                forget()
         if key == "motion_background":
             self.motionBgChanged.emit()
         elif key == "hover_control_motion":
@@ -11340,12 +11782,12 @@ class WavesBridge(LibraryMixin, QObject):
                 agg = sum(grp["prog"].get(k, 0.0) * grp["weights"].get(k, 1) for k in grp["keys"]) / weight_sum
                 remaining = len(grp["keys"]) - len(grp["done"])
                 finished = len(grp["done"]) >= len(grp["keys"])
-                updates.append((fid, remaining, grp["total"], agg, finished, bool(grp["failed"])))
+                updates.append((fid, remaining, grp["total"], agg, finished, bool(grp["failed"]), _rollup_started(grp)))
                 if finished:
                     del self._folder_groups[fid]
         if self._scan_gen != gen:
             return
-        for fid, remaining, total, agg, finished, any_failed in updates:
+        for fid, remaining, total, agg, finished, any_failed, started in updates:
             if state in ("done", "failed"):
                 self.folderRemaining.emit(fid, remaining, total)
             if finished:
@@ -11356,7 +11798,7 @@ class WavesBridge(LibraryMixin, QObject):
                     self.downloadState.emit(fid, "done")
             else:
                 self.downloadProgress.emit(fid, float(agg))
-                self.downloadState.emit(fid, "running")
+                self.downloadState.emit(fid, "running" if started else "queued")
 
     def _bump_artist_group(self, media_id: str, pct, state) -> None:
         """Roll an album's progress into any 'download discography' group it
@@ -11397,12 +11839,12 @@ class WavesBridge(LibraryMixin, QObject):
                 total = len(grp["keys"]) or 1
                 agg = sum(grp["prog"].get(k, 0.0) for k in grp["keys"]) / total
                 finished = len(grp["done"]) >= len(grp["keys"])
-                updates.append((aid, agg, finished, bool(grp["failed"])))
+                updates.append((aid, agg, finished, bool(grp["failed"]), _rollup_started(grp)))
                 if finished:
                     del self._artist_groups[aid]
         if self._scan_gen != gen:
             return
-        for aid, agg, finished, any_failed in updates:
+        for aid, agg, finished, any_failed, started in updates:
             if finished:
                 if any_failed:
                     self.downloadState.emit(aid, "failed")
@@ -11411,7 +11853,7 @@ class WavesBridge(LibraryMixin, QObject):
                     self.downloadState.emit(aid, "done")
             else:
                 self.downloadProgress.emit(aid, float(agg))
-                self.downloadState.emit(aid, "running")
+                self.downloadState.emit(aid, "running" if started else "queued")
 
     def _reap_stranded_groups(self) -> None:
         """Safety net for the rollups: delete any group none of whose members
@@ -12436,7 +12878,14 @@ class WavesBridge(LibraryMixin, QObject):
         # run's count (or its finished checkmark) until this line lands, and the
         # odometer then rolls away from a number that was never true.
         self.folderRemaining.emit(folder_id, len(keys), len(keys))
-        self.downloadState.emit(folder_id, "running")
+        # QUEUED, not running: nothing has been picked up by a download slot
+        # yet, and a rollup that announces "running" at registration paints an
+        # empty progress matrix over a button whose members are all still
+        # waiting in line, with no cancel and no sign of life. Every other
+        # download says QUEUED first. The first member tick flips this to
+        # running (see _bump_artist_group / _bump_folder_group), and the only
+        # ticks those ever see come from a member that really did start.
+        self.downloadState.emit(folder_id, "queued")
         devlog.event("download", "folder start", id=folder_id, playlists=len(keys))
         # GUI thread already (slot): batch the queue emits like the
         # discography path so the queue appears at once, not 0 -> N.
@@ -12651,7 +13100,14 @@ class WavesBridge(LibraryMixin, QObject):
         # as the state flips, so the count must already be there.
         self.folderRemaining.emit(group_id, len(keys), len(keys))
         self.downloadProgress.emit(group_id, 0.0)
-        self.downloadState.emit(group_id, "running")
+        # QUEUED, not running: nothing has been picked up by a download slot
+        # yet, and a rollup that announces "running" at registration paints an
+        # empty progress matrix over a button whose members are all still
+        # waiting in line, with no cancel and no sign of life. Every other
+        # download says QUEUED first. The first member tick flips this to
+        # running (see _bump_artist_group / _bump_folder_group), and the only
+        # ticks those ever see come from a member that really did start.
+        self.downloadState.emit(group_id, "queued")
         devlog.event("download", "category start", playlists=len(keys))
         with self._queue_batch():
             for key in keys:
@@ -12971,7 +13427,14 @@ class WavesBridge(LibraryMixin, QObject):
                     "prog": {},
                 }
             self.downloadProgress.emit(artist_id, 0.0)
-            self.downloadState.emit(artist_id, "running")
+            # QUEUED, not running: nothing has been picked up by a download slot
+            # yet, and a rollup that announces "running" at registration paints an
+            # empty progress matrix over a button whose members are all still
+            # waiting in line, with no cancel and no sign of life. Every other
+            # download says QUEUED first. The first member tick flips this to
+            # running (see _bump_artist_group / _bump_folder_group), and the only
+            # ticks those ever see come from a member that really did start.
+            self.downloadState.emit(artist_id, "queued")
             # One batch emit → all albums enqueued together on the GUI thread
             # (keeps each album's progress relay GUI-affine and avoids the queue
             # appearing to jump 0 → N as albums trickle in one at a time).
@@ -13104,7 +13567,14 @@ class WavesBridge(LibraryMixin, QObject):
                     "prog": {},
                 }
             self.downloadProgress.emit(gid, 0.0)
-            self.downloadState.emit(gid, "running")
+            # QUEUED, not running: nothing has been picked up by a download slot
+            # yet, and a rollup that announces "running" at registration paints an
+            # empty progress matrix over a button whose members are all still
+            # waiting in line, with no cancel and no sign of life. Every other
+            # download says QUEUED first. The first member tick flips this to
+            # running (see _bump_artist_group / _bump_folder_group), and the only
+            # ticks those ever see come from a member that really did start.
+            self.downloadState.emit(gid, "queued")
             self._videosQueued.emit(gen, video_keys)
             devlog.event("artist_videos_all", videos=len(video_keys))
             self._set_status(f"Downloading {len(video_keys)} videos…")
@@ -13284,7 +13754,14 @@ class WavesBridge(LibraryMixin, QObject):
                     "prog": {},
                 }
             self.downloadProgress.emit(gid, 0.0)
-            self.downloadState.emit(gid, "running")
+            # QUEUED, not running: nothing has been picked up by a download slot
+            # yet, and a rollup that announces "running" at registration paints an
+            # empty progress matrix over a button whose members are all still
+            # waiting in line, with no cancel and no sign of life. Every other
+            # download says QUEUED first. The first member tick flips this to
+            # running (see _bump_artist_group / _bump_folder_group), and the only
+            # ticks those ever see come from a member that really did start.
+            self.downloadState.emit(gid, "queued")
             # Edition handling already ran; exempt these from downloadAlbum's
             # own scan, for the same rollup reason downloadArtist documents.
             self._merge_scanned.update(keys)
@@ -13448,6 +13925,13 @@ class WavesBridge(LibraryMixin, QObject):
                 self._ffmpeg_abort.set()
         except Exception:
             logger.debug("shutdown: no ffmpeg abort event", exc_info=True)
+        # The scanner process: a scan in flight is killed (its worker thread
+        # is released by the generation bump above), an idle one is asked to
+        # quit; either way no child outlives the app.
+        with contextlib.suppress(Exception):
+            worker = getattr(self, "_library_worker", None)
+            if worker is not None:
+                worker.close()
         for pool in (self.dl_pool, self._scan_pool, self.threadpool):
             pool.clear()
         self.dl_pool.waitForDone(4000)
@@ -13922,6 +14406,55 @@ class WavesBridge(LibraryMixin, QObject):
             self._bump_download_groups(mid, None, "failed")
         self._reap_stranded_groups()
         self._emit_queue()
+
+    @Slot(str)
+    def cancelQueuedGroup(self, gid: str) -> None:
+        """Give up a whole rollup (a discography, a folder "download all")
+        from its own button, the way ``cancelQueueItem`` gives up one row.
+
+        A rollup id is not a queue row's media id, so the button's cancel X
+        had nothing to cancel: it queues N album or playlist rows and shows
+        one button over them. The group is dropped FIRST, so the members'
+        withdrawal does not credit N failures against it and leave the button
+        reading RETRY over a batch the user deliberately called off; the
+        button is then put back to idle by hand."""
+        gid = str(gid or "")
+        if not gid:
+            return
+        keys: set[str] = set()
+        with self._artist_lock:
+            grp = self._artist_groups.pop(gid, None)
+        if grp is not None:
+            keys |= set(grp.get("keys") or ())
+        with self._folder_lock:
+            fgrp = self._folder_groups.pop(gid, None)
+        if fgrp is not None:
+            keys |= set(fgrp.get("keys") or ())
+        if grp is None and fgrp is None:
+            return
+        with self._queue_lock:
+            qids = [
+                int(it["qid"])
+                for it in self._queue
+                if str(it.get("media_id", "")) in keys and it.get("status") in ("queued", "running")
+            ]
+        for qid in qids:
+            self.cancelQueueItem(qid)
+        # A member HELD for recovery has no queue row (see _bump_folder_group),
+        # so the sweep above cannot see it and cancelQueueItem never reaches
+        # its stash. Left behind, the share comes back, the replay fires, and
+        # an album the user called off downloads itself with its group already
+        # popped, so it can never report anything. Cancelling a whole rollup
+        # has to reach the stash the same way cancelling one row does.
+        held = self._discard_pending_downloads(keys)
+        self._release_abandoned_hold(held)
+        self.downloadState.emit(gid, "")
+        logger.info(
+            "A queued rollup was cancelled from its button (%d rows, %d held)",
+            len(qids),
+            len(held),
+        )
+        self._set_status("Cancelled")
 
     @Slot()
     def clearFinished(self) -> None:
@@ -14913,6 +15446,7 @@ class WavesBridge(LibraryMixin, QObject):
         # a presence test would sweep the library again on each one.
         lib_before = {k: self._waves_prefs.get(k) for k in ("library_enabled", "library_source", "library_folder")}
         dl_base_before = getattr(data, "download_base_path", None)
+        symlink_before = getattr(data, "symlink_to_track", None)
         for key, value in values.items():
             if key in self._waves_prefs:
                 self.setWavesPref(key, value)
@@ -15045,6 +15579,17 @@ class WavesBridge(LibraryMixin, QObject):
         # covers both.
         if getattr(data, "download_base_path", None) != dl_base_before:
             self.librarySourceChanged.emit()
+            # Ownership is only ever answered from the download and library
+            # folders, so a moved download folder re-asks every answer.
+            forget = getattr(self, "_forget_ownership_answers", None)
+            if forget is not None:
+                forget()
+        elif getattr(data, "symlink_to_track", None) != symlink_before:
+            # The mode decides which spelling of each folder a recorded copy
+            # is matched against, so every answer is re-asked too.
+            forget = getattr(self, "_forget_ownership_answers", None)
+            if forget is not None:
+                forget()
         # SAVE CHANGES is also the library card's Start scan: a library setting
         # that actually MOVED starts the fresh configuration's first scan,
         # provided the master switch is on and a folder is set, which is exactly

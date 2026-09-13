@@ -116,7 +116,18 @@ them, and enqueues the set under one `albums:` rollup id.
 
 The scan family lives in `bridge_library.py` (`LibraryMixin`, mixed into
 `WavesBridge`); `waves/library_index.py` walks the configured folder and
-`waves/matching.py` decides what counts as the same album.
+`waves/matching.py` decides what counts as the same album. The walk runs in a
+child process (`waves/library_worker.py`, driven by
+`waves/waves_ui/library_proc.py`'s `LibraryWorker`), so a long scan never holds
+the interpreter lock the interface thread needs.
+
+Ownership (the record of what Waves itself downloaded) is scoped to at most two
+roots, the download folder and the library folder (`_ownership_roots`): a
+recorded path outside both never counts and is never statted. `ownershipOf`
+answers carry `in_library` and `folder` per copy, and
+`collectionOwnershipDetail(ids)` rolls them up for an album or playlist, so a
+finished button reads IN LIBRARY or DOWNLOADED by where the copy lives and its
+click can name that folder.
 
 `decide_presence` answers at two strengths and the difference matters. `present`
 lights the pill and is generous. Beyond it the verdict splits into two

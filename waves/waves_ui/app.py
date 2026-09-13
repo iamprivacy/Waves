@@ -210,24 +210,26 @@ class _BootPacedIncubation(QQmlIncubationController):
         self._timer.start()
 
     def set_count_notifier(self, fn) -> None:
-        """The bridge learns the live incubation count (bootIncubationBusy):
-        under boot pacing the landing's cards finish registering into the
-        veil count only after it has already settled, so the reveal gate
-        reads THIS count, the authoritative one, instead."""
+        """Kept for the release path: the bridge is told 0 once the throttle
+        opens. The live count itself is polled through count_reader."""
         self._notify = fn
+
+    def count_reader(self):
+        """A callable the bridge's reveal gate polls for the live incubation
+        count (see the note on incubatingObjectCountChanged above)."""
+        return self.incubatingObjectCount
 
     def set_handback(self, fn) -> None:
         """Called once at release; returns True when it restored the window's
         own incubation controller on the engine."""
         self._handback = fn
 
-    def incubatingObjectCountChanged(self, *args) -> None:
-        # The binding passes the new count positionally; *args accepts either
-        # spelling and the authoritative count is queried, not trusted. This
-        # virtual is informational only (the reveal gate's third leg): pacing
-        # itself must keep working even if it never fires.
-        if self._notify is not None:
-            self._notify(self.incubatingObjectCount())
+    # incubatingObjectCountChanged is deliberately NOT overridden. Qt calls
+    # that virtual on every incubation start and finish, and a Python
+    # override means Shiboken takes the interpreter for each call (sampled
+    # 2026-09-12: one wait per card behind the launch workers, inside the
+    # frame). Without an override the wrapper caches the miss and never
+    # crosses again; the reveal gate polls incubatingObjectCount() instead.
 
     def _tick(self) -> None:
         self.incubateFor(self._BOOT_SLICE_MS if self._boot else self._OPEN_SLICE_MS)
@@ -651,6 +653,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     app._waves_incubation = incubation  # type: ignore[attr-defined]  # keep alive
     bridge.set_boot_reveal_hook(incubation.release_throttle)
     incubation.set_count_notifier(bridge.note_incubation_count)
+    bridge.set_incubation_count_reader(incubation.count_reader())
     incubation.set_handback(lambda: _hand_incubation_back_to_window(engine))
     # Belt and braces: if the reveal hook is somehow never reached, open the
     # throttle anyway; by then every boot path has long finished.
@@ -665,18 +668,22 @@ def waves_activate(tidal: Tidal | None = None) -> int:
         print("Failed to load Waves QML UI", file=sys.stderr)
         return 1
 
-    # Back-navigation filter (mouse back/forward buttons, the macOS back-swipe)
-    # plus the activate/deactivate swallow: installed on the WINDOW, not the
-    # application. Every one of those events is delivered to the QQuickWindow
-    # itself, so the window's filter sees them all, and an application-wide
-    # filter is a per-event tax on the whole process: each of the thousands of
-    # ChildAdded / DeferredDelete / MetaCall events the QML engine raises while
-    # it builds a page crossed into Python (a wrapper allocated for the target
-    # object, the GIL taken, the filter run and declined), and while a scan
-    # worker held the GIL the GUI thread queued behind it for each one. Sampled
-    # at launch: object creation ran ~3.5x longer with the filter on the app,
-    # and the launch animation dropped frames for it.
-    root_objects[0].installEventFilter(bridge)
+    # The macOS back-swipe filter: installed on the window's CONTENT ITEM,
+    # not the window and not the application. A Python event filter costs a
+    # crossing into the interpreter for every event its target receives, and
+    # the GUI thread waits for the interpreter on each one behind whatever
+    # worker holds it. On the application that was every ChildAdded /
+    # DeferredDelete / MetaCall of a page build (object creation ran ~3.5x
+    # longer, sampled 2026-08-16). On the window it was still one crossing
+    # per FRAME: the render loop's update request is delivered to the window,
+    # so every frame of the launch water queued for the interpreter behind
+    # the launch workers (sampled 2026-09-11: the largest single GUI-thread
+    # cost while the landing built). The content item receives only what no
+    # item under the pointer accepted: the swipe gesture, which nothing
+    # else claims, and nothing at all while the scene is idle. The mouse
+    # side buttons are read by a MouseArea at the top of the scene (Main.qml).
+    content = root_objects[0].contentItem() if hasattr(root_objects[0], "contentItem") else None
+    (content or root_objects[0]).installEventFilter(bridge)
 
     # Also set the icon on the actual top-level window, not just the application
     # default. app.setWindowIcon only sets a fallback that a Nuitka-compiled

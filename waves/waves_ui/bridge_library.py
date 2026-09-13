@@ -34,10 +34,12 @@ watcher state directly.
 from __future__ import annotations
 
 import contextlib
+import gc
 import logging
 import os
 import pathlib
 import sys
+import threading
 import time
 
 from PySide6 import QtCore, QtGui
@@ -46,9 +48,11 @@ from PySide6.QtCore import Signal, Slot
 import waves.matching as matching
 from waves.helper.path import folder_name_candidates, safe_filename_replacement, safe_filename_replacement_map
 from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, root_comparison_key
+from waves.library_recover import recover_untrusted
+from waves.ownership import path_under
 from waves.worker import Worker
 
-from . import smb_relist
+from .library_proc import LibraryWorker, WorkerFailed
 
 # The subsystem child logger (per the diagnostics conventions): propagates into
 # the root "waves" breadcrumb ring while letting verbose logs slice per subsystem.
@@ -78,12 +82,6 @@ _LIBRARY_WATCH_DEBOUNCE_MS = 3000  # coalesce a watcher event burst (copying an 
 _LIBRARY_WATCH_MAX_DEBOUNCE_S = 30.0  # but flush at least this often during a long import
 _LIBRARY_WATCH_CHUNK = 200  # add this many watch paths per event-loop tick (no UI stall)
 _LIBRARY_DL_DEBOUNCE_MS = 15 * 1000  # coalesce a bulk download's per-track ownership records
-# The launch sweep waits for the boot overlay to reveal (its walk starves the
-# GUI thread of the interpreter, and the boot water drops frames): this timer
-# is the failsafe that starts it anyway if the reveal never reports, sized
-# past the launch sequence's own worst case (1.9s hold + 8s handover cap +
-# drain + zoom) so it only ever fires when QML is gone or wedged.
-_BOOT_LIBRARY_SCAN_FAILSAFE_MS = 15 * 1000
 # ...but flush at least this often, because that debounce RESTARTS per track and
 # a sustained download lands tracks faster than it, so without a ceiling the
 # rebuild never runs and badges freeze for the whole batch. Longer than the
@@ -112,6 +110,57 @@ _LIBRARY_PROBE_CHUNK = 192
 # caller slipped in between, and giving up simply leaves the recovery to the
 # next scan.
 _LIBRARY_RELIST_LOCK_WAIT_S = 20.0
+# _library_worker_probe's "run it in this process" answer, distinct from a
+# probe's own None ("never asked").
+_IN_PROCESS = object()
+
+
+# Every capped memo in this module evicts under one lock. These memos are
+# asked from BOTH the GUI thread (the presence slots, one call per badge) and
+# pool threads (the browse payload dressing, one call per card), and the
+# eviction reads the dict's first key and then deletes it: two threads inside
+# that at once can overshoot the cap, and can have one delete the key the
+# other just read, which raises inside a badge lookup. Rare under the
+# interpreter lock rather than observed, and cheap enough to simply not leave
+# to chance: the work under the lock is a dict operation, so one lock for all
+# of them costs nothing, and the backend's own caches already answer the same
+# race the same way (WavesBridge._remember_capped). Module level, not a
+# method, so the partial bridge stubs in the tests reach it too.
+_MEMO_LOCK = threading.Lock()
+
+
+def _remember(d: dict, key, value, cap: int) -> None:
+    """Insert into a capped memo, evicting oldest-first, under _MEMO_LOCK."""
+    with _MEMO_LOCK:
+        d[key] = value
+        while len(d) > cap:
+            del d[next(iter(d))]  # evict oldest insert
+
+
+def _closed(lib) -> bool:
+    """True when the cache's close() already ran.
+
+    ``is_closed`` is a method today and a bare attribute test on it was always
+    true, which is the bug this helper exists for; it is read here through
+    ``callable`` so that a future property spelling answers correctly too,
+    rather than silently reading False for every cache."""
+    closed = getattr(lib, "is_closed", None)
+    if callable(closed):
+        closed = closed()
+    return bool(closed)
+
+
+def _log_scan_failure(lib) -> None:
+    """(inside an except) A quit (or factory reset) that closed the cache
+    while a walk sat wedged in a network stat past the bounded shutdown wait
+    raises on the closed connection: that is the orderly end arriving late,
+    not a failed scan, and must not land as an ERROR in the crash trail."""
+    if _closed(lib):
+        logger.info("library scan ended by shutdown")
+    else:
+        logger.exception("Library album-presence index build failed")
+
+
 # Distinct spellings kept per artist key, and the ceiling on the whole queue:
 # a runaway page must never turn into unbounded state or unbounded disk asks.
 _LIBRARY_PROBE_SPELLINGS = 3
@@ -247,6 +296,116 @@ def _listing_reconciled(lib) -> bool:
     return bool(getattr(lib, "last_listing_reconciled", False))
 
 
+class SqlPresenceIndex:
+    """The album presence index, answered by the scan cache itself.
+
+    The matcher asks a mapping for one presence key and gets that key's
+    bucket of fact dicts; this answers each such question with one indexed
+    query on the cache (LibraryIndex.presence_facts) and memoises the bucket.
+    It replaces a dict of every album in the library, rebuilt from a full
+    table read on every publish: hundreds of thousands of key derivations
+    that held the interpreter for seconds each time, right under the launch
+    water. Nothing is built up front, so a publish costs nothing, and a
+    lookup releases the interpreter while sqlite steps.
+
+    A fresh object per publish, on purpose: the slots' memos key on the
+    index object's identity, so a republish still resets them exactly as a
+    fresh dict did. Truthiness follows the cache: an index over a cache with
+    no keyed rows reads empty, and every slot then answers "not built"."""
+
+    _MEMO_MAX = 4096
+
+    def __init__(self, lib) -> None:
+        self._lib = lib
+        self._memo: dict = {}
+        self._nonempty: bool | None = None
+
+    def __bool__(self) -> bool:
+        if self._nonempty is None:
+            try:
+                self._nonempty = bool(self._lib.has_presence_rows())
+            except Exception:
+                # Deliberately NOT remembered. A read that failed once (a
+                # cache locked by a writer, a share that blinked) is not the
+                # answer "this library is empty", and storing it here would
+                # make every presence slot say "not built" for the whole life
+                # of this index: every badge dark until the next publish, from
+                # one transient error. The next question asks the cache again.
+                logger.debug("presence row probe failed", exc_info=True)
+                return False
+        return self._nonempty
+
+    def __len__(self) -> int:
+        return 1 if self else 0
+
+    def get(self, key, default=None):
+        hit = self._memo.get(key)
+        if hit is None:
+            try:
+                hit = self._lib.presence_facts(key)
+            except Exception:
+                logger.debug("presence lookup failed", exc_info=True)
+                return default
+            _remember(self._memo, key, hit, self._MEMO_MAX)
+        return hit if hit else default
+
+    def __contains__(self, key) -> bool:
+        return bool(self.get(key))
+
+
+class SqlTrackIndex(SqlPresenceIndex):
+    """The track presence index, the same way (LibraryIndex.track_facts)."""
+
+    def get(self, key, default=None):
+        hit = self._memo.get(key)
+        if hit is None:
+            try:
+                hit = self._lib.track_facts(key)
+            except Exception:
+                logger.debug("track presence lookup failed", exc_info=True)
+                return default
+            _remember(self._memo, key, hit, self._MEMO_MAX)
+        return hit if hit else default
+
+
+class SqlArtistRollup:
+    """The per-artist rollup, one artist at a time from the cache
+    (LibraryIndex.artist_buckets + matching.artist_rollup_entry), memoised.
+    Replaces a whole-library pass at every publish."""
+
+    _MEMO_MAX = 2048
+
+    def __init__(self, lib) -> None:
+        self._lib = lib
+        self._memo: dict = {}
+
+    def get(self, artist_key, default=None):
+        if artist_key in self._memo:
+            hit = self._memo[artist_key]
+            return hit if hit else default
+        # The Various-Artists test belongs on the NORMALISED key, which is what
+        # the whole-library pass this replaced did (matching.build_artist_rollup)
+        # and what the raw-tag refusal in _album_keys cannot stand in for: that
+        # one runs before norm_artist, so a tag reading "The Various" or
+        # "V.A.; Some DJ" walks past it and only normalises into a compilation
+        # afterwards. Both nets were deliberate. Without this one a compilation
+        # credit earns a real artist's badge and inflates their tally.
+        try:
+            wanted = bool(artist_key) and not matching.is_various_artists(artist_key)
+            entry = matching.artist_rollup_entry(self._lib.artist_buckets(artist_key)) if wanted else None
+        except Exception:
+            logger.debug("artist rollup lookup failed", exc_info=True)
+            return default
+        _remember(self._memo, artist_key, entry, self._MEMO_MAX)
+        return entry if entry else default
+
+    def __contains__(self, artist_key) -> bool:
+        return bool(self.get(artist_key))
+
+    def __bool__(self) -> bool:
+        return True
+
+
 def _rearm(bridge) -> None:
     """Re-ask whatever a running scan made the probe defer. Guarded because the
     partial stubs the bridge tests build bind a fixed list of methods."""
@@ -327,6 +486,12 @@ class LibraryMixin:
             # getattr: partial test stubs drive this slot without the full init.
             scanning = getattr(self, "_library_scanning", None)
             self._library = self._open_library_index()
+        # The scanner process may be mid-walk on the old folder: killed, so
+        # the generation bump above is the end of it there too.
+        worker = getattr(self, "_library_worker", None)
+        if worker is not None:
+            with contextlib.suppress(Exception):
+                worker.cancel()
         # Close the retired index's sqlite connection, or every folder change
         # leaked one for the session. NOT while a scan still holds it: that
         # scan keeps writing its work into the old file (preserved for the day
@@ -351,34 +516,97 @@ class LibraryMixin:
             self._library_probe_pending = {}
             self._library_probe_deferred = {}
         self._library_scan_progress = {}
+        self._bump_library_stamp()
         self.libraryPresenceChanged.emit()
         self.libraryScanStatusChanged.emit()
 
-    def _publish_artist_rollup(self, idx: dict) -> None:
-        """(worker thread) Derive the per-artist rollup for a just-published
-        album index BEFORE libraryPresenceChanged fires. The QML handlers that
-        signal wakes re-ask artistLibraryPresence synchronously on the GUI
-        thread, and that slot's lazy derive is a full pass over the album
-        index, so leaving it to the slot put the whole pass inside a frame.
-        The slot keeps the lazy derive as the race fallback. Guarded so a
-        publish that lost the last-writer race never caches a rollup for an
-        index that is no longer the published one."""
-        try:
-            rollup = matching.build_artist_rollup(idx)
-        except Exception:
-            logger.debug("Artist rollup precompute failed; the slot derives it lazily", exc_info=True)
-            return
+    def _bump_library_stamp(self) -> None:
+        """Every change of the index, a clear included, dates the verdicts
+        baked before it: a card built after a clear must not trust an IN
+        LIBRARY answered from the folder that was left (see libraryStamp)."""
         with self._library_index_lock:
-            if self._library_index is idx:
-                self._library_artist_index = rollup
-                self._library_artist_index_src = idx
+            self._library_stamp = int(getattr(self, "_library_stamp", 0)) + 1
 
-    def _build_presence_indexes(self, lib) -> tuple[dict, dict]:
-        """Both presence indexes (albums, tracks) from one committed cache
-        read, so every publish lands them as a pair and the two pills always
-        describe the same scan. Reads only ``lib`` (handed in, never
-        self._library at use time: see the generation notes in
-        _rebuild_library_index), so the launch seed and the scan share it."""
+    def _artist_rollup(self, idx):
+        """(worker thread) The per-artist rollup for an album index: answered
+        by the cache one artist at a time for a cache-backed index, derived
+        whole for a plain dict (the tests' stubs), or empty when the derive
+        fails (the artist page then reads nothing for that publish, never a
+        stale index's answer)."""
+        if isinstance(idx, SqlPresenceIndex):
+            return SqlArtistRollup(idx._lib)
+        try:
+            return matching.build_artist_rollup(idx)
+        except Exception:
+            logger.debug("Artist rollup precompute failed", exc_info=True)
+            return {}
+
+    def _publish_index(self, idx: dict, tracks: dict, *, only_if_unset: bool = False) -> bool:
+        """(worker thread) Publish a freshly built pair of presence indexes
+        AND the artist rollup derived from them as one swap under the publish
+        lock. Returns whether the publish stood.
+
+        One swap, because the rollup used to be derived after the album index
+        had already been published, and the slots that read both kept a lazy
+        derive for the gap: a full pass over the album index, on the GUI
+        thread, inside whatever frame happened to ask first. At launch that
+        was a card being created behind the boot water (sampled live: 52-84 ms
+        in build_artist_rollup under _library_probe_wanted, mid-fade). With
+        the rollup derived HERE, before the lock, a reader can never see an
+        index without its rollup, and the lazy derive is gone.
+
+        ``only_if_unset`` is the launch seed's rule: a scan that finished
+        first has published a newer index over the window the seed spent
+        assembling an older one, and the last writer must not be the stale
+        one (see _seed_library_badges_job).
+
+        The heap is frozen after a publish: the index is hundreds of thousands
+        of long-lived objects, and every full collection walked them all with
+        the interpreter held (36-56 ms each, measured as dropped frames while
+        the scan ran). Frozen objects are simply skipped."""
+        rollup = self._artist_rollup(idx)
+        with self._library_index_lock:
+            if only_if_unset and self._library_index is not None:
+                return False
+            self._library_index = idx
+            self._library_track_index = tracks
+            self._library_probe_memo = {}
+            self._library_artist_index = rollup
+            self._library_artist_index_src = idx
+            # Bumped inside the swap, so nothing can read the new index with
+            # the old stamp: see libraryStamp for what reads it.
+            self._library_stamp = int(getattr(self, "_library_stamp", 0)) + 1
+        # Swept before it is promoted. gc.freeze() never collects what it
+        # freezes, so any cyclic garbage alive at this instant would be kept
+        # for the rest of the session, and a publish happens on every scan,
+        # every probe hit and every library change. The sweep only ever walks
+        # what is NOT already frozen, so after the first one it is this index
+        # and the churn around it, never the whole heap.
+        #
+        # The first publish skips the sweep: nothing is frozen yet, so it
+        # would be a full collection, and at launch this can land under the
+        # water (bootRevealed freezes there for the same reason, and a scan
+        # that publishes early can beat it). One unswept promotion is the
+        # price of not putting a full collection in the picture's way.
+        if gc.get_freeze_count():
+            gc.collect()
+        gc.freeze()
+        return True
+
+    def _build_presence_indexes(self, lib) -> tuple:
+        """Both presence indexes (albums, tracks) over one cache, so every
+        publish lands them as a pair and the two pills always describe the
+        same scan. Reads only ``lib`` (handed in, never self._library at use
+        time: see the generation notes in _rebuild_library_index), so the
+        launch seed and the scan share it.
+
+        A real cache answers through SqlPresenceIndex / SqlTrackIndex: no
+        table read, no dict, nothing derived (the keys are stored on the
+        rows by the scanner). The dict build below remains for a cache that
+        offers only the row iterators, which is what the tests' stubs are,
+        and it documents the fact shapes the sqlite path reproduces."""
+        if hasattr(lib, "presence_facts") and hasattr(lib, "track_facts"):
+            return SqlPresenceIndex(lib), SqlTrackIndex(lib)
         local: dict = {}
         for a in lib.iter_albums():
             # A Various-Artists credit is refused HERE, on the raw tag,
@@ -491,31 +719,22 @@ class LibraryMixin:
         # badges then visibly fall BACK to the pre-scan picture until the
         # hourly sweep (the container poll sees no change, the scan having
         # already stamped the mtimes it compares against).
-        with self._library_index_lock:
-            if self._library_index is not None:
-                return
-            self._library_index = seeded
-            self._library_track_index = seeded_tracks
-            self._library_probe_memo = {}
+        if not self._publish_index(seeded, seeded_tracks, only_if_unset=True):
+            return
         # The cache remembers what its last scan could not trust, so a badge
         # seeded from it can already ask the disk by name (see the probe
         # section) while the change-check scan runs underneath.
         self._library_scan_partial = bool(getattr(lib, "last_scan_partial", False))
         self._library_listing_shape = _listing_shape(lib)
         self._library_listing_reconciled = _listing_reconciled(lib)
-        self._publish_artist_rollup(seeded)
         self._emit_from_worker("libraryPresenceChanged")
         _rearm(self)
 
     def _seed_library_badges(self) -> None:
         """(GUI thread, launch) Light the badges from the committed cache
-        WITHOUT dispatching a scan. The launch sweep itself is held until the
-        boot overlay has revealed (_start_boot_library_scan): its directory
-        walk runs on pool threads that compete with the GUI thread for the
-        interpreter, and the only motion on screen during boot (the wave
-        loop) paid for that in dropped frames (probe 2026-09-01: 59-73 ms GUI
-        stalls with _walk_album_dirs/_scandir_one busy, against a 42 ms frame
-        budget). The seed is a sqlite read, cheap enough to keep."""
+        WITHOUT waiting for a scan: the cache-backed indexes cost nothing to
+        publish, so a freshly launched window is never badge-less while the
+        change-check runs in the scanner process underneath."""
         with self._library_index_lock:
             gen = self._library_gen
             lib = self._library
@@ -523,22 +742,6 @@ class LibraryMixin:
         if not root:
             return
         self.threadpool.start(Worker(lambda: self._seed_library_badges_job(gen, lib, root)), 10)
-
-    def _start_boot_library_scan(self) -> None:
-        """(GUI thread) Release the launch library sweep. Called by the boot
-        reveal (bootRevealed) and by the failsafe timer armed at construction,
-        whichever comes first; one-shot, so the loser is a no-op. The
-        force_full decision is made HERE, not at construction: it reads the
-        cache's clock, and the answer cannot go stale in the seconds the
-        reveal takes."""
-        if not getattr(self, "_boot_library_scan_pending", False):
-            return
-        self._boot_library_scan_pending = False
-        timer = getattr(self, "_boot_library_scan_timer", None)
-        if timer is not None:
-            timer.stop()
-        logger.info("boot library sweep released")
-        self._rebuild_library_index(force_full=self._library.due_for_full_scan(_LIBRARY_DEEP_SWEEP_MS / 1000.0))
 
     def _rebuild_library_index(self, force_full: bool = False) -> None:  # noqa: C901 (see below)
         """(Re)build the local library-presence index off the GUI thread by
@@ -607,6 +810,7 @@ class LibraryMixin:
                 self._library_index_building = False
                 self._library_scanning = None
             if changed:
+                self._bump_library_stamp()
                 self.libraryPresenceChanged.emit()
                 self.libraryScanStatusChanged.emit()
             return
@@ -677,14 +881,10 @@ class LibraryMixin:
                     # Under the lock the seed beside this scan also takes, so
                     # its "nobody has published yet" check cannot straddle
                     # this publish and overwrite it with the older cache.
-                    with self._library_index_lock:
-                        self._library_index = fresh
-                        self._library_track_index = fresh_tracks
-                        self._library_probe_memo = {}
+                    self._publish_index(fresh, fresh_tracks)
                     self._library_scan_partial = bool(getattr(lib, "last_scan_partial", False))
                     self._library_listing_shape = _listing_shape(lib)
                     self._library_listing_reconciled = _listing_reconciled(lib)
-                    self._publish_artist_rollup(fresh)
                     self._emit_from_worker("libraryPresenceChanged")
                     _rearm(self)
             self._library_scan_progress = p
@@ -703,6 +903,7 @@ class LibraryMixin:
             try:
                 try:
                     self._library_share_remount(root)
+
                     # Classified HERE on the pool (the stat behind it can hang
                     # on a sick mount) and handed to refresh, which throttles
                     # its walk and read pools on a network root: sixteen
@@ -712,29 +913,13 @@ class LibraryMixin:
                     # a POSITIVE network verdict may throttle, or an unnamed
                     # local filesystem would scan a cold library at a quarter
                     # speed for no reason.
-                    count = lib.refresh(
-                        root,
-                        should_continue=lambda: gen == self._library_gen,
-                        on_progress=on_progress,
-                        force_full=force_full,
-                        root_is_local=self._library_root_locality(root),
-                    )
-                    status = lib.last_scan_status
-                    self._library_share_alive(root, status)
-                    # Before the index is built, so a recovery lands in the
-                    # very first publish rather than a second one.
-                    self._library_recover_untrusted(lib, root, lambda: gen == self._library_gen, on_progress)
+                    def alive() -> bool:
+                        return gen == self._library_gen
+
+                    count, status = self._library_scan_once(lib, root, force_full, alive, on_progress)
                     index, track_index = build_index()
                 except Exception:
-                    if getattr(lib, "is_closed", False):
-                        # A quit (or factory reset) closed the cache while a
-                        # walk sat wedged in a network stat past the bounded
-                        # shutdown wait; the raise on the closed connection is
-                        # that orderly end arriving late, not a failed scan,
-                        # and must not land as an ERROR in the crash trail.
-                        logger.info("library scan ended by shutdown")
-                    else:
-                        logger.exception("Library album-presence index build failed")
+                    _log_scan_failure(lib)
                     index = None  # keep the last good index; do not blank the badge
                 if gen == self._library_gen:
                     # Publish only an index that belongs to THIS root: a failed
@@ -746,11 +931,7 @@ class LibraryMixin:
                         # Same lock as the seed's check-and-set: whichever of
                         # the two runs last must be the one that stands, and
                         # this one is always allowed to stand.
-                        with self._library_index_lock:
-                            self._library_index = index
-                            self._library_track_index = track_index
-                            self._library_probe_memo = {}
-                        self._publish_artist_rollup(index)
+                        self._publish_index(index, track_index)
                         self._library_scan_progress = {"phase": "done", "indexed": count, "eta_secs": -1}
                         self._emit_from_worker("libraryPresenceChanged")
                         _rearm(self)
@@ -1092,6 +1273,22 @@ class LibraryMixin:
         handed, distinct = getattr(self, "_library_listing_shape", (0, 0))
         return {"entries": int(handed), "distinct": int(distinct)}
 
+    @Slot(result=int)
+    def libraryStamp(self) -> int:
+        """Which published presence index the answers on screen came from.
+
+        A browse payload is dressed with its library verdicts on a worker
+        thread and its cards are built from it later, so a publish landing in
+        between hands a brand new card an answer from before it: the card
+        printed DOWNLOAD over an album already on disk, and kept printing it,
+        because the signal that would have made it re-ask fired while the card
+        did not yet exist. A dressed card carries this number and compares it
+        before trusting what it was handed.
+
+        Counts publishes, not scans: every swap of the index bumps it, which
+        is exactly when a baked answer stops being current."""
+        return int(getattr(self, "_library_stamp", 0))
+
     @Slot(result=bool)
     def libraryIndexReady(self) -> bool:
         """Has the presence index answered even once yet? Every presence slot
@@ -1134,28 +1331,18 @@ class LibraryMixin:
         dead network mount can hang for many seconds. In download-source mode
         the library root IS the download folder, so the answer is trivially
         true whenever a root resolves."""
-        root = self._library_root()
-        if not root:
-            return False
-        base = (self.settings.data.download_base_path or "").strip()
-        if not base:
-            return False
-        try:
-            r = os.path.normcase(os.path.normpath(os.path.expanduser(root)))
-            b = os.path.normcase(os.path.normpath(os.path.expanduser(base)))
-        except Exception:
-            return False
-        if sys.platform == "darwin":
-            # normcase only folds case on Windows, but macOS volumes are
-            # case-insensitive by default (APFS and HFS+ both), so /Music and
-            # /music name the SAME folder and the unfolded compare would call
-            # a download folder separate from the library it sits in. This is
-            # the same bet Windows already makes through normcase, on the same
-            # grounds: the platform default wins, and the opt-in exception
-            # (case-sensitive APFS, NTFS per-directory case sensitivity) is
-            # rare enough that neither normcase nor this may stat to find out.
-            r, b = r.lower(), b.lower()
-        return b == r or b.startswith(r + os.sep)
+        return self._path_inside_library(self.settings.data.download_base_path or "")
+
+    def _path_inside_library(self, path: str) -> bool:
+        """Does ``path`` lie under the scanned library root? The same rule
+        downloadsInsideLibrary applies to the download folder, applied to any
+        one path: a copy Waves wrote before the download folder moved may sit
+        anywhere, and its face must name where THAT copy is. String compare
+        only, never a stat (GUI thread, possibly a dead mount)."""
+        # The ownership store's own rule (path_under), so a copy it counts as
+        # inside the library is worded IN LIBRARY by exactly the same compare.
+        real = getattr(self, "_library_root_real", "")
+        return path_under(path, self._library_root()) or bool(real and path_under(path, real))
 
     @Slot()
     def rescanLibrary(self) -> None:
@@ -1214,9 +1401,7 @@ class LibraryMixin:
         verdict = self._presence_memo.get(key)
         if verdict is None:
             verdict = matching.decide_presence(title, artist, year, num_tracks, idx, duration)
-            if len(self._presence_memo) >= _PRESENCE_MEMO_MAX:
-                self._presence_memo.pop(next(iter(self._presence_memo)))
-            self._presence_memo[key] = verdict
+            _remember(self._presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
         if not verdict.get("present"):
             # A miss on a share whose listing cannot be trusted is not an
             # answer yet: ask the disk by name (see the probe section). A
@@ -1262,9 +1447,7 @@ class LibraryMixin:
         verdict = self._track_presence_memo.get(key)
         if verdict is None:
             verdict = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
-            if len(self._track_presence_memo) >= _PRESENCE_MEMO_MAX:
-                self._track_presence_memo.pop(next(iter(self._track_presence_memo)))
-            self._track_presence_memo[key] = verdict
+            _remember(self._track_presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
         if not verdict.get("present"):
             probe = getattr(self, "_library_probe_async", None)  # as the album pill above
             if probe is not None:
@@ -1502,82 +1685,120 @@ class LibraryMixin:
     # worst a race can do is one extra stat.
 
     def _library_recover_untrusted(self, lib, root: str, alive, on_progress=None) -> int:
-        """(POOL THREAD, straight after a scan) Ask a freshly mounted copy of
-        the share for the folder names its own mount would not list, and index
-        whatever comes back. Returns how many folders were recovered.
-
-        Only ever reached when the scan just flagged a listing as untrusted, so
-        a healthy library pays one boolean for this. Everything after that gate
-        is best effort: no better listing, no credential, a server asleep, a
-        fresh listing that repeated itself too, all return 0 and leave the app
-        behaving exactly as it does today. The probe by name behind every badge
-        miss stays in place either way, and still covers whatever this misses.
-
-        The names go to probe_folders as their own spellings, because they came
-        off the disk: no naming-settings guesswork is needed for a name the
-        filesystem just handed over. That call stats each one under every
-        flagged folder, skipping the ones the cache already holds, walks the
-        subtree of each hit and writes it under the flagged folder as parent,
-        which is exactly what the scan would have done had the listing named
-        them. ``on_progress`` is the scan's own progress sink: a share's worth
-        of recovered artists is minutes of reading, and the bar must keep
-        moving through it."""
+        """(POOL THREAD, the in-process fallback) waves.library_recover's
+        recovery of the folders an untrusted listing left out; the scanner
+        process runs the same function itself."""
+        # The same first guard the function itself applies, taken here too
+        # so a healthy library never even resolves the config directory.
         if not bool(getattr(lib, "last_scan_partial", False)):
             return 0
-        if not alive():
+        # No settings file, no config directory to mount under: nothing to
+        # recover with, exactly the 0 the function itself answers.
+        file_path = getattr(self.settings, "file_path", "")
+        if not file_path:
             return 0
-        try:
-            targets = list(lib.unreliable_dirs())
-            if not targets:
-                return 0
-            config_dir = os.path.dirname(self.settings.file_path)
-            # A mount point a crashed run left behind is cleaned up here rather
-            # than at startup: this is the first moment one could get in the
-            # way, and boot has better things to do than stat a directory for
-            # a case almost nobody is in.
-            smb_relist.sweep_stale(config_dir)
-            recovered = smb_relist.relist_folders(
-                targets,
-                config_dir=config_dir,
-                known={t: lib.child_names(t) for t in targets},
-            )
-            if not recovered or not alive():
-                return 0
-            wanted = sorted({name for names in recovered.values() for name in names})
-            found = lib.probe_folders(
-                root,
-                wanted,
-                alive,
-                candidates=lambda name: (name,),
-                timeout=_LIBRARY_RELIST_LOCK_WAIT_S,
-                on_progress=on_progress,
-            )
-        except Exception:
-            logger.debug("Recovering an untrusted listing failed; leaving the scan as it was", exc_info=True)
-            return 0
-        hits = int(found or 0)
-        # Whether anything the fresh mount named is STILL missing from the
-        # cache. The listing stays untrusted either way (the probe by name
-        # stays armed behind every badge miss), but a folder that is fully
-        # recovered is not an incomplete library, and Settings must not warn
-        # about badges that are all there. Checked against the cache, not
-        # against the hit count: most of these names were already indexed by
-        # an earlier recovery, so a run that indexes nothing new is the normal
-        # steady state, not a failure.
-        try:
-            complete = all(lib.listing_holds_all(target, names) for target, names in recovered.items())
-        except Exception:
-            logger.debug("Checking a recovered listing against the cache failed", exc_info=True)
-            complete = False
-        with contextlib.suppress(Exception):  # a stub index without the setter
-            lib.note_listing_reconciled(complete)
-        logger.info(
-            "untrusted listing recovery: %d names read from a fresh mount, %d folders indexed, nothing left out: %s",
-            len(wanted),
-            hits,
-            complete,
+        return recover_untrusted(
+            lib,
+            root,
+            os.path.dirname(file_path),
+            alive,
+            on_progress,
+            lock_wait=_LIBRARY_RELIST_LOCK_WAIT_S,
         )
-        return hits
+
+    def _library_scan_once(self, lib, root: str, force_full: bool, alive, on_progress) -> tuple[int, str]:
+        """(POOL THREAD) One scan of ``root`` into ``lib``: the count indexed
+        and the scan status. The scanner process does the walk, the reads,
+        the writes and the untrusted-listing recovery, so none of it ever
+        holds this process's interpreter (see waves.library_worker).
+        In-process only when the process is unavailable, exactly as before."""
+        outcome = self._library_worker_scan(lib, root, force_full, alive, on_progress)
+        if outcome is None:
+            count = lib.refresh(
+                root,
+                should_continue=alive,
+                on_progress=on_progress,
+                force_full=force_full,
+                root_is_local=self._library_root_locality(root),
+            )
+            status = lib.last_scan_status
+            self._library_share_alive(root, status)
+            # Before the index is built, so a recovery lands in the very
+            # first publish rather than a second one.
+            self._library_recover_untrusted(lib, root, alive, on_progress)
+            return count, status
+        status = lib.last_scan_status
+        self._library_share_alive(root, status)
+        return int(outcome.get("count") or 0), status
+
+    # ----- the scanner process ---------------------------------------------
+    def _library_worker_scan(self, lib, root: str, force_full: bool, alive, on_progress):
+        """(POOL THREAD) Run the scan in the scanner process and take its
+        outcome onto ``lib``; None means run it in-process (no process, a
+        cache the process cannot open, a failure) or that the job was
+        superseded (an in-process run then bails on its first check)."""
+        worker = getattr(self, "_library_worker", None)
+        if not isinstance(worker, LibraryWorker) or worker.disabled:
+            return None
+        path = getattr(lib, "path", "")
+        if not path or path == ":memory:":
+            return None
+        job = {
+            "cache": path,
+            "root": root,
+            "force_full": bool(force_full),
+            "root_is_local": self._library_root_locality(root),
+            "config_dir": os.path.dirname(self.settings.file_path),
+            "recover": True,
+            "lock_wait": _LIBRARY_RELIST_LOCK_WAIT_S,
+        }
+        try:
+            outcome = worker.run_scan(job, alive=alive, on_progress=on_progress)
+        except WorkerFailed as exc:
+            # Said out loud: this is the one path that quietly walks the whole
+            # library a second time, in this process, which is the stutter the
+            # scanner process exists to remove. A silent fallback here reads in
+            # the log exactly like a scan that went well.
+            logger.warning("the library scan fell back in-process: %s", exc)
+            return None
+        if outcome is None:
+            return None
+        lib.adopt_scan_outcome(
+            str(outcome.get("status") or ""),
+            partial=bool(outcome.get("partial")),
+            shape=outcome.get("shape") or (0, 0),
+            reconciled=bool(outcome.get("reconciled")),
+        )
+        return outcome
+
+    def _library_worker_probe(self, lib, root: str, names: list[str], gen: int, timeout: float):
+        """(worker thread) probe_folders in the scanner process: the count
+        found, None for "never asked" (the process is busy with a scan, or
+        the job was superseded), or _IN_PROCESS to run it here."""
+        worker = getattr(self, "_library_worker", None)
+        if not isinstance(worker, LibraryWorker) or worker.disabled:
+            return _IN_PROCESS
+        path = getattr(lib, "path", "")
+        if not path or path == ":memory:":
+            return _IN_PROCESS
+        job = {
+            "cache": path,
+            "root": root,
+            "names": list(names),
+            "spellings": {n: list(self._library_probe_candidates(n)) for n in names},
+            # The CALLER's wait, the same number the in-process path is given.
+            # Pinned to the relist constant here, the drainer's "do not wait
+            # for the cache at all" (0.0) became a twenty-second block inside
+            # the child, which is the one thing that answer exists to avoid.
+            "timeout": float(timeout),
+        }
+        try:
+            out = worker.run_probe(job, alive=lambda: gen == self._library_gen)
+        except WorkerFailed:
+            return _IN_PROCESS
+        if out is None:
+            return None
+        return out.get("found")
 
     def _library_probe_candidates(self, name: str) -> list[str]:
         """The folder spellings to try for an artist, from the naming settings
@@ -1606,14 +1827,12 @@ class LibraryMixin:
         if not key:
             return None
         idx = self._library_index
-        if idx:
-            if self._library_artist_index_src is not idx:
-                # The rollup is precomputed at every publish; this is the same
-                # race fallback artistLibraryPresence keeps.
-                self._library_artist_index = matching.build_artist_rollup(idx)
-                self._library_artist_index_src = idx
-            if key in self._library_artist_index:
-                return None
+        # The rollup is published in the same swap as the index
+        # (_publish_index), so it is always the index's own. A stub that set
+        # the index by hand has no rollup: nothing to check against, and
+        # nothing worth deriving here, on a GUI-thread lookup.
+        if idx and self._library_artist_index_src is idx and key in self._library_artist_index:
+            return None
         if key in getattr(self, "_library_probe_inflight", ()):
             return None
         deadline = getattr(self, "_library_probe_memo", {}).get(key)
@@ -1641,23 +1860,22 @@ class LibraryMixin:
         try:
             if not root or lib is None:
                 return False
-            found = lib.probe_folders(
-                root,
-                [name for spellings in batch.values() for name in spellings],
-                lambda: gen == self._library_gen,
-                candidates=self._library_probe_candidates,
-                timeout=timeout,
-            )
+            names = [name for spellings in batch.values() for name in spellings]
+            found = self._library_worker_probe(lib, root, names, gen, timeout)
+            if found is _IN_PROCESS:
+                found = lib.probe_folders(
+                    root,
+                    names,
+                    lambda: gen == self._library_gen,
+                    candidates=self._library_probe_candidates,
+                    timeout=timeout,
+                )
             if not found or gen != self._library_gen:
                 return False
             fresh, fresh_tracks = self._build_presence_indexes(lib)
             if gen != self._library_gen:
                 return False
-            with self._library_index_lock:
-                self._library_index = fresh
-                self._library_track_index = fresh_tracks
-                self._library_probe_memo = {}
-            self._publish_artist_rollup(fresh)
+            self._publish_index(fresh, fresh_tracks)
             self._emit_from_worker("libraryPresenceChanged")
         except Exception:
             logger.debug("Library probe by name failed; leaving the badge as it was", exc_info=True)
@@ -1935,7 +2153,13 @@ class LibraryMixin:
             self._library_probe_miss(name)
             return {"present": False, "albums": 0, "tracks": 0}
         if self._library_artist_index_src is not idx:
-            self._library_artist_index = matching.build_artist_rollup(idx)
+            # Through _artist_rollup, not build_artist_rollup: the published
+            # index is normally the cache-backed one, which has no .items()
+            # to walk, and this is a GUI-thread slot, so the whole-library
+            # derive raising here is a traceback in a frame. The publish sets
+            # index and rollup in one swap, so this runs only when a publish
+            # landed between the two reads above.
+            self._library_artist_index = self._artist_rollup(idx)
             self._library_artist_index_src = idx
         if matching.is_various_artists(name):
             return {"present": False, "albums": 0, "tracks": 0}
