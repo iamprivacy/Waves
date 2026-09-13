@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.28"
+version = "0.1.29"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -178,7 +178,10 @@ ignore = [
 "tests/test_search_tab_artist_restore.py" = ["S603", "C901"]
 "tests/test_boot_input_shield.py" = ["S603", "C901"]
 "tests/test_boot_reveal_prewarm.py" = ["S603", "C901"]
+"tools/launch_probe.py" = ["S603"]
+"tests/test_boot_quiet_window.py" = ["S603", "C901"]
 "tests/test_search_paste_autosearch.py" = ["S603", "C901"]
+"tests/test_search_query_collapse_qml.py" = ["S603", "C901"]
 "tests/test_queue_failed_section.py" = ["S603", "C901"]
 "tests/test_queue_row_index.py" = ["S603", "C901"]
 "tests/test_queue_row_quality.py" = ["S603", "C901"]
@@ -217,15 +220,17 @@ ignore = [
 "tests/test_queue_row_progress_density.py" = ["S603", "C901"]
 "tests/test_card_progress_outline.py" = ["S603", "C901"]
 "tests/test_queue_playlist_expands.py" = ["S603", "C901"]
+"tests/test_queue_single_row_has_nothing_to_expand.py" = ["S603", "C901"]
 "tests/test_queue_expected_tier.py" = ["S603", "C901"]
 "tests/test_queue_in_library_row.py" = ["S603", "C901"]
 "tests/test_queue_ledger_cap.py" = ["S603", "C901"]
+"tests/test_queue_section_pulse.py" = ["S603", "C901"]
+"tests/test_new_release_mark.py" = ["S603", "C901"]
 "tests/test_queue_repeated_track_state.py" = ["S603", "C901"]
 "tests/test_queue_owned_prediction.py" = ["S603", "C901"]
 "tests/test_progress_jump_ramp.py" = ["S603", "C901"]
 "tests/test_progress_pad_cells.py" = ["S603", "C901"]
 "tests/test_search_artists_show_all_empty.py" = ["S603", "C901"]
-"tests/test_boot_library_scan_deferral.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
