@@ -199,6 +199,35 @@ def test_the_live_ceiling_alone_settles_a_legacy_row(tmp_path):
     assert dl._ownership_decision(_track(tags=["LOSSLESS"]))[0] == "skip"
 
 
+def test_the_gate_stamps_the_ceiling_it_read_onto_a_legacy_row(tmp_path):
+    """Issue #40: the gate skipped the copy on the live ceiling, but the
+    button (holding only an id) kept offering the upgrade. The ceiling the
+    gate reads now lands on the row, so a ceiling-blind reader settles too,
+    and a ceiling already stored is never overwritten."""
+    store = _store(tmp_path)
+    path = _file(tmp_path, "song.flac")
+    store.record("101", path, "LOSSLESS")
+    dl = _gate(store, target="HI_RES_LOSSLESS")
+    dl._ownership_stamp = store.stamp_ceiling
+    assert dl._ownership_decision(_track(tags=["LOSSLESS"]))[0] == "skip"
+    rec = store.ownership_of("101")
+    assert rec["ceiling_rank"] == quality_rank("LOSSLESS")
+    assert _copy_is_current(rec, quality_rank("HI_RES_LOSSLESS"), False, None), "id-only readers now settle"
+    # A later, higher advertisement does not rewrite what was stored.
+    dl._ownership_decision(_track(tags=["HIRES_LOSSLESS", "LOSSLESS"]))
+    assert store.ownership_of("101")["ceiling_rank"] == quality_rank("LOSSLESS")
+
+
+def test_stamp_ceiling_only_fills_a_missing_ceiling(tmp_path):
+    store = _store(tmp_path)
+    path = _file(tmp_path, "song.flac")
+    store.record("101", path, "LOSSLESS", requested_rank=3, ceiling_rank=3)
+    assert store.stamp_ceiling("101", path, 2) is False
+    assert store.ownership_of("101")["ceiling_rank"] == 3
+    assert store.stamp_ceiling("101", path, -1) is False
+    assert store.stamp_ceiling("999", path, 2) is False
+
+
 def test_a_release_that_offers_hi_res_still_forces_the_upgrade(tmp_path):
     """The control: the cap must never freeze a genuine upgrade."""
     store = _store(tmp_path)

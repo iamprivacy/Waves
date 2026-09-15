@@ -71,6 +71,10 @@ class _BridgeStub:
         self._OWN_TTL_BUSY = WavesBridge._OWN_TTL_BUSY
         self._downloads_running = lambda: False
         self._base_ok = ("", 0.0)
+        # The page's object cache: ownershipOf reads the track out of it (when
+        # a page holds one) to cap the target at the release's ceiling exactly
+        # as the download gate does (issue #40). Empty unless a test fills it.
+        self._objs: dict = {"track": {}}
         # _track_lifecycle also rolls the per-track registry up onto the job's
         # queue row (so a collapsed row can state its delivered tier). These
         # tests drive it with no queue at all, which is a real shape: an event
@@ -99,6 +103,7 @@ class _BridgeStub:
             "ownershipOf",
             "_would_refetch_atmos",
             "_own_refresh",
+            "_learn_ceiling",
             "_announce_ownership",
             "_own_announce_flush",
             "_target_quality_rank",
@@ -494,6 +499,66 @@ def test_owned_copy_at_target_quality_is_up_to_date(tmp_path):
     f = _make_file(tmp_path)
     stub._track_lifecycle(1, {"id": "42", "status": "done", "path": str(f), "quality": {"tier": "HI_RES_LOSSLESS"}})
     assert stub.ownershipOf("42")["up_to_date"] is True, "equal-or-better must read as current"
+
+
+def _catalog_track(tags, modes=("STEREO",)):
+    """What a page holds for a row on screen: the catalog's advertised tags and
+    audio modes are all ownershipOf reads off it."""
+    return SimpleNamespace(media_metadata_tags=list(tags) if tags is not None else None, audio_modes=list(modes))
+
+
+def test_the_button_settles_at_the_release_ceiling_like_the_gate(tmp_path):
+    """Issue #40: a mixed playlist under a Max setting. The 16-bit tracks were
+    on disk from an earlier run, recorded before their run stamped a ceiling.
+    The download gate holds the track and skipped each one as the best that
+    exists, so a playlist run fetched nothing for them and a click on the row
+    finished in a millisecond, while this ceiling-blind answer kept offering an
+    upgrade: DOWNLOAD TRACK on every one of them, forever."""
+    stub = _BridgeStub(tmp_path, quality_audio="HI_RES_LOSSLESS")
+    f = _make_file(tmp_path)
+    stub._ownership.record("42", str(f), "LOSSLESS")  # no requested or ceiling rank stamped
+    stub._objs["track"]["42"] = _catalog_track(["LOSSLESS"])
+    info = stub.own("42")
+    assert info["owned"] is True
+    assert info["up_to_date"] is True, "the gate skips this copy as current, so the button must read DOWNLOADED"
+
+
+def test_the_button_still_offers_a_real_upgrade_when_the_page_holds_the_track(tmp_path):
+    """The control: a release that advertises a hi-res master keeps its
+    LOSSLESS copy an upgrade candidate, with or without the track in hand."""
+    stub = _BridgeStub(tmp_path, quality_audio="HI_RES_LOSSLESS")
+    f = _make_file(tmp_path)
+    stub._ownership.record("42", str(f), "LOSSLESS")
+    stub._objs["track"]["42"] = _catalog_track(["HIRES_LOSSLESS", "LOSSLESS"])
+    assert stub.own("42")["up_to_date"] is False
+    stub._objs["track"].clear()
+    stub.expire("42")
+    assert stub.own("42")["up_to_date"] is False
+
+
+def test_a_ceiling_the_button_learns_is_kept_on_the_record(tmp_path):
+    """The answer must not swing with the page cache: a long playlist evicts
+    its first rows and a search clears every object. Once the button has seen
+    the track, the record carries the ceiling and answers alike without it."""
+    stub = _BridgeStub(tmp_path, quality_audio="HI_RES_LOSSLESS")
+    f = _make_file(tmp_path)
+    stub._ownership.record("42", str(f), "LOSSLESS")
+    stub._objs["track"]["42"] = _catalog_track(["LOSSLESS"])
+    assert stub.own("42")["up_to_date"] is True
+    stub._objs["track"].clear()
+    stub.expire("42")  # the next answer re-reads the store, with no track in hand
+    assert stub.own("42")["up_to_date"] is True
+    assert stub._ownership.ownership_of("42")["ceiling_rank"] == 2
+
+
+def test_unknown_tags_on_the_held_track_change_nothing(tmp_path):
+    """tidalapi leaves media_metadata_tags None on an unavailable track: no
+    ceiling is no cap, so the stored ranks decide exactly as before."""
+    stub = _BridgeStub(tmp_path, quality_audio="HI_RES_LOSSLESS")
+    f = _make_file(tmp_path)
+    stub._ownership.record("42", str(f), "LOSSLESS")
+    stub._objs["track"]["42"] = _catalog_track(None)
+    assert stub.own("42")["up_to_date"] is False
 
 
 def test_tierless_video_record_is_always_up_to_date(tmp_path):
