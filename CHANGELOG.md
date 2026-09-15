@@ -22,6 +22,12 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.30 (2026-09-15)
+
+### 🐛 Fixed
+
+- 🎚️ A track you already hold at the best quality TIDAL offers for it no longer keeps offering DOWNLOAD TRACK under a Max setting, where a click fetched nothing: the button now judges the copy the way the download does, so a mixed-quality playlist reads as downloaded once it is ([issue #40](https://github.com/iamprivacy/Waves/issues/40)).
+
 ## 🗂️ v0.1.29 (2026-09-13)
 
 ### ✨ Added
