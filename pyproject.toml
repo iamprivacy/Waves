@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.29"
+version = "0.1.30"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
