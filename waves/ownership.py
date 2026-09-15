@@ -344,6 +344,33 @@ class OwnershipStore:
             ).fetchone()
         return int(got[0]) if got else 0
 
+    def stamp_ceiling(self, track_id: str, path: str, ceiling_rank: int) -> bool:
+        """Write the best rank TIDAL advertises for ``track_id`` onto the row
+        for ``path``, only where that row has none yet (a copy recorded before
+        ceilings were kept, or by a fetch whose tags were unknown).
+
+        A ceiling learned later is as true as one learned at the fetch, and
+        without it such a row settles only for a caller holding the track
+        (the download gate) while every caller that holds an id alone (the
+        button, the album card) keeps offering an upgrade that cannot come.
+        Stamping it once lets the stored ranks answer for good. Never
+        overwrites a ceiling already there: what the fetch saw stands.
+
+        Returns:
+            bool: Whether a row was changed.
+        """
+        rank = int(ceiling_rank)
+        if rank < 0:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE downloads SET ceiling_rank = ?
+                   WHERE track_id = ? AND path = ? AND (ceiling_rank IS NULL OR ceiling_rank < 0)""",
+                (rank, str(track_id), str(path)),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
+
     def record_members_replace(self, collection_id: str, track_ids: list[str]) -> None:
         """Remember the exact, current track ids that make up ``collection_id``
         (an album, playlist or mix), replacing any previous record for it.
