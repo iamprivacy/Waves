@@ -187,3 +187,4 @@ packaging/winget/
 # a ref, so untracked files were already safe from the public repo; this closes
 # the other door, a stray `git add -A` sweeping one into a commit.
 /*audit*.md
+/notes/*audit*.md

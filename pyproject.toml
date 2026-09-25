@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.30"
+version = "0.1.31"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -64,7 +64,7 @@ tox = "^4.32.0"
 pyupgrade = "^3.21.2"
 pillow = "^12.0.0"
 black = "^25.11.0"
-nuitka = "2.8.4"
+nuitka = "4.2.2"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -143,12 +143,18 @@ ignore = [
 # Measures import-time metadata cost in a fresh interpreter: this interpreter
 # runs a literal probe script (S603, fixed argv).
 "tests/test_lazy_metadata.py" = ["S603"]
+# Builds a real bridge offline in a fresh interpreter to check the ownership
+# max-age timer: re-runs this file (S603, fixed argv).
+"tests/test_final_audit_pins_2026_09_24.py" = ["S603"]
 # The exit-time cancel of the freeze-watchdog countdown can only be observed
 # in a fresh interpreter: this one runs a literal probe script (S603, fixed argv).
 "tests/test_freeze_watchdog_quit.py" = ["S603"]
 # The quality badge menu scenario re-runs itself in a subprocess to isolate the
 # Qt boot (S603, fixed argv).
 "tests/test_quality_pick_qml.py" = ["S603"]
+# The My Tidal list-top scenario re-runs itself in a subprocess to isolate the
+# Qt boot (S603, fixed argv).
+"tests/test_my_tidal_list_top_scenario.py" = ["S603"]
 "tests/test_album_collapse_returns_the_view.py" = ["S603"]
 # The search in-place refresh scenario re-runs itself in a subprocess to
 # isolate the Qt boot (S603, fixed argv), and its build -> correct -> assert
@@ -173,6 +179,7 @@ ignore = [
 "tests/test_browse_card_library_state.py" = ["S603", "C901"]
 "tests/test_browse_strip_fits_the_card.py" = ["S603", "C901"]
 "tests/test_library_track_claim.py" = ["S603", "C901"]
+"tests/test_my_tidal_download_all_scenario.py" = ["S603", "C901"]
 "tests/test_boot_version_drain_order.py" = ["S603", "C901"]
 "tests/test_boot_scroll_dressing_hidden.py" = ["S603", "C901"]
 "tests/test_search_tab_artist_restore.py" = ["S603", "C901"]
@@ -195,6 +202,8 @@ ignore = [
 "tests/test_qml_loads.py" = ["S603", "C901"]
 "tests/test_presence_call_budget.py" = ["S603", "C901"]
 "tests/test_library_presence_surfaces.py" = ["S603", "C901"]
+"tests/test_badges_survive_navigation.py" = ["S603", "C901"]
+"tests/test_library_page_dressed_and_veiled.py" = ["S603", "C901"]
 "tests/test_browse_card_line_fits.py" = ["S603", "C901"]
 # Imports the download engine in a clean interpreter to check its import closure
 # (S603, fixed argv: sys.executable -c with a literal probe).
