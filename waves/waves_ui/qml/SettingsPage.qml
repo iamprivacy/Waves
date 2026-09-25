@@ -61,6 +61,7 @@ Item {
     property bool savedFlash: false
     Timer { id: flashTimer; interval: 2200; onTriggered: page.savedFlash = false }
     Timer { id: auUpToDateTimer; interval: 4000; onTriggered: page.auUpToDate = false }
+    Timer { id: auCheckFailedTimer; interval: 4000; onTriggered: page.auCheckFailed = false }
     // The control tree is expensive to instantiate, but the schema's *shape*
     // never changes, only the persisted values do, and those only when we
     // save. So we build `groups` once and keep the delegates alive; rebuilding
@@ -208,6 +209,7 @@ Item {
     property string auLatest: ""         // latest version tag when available
     property bool auChecking: false      // a user-initiated check is in flight
     property bool auUpToDate: false      // transient "✓ up to date" after a check
+    property bool auCheckFailed: false   // transient "could not check" after a check that never got an answer
     readonly property bool auBusy: auState === "downloading" || auState === "verifying" || auState === "installing"
     readonly property bool auDone: auState === "done"
     function auRefresh() {
@@ -229,7 +231,7 @@ Item {
     property bool diagFailed: false
     function auCheck() {
         if (page.auBusy || page.auChecking) return
-        page.auChecking = true; page.auUpToDate = false; waves.checkAppUpdate(true)
+        page.auChecking = true; page.auUpToDate = false; page.auCheckFailed = false; waves.checkAppUpdate(true)
     }
 
     // Deep-link: land the view on a section card, e.g. arriving from the
@@ -292,10 +294,6 @@ Item {
         openSections = m
         waves.setWavesPref("settings_open_sections", JSON.stringify(m))
     }
-    // Where the page is scrolled to, for anything outside that needs to read
-    // or set it (and for the bench that pins this behaviour).
-    property alias scrollY: settingsFlick.contentY
-    property alias scrollViewport: settingsFlick
     function _restoreScroll() {
         if (pendingY < 0 || settingsFlick.height <= 0) return
         var most = Math.max(0, settingsFlick.contentHeight - settingsFlick.height)
@@ -317,6 +315,11 @@ Item {
     // Child toggle value for the cover_scope composite, under its own child_key.
     function valChild(f) { return editMap[f.child_key] !== undefined ? editMap[f.child_key] : f.child_value }
     function setv(key, v) { var e = Object.assign({}, editMap); e[key] = v; editMap = e; dirty = true }
+    // A value applied LIVE (the diagnostics toggles push their pref straight
+    // to the backend): shown from the edit map like any other, but never an
+    // unsaved change, so SAVE and CANCEL stay inert for it. Marking it dirty
+    // made CANCEL promise an undo it could not deliver.
+    function setLive(key, v) { var e = Object.assign({}, editMap); e[key] = v; editMap = e }
     // Fields whose value the engine launders before use (the illegal-character
     // stand-in), by key. Their delegates register themselves here so the save
     // gate can find them without the page walking the whole schema.
@@ -564,8 +567,13 @@ Item {
             page.auUpdate = available
             page.auLatest = latest
             // Only flash "up to date" for a user-initiated check, never the
-            // silent startup one.
-            if (!available && wasManual) { page.auUpToDate = true; auUpToDateTimer.restart() }
+            // silent startup one. A check that threw (offline, API error)
+            // arrives as available=false with an EMPTY latest: that is not
+            // "up to date", it is "could not check", and says so instead.
+            if (!available && wasManual) {
+                if (latest === "") { page.auCheckFailed = true; auCheckFailedTimer.restart() }
+                else { page.auUpToDate = true; auUpToDateTimer.restart() }
+            }
         }
         function onDiagnosticsExported(path) {
             page.diagBusy = false
@@ -673,6 +681,7 @@ Item {
             Item {
                 Layout.fillHeight: true; implicitWidth: seg.seg1W
                 Text {
+                    textFormat: Text.PlainText
                     id: segT1; anchors.centerIn: parent
                     text: seg.opts.length > 0 ? String(seg.opts[0].label).toUpperCase() : ""
                     font.family: page.uiFont; font.bold: true; font.pixelSize: 10
@@ -687,6 +696,7 @@ Item {
             Item {
                 Layout.fillHeight: true; implicitWidth: seg.seg2W
                 Text {
+                    textFormat: Text.PlainText
                     id: segT2; anchors.centerIn: parent
                     text: seg.opts.length > 1 ? String(seg.opts[1].label).toUpperCase() : ""
                     font.family: page.uiFont; font.bold: true; font.pixelSize: 10
@@ -727,7 +737,7 @@ Item {
             }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 3
-                Text { text: act.autoField ? act.autoField.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                Text { textFormat: Text.PlainText; text: act.autoField ? act.autoField.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
                 Text {
                     text: "Notifies only; nothing downloads until you click Update. The check sends none of your data."
                     color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
@@ -771,7 +781,7 @@ Item {
         }
         Rectangle {
             width: 52; height: 32; radius: 8; color: page.surface2; border.color: page.outline
-            Text { anchors.centerIn: parent; text: parent.parent.value.toFixed(parent.parent.decimals); color: page.textHi; font.family: page.mono; font.pixelSize: 16; font.bold: true }
+            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: parent.parent.value.toFixed(parent.parent.decimals); color: page.textHi; font.family: page.mono; font.pixelSize: 16; font.bold: true }
         }
         Rectangle {
             width: 32; height: 32; radius: 8; color: page.surface2; border.color: page.outline
@@ -786,7 +796,7 @@ Item {
         implicitWidth: 240
         textRole: "label"   // model items are {value, label}; store value, show label
         background: Rectangle { radius: 8; color: page.surface2; border.color: cb.pressed || cb.popup.visible ? page.accent : page.outline }
-        contentItem: Text { text: cb.displayText; color: page.textHi; font.pixelSize: 14; leftPadding: 12; rightPadding: 26; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+        contentItem: Text { textFormat: Text.PlainText; text: cb.displayText; color: page.textHi; font.pixelSize: 14; leftPadding: 12; rightPadding: 26; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
         indicator: ExpandChevron {
             x: cb.width - 24; y: (cb.height - 16) / 2; tile: 16; glyph: 12
             showTile: false; closedAngle: -90; openAngle: 0
@@ -794,7 +804,7 @@ Item {
         }
         delegate: ItemDelegate {
             width: cb.width
-            contentItem: Text { text: (modelData && modelData.label !== undefined) ? modelData.label : modelData; color: page.textHi; font.pixelSize: 14; verticalAlignment: Text.AlignVCenter }
+            contentItem: Text { textFormat: Text.PlainText; text: (modelData && modelData.label !== undefined) ? modelData.label : modelData; color: page.textHi; font.pixelSize: 14; verticalAlignment: Text.AlignVCenter }
             background: Rectangle { color: highlighted ? page.surface3 : page.surface2 }
             highlighted: cb.highlightedIndex === index
         }
@@ -1043,7 +1053,7 @@ Item {
                                 Layout.alignment: Qt.AlignVCenter
                                 radius: 5; color: page.goldCont; border.color: page.gold
                                 implicitWidth: updT.implicitWidth + 14; implicitHeight: 19
-                                Text { textFormat: Text.PlainText; id: updT; anchors.centerIn: parent; text: "UPDATE"; color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true }
+                                Text { id: updT; textFormat: Text.PlainText; anchors.centerIn: parent; text: "UPDATE"; color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true }
                             }
                             Rectangle {
                                 visible: page.ff.stateKey !== "missing"
@@ -1089,9 +1099,10 @@ Item {
 
                         // Failure message
                         Text {
+                            textFormat: Text.PlainText
                             visible: page.ff.lifeState === "failed"
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            text: "Install failed: " + page.ff.message
+                            text: page.ff.failPrefix + page.ff.message
                             color: page.red; font.pixelSize: 12
                         }
 
@@ -1212,6 +1223,7 @@ Item {
                                 Rectangle { width: 7; height: 7; radius: 4; color: page.green }
                                 Text { text: "FFMPEG"; color: page.textHi; font.pixelSize: 13; font.bold: true; font.letterSpacing: 1.4 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                     // A pending update is worth shouting about, as
                                     // on the Updates card: gold and full-size.
@@ -1226,7 +1238,7 @@ Item {
                                     Layout.alignment: Qt.AlignVCenter
                                     radius: 5; color: page.goldCont; border.color: page.gold
                                     implicitWidth: ffUpdT.implicitWidth + 14; implicitHeight: 19
-                                    Text { textFormat: Text.PlainText; id: ffUpdT; anchors.centerIn: parent; text: "UPDATE"; color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true }
+                                    Text { id: ffUpdT; textFormat: Text.PlainText; anchors.centerIn: parent; text: "UPDATE"; color: page.gold; font.family: page.mono; font.pixelSize: 10; font.bold: true }
                                 }
                                 Rectangle {
                                     Layout.alignment: Qt.AlignVCenter
@@ -1257,9 +1269,10 @@ Item {
 
                             // Failure message
                             Text {
+                                textFormat: Text.PlainText
                                 visible: page.ff.lifeState === "failed"
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "Install failed: " + page.ff.message
+                                text: page.ff.failPrefix + page.ff.message
                                 color: page.red; font.pixelSize: 12
                             }
 
@@ -1274,6 +1287,7 @@ Item {
                                     opacity: (page.ff.busy || page.ff.checking) ? 0.6 : 1.0
                                     color: page.accentCont; border.color: page.accentDim
                                     Text {
+                                        textFormat: Text.PlainText
                                         id: ffPrimTxt; anchors.centerIn: parent; text: ffPrimary.label.toUpperCase()
                                         color: page.accent
                                         font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
@@ -1303,6 +1317,11 @@ Item {
                                 Text {
                                     visible: page.ff.upToDate && !page.ff.updateAvailable && !page.ff.checking
                                     text: "✓ Up to date"; color: page.green; font.pixelSize: 12
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                                Text {
+                                    visible: page.ff.checkFailed && !page.ff.updateAvailable && !page.ff.checking
+                                    text: "✗ Could not check"; color: page.red; font.pixelSize: 12
                                     Layout.alignment: Qt.AlignVCenter
                                 }
                             }
@@ -1375,8 +1394,9 @@ Item {
                                     width: 7; height: 7; radius: 4
                                     color: page.auUpdate ? page.gold : (auCard.st === "ready" ? page.green : page.textDim)
                                 }
-                                Text { text: "Waves " + (auCard.cur || ""); color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                Text { textFormat: Text.PlainText; text: "Waves " + (auCard.cur || ""); color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                     // A pending update is the one state worth shouting about:
                                     // gold and full-size, not the dim caption grey.
@@ -1401,6 +1421,7 @@ Item {
                                 }
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                                 text: auCard.st !== "managed"
                                     ? "Checks the public releases page and only notifies you; sends none of your data."
@@ -1426,9 +1447,20 @@ Item {
 
                             // Failure message
                             Text {
+                                textFormat: Text.PlainText
                                 visible: page.auState === "failed"
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                                 text: "Update failed: " + page.auMsg
+                                color: page.red; font.pixelSize: 12
+                            }
+                            // The last restart did not land (the helper could not
+                            // swap the install folder) and was re-armed once: the
+                            // restart prompt says why instead of repeating itself.
+                            Text {
+                                textFormat: Text.PlainText
+                                visible: page.auDone && (page.appUp.swap_failure || "") !== ""
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: (page.appUp.swap_failure || "") + " Restart to try once more."
                                 color: page.red; font.pixelSize: 12
                             }
 
@@ -1457,6 +1489,7 @@ Item {
                                     color: auPrimary.accent ? page.accentCont : "transparent"
                                     border.color: auPrimary.accent ? page.accentDim : page.outline
                                     Text {
+                                        textFormat: Text.PlainText
                                         id: auPrimTxt; anchors.centerIn: parent; text: auPrimary.label.toUpperCase()
                                         color: auPrimary.accent ? page.accent : page.textLo
                                         font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
@@ -1486,6 +1519,12 @@ Item {
                                 Text {
                                     visible: page.auUpToDate && !page.auUpdate && !page.auBusy && !page.auChecking
                                     text: "✓ Up to date"; color: page.green; font.pixelSize: 12
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                                // And the honest word when the check never got an answer.
+                                Text {
+                                    visible: page.auCheckFailed && !page.auUpdate && !page.auBusy && !page.auChecking
+                                    text: "✗ Could not check"; color: page.red; font.pixelSize: 12
                                     Layout.alignment: Qt.AlignVCenter
                                 }
 
@@ -1602,6 +1641,7 @@ Item {
                                 Rectangle { width: 7; height: 7; radius: 4; color: dgCard.vbOn ? page.green : page.textDim }
                                 Text { text: "Diagnostic report"; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                     color: page.textDim; font.pixelSize: 12
                                     text: dgCard.vbOn ? "verbose logging on" : "logging warnings only"
@@ -1620,6 +1660,7 @@ Item {
                                     opacity: page.diagBusy ? 0.6 : 1.0
                                     color: page.accentCont; border.color: page.accentDim
                                     Text {
+                                        textFormat: Text.PlainText
                                         id: dgPrimTxt; anchors.centerIn: parent
                                         text: (page.diagBusy ? "Exporting…" : "Export report").toUpperCase()
                                         color: page.accent
@@ -1685,7 +1726,7 @@ Item {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: {
                                             var v = !dgCard.vbOn
-                                            page.setv("verbose_diagnostics", v)
+                                            page.setLive("verbose_diagnostics", v)
                                             // Applies live: the watchdog and detail level flip now,
                                             // not on Save, so "turn on, reproduce, export" just works.
                                             waves.setWavesPref("verbose_diagnostics", v)
@@ -1698,7 +1739,7 @@ Item {
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 3
-                                    Text { text: dgCard.dfVerbose ? dgCard.dfVerbose.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text { textFormat: Text.PlainText; text: dgCard.dfVerbose ? dgCard.dfVerbose.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
                                     Text {
                                         text: "Logs detailed activity to help diagnose slowdowns, freezes and crashes. Turn on, reproduce the problem, then export."
                                         color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
@@ -1715,7 +1756,7 @@ Item {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: {
                                             var v = !dgCard.rdOn
-                                            page.setv("diagnostics_redact_content", v)
+                                            page.setLive("diagnostics_redact_content", v)
                                             waves.setWavesPref("diagnostics_redact_content", v)
                                             page.needsRefresh = true
                                         }
@@ -1723,7 +1764,7 @@ Item {
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 3
-                                    Text { text: dgCard.dfRedact ? dgCard.dfRedact.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text { textFormat: Text.PlainText; text: dgCard.dfRedact ? dgCard.dfRedact.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
                                     Text {
                                         text: "Exports always remove usernames, paths, addresses and tokens. This also hides searches and titles, which can make bugs harder to reproduce."
                                         color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
@@ -1807,11 +1848,13 @@ Item {
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: card.modelData.group; color: page.textHi
                                     font.pixelSize: 15; font.weight: Font.DemiBold
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     visible: text !== ""
                                     text: card.modelData.desc !== undefined ? card.modelData.desc : ""
                                     color: page.textDim; font.pixelSize: 12
@@ -1822,22 +1865,24 @@ Item {
                                 radius: 4; color: "transparent"; border.color: page.border1
                                 Layout.preferredHeight: 18; Layout.preferredWidth: cntT.implicitWidth + 16
                                 Layout.alignment: Qt.AlignVCenter
-                                Text { id: cntT; anchors.centerIn: parent; text: card.modelData.fields.length; color: page.textDim; font.family: page.mono; font.pixelSize: 11 }
+                                Text { id: cntT; textFormat: Text.PlainText; anchors.centerIn: parent; text: card.modelData.fields.length; color: page.textDim; font.family: page.mono; font.pixelSize: 11 }
                             }
                             ExpandChevron { open: card.open; hovered: hdHover.containsMouse; Layout.alignment: Qt.AlignVCenter }
                         }
                         MouseArea {
                             id: hdHover
                             anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            // Record on the page as well: the click breaks the
-                            // binding above, and the next schema refresh would
-                            // otherwise rebuild this card back to its default.
+                            // Only the page record is written: `open` above
+                            // stays a binding on it, so a deep link
+                            // (jumpToCard) can still open this card after a
+                            // hand toggle, and the next schema refresh
+                            // rebuilds it the way it was left. Assigning
+                            // card.open here would sever that binding.
                             onClicked: {
                                 // Toggling re-measures the page; a still-armed
                                 // restore must not ride that and jump the view.
                                 page.pendingY = -1
-                                card.open = !card.open
-                                page.setSectionOpen(card.modelData.id, card.open)
+                                page.setSectionOpen(card.modelData.id, !card.open)
                             }
                         }
                     }
@@ -1936,6 +1981,7 @@ Item {
                                         Row {
                                             width: parent.width; spacing: 10
                                             Text {
+                                                textFormat: Text.PlainText
                                                 id: mapLabel
                                                 text: mapCard.modelData.label; color: page.textHi
                                                 font.pixelSize: 14; font.weight: Font.Medium
@@ -1968,6 +2014,7 @@ Item {
                                             }
                                         }
                                         Text {
+                                            textFormat: Text.PlainText
                                             visible: modelData.help !== ""
                                             width: parent.width
                                             text: modelData.help; color: page.textDim; font.pixelSize: 12
@@ -2272,7 +2319,7 @@ Item {
                                                 Layout.fillWidth: true; spacing: 2
                                                 Row {
                                                     spacing: 10
-                                                    Text { id: inlineLabel; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                    Text { id: inlineLabel; textFormat: Text.PlainText; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
                                                     // Same per-field Restore default link as the
                                                     // full-width str rows (see strDefaultLink).
                                                     Text {
@@ -2302,7 +2349,7 @@ Item {
                                                         }
                                                     }
                                                 }
-                                                Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                Text { textFormat: Text.PlainText; visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                             }
                                             SCombo {
                                                 visible: modelData.type === "enum"; Layout.alignment: Qt.AlignVCenter
@@ -2346,8 +2393,8 @@ Item {
                                                 width: parent.width; spacing: 14
                                                 ColumnLayout {
                                                     Layout.fillWidth: true; spacing: 2
-                                                    Text { text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
-                                                    Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                    Text { textFormat: Text.PlainText; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                    Text { textFormat: Text.PlainText; visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                                 }
                                                 SCombo {
                                                     Layout.alignment: Qt.AlignVCenter
@@ -2367,7 +2414,7 @@ Item {
                                                 width: parent.width; spacing: 14
                                                 ColumnLayout {
                                                     Layout.fillWidth: true; spacing: 2
-                                                    Text { text: modelData.file_label ? modelData.file_label : "Separate cover.jpg size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
+                                                    Text { textFormat: Text.PlainText; text: modelData.file_label ? modelData.file_label : "Separate cover.jpg size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
                                                     Text { text: "Size of the saved cover.jpg. \"Same as embedded\" matches the size above."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                                 }
                                                 SCombo {
@@ -2502,6 +2549,7 @@ Item {
                                             // and replacing a copy is what a re-download with
                                             // skip-existing off is FOR.
                                             Text {
+                                                textFormat: Text.PlainText
                                                 visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap
                                                 opacity: libraryCol.enabledE ? 1 : 0.4
                                                 Behavior on opacity { NumberAnimation { duration: 160 } }
@@ -2573,6 +2621,7 @@ Item {
                                                     border.color: libraryCol.scannable ? page.accent : page.border1
                                                     opacity: libraryCol.scannable ? 1 : 0.55
                                                     Text {
+                                                        textFormat: Text.PlainText
                                                         id: startTxt; anchors.centerIn: parent
                                                         text: libraryCol.scanning ? "Scanning…" : "Rescan"
                                                         color: libraryCol.scannable ? page.accent : page.textLo; font.pixelSize: 13; font.weight: Font.DemiBold
@@ -2595,6 +2644,7 @@ Item {
                                             // folder is still missing. Hidden with the switch off, the grey
                                             // row already says the feature is off.
                                             Text {
+                                                textFormat: Text.PlainText
                                                 visible: libraryCol.enabledE && !libraryCol.scannable && !libraryCol.scanning
                                                 width: parent.width; wrapMode: Text.WordWrap
                                                 text: libraryCol.libDirty && libraryCol.root !== ""
@@ -2614,6 +2664,7 @@ Item {
                                             Text {
                                                 visible: (libraryCol.scanning && !page.libScanReading)
                                                          || page.libraryScanStatus === "unreadable"
+                                                         || page.libraryScanStatus === "error"
                                                          || (page.libraryScanStatus === "missing" && libraryCol.root !== "")
                                                          || (page.libTruncationShown && libraryCol.root !== "")
                                                 width: parent.width; wrapMode: Text.WordWrap
@@ -2628,6 +2679,8 @@ Item {
                                                          : "Waves doesn't have permission to read this folder. Check the folder's permissions (and, on a network share, that the mount allows this user to read it), then reopen Settings.")
                                                       : page.libraryScanStatus === "missing"
                                                       ? "This folder isn't available right now. If it lives on an external drive or NAS, connect it and reopen Settings."
+                                                      : page.libraryScanStatus === "error"
+                                                      ? "The last scan did not finish. Try Rescan again; if it keeps failing, export diagnostics from Advanced."
                                                       : page.libTruncationNote()
                                             }
                                             // The download buttons' dot matrix in the download buttons'
@@ -2740,6 +2793,7 @@ Item {
                                             Row {
                                                 width: parent.width; spacing: 10
                                                 Text {
+                                                    textFormat: Text.PlainText
                                                     id: strLabel
                                                     text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium
                                                 }
@@ -2787,7 +2841,7 @@ Item {
                                                     }
                                                 }
                                             }
-                                            Text { visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap }
+                                            Text { textFormat: Text.PlainText; visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap }
                                             Row {
                                                 width: parent.width; spacing: 8
                                                 SText {
@@ -3093,8 +3147,9 @@ Item {
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 3
-                                                Text { text: flagTile.modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { textFormat: Text.PlainText; text: flagTile.modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
                                                 Text {
+                                                    textFormat: Text.PlainText
                                                     visible: flagTile.modelData.help !== "" && !flagTile.blocked
                                                     text: flagTile.modelData.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
                                                     // Trim the helper to two lines while the child checkbox is
@@ -3108,6 +3163,7 @@ Item {
                                                     text: "Requires FFmpeg"; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
                                                 }
                                                 Text {
+                                                    textFormat: Text.PlainText
                                                     visible: flagTile.depBlocked && !flagTile.ffBlocked
                                                     text: flagTile.modelData.requires_hint !== undefined ? flagTile.modelData.requires_hint : "Requires another option"
                                                     color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
@@ -3137,6 +3193,7 @@ Item {
                                                             Ico { anchors.centerIn: parent; visible: parent.on; name: "check"; color: page.accent; size: 12 }
                                                         }
                                                         Text {
+                                                            textFormat: Text.PlainText
                                                             text: flagTile.modelData.child_label !== undefined ? flagTile.modelData.child_label : ""
                                                             color: page.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true
                                                         }
@@ -3321,7 +3378,7 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 0
-                        Text { anchors.verticalCenter: parent.verticalCenter
+                        Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
                                text: "made with ".substring(0, footer.visFor(0, 10)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
                         Item { width: footer.slotW; height: footer.heartH; anchors.verticalCenter: parent.verticalCenter
                             Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
@@ -3356,10 +3413,10 @@ Item {
                                 onExited:  { beatAnim.stop(); beatReset.start() }
                                 onClicked: footer.gibHeart() }
                         }
-                        Text { anchors.verticalCenter: parent.verticalCenter
+                        Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
                                text: " by ".substring(0, footer.visFor(11, 4)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
                         Item { implicitWidth: fGh.implicitWidth; implicitHeight: fGh.implicitHeight; anchors.verticalCenter: parent.verticalCenter
-                            Text { id: fGh; text: "iamprivacy".substring(0, footer.visFor(15, 10))
+                            Text { id: fGh; textFormat: Text.PlainText; text: "iamprivacy".substring(0, footer.visFor(15, 10))
                                    color: fGhMA.containsMouse ? page.textHi : page.gold
                                    font.family: page.mono; font.pixelSize: 11
                                    font.underline: fGhMA.containsMouse }

@@ -189,9 +189,7 @@ ApplicationWindow {
     // panel that warms to green as the tab powers on (see NavTab).
     readonly property color navIdleBg:       "#0b140f"
     readonly property color navIdleBorder:   "#1f3d2a"
-    readonly property color navIdleBorderHi: "#2c5c3e"
     readonly property color navIdleText:     "#8f949e"
-    readonly property color navIdleTextHi:   "#bcc1c9"
 
     // ---- View routing --------------------------------------------------
     // Exactly one main surface shows at a time: Browse (default), search
@@ -587,9 +585,14 @@ ApplicationWindow {
         Component.onCompleted: Qt.callLater(armRoll)
         // Delegates recycle and result columns repopulate; contentHeight moves
         // in both cases, so it doubles as the re-arm signal.
+        // The angles re-tilt on every change (rollTick), cheap. The ARM walk
+        // (every child, a transform created per new row) waits for the height
+        // to settle: an expand animates contentHeight for ~280 ms, and walking
+        // per frame for its whole run bought nothing a walk at the end does not.
+        Timer { id: bttArmSettle; interval: 60; onTriggered: btt.armRoll() }
         Connections {
             target: btt.flick
-            function onContentHeightChanged() { Qt.callLater(btt.armRoll) }
+            function onContentHeightChanged() { btt.rollTick++; bttArmSettle.restart() }
         }
 
         // ---- the INLINE crest pill ------------------------------------------
@@ -620,7 +623,7 @@ ApplicationWindow {
                     text: ("_.-~^~-._.~^'~._").substring(bttCrest.ph) + ("_.-~^~-._.~^'~._").substring(0, bttCrest.ph)
                     anchors.verticalCenter: parent.verticalCenter
                     color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; font.letterSpacing: -1
-                    Timer { running: btt.on; interval: 120; repeat: true; onTriggered: bttCrest.ph = (bttCrest.ph + 1) % 16 }
+                    Timer { running: btt.on && root.onScreen; interval: 120; repeat: true; onTriggered: bttCrest.ph = (bttCrest.ph + 1) % 16 }
                 }
                 Text {
                     textFormat: Text.PlainText; text: "TOP"
@@ -956,8 +959,11 @@ ApplicationWindow {
     // painted: each card created while the veil is up joins the count, and
     // ticks when it lands, so the veil still drops on a finished page. Both
     // no-ops once the veil is down (a card scrolled into view later).
-    function _browseCardStart(async) { if (async && browseBuilding) ++_browseBuildTotal }
-    function _browseCardTick(async) { if (async) _browseBuildTick() }
+    // Start returns whether the card was counted, and the card hands that
+    // back on load: a straggler created before the veil (or after it fell)
+    // must not tick a count it never joined, or it ends a later build early.
+    function _browseCardStart(async) { if (async && browseBuilding) { ++_browseBuildTotal; return true } return false }
+    function _browseCardTick(counted) { if (counted) _browseBuildTick() }
     // A loader that errors (or a miscount) must never pin the veil. Re-armed
     // by every loader that reports, so this is an inactivity timeout, not a
     // budget for the whole build: a landing with a dozen shelves used to blow
@@ -979,9 +985,79 @@ ApplicationWindow {
         id: browseLandingFreshTimer
         interval: 5 * 60 * 1000    // max-age: editorial rows move a few times a day
         repeat: true
-        running: root.signedIn && root.browseOpen && root.browsePageKey === ""
+        running: root.signedIn && root.windowUp && root.browseOpen && root.browsePageKey === ""
                  && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
         onTriggered: waves.refreshBrowse()   // silent, throttled; repaints only on change
+    }
+    // A drilled Browse page (a playlist, mix or album) and an artist page
+    // revalidated only on entry, so one the user parked on stayed at the
+    // payload of its open. Same max-age, same silent path (the backend
+    // re-emits only on change, flagged for an in-place swap that holds the
+    // scroll spot), only while that page is the view.
+    Timer {
+        id: browseItemFreshTimer
+        interval: 5 * 60 * 1000
+        repeat: true
+        running: root.signedIn && root.windowUp && root.browseOpen && root.browsePageKey !== ""
+                 && !root.browsePageLoading
+                 && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
+        onTriggered: {
+            var parts = root.browsePageKey.split(":")
+            if (parts.length < 3 || parts[0] !== "item") return
+            waves.refreshBrowseItem(parts[1], parts.slice(2).join(":"))
+        }
+    }
+    Timer {
+        id: artistFreshTimer
+        interval: 5 * 60 * 1000
+        repeat: true
+        running: root.signedIn && root.windowUp && root.artistOpen && !root.settingsOpen
+                 && !!root.artistData && !root.artistData.libraryScoped
+                 && ("" + (root.artistData.id || "")) !== ""
+        onTriggered: waves.refreshArtist("" + root.artistData.id)
+    }
+    // My Tidal has the same need: Home and every category pane revalidated
+    // only from loadLib (a tab or category switch), so a user parked on one
+    // for days never saw the favourites they added from their phone. Same
+    // max-age, same quiet path (the backend repaints only on change and the
+    // refill pins the scroll spot), only while that pane is the view.
+    Timer {
+        id: libraryFreshTimer
+        interval: 5 * 60 * 1000
+        repeat: true
+        running: root.signedIn && root.windowUp && root.libraryOpen
+                 && !root.settingsOpen && !root.artistOpen
+        onTriggered: {
+            if (root.libraryCategory === "home") {
+                waves.loadHome(root.homeSections.length > 0)
+            } else {
+                var m = libModelFor(root.libraryCategory)
+                if (m && m.count > 0) {
+                    libPinRefill = true
+                    waves.loadLibrary(root.libraryCategory, true)
+                }
+            }
+        }
+    }
+    // The four max-age timers stop while the window is hidden or minimized
+    // and restart from zero on re-show, so a window restored after a night
+    // away served the old page for up to another interval. A re-show after
+    // at least one interval down fires each timer that is running once, a
+    // frame later so their running bindings have settled; every refresh is
+    // throttled and repaints only on a change.
+    property double freshDownAt: 0
+    Connections {
+        target: root
+        function onWindowUpChanged() {
+            if (!root.windowUp) { root.freshDownAt = Date.now(); return }
+            var away = root.freshDownAt > 0 ? Date.now() - root.freshDownAt : 0
+            root.freshDownAt = 0
+            if (away < browseLandingFreshTimer.interval) return
+            Qt.callLater(function () {
+                var timers = [browseLandingFreshTimer, browseItemFreshTimer, artistFreshTimer, libraryFreshTimer]
+                for (var i = 0; i < timers.length; ++i) if (timers[i].running) timers[i].triggered()
+            })
+        }
     }
     // --- NEW mark on recent releases --------------------------------------
     // A release wears NEW for its first fortnight: two release Fridays, so a
@@ -1090,6 +1166,45 @@ ApplicationWindow {
         id: searchLibraryReveal; interval: 0
         onTriggered: { root._searchAwaitingLibrary = false; root._searchBuildMaybeReveal() }
     }
+    // --- My Tidal build veil ----------------------------------------------
+    // The library half of the search veil, and only that half. A category's
+    // rows are plain ListView delegates, built synchronously, so there is no
+    // incubation to wait out; what there is to wait for is the library's
+    // first answer. A page built before it wears no badges at all (every
+    // verdict reads "not present" until the index publishes once) and then
+    // lit every one of them a moment later, which to the reader is the same
+    // pop the navigation fix ended everywhere else. So the pane holds at
+    // opacity 0 until that first publish has landed and every pill on it has
+    // re-resolved (one event-loop pass later, see searchLibraryReveal), and
+    // the badges' own fade is off for the duration: behind the veil they are
+    // simply there. Raised only while the index has never answered, which is
+    // a launch-time window, and never held past libBuildGuard: a warm library
+    // never raises it at all, and a folder that cannot be read counts as an
+    // answer (see libraryIndexReady), so a category never waits on a scan
+    // that is not coming.
+    property bool libraryBuilding: false
+    // Only a category that carries badges (albums, tracks, artists), and
+    // only its FIRST build: a revalidate repaints rows the reader is already
+    // looking at (libFill keeps them in place), and blanking a painted page
+    // for up to 800 ms is the pop this veil exists to prevent. Playlists,
+    // mixes and videos carry no library badge and have nothing to wait for.
+    readonly property var _libDressedCats: ({ albums: true, tracks: true, artists: true })
+    function _libBuildStart(cat, n, fresh) {
+        libLibraryReveal.stop()   // a pending drop from the previous build
+        var wait = fresh && n > 0 && !!_libDressedCats[cat] && !waves.libraryIndexReady()
+        libraryBuilding = wait
+        if (wait) libBuildGuard.restart(); else libBuildGuard.stop()
+    }
+    Timer { id: libBuildGuard; interval: 800; onTriggered: root.libraryBuilding = false }
+    Timer { id: libLibraryReveal; interval: 0; onTriggered: root.libraryBuilding = false }
+    // The veil's visual, one-directional like searchReveal: raising snaps to
+    // 0 in the same frame, dropping fades the finished pane in.
+    property real libraryReveal: 1
+    onLibraryBuildingChanged: {
+        if (libraryBuilding) { libraryRevealRise.stop(); libraryReveal = 0 }
+        else libraryRevealRise.restart()
+    }
+    NumberAnimation { id: libraryRevealRise; target: root; property: "libraryReveal"; to: 1; duration: 180; easing.type: Easing.OutQuad }
     // The veil's visual: every veiled element binds its opacity to this one
     // animated value instead of the raw building flag, so when the veil drops
     // the whole page fades in quickly (over the ambient water, which stays
@@ -1138,10 +1253,14 @@ ApplicationWindow {
     // this album, pointing at the wrong folder, so hang it off the property
     // itself: every assignment re-resolves, and nothing has to remember to.
     onBrowsePageChanged: root._resolveLibraryPresence()
+    // The header's explicit is the release's flag as the album gate reads it
+    // (true, false, or null when TIDAL never said; absent on a page cached
+    // before it existed), so here false IS proof of a clean release.
     function _resolveLibraryPresence() {
         var ph = (root.browsePage && root.browsePage.header) ? root.browsePage.header : null
         root.libraryPresence = (ph && ph.kind === "album")
-            ? waves.libraryAlbumPresence(ph.artist || "", ph.title || "", "" + (ph.year || ""), ph.num_tracks || 0, ph.duration_sec || 0)
+            ? waves.libraryAlbumPresence(ph.artist || "", ph.title || "", "" + (ph.year || ""), ph.num_tracks || 0, ph.duration_sec || 0,
+                                         ph.explicit === true ? 1 : ph.explicit === false ? 0 : -1)
             : null
     }
     property var browseStack: []           // pages beneath the current one (Back pops)
@@ -1400,8 +1519,12 @@ ApplicationWindow {
     // window usually stays fully visible next to whatever stole focus, and
     // the water freezing the instant the app loses focus (then lurching
     // back on refocus) reads as a glitch (livetest report).
-    readonly property bool onScreen: visibility !== Window.Hidden && visibility !== Window.Minimized
-                                     && !presentStalled
+    readonly property bool windowUp: visibility !== Window.Hidden && visibility !== Window.Minimized
+    readonly property bool onScreen: windowUp && !presentStalled
+    // The bridge slows its share keep-warm and ownership max-age while the
+    // window is hidden or minimized (not on a presentation stall, which an
+    // app switch trips); guarded so a partial bridge (the QML labs) is fine.
+    onWindowUpChanged: if (waves && waves.windowShown) waves.windowShown(windowUp)
     Timer {
         running: root.onScreen
         interval: 50; repeat: true
@@ -1500,7 +1623,7 @@ ApplicationWindow {
             // card's caption down by a pixel on the marked cards only.
             NewTag {
                 id: capNew
-                compact: true; visible: cap.fresh; settled: cap.settled
+                compact: true; shown: cap.fresh; settled: cap.settled
                 height: Math.min(implicitHeight, Math.floor(capFm.height))
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -1583,6 +1706,32 @@ ApplicationWindow {
             dlHoldersGen += 1
         }
         return h
+    }
+    // Release a settled holder once no queue row names its media id any
+    // more: they were created for every id that ever reported progress and
+    // never destroyed, so a long session's queue history stayed resident.
+    // A control that later needs one recreates it lazily. Takes every media
+    // id a drop batch removed and walks the model once for the lot: once per
+    // id made clearing a 3,000-row Stopped section 3,000 full walks.
+    function dlHoldersRelease(ids) {
+        var settled = [], id
+        for (id in ids) {
+            var h = dlHolders[id]
+            if (h !== undefined && (h.st === "" || h.st === "done")) settled.push(id)
+        }
+        if (settled.length === 0) return
+        var m = queueModel, live = {}
+        for (var i = 0; i < m.count; ++i) live[m.get(i).media_id] = true
+        var gone = 0
+        for (var k = 0; k < settled.length; ++k) {
+            id = settled[k]
+            if (live[id] === true) continue
+            var g = dlHolders[id]
+            delete dlHolders[id]
+            g.destroy()
+            gone += 1
+        }
+        if (gone > 0) dlHoldersGen += 1
     }
     function dlPct(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
     function dlSt(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.st : "" }
@@ -1741,12 +1890,15 @@ ApplicationWindow {
     }
     // Both pipelines are at the same moment: swap which one is on stage and
     // which one is audible, in a single frame, then retire the peek.
-    function _videoCut() {
+    // forcePlay: the glance pipeline is already dead (its errorOccurred is
+    // what got us here, and inside that handler the player reads Stopped),
+    // so its state says nothing about whether the user was watching. Play.
+    function _videoCut(forcePlay) {
         videoUpgradeRetry.stop()
         videoUpgrading = false
         _videoUpPhase = 0
         if (!videoFromPeek) return
-        var wasPaused = peekPlayer.playbackState !== MediaPlayer.PlayingState
+        var wasPaused = !forcePlay && peekPlayer.playbackState !== MediaPlayer.PlayingState
         // The upgrade is parked on the very frame the peek is showing, so the
         // stage flip reveals a picture that is already correct. Retire the
         // glance stream first so the two never sound at once.
@@ -1773,7 +1925,7 @@ ApplicationWindow {
     function _videoPromotionLost() {
         if (videoUpgrading && (videoPlayer.mediaStatus === MediaPlayer.LoadedMedia
                 || videoPlayer.mediaStatus === MediaPlayer.BufferedMedia)) {
-            _videoCut()
+            _videoCut(true)
             return
         }
         videoUpgradeRetry.stop(); videoUpgrading = false
@@ -1972,8 +2124,6 @@ ApplicationWindow {
     // ---- Console helpers: ASCII download bar + popularity-meter segments ----
     // asciiBar renders a monospace progress bar of filled (█) + dim (░) cells.
     function asciiBar(pct, n) { n = n || 9; var f = Math.max(0, Math.min(n, Math.round((pct / 100) * n))); return "█".repeat(f) }
-    function asciiBarDim(pct, n) { n = n || 9; var f = Math.max(0, Math.min(n, Math.round((pct / 100) * n))); return "░".repeat(n - f) }
-    function popLit(v) { return Math.round(Math.max(0, Math.min(100, v)) / 100 * 10) }
     function segColor(i) { return i < 5 ? green : i < 8 ? gold : red }
 
     // Back/forward navigation (triggered by the back bar, the native swipe
@@ -2035,7 +2185,6 @@ ApplicationWindow {
         navHistory = navHistory.concat([s]).slice(-50)
     }
     function navBackLabel() { return navHistory.length > 0 ? navHistory[navHistory.length - 1].label : "" }
-    function navForwardLabel() { return navForwardHistory.length > 0 ? navForwardHistory[navForwardHistory.length - 1].label : "" }
     function navBack() {
         var levelUp = navHistory.length === 0
         // A Back press that lands nowhere (nothing recorded, no surface open:
@@ -2083,7 +2232,10 @@ ApplicationWindow {
         if (s.v === "settings") { settingsOpen = true; artistOpen = false; libraryOpen = false }
         else if (s.v === "library") {
             libraryOpen = true; settingsOpen = false; artistOpen = false
-            if (libraryCategory !== s.cat) loadLib(s.cat)
+            // Unconditional: a category that already has rows revalidates
+            // quietly inside loadLib (repaint only on change), so Back into
+            // the category you left still tracks TIDAL instead of freezing.
+            loadLib(s.cat)
         } else if (s.v === "artist") {
             if (artistData && ("" + artistData.id) === s.id
                     && !!artistData.libraryScoped === !!s.scoped) {
@@ -3662,7 +3814,10 @@ ApplicationWindow {
         // 1 = the bottom of the exhale.
         property real fxBreath: 0
         SequentialAnimation {
-            running: artRoot.fxPaused
+            // Gated like the blink below: a paused preview's cover sits on
+            // several shelves and on hidden panes, and each ran this loop at
+            // display rate behind a hidden tab or a minimised window.
+            running: artRoot.fxPaused && artRoot.visible && root.onScreen
             loops: Animation.Infinite
             NumberAnimation { target: artRoot; property: "fxBreath"; to: 1
                               duration: root.artPlayBreathMs; easing.type: Easing.InOutSine }
@@ -3976,15 +4131,33 @@ ApplicationWindow {
     // holds right after the cards appeared). Cards register their
     // collection id and member keys here instead; one call answers every
     // hit card at once, and the cards read their answer off ownAnswers.
-    property var _ownCards: ({})      // cid -> [",id,", ...] member keys (or null)
+    // cid -> {n, keys}: the member keys ([",id,", ...] or null) and how many
+    // live cards share them. Counted, because the same release sits on
+    // more than one shelf (New and For You, a landing row and its drilled
+    // page): one card's destruction used to drop the registration for the
+    // cards still showing it, and those stopped hearing batch answers.
+    property var _ownCards: ({})
     property var ownAnswers: ({})     // cid -> {ids, verdict}, the last batch's answers
     property int ownAnswersGen: 0
-    function ownCardRegister(cid, keys) { if (cid) _ownCards[cid] = keys || null }
-    function ownCardForget(cid) { if (cid && cid in _ownCards) delete _ownCards[cid] }
+    // Register counts one holder; a card registers ONCE per collection id it
+    // shows (see ArtCard._ownHeld), rekeys on every later rollup, and
+    // forgets once, on destruction or when its card changes.
+    function ownCardRegister(cid, keys) {
+        if (!cid) return
+        var e = _ownCards[cid]
+        if (e) { e.n++; e.keys = keys || null; return }
+        _ownCards[cid] = { n: 1, keys: keys || null }
+    }
+    function ownCardRekey(cid, keys) { var e = cid ? _ownCards[cid] : null; if (e) e.keys = keys || null }
+    function ownCardForget(cid) {
+        var e = cid ? _ownCards[cid] : null
+        if (!e) return
+        if (--e.n <= 0) delete _ownCards[cid]
+    }
     function ownCardsBatch(batch) {
         var hit = []
         for (var cid in _ownCards) {
-            var keys = _ownCards[cid]
+            var keys = _ownCards[cid].keys
             if (!keys) continue
             for (var i = 0; i < keys.length; ++i)
                 if (batch.indexOf(keys[i]) !== -1) { hit.push(cid); break }
@@ -4266,7 +4439,9 @@ ApplicationWindow {
         Behavior on pillInk { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
         Behavior on pillSpecInk { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
         Behavior on pillDot { ColorAnimation { duration: qpk.swapMs; easing.type: Easing.InOutSine } }
-        Behavior on extraW { NumberAnimation { duration: root.hoverMotion ? 220 : 0; easing.type: Easing.OutBack } }
+        // Hover-driven width: eases, never springs (a spring overshoots and
+        // the caret's room visibly bounces under a resting pointer).
+        Behavior on extraW { NumberAnimation { duration: root.hoverMotion ? 220 : 0; easing.type: Easing.OutCubic } }
         // The pill's width, eased only THROUGH a swap: at rest and on hover it
         // tracks the content exactly, so the caret's room keeps its own
         // spring. Left easing, a hover would glide the caret in instead.
@@ -4464,7 +4639,8 @@ ApplicationWindow {
         transformOrigin: Item.Center
         Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
         Behavior on border.color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
-        Behavior on scale { NumberAnimation { duration: root.hoverMotion ? 140 : 0; easing.type: Easing.OutBack } }
+        // Hover-driven scale: eases, never springs (see the queue peek rule).
+        Behavior on scale { NumberAnimation { duration: root.hoverMotion ? 140 : 0; easing.type: Easing.OutCubic } }
         Row {
             anchors.left: parent.left; anchors.leftMargin: 8
             anchors.verticalCenter: parent.verticalCenter; spacing: 6
@@ -4556,8 +4732,8 @@ ApplicationWindow {
         // decided and early enough to catch anything the scan publishes after.
         // A Timer rather than Component.onCompleted, because call sites declare
         // their own onCompleted and would silently replace it.
-        // Gated on visible, not replacing it: an invisible pill must still take
-        // no layout width, which opacity alone would not do.
+        // `shown` drives `visible` too, not the fade alone: a pill with no
+        // match must still take no layout width, which opacity cannot do.
         //
         // Creation is only half of it. These pills outlive the thing they
         // describe: a list delegate is RECYCLED onto the next album as you
@@ -4569,9 +4745,25 @@ ApplicationWindow {
         property bool _settled: false
         onSettleKeyChanged: { pxt._settled = false; pxtSettle.restart() }
         Timer { id: pxtSettle; interval: 0; running: true; onTriggered: pxt._settled = true }
-        opacity: pxt.visible ? 1 : 0
+        // What the badge FOUND: its own verdict, set by whoever resolved it, and
+        // the only thing either `visible` or the fade may read.
+        //
+        // The fade used to read `visible`, and `visible` in Qt is EFFECTIVE
+        // visibility: false whenever ANY ancestor is hidden. Every pane in this
+        // app is hidden by its own `visible` (a My Tidal category, a tab), so
+        // leaving a pane drove every pill on it to opacity 0 behind the reader's
+        // back, and coming back re-ran the arrival fade over badges that had
+        // never changed. The whole page's badges popped into existence again on
+        // every navigation, which is the one thing the settle latch above exists
+        // to prevent (measured offscreen: 8 of 8 pills mid-fade on a category
+        // switch, with not one bridge call made and not one verdict different).
+        // Anything a pill's LAYOUT is asked for reads this too, for the same
+        // reason: a hidden pane must not re-elide the titles it is not showing.
+        property bool shown: false
+        visible: pxt.shown
+        opacity: pxt.shown ? 1 : 0
         Behavior on opacity {
-            enabled: pxt._settled && !root.searchBuilding && !root.browseBuilding
+            enabled: pxt._settled && !root.searchBuilding && !root.browseBuilding && !root.libraryBuilding
             NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
         }
         radius: 4; color: root.pillClassCont(pxt.qclass)
@@ -4680,29 +4872,46 @@ ApplicationWindow {
         // 50-row page, 22us apiece, ~16ms of GUI thread per page build. One
         // property is one binding evaluation and one call. Null (or no title)
         // means no album to ask about, and the pill stays hidden.
+        //
+        // Its explicitFlag is the release's advisory flag as the bridge takes
+        // it (1 explicit, 0 clean, -1 unknown, the default when absent): the
+        // same flag the bulk gate weighs, so the pill never vouches for a
+        // clean copy while the explicit release is on screen, or the reverse.
         property var album: null
         property var presence: null
         readonly property string albumTitle: (album && album.title) ? ("" + album.title) : ""
-        // A recycled row is a new album, not news about this one.
-        settleKey: appl.albumTitle
-        property bool _resolved: false
-        function _resolvePresence() {
-            _resolved = true
+        // A recycled row is a new album, not news about this one. Keyed by
+        // id: two same-titled albums (Greatest Hits) recycled into one row
+        // kept the settle latch and played the arrival fade.
+        settleKey: (appl.album && appl.album.id !== undefined && appl.album.id !== null && ("" + appl.album.id) !== "")
+                   ? ("" + appl.album.id) : appl.albumTitle
+        property bool _completed: false
+        // The verdict the row was handed (album.lib, baked where the page was
+        // built: a My Tidal row arrives dressed, see _dress_library_rows)
+        // serves the creation, so a page build makes no bridge call per pill;
+        // a publish asks live. Dated by the same stamp ArtCard compares, for
+        // the same reason: a verdict from before a publish is a stale one.
+        function _resolvePresence(live) {
             var a = appl.album
-            presence = (a && a.title)
-                ? waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
-                                             "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
-                : null
+            presence = !(a && a.title) ? null
+                : (!live && a.lib !== undefined && a.lib !== null && a.libStamp === root.libStamp) ? a.lib
+                : waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                             "" + (a.year || ""), (a.audio_tracks !== undefined ? a.audio_tracks : a.tracks) || 0, a.duration_sec || 0,
+                                             (a.explicitFlag === 1 || a.explicitFlag === 0) ? a.explicitFlag : -1)
         }
-        onAlbumChanged: _resolvePresence()
-        // Only if the binding above has not already answered: an unconditional
-        // resolve here is the fifth call this component exists to avoid.
-        Component.onCompleted: if (!_resolved) _resolvePresence()
+        // Once at creation, from onCompleted, with every property assigned.
+        // The identity object is rebuilt as each of its parts lands during
+        // creation, and resolving on every rebuild spent a live call per part
+        // (three per row, measured) before the baked verdict had even been
+        // assigned. After creation every rebuild resolves, which is what a
+        // recycled row and a changed identity need.
+        onAlbumChanged: if (_completed) _resolvePresence(false)
+        Component.onCompleted: { _completed = true; _resolvePresence(false) }
         Connections {
             target: waves
-            function onLibraryPresenceChanged() { appl._resolvePresence() }
+            function onLibraryPresenceChanged() { appl._resolvePresence(true) }
         }
-        visible: !!(presence && presence.present)
+        shown: !!(presence && presence.present)
         have: presence ? (presence.local_tracks || 0) : 0
         total: (album && album.tracks) ? album.tracks : 0
         declared: presence ? (presence.local_declared || 0) : 0
@@ -4727,26 +4936,32 @@ ApplicationWindow {
         // what the match can be PROVEN against, since a track carries no year
         // of its own and its title matches every edition that shares it. A row
         // that cannot name its album still gets a pill, it just keeps the "?".
+        // explicitFlag is the track's own advisory flag: see AlbumPresencePill.
         property var track: null
         property var presence: null
-        // A recycled row is a new track, not news about this one.
-        settleKey: (tppl.track && tppl.track.title) ? ("" + tppl.track.title) : ""
-        property bool _resolved: false
-        function _resolvePresence() {
-            _resolved = true
+        // A recycled row is a new track, not news about this one. Keyed by
+        // id: same-titled tracks (Intro, Outro) recycled into one row kept
+        // the settle latch and played the arrival fade.
+        settleKey: (tppl.track && tppl.track.id !== undefined && ("" + tppl.track.id) !== "")
+                   ? ("" + tppl.track.id) : ((tppl.track && tppl.track.title) ? ("" + tppl.track.title) : "")
+        property bool _completed: false
+        // The row's baked verdict serves the creation, a publish asks live,
+        // and creation resolves once, from onCompleted: see AlbumPresencePill.
+        function _resolvePresence(live) {
             var t = tppl.track
-            presence = (t && t.title)
-                ? waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
-                                             "" + (t.album || ""), "" + (t.year || ""), t.duration_sec || 0)
-                : null
+            presence = !(t && t.title) ? null
+                : (!live && t.lib !== undefined && t.lib !== null && t.libStamp === root.libStamp) ? t.lib
+                : waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                                             "" + (t.album || ""), "" + (t.year || ""), t.duration_sec || 0,
+                                             (t.explicitFlag === 1 || t.explicitFlag === 0) ? t.explicitFlag : -1)
         }
-        onTrackChanged: _resolvePresence()
-        Component.onCompleted: if (!_resolved) _resolvePresence()
+        onTrackChanged: if (_completed) _resolvePresence(false)
+        Component.onCompleted: { _completed = true; _resolvePresence(false) }
         Connections {
             target: waves
-            function onLibraryPresenceChanged() { tppl._resolvePresence() }
+            function onLibraryPresenceChanged() { tppl._resolvePresence(true) }
         }
-        visible: !!(presence && presence.present)
+        shown: !!(presence && presence.present)
         albumId: presence ? (presence.local_album_id || "") : ""
         qclass: presence ? (presence.local_class || "") : ""
         // The same identity axis the album pill reads, inherited from the
@@ -4801,34 +5016,52 @@ ApplicationWindow {
         implicitHeight: arb.bar ? arb.barHeight : abPlate.implicitHeight
         width: implicitWidth
         height: implicitHeight
-        // The album pill's economy, for the same reason: this now rides every
-        // artist card on a search page, and an unconditional resolve here
-        // would be a second QML->Python call per card on top of the binding's.
-        property bool _resolved: false
+        // The rollup the row was handed and the publish it came from (a My
+        // Tidal artist row arrives dressed, see _dress_library_rows). Left
+        // undefined, or dated before the current publish, the strip asks live.
+        property var libBaked
+        property var libStamp
+        // The album pill's economy, for the same reason: this rides every
+        // artist card on a search page, so a card resolves exactly ONCE at
+        // creation, from onCompleted, with every property assigned. The change
+        // handlers resolve only after that: at creation each fires as its own
+        // binding lands, and the name lands before the baked rollup, which
+        // spent the live call the baking exists to save and then answered
+        // again a moment later.
+        property bool _completed: false
         // False until this badge has answered for the name it currently shows.
         // The fade below reads it, so the badge a page is BUILT with (or a
         // recycled row rebound to a new artist) is simply there, and only a
         // badge the running scan turns up while you are looking at it animates.
         property bool _settled: false
-        function _resolvePresence() {
-            _resolved = true
-            presence = artistName !== "" ? waves.artistLibraryPresence(artistName) : null
+        function _resolvePresence(live) {
+            presence = artistName === "" ? null
+                : (!live && libBaked !== undefined && libBaked !== null && libStamp === root.libStamp) ? libBaked
+                : waves.artistLibraryPresence(artistName)
             _settled = true   // after the answer, never before: see the Behavior
         }
-        onArtistNameChanged: { _settled = false; _resolvePresence() }
-        Component.onCompleted: if (!_resolved) _resolvePresence()
+        // A recycled row rebinds name and rollup one after the other, in no
+        // fixed order, so each re-resolves; both land in the same pass and
+        // neither is news (_settled drops first).
+        onArtistNameChanged: { _settled = false; if (_completed) _resolvePresence(false) }
+        onLibBakedChanged: { _settled = false; if (_completed) _resolvePresence(false) }
+        Component.onCompleted: { _completed = true; _resolvePresence(false) }
         Connections {
             target: waves
             // A browse shelf builds this strip on every card and names only the
             // artists, so the ones that will never show must not run a handler
             // per card per committed batch of a running scan.
             enabled: arb.artistName !== ""
-            function onLibraryPresenceChanged() { arb._resolvePresence() }
+            function onLibraryPresenceChanged() { arb._resolvePresence(true) }
         }
-        visible: !!(presence && presence.present)
+        // The strip's own verdict, for the reason LibraryTag.shown spells out:
+        // `visible` is effective visibility, so a hidden pane would fade every
+        // strip on it back in the next time the reader opened that pane.
+        readonly property bool shown: !!(presence && presence.present)
+        visible: arb.shown
         // The badge hides at the top, so nothing inside it ever sees a
         // visibility change of its own.
-        opacity: arb.visible ? 1 : 0
+        opacity: arb.shown ? 1 : 0
         // Arriving is animated; being there is not. The build flags alone were
         // not enough: they only cover a fresh search or Browse build, so coming
         // BACK to a page (or a row recycling under a scroll) faded every badge
@@ -4837,7 +5070,7 @@ ApplicationWindow {
         // false for exactly as long as this badge has not yet answered for the
         // artist it is showing.
         Behavior on opacity {
-            enabled: arb._settled && !root.searchBuilding && !root.browseBuilding
+            enabled: arb._settled && !root.searchBuilding && !root.browseBuilding && !root.libraryBuilding
             NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
         }
         readonly property int albums: presence ? (presence.albums || 0) : 0
@@ -4960,7 +5193,6 @@ ApplicationWindow {
     component PopMeter: Row {
         id: pm
         property int value: 0
-        property bool showNum: true   // kept for call-site compat; the matrix has no number
         visible: value >= 0
         spacing: 5
         Ico { name: "heart"; color: root.red; size: 12; anchors.verticalCenter: parent.verticalCenter }
@@ -5068,33 +5300,27 @@ ApplicationWindow {
         objectName: "downIcon"
         property var onTap: (function(){})
         property string mediaId: ""
-        // Opt-in: mediaId is an album/playlist/mix id, not a track id, so it
-        // must be resolved through the locally learned collection membership
-        // instead of being looked up as if it were a track (see DownloadButton
-        // for the same distinction, and why this can never require a fetch).
-        property bool collectionCheck: false
+        // Track ids only: every instance is a row's own track or video (the
+        // collection controls are DownloadButtons), so mediaId is looked up
+        // straight in the ownership store.
         // A copy from an earlier session, straight from the ownership store
         // (checked against the disk, so a deleted file reads as not owned).
         // Live job state always wins; this only fills the idle state.
         property bool owned: false
         // Owned AND current for today's quality setting: an owned copy below the
         // target quality shows Download again (clicking upgrades in place).
-        property var _ownIds: null
+        // The store has not answered for this id yet this session (cold
+        // cache, worker fetching): the idle face is held back rather than
+        // painted as DOWNLOAD and flipped to the check a beat later, the same
+        // rule DownloadButton's rollReady follows.
+        property bool ownPending: false
         // Batch keys for the ids this indicator answers for (root.ownKeys).
         property var _ownKeys: null
         function refreshOwned() {
-            if (collectionCheck) {
-                // One bridge call for ids + verdict (see collectionOwnership).
-                var co = di.mediaId !== "" ? waves.collectionOwnership(di.mediaId) : null
-                var ids = co ? co.ids : null
-                _ownIds = ids
-                _ownKeys = root.ownKeys(ids)
-                owned = !!co && co.verdict === "owned"
-                return
-            }
             _ownKeys = di.mediaId !== "" ? [ "," + di.mediaId + "," ] : null
             var o = di.mediaId !== "" ? waves.ownershipOf(di.mediaId) : ({})
             owned = o.owned === true && o.up_to_date === true
+            ownPending = o.pending === true
         }
         // The library twin of `owned`, the same shape (and the same wording,
         // colours and click-through) DownloadButton carries. This icon is the
@@ -5122,16 +5348,24 @@ ApplicationWindow {
         property bool libSure: false
         // The matched local folder, carried so the click-through can name it.
         property string libPath: ""
-        property bool _libResolved: false
-        function refreshLibPresent() {
-            _libResolved = true
+        // Set once creation is over: the libTrack/libAlbum identity literal is
+        // rebuilt as each of its parts lands during creation, and a resolve
+        // per rebuild was a live call per part (AlbumPresencePill's rule).
+        property bool _libCompleted: false
+        // The verdict the row was handed, when it came from the window's
+        // current publish (a panel row arrives dressed, see the bridge's
+        // _dress_panel_rows). A publish always asks live.
+        function _baked(o, live) { return !live && o.lib !== undefined && o.lib !== null && o.libStamp === root.libStamp }
+        function refreshLibPresent(live) {
             var a = di.libAlbum
             if (!a || !a.title) {
                 var t = di.libTrack
                 if (!t || !t.title) { libPresent = false; libPartial = false; libSure = false; libPath = ""; return }
-                var tp = waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                var tp = di._baked(t, live) ? t.lib
+                       : waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
                                                     "" + (t.album || ""), "" + (t.year || ""),
-                                                    t.duration_sec || 0)
+                                                    t.duration_sec || 0,
+                                                    (t.explicitFlag === 1 || t.explicitFlag === 0) ? t.explicitFlag : -1)
                 // A track has no coverage axis: presence alone is the done
                 // shape, and identity alone picks green from gold.
                 libPresent = !!(tp && tp.present === true)
@@ -5140,8 +5374,10 @@ ApplicationWindow {
                 libPath = libPresent ? ("" + (tp.local_album_id || "")) : ""
                 return
             }
-            var p = waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
-                                               "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
+            var p = di._baked(a, live) ? a.lib
+                  : waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                               "" + (a.year || ""), (a.audio_tracks !== undefined ? a.audio_tracks : a.tracks) || 0, a.duration_sec || 0,
+                                               (a.explicitFlag === 1 || a.explicitFlag === 0) ? a.explicitFlag : -1)
             libPresent = !!(p && p.present === true && p.full === true)
             libPartial = !!(p && p.present === true && p.full !== true)
             libSure = !!(p && p.sure === true)
@@ -5161,29 +5397,22 @@ ApplicationWindow {
             root.openLibraryClaim(di.mediaId, di.libTitle, di.libPath,
                                   di.libAlbum ? "album" : "track")
         }
-        // Only if the libTrack/libAlbum binding has not already answered: an
-        // unconditional resolve here is a second call per row.
-        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent() }
+        // ONE resolve at the end of creation, never one per part of the
+        // identity literal landing (see _libCompleted).
+        Component.onCompleted: { refreshOwned(); _libCompleted = true; refreshLibPresent(false) }
         onMediaIdChanged: refreshOwned()
-        onCollectionCheckChanged: refreshOwned()
-        onLibAlbumChanged: refreshLibPresent()
-        onLibTrackChanged: refreshLibPresent()
+        onLibAlbumChanged: if (_libCompleted) refreshLibPresent(false)
+        onLibTrackChanged: if (_libCompleted) refreshLibPresent(false)
         Connections {
             target: waves
             enabled: di.libTitle !== ""
-            function onLibraryPresenceChanged() { di.refreshLibPresent() }
+            function onLibraryPresenceChanged() { di.refreshLibPresent(true) }
         }
         Connections {
             target: waves
             // Empty id = broadcast (the quality setting changed).
-            function onOwnershipChanged(tid) {
-                if (di.collectionCheck) {
-                    if (tid === "" || (di._ownIds && di._ownIds.indexOf(tid) !== -1)) di.refreshOwned()
-                }
-                else if (tid === di.mediaId || tid === "") { di.refreshOwned() }
-            }
+            function onOwnershipChanged(tid) { if (tid === di.mediaId || tid === "") di.refreshOwned() }
             function onOwnershipChangedBatch(batch) { if (root.ownBatchHits(batch, di._ownKeys)) di.refreshOwned() }
-            function onCollectionMembershipChanged(cid) { if (di.collectionCheck && cid === di.mediaId) di.refreshOwned() }
         }
         readonly property string liveSt: di.mediaId !== "" ? root.dlSt(di.mediaId) : ""
         readonly property string st: liveSt !== "" ? liveSt : ((owned || libPresent) ? "done" : "")
@@ -5229,7 +5458,9 @@ ApplicationWindow {
                     // column-major, bottom-up, mirroring DotMatrix's rising fill
                     readonly property int fillIndex: col * diGrid.grows + (diGrid.grows - 1 - rowTop)
                     readonly property bool litCell: fillIndex < diGrid.lit
-                    readonly property bool pulsing: fillIndex === diGrid.lit && diGrid.lit < diGrid.total
+                    // Gated on the grid being shown: at rest lit is 0, so cell 0
+                    // would otherwise re-evaluate on every clock tick, unseen.
+                    readonly property bool pulsing: diGrid.visible && fillIndex === diGrid.lit && diGrid.lit < diGrid.total
                     // Same finishing twinkle as DotMatrix (this grid is the
                     // same visual language, just inlined for the mask effect).
                     readonly property real twinkleR: { var r = Math.sin(index * 12.9898) * 43758.5453; return r - Math.floor(r) }
@@ -5268,7 +5499,10 @@ ApplicationWindow {
         // queued here too: see DownloadButton.waiting.
         readonly property bool waiting: di.st === "queued" || di.st === "preparing"
         Ico {
+            // Held (not painted) while the store is still answering an idle
+            // row: nothing to say yet, so nothing that could be wrong.
             anchors.centerIn: parent; visible: di.st !== "running" && di.st !== "failed" && !di.waiting
+                     && !(di.ownPending && di.st === "")
             name: di.st === "done" ? "check" : "arrow-down"
             color: di.libGuess ? root.gold : di.libPartialClaim ? root.cyan
                  : di.st === "done" ? root.green : root.accent
@@ -6201,7 +6435,9 @@ ApplicationWindow {
         // in, plus a fifth from onCompleted: measured at 15 calls per album
         // row, 750 for a 50-row page at 22us apiece, ~16ms of GUI thread spent
         // asking the same question. One property is one binding evaluation and
-        // one call.
+        // one call. Its optional explicitFlag is the release's advisory flag
+        // (see AlbumPresencePill), so this button and the gate behind its
+        // click reach the same verdict.
         property var libAlbum: null
         // The track twin of libAlbum ({artist, title, album, year}), for buttons
         // that download ONE song. Same economy, same one object per button.
@@ -6258,9 +6494,15 @@ ApplicationWindow {
         // The matched local folder, carried so the click-through can name it
         // and reveal it (see libraryClaimGate).
         property string libPath: ""
-        property bool _libResolved: false
-        function refreshLibPresent() {
-            _libResolved = true
+        property bool _libCompleted: false
+        // The verdict the row was handed rides the identity object (lib and
+        // libStamp, the shape AlbumPresencePill reads): a dressed My Tidal row
+        // fills this button in without a crossing, and a publish asks live.
+        // Dated by the same stamp the cards compare, for the same reason.
+        function _baked(o, live) {
+            return !live && o.lib !== undefined && o.lib !== null && o.libStamp === root.libStamp
+        }
+        function refreshLibPresent(live) {
             var a = db.libAlbum
             if (!a || !a.title) {
                 var t = db.libTrack
@@ -6281,9 +6523,11 @@ ApplicationWindow {
                     libPath = ""
                     return
                 }
-                var tp = waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
+                var tp = db._baked(t, live) ? t.lib
+                       : waves.libraryTrackPresence("" + (t.artist || ""), "" + t.title,
                                                     "" + (t.album || ""), "" + (t.year || ""),
-                                                    t.duration_sec || 0)
+                                                    t.duration_sec || 0,
+                                                    (t.explicitFlag === 1 || t.explicitFlag === 0) ? t.explicitFlag : -1)
                 // No completeness bar to apply: presence alone is the done
                 // shape, and identity alone picks green from gold.
                 libPresent = !!(tp && tp.present === true)
@@ -6292,8 +6536,10 @@ ApplicationWindow {
                 libPath = libPresent ? ("" + (tp.local_album_id || "")) : ""
                 return
             }
-            var p = waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
-                                               "" + (a.year || ""), a.tracks || 0, a.duration_sec || 0)
+            var p = db._baked(a, live) ? a.lib
+                  : waves.libraryAlbumPresence("" + (a.artist || ""), "" + a.title,
+                                               "" + (a.year || ""), (a.audio_tracks !== undefined ? a.audio_tracks : a.tracks) || 0, a.duration_sec || 0,
+                                               (a.explicitFlag === 1 || a.explicitFlag === 0) ? a.explicitFlag : -1)
             // Coverage picks the shape (gold claim vs cyan partial), identity
             // picks the gold wording: an apparently complete but unproven
             // match is exactly what MAYBE is for, while a copy short on
@@ -6325,7 +6571,10 @@ ApplicationWindow {
         // The owned twin: a record of a download Waves made. It used to be
         // inert, which left a copy the user could not find with no way to
         // fetch it again; the gate names its folder and offers REDOWNLOAD.
-        readonly property bool canRedownload: liveSt === "" && owned && ownGateKind !== "" && mediaId !== ""
+        // A live "done" counts: a copy downloaded THIS session is owned the
+        // moment the ownership store learns it, and its holder keeps the
+        // done word for the session, so the gate must not wait for a restart.
+        readonly property bool canRedownload: (liveSt === "" || liveSt === "done") && owned && ownGateKind !== "" && mediaId !== ""
         function openRedownload() {
             root.openRedownloadGate({ kind: db.ownGateKind, id: db.mediaId,
                                       title: db.gateTitle !== "" ? db.gateTitle : db.libTitle }, db.ownFolder)
@@ -6380,18 +6629,21 @@ ApplicationWindow {
         // answers "pending" and the truth lands a beat later; arming the roll
         // then would animate a flip the user reads as every button changing
         // its mind (reported from livetesting an owned album page).
-        Component.onCompleted: { refreshOwned(); if (!_libResolved) refreshLibPresent(); syncGhost(); if (!ownPending) rollReady = true }
+        Component.onCompleted: { refreshOwned(); _libCompleted = true; refreshLibPresent(false); syncGhost(); if (!ownPending) rollReady = true }
         onMediaIdChanged: { if (rollReady) { rollReady = false; dbSettle.restart() } refreshOwned() }
         onOwnedCheckChanged: refreshOwned()
         onCollectionIdsChanged: refreshOwned()
         onCollectionCheckChanged: refreshOwned()
-        onLibAlbumChanged: refreshLibPresent()
-        onLibTrackChanged: refreshLibPresent()
-        onLibArtistChanged: refreshLibPresent()
+        // After creation only: creation resolves once, from onCompleted, with
+        // every property assigned (see AlbumPresencePill for the fan-out an
+        // identity object rebuilt part by part otherwise spends).
+        onLibAlbumChanged: if (_libCompleted) refreshLibPresent(false)
+        onLibTrackChanged: if (_libCompleted) refreshLibPresent(false)
+        onLibArtistChanged: if (_libCompleted) refreshLibPresent(false)
         Connections {
             target: waves
             enabled: db.libTitle !== "" || db.libArtist !== ""
-            function onLibraryPresenceChanged() { db.refreshLibPresent() }
+            function onLibraryPresenceChanged() { db.refreshLibPresent(true) }
         }
         Connections {
             target: waves
@@ -6429,16 +6681,19 @@ ApplicationWindow {
                                 dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth,
                                 (db.libAlbum || db.libArtist !== "") ? dbMetricLib.implicitWidth
                                             : db.libTrack ? dbMetricLibTrack.implicitWidth : 0) + root.btnPadH * 2
+        // Boxes stand in for the glyphs in every metric row (dbMetricQueued
+        // already did this): an Ico is a vector Shape, and four of them per
+        // idle button, never drawn, were still built and kept in the scene.
         Row {
             id: dbMetric
             visible: false; spacing: 7
-            Ico { name: "arrow-down"; color: root.accent; size: 14; bold: 10 }
+            Item { width: 14; height: 14 }      // the arrow Ico, size 14
             Text { textFormat: Text.PlainText; text: db.label.toUpperCase(); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         Row {
             id: dbMetricDone
             visible: false; spacing: 7
-            Ico { name: "check"; color: root.accent; size: 14 }
+            Item { width: 14; height: 14 }      // the check Ico, size 14
             Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || (db.owned ? db.ownInLibrary : root.dlInLibrary)) ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // The longest library-claim label ("PARTIALLY IN LIBRARY" beats "MAYBE
@@ -6451,7 +6706,7 @@ ApplicationWindow {
         Row {
             id: dbMetricLib
             visible: false; spacing: 7
-            Ico { name: "check"; color: root.accent; size: 14 }
+            Item { width: 14; height: 14 }
             Text { textFormat: Text.PlainText; text: "PARTIALLY IN LIBRARY"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // The track twin. A track can reach only two claim faces, MAYBE IN
@@ -6463,7 +6718,7 @@ ApplicationWindow {
         Row {
             id: dbMetricLibTrack
             visible: false; spacing: 7
-            Ico { name: "check"; color: root.accent; size: 14 }
+            Item { width: 14; height: 14 }
             Text { textFormat: Text.PlainText; text: "MAYBE IN LIBRARY"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // Queued measures too, now that it carries a cancel X: without it the
@@ -7407,13 +7662,22 @@ ApplicationWindow {
             if (!t) return
             t = ("" + t).replace(/\s+/g, " ").trim()
             if (!t.length) return
-            _final = t; _locked = 0; decoding = true
+            _final = t; _locked = 0; decoding = true; _prevLen = t.length
             begun()
             _step = Math.max(1, Math.ceil(_final.length / _maxTicks))   // cap the run length
             field.text = _scr(t.length)        // start scrambled, no flash of the raw text
             field.forceActiveFocus()
             _timer.restart()
             if (glyph) glyph.play()
+        }
+        // Enter mid-decode (issue #41): settle at once and hand back the real
+        // text, so the caller submits what was pasted, not the glyphs on
+        // screen. decoded() is NOT emitted: the caller is the submit.
+        function finish() {
+            if (!decoding) return field.text
+            _timer.stop(); decoding = false
+            field.text = _final; _prevLen = _final.length
+            return _final
         }
         property Timer _timer: Timer {
             interval: 26; repeat: true
@@ -8070,7 +8334,10 @@ ApplicationWindow {
                     // Clamped to the column width so an extreme narrowing can
                     // never push the dot + date past the meta column and under
                     // the download button.
-                    readonly property real dateW: vDateTx.visible
+                    // The fact, not vDateTx.visible: that is EFFECTIVE visibility,
+                    // false under a hidden pane, so every video row re-measured
+                    // its links twice per navigation.
+                    readonly property real dateW: vcell.vcDate !== ""
                         ? Math.min(width, vDot.implicitWidth + vDateTx.implicitWidth + 16) : 0
                     ArtistLinks {
                         id: vArtists
@@ -8119,7 +8386,7 @@ ApplicationWindow {
         property bool pulse: true
         property color onColor: root.accent
         // "Finishing" twinkle (chosen in the shimmer lab): the bar sits at
-        // 100% while the final steps run (merge, decrypt, FLAC extract,
+        // 100% while the final steps run (merge, FLAC extract,
         // tagging), so instead of freezing, every lit dot breathes on its
         // own pseudo-random offset of the shared shimmerPhase clock. Only
         // download surfaces set this; the player's scrub track is playback
@@ -8367,29 +8634,6 @@ ApplicationWindow {
     }
 
     // Dark-themed dropdown (shared by sort + quality selectors).
-    component StyledCombo: ComboBox {
-        id: sc
-        implicitHeight: 42
-        background: Rectangle { radius: 8; color: root.surface2; border.color: sc.popup.visible ? root.accent : root.outline }
-        contentItem: Text { textFormat: Text.PlainText; text: sc.displayText; color: root.textHi; font.pixelSize: 14; leftPadding: 14; rightPadding: 28; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-        indicator: ExpandChevron {
-            x: sc.width - 26; y: (sc.height - 18) / 2; tile: 18; glyph: 13
-            showTile: false; closedAngle: -90; openAngle: 0
-            stroke: root.accent; open: sc.popup.visible
-        }
-        delegate: ItemDelegate {
-            width: sc.width
-            contentItem: Text { textFormat: Text.PlainText; text: modelData; color: root.textHi; font.pixelSize: 14; verticalAlignment: Text.AlignVCenter }
-            background: Rectangle { color: highlighted ? root.surface3 : root.surface2 }
-            highlighted: sc.highlightedIndex === index
-        }
-        popup: Popup {
-            y: sc.height + 4; width: sc.width; padding: 4
-            implicitHeight: contentItem.implicitHeight + 8
-            background: Rectangle { radius: 8; color: root.surface2; border.color: root.outline }
-            contentItem: ListView { clip: true; implicitHeight: contentHeight; model: sc.popup.visible ? sc.delegateModel : null; ScrollBar.vertical: ScrollBar {} }
-        }
-    }
 
     // Small square checkbox.
     component Check: Rectangle {
@@ -8416,6 +8660,15 @@ ApplicationWindow {
         property string listedDate: ""   // the day a reissue was really listed, "" otherwise: shown over releaseDate
         property int trackCount: 0
         property int durationSec: 0      // raw seconds, the presence matcher's duration witness
+        // TIDAL's explicit flag as the album dict carries it. True is proof,
+        // false is not (the dict turns a missing flag into false), so the
+        // presence ask gets 1 or unknown, never clean.
+        property bool explicit: false
+        // The library verdict the row was handed and the publish it came from
+        // (a My Tidal row arrives dressed, see _dress_library_rows). Left
+        // undefined, the pill asks the bridge live, as every other site does.
+        property var libBaked
+        property var libStamp
         property string quality: ""
         property int popularity: 0
         // Expand state is held globally (keyed by album id) so it survives
@@ -8500,8 +8753,8 @@ ApplicationWindow {
                         textFormat: Text.PlainText; text: title
                         color: abRowTitleMa.containsMouse ? "#ffffff" : root.textHi
                         font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true
-                        rightPadding: (abRowPill.visible ? abRowPill.width + 8 : 0)
-                                      + (abRowNew.visible ? abRowNew.width + (abRowPill.visible ? 6 : 8) : 0)
+                        rightPadding: (abRowPill.shown ? abRowPill.width + 8 : 0)
+                                      + (abRowNew.shown ? abRowNew.width + (abRowPill.shown ? 6 : 8) : 0)
                         // Title -> the album's dedicated page (row click still expands)
                         MouseArea {
                             id: abRowTitleMa
@@ -8520,20 +8773,21 @@ ApplicationWindow {
                             id: abRowPill
                             anchors.verticalCenter: parent.verticalCenter
                             x: Math.min(abRowTitle.contentWidth + 8,
-                                        abRowTitle.width - width - (abRowNew.visible ? abRowNew.width + 6 : 0))
+                                        abRowTitle.width - width - (abRowNew.shown ? abRowNew.width + 6 : 0))
                             album: ({ artist: ab.artistName, title: ab.title,
                                       year: ab.year, tracks: ab.trackCount,
-                                      duration_sec: ab.durationSec })
+                                      duration_sec: ab.durationSec, explicitFlag: ab.explicit ? 1 : -1,
+                                      lib: ab.libBaked, libStamp: ab.libStamp })
                         }
                         // Tested on the date the row shows (a reissue's listed
                         // day over TIDAL's original), so the two never disagree.
                         NewTag {
                             id: abRowNew
-                            visible: root.isNewRelease(ab.listedDate !== "" ? ab.listedDate : ab.releaseDate)
+                            shown: root.isNewRelease(ab.listedDate !== "" ? ab.listedDate : ab.releaseDate)
                             settled: abDl.st === "done"
                             anchors.verticalCenter: parent.verticalCenter
-                            x: abRowPill.visible ? abRowPill.x + abRowPill.width + 6
-                                                 : Math.min(abRowTitle.contentWidth + 8, abRowTitle.width - width)
+                            x: abRowPill.shown ? abRowPill.x + abRowPill.width + 6
+                                               : Math.min(abRowTitle.contentWidth + 8, abRowTitle.width - width)
                         }
                     }
                     ArtistLinks {
@@ -8563,7 +8817,7 @@ ApplicationWindow {
                 DownloadButton {
                     id: abDl
                     Layout.alignment: Qt.AlignVCenter; mediaId: albumId; collectionCheck: true; label: "Download album"
-                    libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec })
+                    libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec, explicitFlag: ab.explicit ? 1 : -1, lib: ab.libBaked, libStamp: ab.libStamp })
                     onTap: function(){ waves.downloadAlbum(albumId) }
                 }
             }
@@ -8645,8 +8899,14 @@ ApplicationWindow {
                             // separate action.
                             DownloadButton {
                                 mediaId: albumId; label: "Download album"
-                                collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : []
-                                libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec })
+                                // null, not [], while the track list has not landed: an
+                                // empty list reads as a firm "not owned" and flashed
+                                // DOWNLOAD over an owned album until the tracks arrived.
+                                // Until then the button asks the store's remembered
+                                // members by album id (collectionCheck).
+                                collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : null
+                                collectionCheck: true
+                                libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec, explicitFlag: ab.explicit ? 1 : -1, lib: ab.libBaked, libStamp: ab.libStamp })
                                 onTap: function(){ waves.downloadAlbum(albumId) }
                             }
                             Text {
@@ -8663,7 +8923,12 @@ ApplicationWindow {
                         PopMeter { anchors.right: parent.right; value: popularity }
                     }
                 }
-                Text { visible: !root.trackCache[albumId]; text: "Loading tracks…"; color: root.textLo; font.pixelSize: 13 }
+                Text {
+                    visible: !root.trackCache[albumId]
+                    text: root.trackCache[albumId] === null ? "No tracks to show, collapse and expand to try again" : "Loading tracks…"
+                    textFormat: Text.PlainText
+                    color: root.textLo; font.pixelSize: 13
+                }
                 Column {
                     width: parent.width; spacing: 0
                     // Select-all header
@@ -8700,15 +8965,22 @@ ApplicationWindow {
                                 Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 16; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
                                 TrackPreview { kind: "track"; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
                                 Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
-                                PopMeter { value: modelData.popularity; showNum: false }
+                                PopMeter { value: modelData.popularity }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
                                 DownIcon {
                                     mediaId: modelData.id
                                     // The panel knows the release these rows
                                     // belong to, so a match here can be PROVEN
                                     // (green) rather than hedged by title alone.
-                                    libTrack: ({ artist: ab.artistName, title: modelData.title,
-                                                 album: ab.title, year: ab.year })
+                                    // The row names the release itself (and
+                                    // arrives dressed, see _dress_panel_rows);
+                                    // the block's own strings stand in for a
+                                    // row that does not.
+                                    libTrack: ({ artist: modelData.artist || ab.artistName, title: modelData.title,
+                                                 album: modelData.album || ab.title, year: modelData.year || ab.year,
+                                                 duration_sec: modelData.duration_sec || 0,
+                                                 explicitFlag: modelData.explicit === true ? 1 : modelData.explicit === false ? 0 : -1,
+                                                 lib: modelData.lib, libStamp: modelData.libStamp })
                                     onTap: function(){ waves.downloadTrack(modelData.id) }
                                 }
                             }
@@ -8888,7 +9160,12 @@ ApplicationWindow {
                         }
                     }
                 }
-                Text { visible: !root.playlistTrackCache[plId]; text: "Loading tracks…"; color: root.textLo; font.pixelSize: 13 }
+                Text {
+                    visible: !root.playlistTrackCache[plId]
+                    text: root.playlistTrackCache[plId] === null ? "No tracks to show, collapse and expand to try again" : "Loading tracks…"
+                    textFormat: Text.PlainText
+                    color: root.textLo; font.pixelSize: 13
+                }
                 Column {
                     width: parent.width; spacing: 0
                     // Select-all header
@@ -8928,7 +9205,7 @@ ApplicationWindow {
                                 TrackPreview { kind: modelData.kind; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
                                 Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Text { textFormat: Text.PlainText; text: modelData.artist; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 220 }
-                                PopMeter { value: modelData.popularity; showNum: false }
+                                PopMeter { value: modelData.popularity }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
                                 DownIcon {
                                     mediaId: modelData.id
@@ -8937,7 +9214,9 @@ ApplicationWindow {
                                     // hedge (gold). Never for a video: the
                                     // library scan only ever holds audio.
                                     libTrack: modelData.kind === "video" ? null
-                                            : ({ artist: modelData.artist, title: modelData.title })
+                                            : ({ artist: modelData.artist, title: modelData.title,
+                                                 explicitFlag: modelData.explicit === true ? 1 : modelData.explicit === false ? 0 : -1,
+                                                 lib: modelData.lib, libStamp: modelData.libStamp })
                                     onTap: function(){ if (modelData.kind === "video") waves.downloadVideo(modelData.id); else waves.downloadTrack(modelData.id) }
                                 }
                             }
@@ -9100,6 +9379,12 @@ ApplicationWindow {
         objectName: "newTag"
         property bool compact: false
         property bool settled: false
+        // Whether this release is new, the mark's own reason: `visible` is
+        // effective visibility (see LibraryTag.shown), so a row whose title
+        // padding read the mark's `visible` re-elided every title on the pane
+        // twice per navigation, once on the way out and once on the way back.
+        property bool shown: false
+        visible: nt.shown
         readonly property bool pulsing: ntPulse.running
         // Where the word's capitals sit, measured from the glyphs, so a caller
         // beside much larger type can line the two up by eye rather than by
@@ -9215,6 +9500,14 @@ ApplicationWindow {
         property string date: ""
         property string duration: ""
         property int durationSec: 0      // raw seconds, the presence matcher's duration witness
+        // TIDAL's explicit flag as the track dict carries it (a track's own
+        // flag is always parsed, so false here does mean clean), and the
+        // bridge's form of it for the presence ask: 1, 0, or -1 when absent.
+        property var explicit
+        readonly property int explicitFlag: explicit === true ? 1 : explicit === false ? 0 : -1
+        // The row's baked library verdict and its publish: see AlbumBlock.
+        property var libBaked
+        property var libStamp
         property string quality: ""
         property int popularity: 0
         property bool hi: false          // "you came here for this track" marker
@@ -9314,8 +9607,8 @@ ApplicationWindow {
                         // inside the full-width Text, exactly like the album
                         // row's pill: the title keeps its layout size and
                         // elides only for real overflow.
-                        rightPadding: (trPill.visible ? trPill.width + 8 : 0)
-                                      + (trNew.visible ? trNew.width + (trPill.visible ? 6 : 8) : 0)
+                        rightPadding: (trPill.shown ? trPill.width + 8 : 0)
+                                      + (trNew.shown ? trNew.width + (trPill.shown ? 6 : 8) : 0)
                         // Title -> the track's album page (highlighting this track);
                         // for a video row it opens the in-app video player instead.
                         MouseArea {
@@ -9334,22 +9627,23 @@ ApplicationWindow {
                             id: trPill
                             anchors.verticalCenter: parent.verticalCenter
                             x: Math.min(trTitle.contentWidth + 8,
-                                        trTitle.width - width - (trNew.visible ? trNew.width + 6 : 0))
+                                        trTitle.width - width - (trNew.shown ? trNew.width + 6 : 0))
                             track: trow.kind === "video" ? null
                                    : ({ artist: trow.artistName, title: trow.title,
                                         album: trow.album, year: trow.year,
-                                        duration_sec: trow.durationSec })
+                                        duration_sec: trow.durationSec, explicitFlag: trow.explicitFlag,
+                                        lib: trow.libBaked, libStamp: trow.libStamp })
                         }
                         // On the album's own page too: each row goes steady on
                         // its own as that track lands, which the header alone
                         // cannot say.
                         NewTag {
                             id: trNew
-                            visible: trow.kind !== "video" && root.isNewRelease(trow.date)
+                            shown: trow.kind !== "video" && root.isNewRelease(trow.date)
                             settled: trDl.st === "done"
                             anchors.verticalCenter: parent.verticalCenter
-                            x: trPill.visible ? trPill.x + trPill.width + 6
-                                              : Math.min(trTitle.contentWidth + 8, trTitle.width - width)
+                            x: trPill.shown ? trPill.x + trPill.width + 6
+                                            : Math.min(trTitle.contentWidth + 8, trTitle.width - width)
                         }
                     }
                     ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[tId] || []; suffix: album; albumId: trow.albumId }
@@ -9383,7 +9677,8 @@ ApplicationWindow {
                     libTrack: trow.kind === "video" ? null
                               : ({ artist: trow.artistName, title: trow.title,
                                    album: trow.album, year: trow.year,
-                                   duration_sec: trow.durationSec })
+                                   duration_sec: trow.durationSec, explicitFlag: trow.explicitFlag,
+                                   lib: trow.libBaked, libStamp: trow.libStamp })
                     onTap: function(){ trow.kind === "video" ? waves.downloadVideo(tId) : waves.downloadTrack(tId) }
                 }
             }
@@ -9557,6 +9852,56 @@ ApplicationWindow {
         readonly property string pvSt: previewable ? root.pvSt(bc.kind, bc.card.id || "") : ""
         readonly property string dlSt: root.dlSt(bc.card.id || "")
         readonly property real dlPct: root.dlPct(bc.card.id || "")
+        // The ownership rollup ArtCard carries (its applyOwn / refreshOwned,
+        // same economy): a collection Waves downloaded in an earlier session
+        // reads DONE here too, and its click opens the owned gate with
+        // REDOWNLOAD one click away. Without it this was the one card in the
+        // app that printed DOWNLOAD over files Waves itself wrote.
+        readonly property bool ownable: bc.kind === "album" || bc.kind === "playlist" || bc.kind === "mix"
+        property bool owned: false
+        property var _ownIds: null
+        property var _ownKeys: null
+        property string _ownHeld: ""
+        function applyOwn(co) {
+            var ids = co ? co.ids : null
+            _ownIds = ids
+            _ownKeys = root.ownKeys(ids)
+            var cid = "" + (bc.card.id || "")
+            if (cid !== _ownHeld) {
+                if (_ownHeld !== "") root.ownCardForget(_ownHeld)
+                if (cid !== "") root.ownCardRegister(cid, _ownKeys)
+                _ownHeld = cid
+            } else if (cid !== "") root.ownCardRekey(cid, _ownKeys)
+            var v = co ? co.verdict : "no"
+            if (v === "no") { owned = false; return }
+            if (v === "owned") owned = true
+        }
+        function refreshOwned(live) {
+            if (!bc.ownable) { owned = false; return }
+            applyOwn((!live && ("own" in bc.card) && bc.card.ownGen === root.ownGen) ? bc.card.own
+                     : waves.collectionOwnership("" + (bc.card.id || "")))
+        }
+        Component.onDestruction: if (_ownHeld !== "") root.ownCardForget(_ownHeld)
+        Connections {
+            target: waves
+            enabled: bc.ownable
+            function onOwnershipChanged(tid) {
+                if (tid === "" || (bc._ownIds && bc._ownIds.indexOf(tid) !== -1)) bcOwnCoalesce.restart()
+            }
+            function onCollectionMembershipChanged(cid) { if (cid === "" + (bc.card.id || "")) bc.refreshOwned(true) }
+        }
+        Connections {
+            target: root
+            enabled: bc.ownable
+            function onOwnAnswersGenChanged() {
+                var a = root.ownAnswers["" + (bc.card.id || "")]
+                if (a) bc.applyOwn(a)
+            }
+        }
+        Timer { id: bcOwnCoalesce; interval: 50; onTriggered: bc.refreshOwned(true) }
+        // Session state OR the rollup: this session's done and last week's
+        // download wear the same word. A LIVE state outranks the rollup.
+        readonly property bool dlDone: bc.dlSt === "done" || (bc.dlSt === "" && bc.owned)
         // The library verdict this card carries, resolved ONCE per card, the
         // same shape and the same economy as ArtCard's. The console style's
         // card was the one browse card that printed DOWNLOAD over an album
@@ -9567,7 +9912,8 @@ ApplicationWindow {
         property bool _libResolved: false
         // The payload's own answer (card.lib) serves the creation, a later
         // publish asks live: see ArtCard.resolveLibPresence for why a bridge
-        // call inside an incubation slice is the launch water's enemy.
+        // call inside an incubation slice is the launch water's enemy (and
+        // for why the advisory flag is 1 or -1, never 0).
         function resolveLibPresence(live) {
             _libResolved = true
             var c = bc.card
@@ -9575,12 +9921,13 @@ ApplicationWindow {
             libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
                 ? c.lib
                 : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
-                                             "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
+                                             "" + (c.year || ""), (c.audio_tracks !== undefined ? c.audio_tracks : c.tracks) || 0, c.duration_sec || 0,
+                                             c.explicit === true ? 1 : -1)
         }
-        onCardChanged: resolveLibPresence(false)
+        onCardChanged: { resolveLibPresence(false); refreshOwned(false) }
         // Only if the binding above has not already answered: an unconditional
         // resolve here is a second QML->Python call per card on a shelf.
-        Component.onCompleted: if (!_libResolved) resolveLibPresence(false)
+        Component.onCompleted: { if (!_libResolved) resolveLibPresence(false); refreshOwned(false) }
         Connections {
             target: waves
             // A shelf builds this card for every kind, so the ones that will
@@ -9663,7 +10010,7 @@ ApplicationWindow {
             // Full-width caption line: the album's artist link + date (or
             // "N tracks") gets the whole row now that the download control
             // lives on its own line below.
-            CardCaption { card: bc.card; px: 11; width: parent.width; settled: bc.dlSt === "done" || bc.libClaim }
+            CardCaption { card: bc.card; px: 11; width: parent.width; settled: bc.dlDone || bc.libClaim }
         }
         // Control line pinned to the bottom edge so shelf rows align:
         // ▶ PREVIEW on the left, bare-text download on the right.
@@ -9793,8 +10140,8 @@ ApplicationWindow {
                     // A download Waves made is the freshest fact this line can
                     // state, so DONE outranks any library verdict; only an idle
                     // card falls through to what the scan found.
-                    text: bc.dlSt === "done" ? "DONE" : bc.dlSt === "failed" ? "RETRY" : bc.libWord
-                    color: bc.dlSt === "done" ? root.green : bc.dlSt === "failed" ? root.red : bc.libInk
+                    text: bc.dlDone ? "DONE" : bc.dlSt === "failed" ? "RETRY" : bc.libWord
+                    color: bc.dlDone ? root.green : bc.dlSt === "failed" ? root.red : bc.libInk
                     font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack
                 }
                 // Queued: the stack glyph and the word, the same language as
@@ -9834,7 +10181,11 @@ ApplicationWindow {
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        if (bc.dlSt === "running" || bc.dlSt === "done" || bcDlBox.waiting) return
+                        // An owned collection (this session's or an earlier one's)
+                        // opens the owned gate, REDOWNLOAD one click away, the
+                        // same click the art card's strip gives it.
+                        if (bc.dlDone) { root.openRedownloadGate(bc.card); return }
+                        if (bc.dlSt === "running" || bcDlBox.waiting) return
                         // A full claim opens the claim gate, the same click the
                         // full button and the art card's strip give it. A
                         // partial copy downloads: with the bulk skip gate on,
@@ -10201,6 +10552,11 @@ ApplicationWindow {
         // at launch, that wait was most of what the boot water dropped
         // frames on. Keys are checked with `in`: a payload built before the
         // dressing existed simply has no key and asks as before.
+        //
+        // The advisory flag rides along as the bridge's 1 or -1, never 0: an
+        // album dict turns TIDAL's missing flag into false, so false is not
+        // proof of a clean release (the worker's dressing reads it the same
+        // way, so the baked and the live answer agree).
         function resolveLibPresence(live) {
             _libResolved = true
             var c = ac.card
@@ -10208,7 +10564,8 @@ ApplicationWindow {
             libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
                 ? c.lib
                 : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
-                                             "" + (c.year || ""), c.tracks || 0, c.duration_sec || 0)
+                                             "" + (c.year || ""), (c.audio_tracks !== undefined ? c.audio_tracks : c.tracks) || 0, c.duration_sec || 0,
+                                             c.explicit === true ? 1 : -1)
         }
         // The cross-session downloaded fact, the same rollup the full button
         // uses: every member track recorded by a real download and still up
@@ -10226,11 +10583,17 @@ ApplicationWindow {
         property var _ownIds: null
         // Batch keys for those members (root.ownKeys).
         property var _ownKeys: null
+        property string _ownHeld: ""   // the cid this card holds a registration on
         function applyOwn(co) {
             var ids = co ? co.ids : null
             _ownIds = ids
             _ownKeys = root.ownKeys(ids)
-            root.ownCardRegister("" + (ac.card.id || ""), _ownKeys)
+            var cid = "" + (ac.card.id || "")
+            if (cid !== _ownHeld) {
+                if (_ownHeld !== "") root.ownCardForget(_ownHeld)
+                if (cid !== "") root.ownCardRegister(cid, _ownKeys)
+                _ownHeld = cid
+            } else if (cid !== "") root.ownCardRekey(cid, _ownKeys)
             var v = co ? co.verdict : "no"
             if (v === "no") { owned = false; return }
             // Cold answers in flight and nothing firmly against: keep the last
@@ -10250,7 +10613,7 @@ ApplicationWindow {
             applyOwn((!live && ("own" in ac.card) && ac.card.ownGen === root.ownGen) ? ac.card.own
                      : waves.collectionOwnership("" + (ac.card.id || "")))
         }
-        Component.onDestruction: root.ownCardForget("" + (ac.card.id || ""))
+        Component.onDestruction: if (_ownHeld !== "") root.ownCardForget(_ownHeld)
         onCardChanged: { resolveLibPresence(false); refreshOwned(false) }
         Component.onCompleted: { if (!_libResolved) resolveLibPresence(false); refreshOwned(false) }
         Connections {
@@ -10355,7 +10718,7 @@ ApplicationWindow {
             // resolved verdict rather than AlbumPresencePill, which would ask
             // the same question a second time per card.
             LibraryTag {
-                visible: ac.libPresent
+                shown: ac.libPresent
                 settleKey: "" + (ac.card.id || "")
                 x: 10; y: 10
                 have: ac.libPresence ? (ac.libPresence.local_tracks || 0) : 0
@@ -10633,10 +10996,7 @@ ApplicationWindow {
                     anchors.centerIn: parent
                     mediaId: ac.card.id || ""
                     // This corner icon renders only for NON-collection kinds
-                    // (collections get the stacked controls above), so a
-                    // collection rollup here could never be seen; leaving it
-                    // on ran two membership rollups per collection card.
-                    collectionCheck: false
+                    // (collections get the stacked controls above).
                     onTap: function() { root.browseCardDownload(ac.card) }
                 }
             }
@@ -10977,8 +11337,9 @@ ApplicationWindow {
                 required property var modelData
                 width: 156; height: 236
                 asynchronous: bsec.landing && root._browseAsyncBuild
-                Component.onCompleted: root._browseCardStart(asynchronous)
-                onLoaded: root._browseCardTick(asynchronous)
+                property bool counted: false
+                Component.onCompleted: counted = root._browseCardStart(asynchronous)
+                onLoaded: root._browseCardTick(counted)
                 sourceComponent: BrowseCard { card: bcLd.modelData }
             }
             ShelfWheelRedirect { pane: bsec.pane }
@@ -11016,8 +11377,9 @@ ApplicationWindow {
                 // page, still creates its cards inline so nothing is watched
                 // filling in.
                 asynchronous: bsec.landing && root._browseAsyncBuild
-                Component.onCompleted: root._browseCardStart(asynchronous)
-                onLoaded: root._browseCardTick(asynchronous)
+                property bool counted: false
+                Component.onCompleted: counted = root._browseCardStart(asynchronous)
+                onLoaded: root._browseCardTick(counted)
                 sourceComponent: ArtCard { card: acLd.modelData; hero: bsec.hero }
             }
             ShelfWheelRedirect { pane: bsec.pane }
@@ -11097,6 +11459,7 @@ ApplicationWindow {
                         title: btrLd.modelData.title; artistName: btrLd.modelData.artist || ""; artistId: btrLd.modelData.artist_id || ""
                         album: btrLd.modelData.album || ""; art: btrLd.modelData.art || ""; year: "" + (btrLd.modelData.year || ""); date: btrLd.modelData.date || ""
                         duration: btrLd.modelData.duration || ""; durationSec: btrLd.modelData.duration_sec || 0; quality: btrLd.modelData.quality || ""; popularity: btrLd.modelData.popularity || 0
+                        explicit: btrLd.modelData.explicit
                         // Numbers only on item pages, where they're ordered
                         // (album track #s / playlist positions), editorial
                         // track shelves would all read "1".
@@ -11144,7 +11507,7 @@ ApplicationWindow {
                     sourceComponent: bsec.artStyle ? blinkTile : blinkChip
                     Component {
                         id: blinkTile
-                        BrowseTile { title: blinkLd.modelData.title; path: blinkLd.modelData.path; idx: blinkLd.index; plOnly: !!blinkLd.modelData.pl }
+                        BrowseTile { title: blinkLd.modelData.title; path: blinkLd.modelData.path; idx: blinkLd.index; plOnly: !!blinkLd.modelData.pl; pane: bsec.pane }
                     }
                     Component {
                         id: blinkChip
@@ -11173,6 +11536,15 @@ ApplicationWindow {
         property string title: ""
         property string path: ""
         property int idx: 0
+        // The scroll pane this tile sits in, for the in-view test below;
+        // null (a recycled view) means always in view.
+        property Item pane: null
+        readonly property bool inView: {
+            if (!pane) return true
+            var cy = pane.contentY   // binding dependency: re-test on scroll
+            var y = bt.mapToItem(pane.contentItem, 0, 0).y
+            return y + bt.height > cy - 100 && y < cy + pane.height + 100
+        }
         // Tile lives inside the Playlists folder view: drill into the
         // playlists-only grid instead of the full editorial page.
         property bool plOnly: false
@@ -11224,9 +11596,11 @@ ApplicationWindow {
                 bt._fxAim(btFxHover.point.position)
             }
         }
-        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+        // The same knob as ArtCard and the track discs (root.artFxEase), so a
+        // browse tile lands flat the way a cover does instead of bouncing.
+        Behavior on fxRx   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxRy   { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
+        Behavior on fxLift { NumberAnimation { duration: 280; easing.type: root.artFxEase } }
         transform: [
             Rotation { origin.x: bt.width / 2; origin.y: bt.height / 2; axis: Qt.vector3d(1, 0, 0); angle: bt.fxRx },
             Rotation { origin.x: bt.width / 2; origin.y: bt.height / 2; axis: Qt.vector3d(0, 1, 0); angle: bt.fxRy },
@@ -11269,7 +11643,7 @@ ApplicationWindow {
         Timer {
             interval: 5200 + (bt.idx % 7) * 1150
             repeat: true
-            running: root.onScreen && !root.browseMoving && bt.visible && bt.arts.length > bt.artN && bt.artN > 0
+            running: root.onScreen && !root.browseMoving && bt.visible && bt.inView && bt.arts.length > bt.artN && bt.artN > 0
             onTriggered: {
                 var pool = bt.arts.length
                 var n = bt.artN
@@ -11475,12 +11849,14 @@ ApplicationWindow {
         // Pin the scroll spot across a revalidate refill (same pattern as the
         // playlist-folder list): the fill resets contentY, so the armed spot
         // is re-applied as the delegates lay out, until it is reachable. A
-        // user drag disarms it, their hand always wins.
+        // user drag disarms it, their hand always wins. The spot is an offset
+        // from the list's top, not a raw contentY: the 8px header puts the
+        // top at originY (-8), and a raw 0 parked the list 8px down.
         property real pendingY: -1
         function applyRestore() {
             if (pendingY < 0) return
             var maxY = Math.max(0, contentHeight - height)
-            contentY = Math.min(pendingY, maxY)
+            contentY = originY + Math.min(pendingY, maxY)
             if (maxY >= pendingY) pendingY = -1
         }
         onMovementStarted: pendingY = -1
@@ -11533,8 +11909,17 @@ ApplicationWindow {
     // folder_id -> playlists remaining in its "download all" (badge digit).
     property var folderRemainMap: ({})
     // Browse category DOWNLOAD ALL flow: which tile's resolve is pending a
-    // download or a preview, and the confirm prompt ({path, title, count}).
+    // download or a preview, and the confirm prompt ({path, title, count}, or
+    // {kind: "favTracks", count} for the My Tidal tracks button, issue #43).
     property string catPendingDl: ""
+    // My Tidal > Tracks DOWNLOAD ALL: a count was asked for and is awaited.
+    property bool favTracksPending: false
+    // The Albums and Artists tabs' twins of it.
+    property bool favAlbumsPending: false
+    property bool favArtistsPending: false
+    property bool favPlaylistsPending: false
+    property bool favMixesPending: false
+    property bool favVideosPending: false
     property string catPendingPv: ""
     property var catDlPrompt: null
     // Every way out of the bulk-download confirm that is not "Download all".
@@ -11544,7 +11929,7 @@ ApplicationWindow {
     function catDlDismiss() { catDlPrompt = null; cdSkip.checked = false }
     function openPlFolder(fid, title) {
         var st = plFolderStack.slice()
-        if (st.length) st[st.length - 1].y = libFolderList.contentY
+        if (st.length) st[st.length - 1].y = libFolderList.contentY - libFolderList.originY
         st.push({ id: fid, title: title, y: 0 })
         plFolderStack = st
         plCurrentFolder = fid
@@ -11858,7 +12243,7 @@ ApplicationWindow {
         }
         if (idxs.length === 0) return
         idxs.sort(function (a, b) { return b - a })
-        var tracks = null, exp = null
+        var tracks = null, exp = null, mids = null
         for (var k = 0; k < idxs.length; ++k) {
             var at = idxs[k], row = m.get(at), qid = row.qid
             queueGroupBump(row.uiGroup, -1)
@@ -11869,11 +12254,14 @@ ApplicationWindow {
             // reconcileQueue). One copy of each for the whole sweep.
             if (root.queueTracks[qid] !== undefined) { if (!tracks) tracks = Object.assign({}, root.queueTracks); delete tracks[qid] }
             if (root.queueExpanded[qid] !== undefined) { if (!exp) exp = Object.assign({}, root.queueExpanded); delete exp[qid] }
+            var mid = row.media_id
             m.remove(at)
             root.qidAt.splice(at, 1)
             delete root.queueRowIndex[qid]
+            if (mid) { if (!mids) mids = {}; mids[mid] = true }
             if (at < lo) lo = at
         }
+        if (mids) root.dlHoldersRelease(mids)
         if (tracks) root.queueTracks = tracks
         if (exp) root.queueExpanded = exp
         queueIndexFix(lo, m.count - 1)
@@ -12077,14 +12465,19 @@ ApplicationWindow {
         waves.setLibrarySort(cat, "date", "desc")   // one date-desc reload; onLibraryLoaded fills
     }
     function libIsMedia(cat) { return cat === "albums" || cat === "tracks" || cat === "videos" }
-    function libFill(cat, items) { var m = libModelFor(cat); if (m) { if (libIsMedia(cat)) fillMedia(m, items); else fill(m, items) } }
+    // In place, by id (reconcileById, the search refresh's own refill): a
+    // quiet revalidate of the category the user is reading used to clear and
+    // rebuild every delegate of the pane, the same synchronous freeze the
+    // search page had, for a page that normally differs by a row or two. A
+    // kept row also keeps its expansion panel, its selection and its badges.
+    function libFill(cat, items) { var m = libModelFor(cat); if (m) reconcileById(m, items, libIsMedia(cat)) }
     function libAppend(cat, items) { var m = libModelFor(cat); if (m) { if (libIsMedia(cat)) appendMedia(m, items); else appendPlain(m, items) } }
     // Called as the active list scrolls; loads the next page well before the
     // bottom (~1.5 viewports early) so it feels endless.
     function libMaybeLoadMore(view, cat) {
         if (cat !== root.libraryCategory || !root.libCatHasMore[cat] || root.libLoadingMore) return
         if (view.count === 0 || view.contentHeight <= 0) return
-        if (view.contentY + view.height > view.contentHeight - view.height * 1.5) {
+        if (view.contentY - view.originY + view.height > view.contentHeight - view.height * 1.5) {
             root.libLoadingMore = true
             waves.loadMoreLibrary(cat)
         }
@@ -12105,16 +12498,23 @@ ApplicationWindow {
             // holdScroll idea). Sort changes and fresh loads disarmed the pin,
             // so those still land at the top as a restarted list should.
             var v = root.libViewFor(cat)
-            var keepY = (root.libPinRefill && v && v.visible && !v.moving && v.contentY > 0)
-                ? v.contentY : -1
+            var keepY = (root.libPinRefill && v && v.visible && !v.moving && v.contentY > v.originY)
+                ? v.contentY - v.originY : -1
+            // Before the fill, so the rows are created behind the veil. A
+            // model that already holds rows is a revalidate, never veiled.
+            var lm = root.libModelFor(cat)
+            root._libBuildStart(cat, items ? items.length : 0, !lm || lm.count === 0)
             root.libFill(cat, items)
             if (keepY >= 0) { v.pendingY = keepY; v.applyRestore() }
             else if (v) {
                 // A restarted list (fresh load, new sort order) begins at the
                 // top. Explicit, because a clear+refill leaves the old
                 // contentY in place when the new content is just as tall.
+                // The top is the 8px header, not contentY 0: a raw 0 parked
+                // every tab 8px down, tight under the tab bar and still
+                // scrollable up by a hair.
                 v.pendingY = -1
-                v.contentY = 0
+                v.positionViewAtBeginning()
             }
         }
         function onLibraryMore(cat, items, more) {
@@ -12138,6 +12538,49 @@ ApplicationWindow {
         }
         // A Browse category finished resolving (count known, list cached):
         // run whichever action the user queued on the tile.
+        // My Tidal > Tracks DOWNLOAD ALL: the count came back, confirm or go.
+        function onFavoriteTracksResolved(count) {
+            if (!root.favTracksPending) return
+            root.favTracksPending = false
+            if (count <= 0) return   // the backend set the status line
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favTracks", count: count }
+            else waves.downloadFavoriteTracks()
+        }
+        function onFavoriteAlbumsResolved(count) {
+            if (!root.favAlbumsPending) return
+            root.favAlbumsPending = false
+            if (count <= 0) return
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favAlbums", count: count }
+            else waves.downloadFavoriteAlbums()
+        }
+        function onFavoriteArtistsResolved(count) {
+            if (!root.favArtistsPending) return
+            root.favArtistsPending = false
+            if (count <= 0) return
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favArtists", count: count }
+            else waves.downloadFavoriteArtists()
+        }
+        function onFavoritePlaylistsResolved(count) {
+            if (!root.favPlaylistsPending) return
+            root.favPlaylistsPending = false
+            if (count <= 0) return
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favPlaylists", count: count }
+            else waves.downloadFavoritePlaylists()
+        }
+        function onFavoriteMixesResolved(count) {
+            if (!root.favMixesPending) return
+            root.favMixesPending = false
+            if (count <= 0) return
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favMixes", count: count }
+            else waves.downloadFavoriteMixes()
+        }
+        function onFavoriteVideosResolved(count) {
+            if (!root.favVideosPending) return
+            root.favVideosPending = false
+            if (count <= 0) return
+            if (waves.confirmCategoryDl) root.catDlPrompt = { kind: "favVideos", count: count }
+            else waves.downloadFavoriteVideos()
+        }
         function onPlaylistCategoryResolved(path, title, count, firstId) {
             if (root.catPendingPv === path) {
                 root.catPendingPv = ""
@@ -12183,6 +12626,9 @@ ApplicationWindow {
             root.browsePageError = false
             root.browsePageLoading = false
             root.browseLoading = false
+            // A shelf still marked as growing would refuse its next "load
+            // more" on the new account (browseGrow checks the latch first).
+            root.browseGrowing = ({})
             // Including a landing payload parked mid-handover: it is the
             // previous account's, and applying it after the reveal would put
             // their personalized rows back on screen.
@@ -12204,6 +12650,12 @@ ApplicationWindow {
             root.catPendingDl = ""
             root.catPendingPv = ""
             root.catDlPrompt = null
+            root.favTracksPending = false
+            root.favAlbumsPending = false
+            root.favArtistsPending = false
+            root.favPlaylistsPending = false
+            root.favMixesPending = false
+            root.favVideosPending = false
             // The keep-alive My Tidal panes hold the previous account's
             // favourites for their whole life; only the account flip may
             // clear them (loadLib no longer clears on category switches).
@@ -12211,10 +12663,17 @@ ApplicationWindow {
             libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
             root.libCatHasMore = ({})
             root.libLoadingMore = false
+            // The sort picked per category is this account's view of its
+            // own favourites; the next account starts from the defaults.
+            root.libSort = ({})
             // The saved Search drill-in can hold the previous account's artist
             // page, restorable from the Search tab: same class of leak as the
             // history stacks dropped above.
             root.searchSaved = null
+            // The per-item artist credits only ever grow (every search, artist
+            // and browse row adds to them); the account flip is where every
+            // row they served has gone.
+            root.artistsById = ({})
             // The drilled-into folder view holds the previous account's rows.
             root.plFolderReset()
             if (root.signedIn && root.browseOpen) {
@@ -12308,6 +12767,8 @@ ApplicationWindow {
             // just been held back for. One event-loop pass puts the whole page
             // behind the reveal, which is the point of waiting at all.
             if (root._searchAwaitingLibrary) searchLibraryReveal.restart()
+            // The My Tidal pane waiting behind its own veil, the same way.
+            if (root.libraryBuilding) libLibraryReveal.restart()
         }
         function onBrowseSectionMore(p) {
             root.browseGrew(p)
@@ -12480,8 +12941,13 @@ ApplicationWindow {
         }
         // Assign a NEW object so the `var` property fires a change notification
         // (mutating + reassigning the same reference does not update bindings).
-        function onAlbumTracksLoaded(id, tracks) { var c = Object.assign({}, root.trackCache); c[id] = tracks; root.trackCache = c }
-        function onPlaylistTracksLoaded(id, tracks) { var c = Object.assign({}, root.playlistTrackCache); c[id] = tracks; root.playlistTrackCache = c }
+        // An empty list is a failed fetch (the backend never answers an
+        // empty list for a release it could read). Stored as null, not as
+        // [], so the panel says so and the next expand asks again: an empty
+        // array is truthy, so it hid "Loading tracks…" and left a blank panel
+        // that no re-expand ever retried.
+        function onAlbumTracksLoaded(id, tracks) { var c = Object.assign({}, root.trackCache); c[id] = tracks.length ? tracks : null; root.trackCache = c }
+        function onPlaylistTracksLoaded(id, tracks) { var c = Object.assign({}, root.playlistTrackCache); c[id] = tracks.length ? tracks : null; root.playlistTrackCache = c }
         function onArtistMetaLoaded(id, pop) {
             for (var i = 0; i < artistsModel.count; ++i) {
                 if (artistsModel.get(i).id === id) { artistsModel.setProperty(i, "popularity", pop); break }
@@ -12852,7 +13318,12 @@ ApplicationWindow {
                                     placeholderTextColor: root.textLo; font.pixelSize: 15
                                     background: Rectangle { color: "transparent" }
                                     onAccepted: {
-                                        var qt = root.searchQueryText(text)
+                                        // Enter during the paste decode: search the pasted
+                                        // text, not the scramble, and drop a glyph arm so the
+                                        // settled decode cannot search a second time.
+                                        var raw = text
+                                        if (searchDecoder.decoding) { searchDecoder.submitArmed = false; raw = searchDecoder.finish() }
+                                        var qt = root.searchQueryText(raw)
                                         if (qt !== text) text = qt   // show what is searched
                                         root.submitSearch(qt)
                                     }
@@ -13429,8 +13900,8 @@ ApplicationWindow {
                                         text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : root.browseTitleHint
                                         color: root.textHi; font.pixelSize: 26; font.bold: true
                                         width: Math.min(implicitWidth,
-                                                        parent.width - (bihPill.visible ? bihPill.width + 10 : 0)
-                                                        - (bihNew.visible ? bihNew.width + 10 : 0))
+                                                        parent.width - (bihPill.shown ? bihPill.width + 10 : 0)
+                                                        - (bihNew.shown ? bihNew.width + 10 : 0))
                                         elide: Text.ElideRight
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
@@ -13440,8 +13911,8 @@ ApplicationWindow {
                                         // One pill for every album page you open, so the
                                         // page you open next must not read as news.
                                         settleKey: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
-                                        visible: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
-                                                    && root.libraryPresence && root.libraryPresence.present)
+                                        shown: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
+                                                   && root.libraryPresence && root.libraryPresence.present)
                                         have: root.libraryPresence ? (root.libraryPresence.local_tracks || 0) : 0
                                         total: browseItemHeader.hd ? (browseItemHeader.hd.num_tracks || 0) : 0
                                         declared: root.libraryPresence ? (root.libraryPresence.local_declared || 0) : 0
@@ -13460,8 +13931,8 @@ ApplicationWindow {
                                         id: bihNew
                                         y: Math.round(bihTitle.y + bihTitle.baselineOffset
                                                       - bihTitleFm.tightBoundingRect("H").height / 2 - capMiddle)
-                                        visible: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
-                                                    && root.isNewRelease(browseItemHeader.hd.date))
+                                        shown: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
+                                                   && root.isNewRelease(browseItemHeader.hd.date))
                                         settled: bihDl.st === "done"
                                     }
                                 }
@@ -13513,7 +13984,9 @@ ApplicationWindow {
                                         libAlbum: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
                                                   ? ({ artist: browseItemHeader.hd.artist || "", title: browseItemHeader.hd.title || "",
                                                        year: "" + (browseItemHeader.hd.year || ""), tracks: browseItemHeader.hd.num_tracks || 0,
-                                                       duration_sec: browseItemHeader.hd.duration_sec || 0 })
+                                                       duration_sec: browseItemHeader.hd.duration_sec || 0,
+                                                       explicitFlag: browseItemHeader.hd.explicit === true ? 1
+                                                                   : browseItemHeader.hd.explicit === false ? 0 : -1 })
                                                   : null
                                         onTap: function() {
                                             if (browseItemHeader.hd)
@@ -13670,7 +14143,7 @@ ApplicationWindow {
                     color: root.textLo; font.pixelSize: 22; topPadding: 96
                     // gentle breathing so the empty state feels alive
                     SequentialAnimation on opacity {
-                        running: emptyHint.visible; loops: Animation.Infinite
+                        running: emptyHint.visible && root.onScreen; loops: Animation.Infinite
                         NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
                         NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
                     }
@@ -13716,6 +14189,7 @@ ApplicationWindow {
                                 albumId: topLd.modelData.id; title: topLd.modelData.title; artistName: topLd.modelData.artist; artistId: topLd.modelData.artist_id || ""
                                 art: topLd.modelData.art; year: "" + (topLd.modelData.year || ""); releaseDate: topLd.modelData.date || ""; listedDate: topLd.modelData.listed || ""; trackCount: topLd.modelData.tracks || 0
                                 durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
+                                explicit: topLd.modelData.explicit === true
                             }
                         }
                         Component {
@@ -13725,7 +14199,7 @@ ApplicationWindow {
                                 title: topLd.modelData.title; artistName: topLd.modelData.artist || ""; artistId: topLd.modelData.artist_id || ""
                                 album: topLd.modelData.album || ""; art: topLd.modelData.art || ""; year: "" + (topLd.modelData.year || ""); date: topLd.modelData.date || ""
                                 duration: topLd.modelData.duration || ""; durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
-                                albumId: topLd.modelData.album_id || ""
+                                albumId: topLd.modelData.album_id || ""; explicit: topLd.modelData.explicit
                             }
                         }
                         Component {
@@ -13806,8 +14280,15 @@ ApplicationWindow {
                         delegate: Loader {
                             width: artistFlow.cardW
                             height: item ? item.implicitHeight : width + 142
-                            // Complement of the strip: live only when NOT in strip mode.
-                            active: !root.searchArtistsStripMode
+                            // Complement of the strip: live only when NOT in strip mode,
+                            // and only while this grid is the artist surface of the
+                            // results. A type chip other than Artists leaves strip mode
+                            // too, and used to build every card of a hidden grid on the
+                            // click. The section condition, not artistFlow.visible: that
+                            // is EFFECTIVE visibility, false whenever an artist, My Tidal,
+                            // Browse or Settings page covers the results, and it tore the
+                            // grid down on every navigation and rebuilt it on Back.
+                            active: !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
                             asynchronous: root.searchBuilding
                             opacity: root.searchReveal
                             onLoaded: root._searchBuildTick()
@@ -13860,6 +14341,7 @@ ApplicationWindow {
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
                             art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                            explicit: model.explicit === true
                         }
                     }
                 }
@@ -13878,7 +14360,7 @@ ApplicationWindow {
                         sourceComponent: TrackRow {
                             tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
                             album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                            albumId: model.album_id || ""
+                            albumId: model.album_id || ""; explicit: model.explicit
                         }
                     }
                 }
@@ -14166,7 +14648,7 @@ ApplicationWindow {
                         width: artistCol.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                        albumId: model.album_id || ""
+                        albumId: model.album_id || ""; explicit: model.explicit
                     }
                 }
                 ShowAllLabel {
@@ -14195,6 +14677,7 @@ ApplicationWindow {
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        explicit: model.explicit === true
                     }
                 }
                 ShowAllLabel {
@@ -14222,6 +14705,7 @@ ApplicationWindow {
                         width: artistCol.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        explicit: model.explicit === true
                     }
                 }
                 ShowAllLabel {
@@ -14356,6 +14840,124 @@ ApplicationWindow {
                         }
                     }
                 }
+                // Tracks tab only: queue every favourite track (issue #43).
+                // The rollup has no ownership record, so the button shows live
+                // download state only, like a playlist folder's.
+                Item {
+                    visible: root.libraryCategory === "tracks"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favTracksBtn.implicitWidth; implicitHeight: favTracksBtn.implicitHeight
+                    DownloadButton {
+                        id: favTracksBtn
+                        objectName: "favTracksBtn"
+                        mediaId: "fav:tracks"
+                        label: "Download all"
+                        onTap: function(){ root.favTracksPending = true; waves.resolveFavoriteTracks() }
+                    }
+                    FolderBadge {
+                        anchors.right: favTracksBtn.right; anchors.rightMargin: -8
+                        anchors.top: favTracksBtn.top; anchors.topMargin: -9
+                        folderId: favTracksBtn.mediaId
+                        st: favTracksBtn.st
+                    }
+                }
+                // Albums tab: every favourite album, under the same album
+                // settings as a Download album click on each.
+                Item {
+                    visible: root.libraryCategory === "albums"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favAlbumsBtn.implicitWidth; implicitHeight: favAlbumsBtn.implicitHeight
+                    DownloadButton {
+                        id: favAlbumsBtn
+                        objectName: "favAlbumsBtn"
+                        mediaId: "fav:albums"
+                        label: "Download all"
+                        onTap: function(){ root.favAlbumsPending = true; waves.resolveFavoriteAlbums() }
+                    }
+                    FolderBadge {
+                        anchors.right: favAlbumsBtn.right; anchors.rightMargin: -8
+                        anchors.top: favAlbumsBtn.top; anchors.topMargin: -9
+                        folderId: favAlbumsBtn.mediaId
+                        st: favAlbumsBtn.st
+                    }
+                }
+                // Artists tab: every favourite artist's discography. The badge
+                // counts artists still to finish.
+                Item {
+                    visible: root.libraryCategory === "artists"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favArtistsBtn.implicitWidth; implicitHeight: favArtistsBtn.implicitHeight
+                    DownloadButton {
+                        id: favArtistsBtn
+                        objectName: "favArtistsBtn"
+                        mediaId: "fav:artists"
+                        label: "Download all"
+                        onTap: function(){ root.favArtistsPending = true; waves.resolveFavoriteArtists() }
+                    }
+                    FolderBadge {
+                        anchors.right: favArtistsBtn.right; anchors.rightMargin: -8
+                        anchors.top: favArtistsBtn.top; anchors.topMargin: -9
+                        folderId: favArtistsBtn.mediaId
+                        st: favArtistsBtn.st
+                    }
+                }
+                // Playlists tab: every playlist, the ones inside folders included.
+                Item {
+                    visible: root.libraryCategory === "playlists"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favPlaylistsBtn.implicitWidth; implicitHeight: favPlaylistsBtn.implicitHeight
+                    DownloadButton {
+                        id: favPlaylistsBtn
+                        objectName: "favPlaylistsBtn"
+                        mediaId: "fav:playlists"
+                        label: "Download all"
+                        onTap: function(){ root.favPlaylistsPending = true; waves.resolveFavoritePlaylists() }
+                    }
+                    FolderBadge {
+                        anchors.right: favPlaylistsBtn.right; anchors.rightMargin: -8
+                        anchors.top: favPlaylistsBtn.top; anchors.topMargin: -9
+                        folderId: favPlaylistsBtn.mediaId
+                        st: favPlaylistsBtn.st
+                    }
+                }
+                // Mixes tab: every mix.
+                Item {
+                    visible: root.libraryCategory === "mixes"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favMixesBtn.implicitWidth; implicitHeight: favMixesBtn.implicitHeight
+                    DownloadButton {
+                        id: favMixesBtn
+                        objectName: "favMixesBtn"
+                        mediaId: "fav:mixes"
+                        label: "Download all"
+                        onTap: function(){ root.favMixesPending = true; waves.resolveFavoriteMixes() }
+                    }
+                    FolderBadge {
+                        anchors.right: favMixesBtn.right; anchors.rightMargin: -8
+                        anchors.top: favMixesBtn.top; anchors.topMargin: -9
+                        folderId: favMixesBtn.mediaId
+                        st: favMixesBtn.st
+                    }
+                }
+                // Videos tab: every favourite video.
+                Item {
+                    visible: root.libraryCategory === "videos"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: favVideosBtn.implicitWidth; implicitHeight: favVideosBtn.implicitHeight
+                    DownloadButton {
+                        id: favVideosBtn
+                        objectName: "favVideosBtn"
+                        mediaId: "fav:videos"
+                        label: "Download all"
+                        onTap: function(){ root.favVideosPending = true; waves.resolveFavoriteVideos() }
+                    }
+                    FolderBadge {
+                        anchors.right: favVideosBtn.right; anchors.rightMargin: -8
+                        anchors.top: favVideosBtn.top; anchors.topMargin: -9
+                        folderId: favVideosBtn.mediaId
+                        st: favVideosBtn.st
+                    }
+                }
                 // Sort (mirrors the Search sort); hidden on the Recent strip,
                 // which is already newest-first and merged across kinds.
                 ComboBox {
@@ -14424,7 +15026,7 @@ ApplicationWindow {
                         color: root.textHi; font.family: root.mono; font.pixelSize: 18
                     }
                     MouseArea {
-                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        anchors.fill: parent; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: { var g = root.libSortGet(root.libraryCategory); root.libApplySort(root.libraryCategory, g.key, !g.asc) }
                     }
                 }
@@ -14433,6 +15035,7 @@ ApplicationWindow {
             Item {
                 id: libArea
                 Layout.fillWidth: true; Layout.fillHeight: true
+                opacity: root.libraryReveal   // the My Tidal build veil
 
                 LibList {
                     id: libAlbumsList
@@ -14442,6 +15045,8 @@ ApplicationWindow {
                         width: ListView.view.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                         art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        explicit: model.explicit === true
+                        libBaked: model.lib; libStamp: model.libStamp
                     }
                 }
                 LibList {
@@ -14452,7 +15057,8 @@ ApplicationWindow {
                         width: ListView.view.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
                         album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                        albumId: model.album_id || ""
+                        albumId: model.album_id || ""; explicit: model.explicit
+                        libBaked: model.lib; libStamp: model.libStamp
                     }
                 }
                 // Artists as a compact card grid (the Search artist card, shrunk)
@@ -14480,7 +15086,7 @@ ApplicationWindow {
                     function applyRestore() {
                         if (pendingY < 0) return
                         var maxY = Math.max(0, contentHeight - height)
-                        contentY = Math.min(pendingY, maxY)
+                        contentY = originY + Math.min(pendingY, maxY)
                         if (maxY >= pendingY) pendingY = -1
                     }
                     onMovementStarted: pendingY = -1
@@ -14519,6 +15125,7 @@ ApplicationWindow {
                                             width: parent.width
                                             anchors.bottom: parent.bottom
                                             artistName: "" + (model.name || "")
+                                            libBaked: model.lib; libStamp: model.libStamp
                                         }
                                     }
                                 }
@@ -14687,7 +15294,7 @@ ApplicationWindow {
                                             title: modelData.title; artistName: modelData.artist || ""; artistId: modelData.artist_id || ""
                                             album: modelData.album || ""; art: modelData.art || ""; year: "" + (modelData.year || ""); date: modelData.date || ""
                                             duration: modelData.duration || ""; durationSec: modelData.duration_sec || 0; quality: modelData.quality || ""; popularity: modelData.popularity || 0
-                                            albumId: modelData.album_id || ""
+                                            albumId: modelData.album_id || ""; explicit: modelData.explicit
                                         }
                                     }
                                 }
@@ -14776,10 +15383,11 @@ ApplicationWindow {
                         function applyRestore() {
                             if (pendingY < 0) return
                             var maxY = Math.max(0, contentHeight - height)
-                            contentY = Math.min(pendingY, maxY)
+                            contentY = originY + Math.min(pendingY, maxY)
                             if (maxY >= pendingY) pendingY = -1
                         }
                         onContentHeightChanged: applyRestore()
+                        onMovementStarted: pendingY = -1
                     }
                 }
                 LibList {
@@ -14947,7 +15555,7 @@ ApplicationWindow {
                     Rectangle {
                         width: 7; height: 7; radius: 3.5; color: root.gold
                         SequentialAnimation on opacity {
-                            running: statusUpdate.visible; loops: Animation.Infinite
+                            running: statusUpdate.visible && root.onScreen; loops: Animation.Infinite
                             NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
                             NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutSine }
                         }
@@ -15001,8 +15609,10 @@ ApplicationWindow {
                         // follow a deliberate click.
                         text: statusMark.verState === "checking" ? "CHECKING…"
                             : statusMark.verState === "current" ? "UP TO DATE"
+                            : statusMark.verState === "failed" ? "COULD NOT CHECK"
                             : "v" + waves.appVersion
                         color: statusMark.verState === "current" ? root.accent
+                             : statusMark.verState === "failed" ? root.red
                              : verMa.containsMouse ? root.textLo : root.textDim
                         font.family: root.mono; font.pixelSize: 11; font.letterSpacing: 0.5
                         Behavior on color { ColorAnimation { duration: 140 } }
@@ -15032,7 +15642,9 @@ ApplicationWindow {
                         target: waves
                         function onAppUpdateChecked(available, current, latest, manual) {
                             if (statusMark.verState !== "checking") return
-                            statusMark.verState = available ? "" : "current"
+                            // An empty latest means the check threw (offline,
+                            // API error): say so rather than "up to date".
+                            statusMark.verState = available ? "" : (latest === "" ? "failed" : "current")
                             if (!available) verSettle.restart()
                         }
                     }
@@ -15533,7 +16145,7 @@ ApplicationWindow {
                     // single. It still carries no caret, no pointing cursor and
                     // no track fetch, because there is nothing to open.
                     readonly property bool peekable: expandable || single
-                    readonly property bool peeking: peekable && !qexp && cardHover.containsMouse
+                    readonly property bool peeking: peekable && !qexp && !!(qBody.item && qBody.item.hovering)
                     // How many track rows the ledger holds, and how many of
                     // them are actually built. A ledger row is not cheap (four
                     // texts, two DecryptText cells, three running Behaviors),
@@ -15557,7 +16169,7 @@ ApplicationWindow {
                     // (the opening one has nothing yet to keep), and a single's
                     // sliver, whose whole content is one line of text, was the
                     // clearest case of all.
-                    readonly property bool ledgerHolding: qexp || peeking || qtrackAnim.running
+                    readonly property bool ledgerHolding: qexp || peeking || !!(qBody.item && qBody.item.ledgerAnimating)
                     readonly property int ledgerShown: qexp ? Math.min(ledgerLen, root.queueLedgerMax)
                                                     : ledgerHolding ? Math.min(ledgerLen, root.queueLedgerPeek)
                                                     : 0
@@ -15599,14 +16211,16 @@ ApplicationWindow {
                                                  : landed !== "" ? landed
                                                  : root.tierFloor(model.quality, model.expected)
                     width: ListView.view.width
-                    property real bodyH: actCol.implicitHeight + 18
+                    // The body's own height (0 while collapsed: the Loader below
+                    // holds no body then, which is the whole point of it).
+                    property real bodyH: qBody.item ? qBody.item.height : 0
                     height: (collapsed || leaving) ? 0 : bodyH + 8
                     opacity: leaving ? 0 : 1
                     clip: true
                     // While the peek/expand animation drives the inner list height,
                     // this outer Behavior must idle, otherwise it re-targets every
                     // frame, chasing the moving bodyH, and the motion turns mushy.
-                    Behavior on height { enabled: !qtrackAnim.running; NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
+                    Behavior on height { enabled: !(qBody.item && qBody.item.ledgerAnimating); NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
                     Behavior on opacity { NumberAnimation { duration: 240 } }
 
                     // Finish flow: ✓ DONE chip pops, then the row collapses +
@@ -15615,14 +16229,32 @@ ApplicationWindow {
                     // the root lingerClock, not here: a delegate only exists
                     // while the drawer shows it, so per-row timers meant a
                     // closed drawer never folded anything.
-                    onStChanged: if (qrow.lingering) chipPop.restart()
+                    onStChanged: if (qrow.lingering && qBody.item) qBody.item.popChip()
 
                     // ---- queue card (Completed rows use the same card as
                     // Downloading/Queued, art thumb, caret, hover peek and
                     // expand included, just in the quieter completed palette) ----
-                    Rectangle {
-                        id: activeRect
+                    // The row's whole body lives behind a Loader that is inactive
+                    // while the Completed section is collapsed. A collapsed row is
+                    // height 0, and a ListView keeps creating zero-height delegates
+                    // until something fills the viewport, so opening the drawer
+                    // used to build every finished row's full body (40 of them)
+                    // for a section that showed none of them.
+                    // Kept alive while the collapse still animates: dropping
+                    // the body first left bodyH at 0 and the 280 ms height
+                    // Behavior shrinking an empty box.
+                    Loader {
+                        id: qBody
+                        active: !qrow.collapsed || qrow.height > 0
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        sourceComponent: Rectangle {
+                        id: activeRect
+                        // What the row root reads off its body (ids inside a
+                        // Loader's component are not reachable from outside it).
+                        readonly property bool hovering: cardHover.containsMouse
+                        readonly property bool ledgerAnimating: qtrackAnim.running
+                        function popChip() { chipPop.restart() }
+                        width: parent ? parent.width : 0
                         height: actCol.implicitHeight + 18
                         radius: 8; color: qrow.isComp ? root.surface : root.surface2
                         border.color: qrow.isComp ? (cardHover.containsMouse && qrow.peekable ? root.outline : root.line1)
@@ -15799,7 +16431,7 @@ ApplicationWindow {
                                     pulse: qrow.st === "running"
                                     pct: qrow.st === "done" ? 100 : model.progress
                                     // 100% but still running = the final steps (merge,
-                                    // decrypt, tag) are in flight: twinkle, don't freeze.
+                                    // tag) are in flight: twinkle, don't freeze.
                                     finishing: qrow.st === "running" && model.progress >= 99.9
                                     onColor: qrow.st === "failed" ? root.red : qrow.st === "queued" ? root.cyanDim : root.accent
                                     }
@@ -16098,6 +16730,7 @@ ApplicationWindow {
                                 easing.type: Easing.Linear
                             }
                         }
+                        }   // the body Rectangle
                     }
                 }
             }
@@ -16326,7 +16959,7 @@ ApplicationWindow {
                             color: loginDecoder.decoding ? root.accent : root.textHi
                             placeholderTextColor: root.textLo; font.pixelSize: 13; font.family: root.mono
                             background: Rectangle { color: "transparent" }
-                            onAccepted: waves.completeLogin(text)
+                            onAccepted: waves.completeLogin(loginDecoder.decoding ? loginDecoder.finish() : text)
                             onTextChanged: loginDecoder.noteTextChanged()
                         }
                         PasteGlyph {
@@ -16385,7 +17018,12 @@ ApplicationWindow {
     Rectangle {
         id: folderGate
         objectName: "folderGate"
+        // Same reason as exitGate: a Drawer paints in the window's overlay
+        // layer, so a gate parented to the page sat under an open queue
+        // drawer whatever its z (front-end audit 2026-09-17).
+        parent: Overlay.overlay
         anchors.fill: parent
+        z: 1200
         visible: root.folderGateBlocking
         color: "#f406070e"
         MouseArea { anchors.fill: parent; hoverEnabled: true }   // eat clicks behind the card
@@ -16467,16 +17105,38 @@ ApplicationWindow {
                 Text {
                     textFormat: Text.PlainText; Layout.fillWidth: true
                     color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
-                    text: root.catDlPrompt
+                    text: !root.catDlPrompt ? ""
+                          : root.catDlPrompt.kind === "favTracks"
+                          ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " track?" : " tracks?")
+                          : root.catDlPrompt.kind === "favAlbums"
+                          ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " album?" : " albums?")
+                          : root.catDlPrompt.kind === "favArtists"
+                          ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " artist?" : " artists?")
+                          : root.catDlPrompt.kind === "favPlaylists"
                           ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " playlist?" : " playlists?")
-                          : ""
+                          : root.catDlPrompt.kind === "favMixes"
+                          ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " mix?" : " mixes?")
+                          : root.catDlPrompt.kind === "favVideos"
+                          ? "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " video?" : " videos?")
+                          : "Download " + root.catDlPrompt.count + (root.catDlPrompt.count === 1 ? " playlist?" : " playlists?")
                 }
                 Text {
                     textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
                     color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
-                    text: root.catDlPrompt
-                          ? "Everything in " + root.catDlPrompt.title + ", each playlist in its own folder. Progress shows in the queue."
-                          : ""
+                    text: !root.catDlPrompt ? ""
+                          : root.catDlPrompt.kind === "favTracks"
+                          ? "Every track in My Tidal, filed by your track path setting. Progress shows in the queue."
+                          : root.catDlPrompt.kind === "favAlbums"
+                          ? "Every album in My Tidal, each in its own folder, under your album settings. Progress shows in the queue."
+                          : root.catDlPrompt.kind === "favArtists"
+                          ? "The full discography of every artist in My Tidal, under your discography settings. This can be a lot of music. Progress shows in the queue."
+                          : root.catDlPrompt.kind === "favPlaylists"
+                          ? "Every playlist in My Tidal, the ones inside folders included, each in its own folder. Progress shows in the queue."
+                          : root.catDlPrompt.kind === "favMixes"
+                          ? "Every mix in My Tidal as it is today, each in its own folder. Progress shows in the queue."
+                          : root.catDlPrompt.kind === "favVideos"
+                          ? "Every video in My Tidal, filed by your video path setting. Progress shows in the queue."
+                          : "Everything in " + root.catDlPrompt.title + ", each playlist in its own folder. Progress shows in the queue."
                 }
                 Row {
                     spacing: 8
@@ -16500,7 +17160,14 @@ ApplicationWindow {
                             var mute = cdSkip.checked
                             root.catDlDismiss()
                             if (mute) waves.muteCategoryDlConfirm()
-                            if (p) waves.downloadPlaylistCategory(p.path)
+                            if (!p) return
+                            if (p.kind === "favTracks") waves.downloadFavoriteTracks()
+                            else if (p.kind === "favAlbums") waves.downloadFavoriteAlbums()
+                            else if (p.kind === "favArtists") waves.downloadFavoriteArtists()
+                            else if (p.kind === "favPlaylists") waves.downloadFavoritePlaylists()
+                            else if (p.kind === "favMixes") waves.downloadFavoriteMixes()
+                            else if (p.kind === "favVideos") waves.downloadFavoriteVideos()
+                            else waves.downloadPlaylistCategory(p.path)
                         }
                     }
                     GateAction { showArrow: false; neutral: true; label: "Cancel"; onClicked: root.catDlDismiss() }
@@ -16594,7 +17261,12 @@ ApplicationWindow {
     Rectangle {
         id: folderUnreachableGate
         objectName: "folderUnreachableGate"
+        // Same reason as exitGate: a Drawer paints in the window's overlay
+        // layer, so a gate parented to the page sat under an open queue
+        // drawer whatever its z (front-end audit 2026-09-17).
+        parent: Overlay.overlay
         anchors.fill: parent
+        z: 1200
         visible: root.folderUnreachable
         color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: { root.folderUnreachable = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
@@ -16634,12 +17306,17 @@ ApplicationWindow {
         // are mutually exclusive on termsCurrentAccepted (the same test the
         // terms gate shows on, version included), so this never stacks with
         // termsGate, a terms-revision re-prompt included.
-        visible: root.signedIn && (
+        readonly property bool wanted: root.signedIn && (
             (!setupSettings.ffmpegSetupDone && !root.termsCurrentAccepted)
             || (setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
                 && appFfmpeg.stateKey === "missing" && !ffmpegGate.sessionSnoozed
                 && !setupSettings.ffmpegPromptDismissed)
         )
+        // Revealed by the launch sequence on the same dial as termsGate
+        // (root.bootContentShown), so a first run's setup card fades up
+        // out of the wordmark instead of sitting fully painted under it.
+        visible: wanted && root.bootContentShown > 0
+        opacity: root.bootContentShown
         color: "#f406070e"
         // Eat every click; the only way past is the Continue / "later" choice.
         MouseArea { anchors.fill: parent; hoverEnabled: true }
@@ -16720,7 +17397,7 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                     visible: appFfmpeg.lifeState === "failed"
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    text: "Install failed: " + appFfmpeg.message; color: root.red; font.pixelSize: 12
+                    text: appFfmpeg.failPrefix + appFfmpeg.message; color: root.red; font.pixelSize: 12
                 }
 
                 // Missing: the choice is two tap cards, no separate confirm.
@@ -16830,6 +17507,9 @@ ApplicationWindow {
         property real pct: 0
         property string stage: ""
         property string error: ""
+        // Why the last restart did not land, when the Windows helper could
+        // not swap the install folder and re-armed it once; "" otherwise.
+        property string swapFailure: ""
         // INSTALL works for a normal self-install AND for a package-manager
         // copy whose manager the app can run (brew upgrade). Only channels
         // without a runnable upgrade (Snap, Flatpak, an unknown sentinel)
@@ -16880,6 +17560,8 @@ ApplicationWindow {
             // the restart pill outright. Not an offer, so the per-version
             // dismissal does not apply, it is already downloaded and verified.
             function onAppUpdatePending(v) {
+                var st = waves.appUpdateStatus()
+                updateToast.swapFailure = st ? "" + (st.swap_failure || "") : ""
                 updateToast.version = v
                 updateToast.pct = 100
                 updateToast.selfInstall = true
@@ -16907,7 +17589,10 @@ ApplicationWindow {
         Behavior on width { enabled: updateToast.phase !== ""; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
         height: 40; radius: 10
         color: root.surface2; border.color: root.outline; border.width: 1
-        opacity: phase !== "" ? 1 : 0
+        // Rides root.bootContentShown like the interface it floats over: a
+        // startup check that answers under the launch water must not paint
+        // the toast at full strength across the wordmark.
+        opacity: phase !== "" ? root.bootContentShown : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
         // gentle settle down and away as it fades
@@ -16925,7 +17610,7 @@ ApplicationWindow {
             Rectangle {
                 visible: updateToast.face !== "installing"
                 width: 7; height: 7; radius: 4; Layout.alignment: Qt.AlignVCenter
-                color: updateToast.face === "ready" ? root.green
+                color: updateToast.face === "ready" ? (updateToast.swapFailure !== "" ? root.red : root.green)
                      : updateToast.face === "failed" ? root.red : root.gold
             }
 
@@ -16934,7 +17619,9 @@ ApplicationWindow {
                 visible: updateToast.face !== "installing"
                 Layout.alignment: Qt.AlignBaseline
                 textFormat: Text.PlainText
-                text: updateToast.face === "ready" ? "Waves v" + updateToast.landedVersion() + " installed"
+                text: updateToast.face === "ready"
+                      ? (updateToast.swapFailure !== "" ? updateToast.swapFailure + " Restart to try once more."
+                                                        : "Waves v" + updateToast.landedVersion() + " installed")
                     : updateToast.face === "failed" ? "Install failed: " + updateToast.error
                     : "Waves v" + updateToast.version + " is available"
                 color: updateToast.face === "failed" ? root.red : root.textHi
@@ -17044,7 +17731,12 @@ ApplicationWindow {
     Rectangle {
         id: ffmpegBlockGate
         objectName: "ffmpegBlockGate"
+        // Same reason as exitGate: a Drawer paints in the window's overlay
+        // layer, so a gate parented to the page sat under an open queue
+        // drawer whatever its z (front-end audit 2026-09-17).
+        parent: Overlay.overlay
         anchors.fill: parent
+        z: 1200
         visible: root.ffmpegBlocked
         color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: { root.ffmpegBlocked = false; waves.dismissDownloadFolderNudge() } }   // click-away cancels (no download)
@@ -17207,10 +17899,12 @@ ApplicationWindow {
                         // Record WHICH terms were agreed to, not just that some
                         // were: a future revision re-prompts only the users
                         // whose stored version is older.
+                        // A terms-revision re-accept is not a first run: only
+                        // the first acceptance ever marks the update prompt fresh.
+                        if (!legalSettings.termsAccepted) setupSettings.updatePromptFresh = true
                         legalSettings.termsAcceptedVersion = root.termsVersion
                         legalSettings.termsAcceptedDate = new Date().toISOString().slice(0, 10)
                         legalSettings.termsAccepted = true
-                        setupSettings.updatePromptFresh = true
                     }
                 }
                 Text {
