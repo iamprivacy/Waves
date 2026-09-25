@@ -60,6 +60,10 @@ env:
 jobs:
   compute:
     # Workaround to be able to use env vars in the matrix.
+    # A tag or test-build push starts a build on the public repo only: the
+    # private dev mirror meters Actions minutes. A manual run still works
+    # anywhere. Every other job needs this one, so skipping it skips them all.
+    if: github.repository == 'iamprivacy/Waves' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       ASSET_EXTENSION: ${{ env.ASSET_EXTENSION }}
@@ -138,14 +142,13 @@ jobs:
       - name: Guard, dispatch release commit is on the default branch
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' }}
         env:
-          # The repository's OWN default branch, never a hard-coded name. This
-          # workflow lives in a private repo whose line is `master` and ships to
-          # the public one whose only branch is `main`, and a dispatch release is
-          # only ever meaningful on the public side: `git fetch origin master`
-          # died there with "couldn't find remote ref", failing this job under
-          # `bash -e` and skipping every build leg. That killed the documented
-          # fallback (RELEASING.md) exactly when it is needed, which is when a
-          # tag push has not fired the build.
+          # The repository's OWN default branch, never a hard-coded name. A
+          # fork or mirror may call its line `master` while this repo's only
+          # branch is `main`, and a hard-coded `git fetch origin master` died
+          # here with "couldn't find remote ref", failing this job under
+          # `bash -e` and skipping every build leg. That killed the manual
+          # dispatch fallback exactly when it is needed, which is when a tag
+          # push has not fired the build.
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git fetch --quiet origin "$DEFAULT_BRANCH"
