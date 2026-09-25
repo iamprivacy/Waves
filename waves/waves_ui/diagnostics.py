@@ -69,7 +69,7 @@ _LOG_BACKUPS = 3
 # Content markers («…», produced by content()). Identity placeholders use ‹…›
 # so the two never collide: the export content pass hashes «…» spans only.
 _C_OPEN, _C_CLOSE = "«", "»"
-_CONTENT_RE = re.compile(f"{_C_OPEN}([^{_C_OPEN}{_C_CLOSE}]{{0,400}}){_C_CLOSE}")
+_CONTENT_RE = re.compile(f"{_C_OPEN}([^{_C_OPEN}{_C_CLOSE}]*){_C_CLOSE}")
 
 # How often the breadcrumb trail may be re-dumped into the file log. An error
 # storm (one ERROR per failed track, say) should not write the same trail
@@ -110,7 +110,11 @@ def content(text: object) -> str:
     export's optional "also redact content" pass replace exactly these spans
     with opaque hashes, nothing else.
     """
-    return f"{_C_OPEN}{text}{_C_CLOSE}"
+    # A marker inside the text would end the span early and leave the rest
+    # readable under the content switch (a title like "Nothing » Everything"),
+    # so the text gives up the two marker characters before it is wrapped.
+    body = str(text).replace(_C_OPEN, "<<").replace(_C_CLOSE, ">>")
+    return f"{_C_OPEN}{body}{_C_CLOSE}"
 
 
 # --------------------------------------------------------------------------
@@ -170,7 +174,24 @@ class _Redactor:
     # Any OS's user-directory form, including ones from *other* machines that
     # arrive in server messages: /Users/<x>, /home/<x>, C:\Users\<x>,
     # \\host\Users\<x>, and the %USERPROFILE% expansion style.
-    _USER_PATH = re.compile(r"(?i)((?:[A-Z]:)?[\\/](?:Users|home)[\\/]+)([^\\/\s\"';]+)")
+    # A Windows profile name can hold spaces ("Eve Adams"): inside a path (a
+    # separator follows) the name runs to that separator, or the surname after
+    # the space survived the scrub.
+    _USER_PATH = re.compile(
+        r"(?i)((?:[A-Z]:)?[\\/](?:Users|home)[\\/]+)([^\\/\s\"';]+(?: [^\\/\s\"';]+)*(?=[\\/])|[^\\/\s\"';]+)"
+    )
+    # A network share named by its host: the Windows UNC form \\host\share
+    # (also doubled in a repr, \\\\host\\share) and the forward-slash form
+    # //host/share a folder dialog or a cifs mount line uses. On macOS the
+    # bridge registers the /Volumes mount point as a secret, but a UNC or gvfs
+    # folder never goes through that, so the shape itself is scrubbed. The
+    # lookbehind keeps a URL's scheme separator ("https://host") and a doubled
+    # slash inside a path ("/a//b") out of it.
+    _UNC_SHARE = re.compile(r"(?<![\w:/\\])(?:\\{2,}|//)[^\\/\s\"';,]+[\\/]+[^\\/\s\"';,]+")
+    # A GNOME gvfs mount spells the share as key=value pairs inside the path
+    # (/run/user/1000/gvfs/smb-share:server=nas,share=music, or
+    # sftp:host=nas,user=carol). The keys stay, the values go.
+    _MOUNT_KV = re.compile(r"(?i)\b(server|host|domain|share|user)=([^,/\\\s\"']+)")
     # A URL query string carries whatever the caller put in it: a search term,
     # an email, an account id. Our own code marks user content with content()
     # so the export can hash it, but a THIRD-PARTY line never does: urllib3's
@@ -225,6 +246,12 @@ class _Redactor:
             return "‹ip›"
         return s  # a clock time such as 12:34:56
 
+    @staticmethod
+    def _mount_kv_sub(m: re.Match) -> str:
+        key = m.group(1)
+        placeholder = {"share": "‹share›", "user": "‹user›"}.get(key.lower(), "‹host›")
+        return f"{key}={placeholder}"
+
     def scrub(self, text: str) -> str:
         with self._lock:
             secrets = list(self._secrets)
@@ -243,6 +270,10 @@ class _Redactor:
         for h in self._homes:
             text = text.replace(h, "~")
         text = self._USER_PATH.sub(r"\1‹user›", text)
+        # After the user-path rule: \\host\Users\x must lose the name first,
+        # then the host and share in front of it.
+        text = self._UNC_SHARE.sub("‹share›", text)
+        text = self._MOUNT_KV.sub(self._mount_kv_sub, text)
         if self._user_re is not None:
             text = self._user_re.sub("‹user›", text)
         for host_re in self._host_res:

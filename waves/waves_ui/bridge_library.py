@@ -38,6 +38,7 @@ import gc
 import logging
 import os
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -214,6 +215,12 @@ def _shelf_artist_names(items) -> list[str]:
 # without Qt. Classifying by mount TYPE (not by QFileSystemWatcher.addPaths()'s
 # return, which reports success for an SMB path on macOS and a kernel NFS/CIFS
 # path on Linux while delivering no events) is what keeps the design correct.
+# Folder suffixes the macOS launcher treats as a package: handing such a
+# folder to openUrl RUNS it instead of showing it (see _reveal_in_file_manager).
+_PACKAGE_SUFFIXES = frozenset(
+    (".app", ".pkg", ".bundle", ".framework", ".kext", ".plugin", ".prefpane", ".qlgenerator", ".xpc", ".appex")
+)
+
 _LOCAL_FS_PREFIXES = (
     "apfs",
     "hfs",
@@ -646,6 +653,9 @@ class LibraryMixin:
                     # has to carry: it can prove an undated match and
                     # refute a same-count impostor.
                     "runtime": a.get("runtime", 0),
+                    # The folder's advisory fact (1, 0, -1 unknown): the one
+                    # thing that tells a clean copy from its explicit twin.
+                    "explicit": a.get("explicit", -1),
                 }
             )
         by_track: dict = {}
@@ -675,6 +685,8 @@ class LibraryMixin:
                     # kept as evidence: different guests are different
                     # recordings and must never claim each other.
                     "guests": sorted(matching.feat_guests(t["title"], t["artist"])),
+                    # The file's own advisory fact (1, 0, -1 unknown).
+                    "explicit": t.get("explicit", -1),
                 }
             )
         return local, by_track
@@ -921,6 +933,7 @@ class LibraryMixin:
                 except Exception:
                     _log_scan_failure(lib)
                     index = None  # keep the last good index; do not blank the badge
+                    status = "error"  # Settings says the scan did not finish, not a silent "ok"
                 if gen == self._library_gen:
                     # Publish only an index that belongs to THIS root: a failed
                     # probe of a changed root (an offline drive, a down NAS)
@@ -1368,7 +1381,8 @@ class LibraryMixin:
 
     @Slot(str, str, str, int, result="QVariant")
     @Slot(str, str, str, int, int, result="QVariant")
-    def libraryAlbumPresence(self, artist, title, year, num_tracks, duration=0):
+    @Slot(str, str, str, int, int, int, result="QVariant")
+    def libraryAlbumPresence(self, artist, title, year, num_tracks, duration=0, explicit=-1):
         """Synchronous: is this TIDAL album already in your local music library?
         Answered from the finished in-memory scan index (no disk I/O on the GUI
         thread), so there is no staleness race. Returns {present, partial,
@@ -1380,11 +1394,17 @@ class LibraryMixin:
         The optional duration is the release's total play length in seconds
         (TIDAL's number); the matcher weighs it against the folder's summed
         file lengths as a second identity witness. Callers without it get the
-        four-argument overload and years remain the only proof."""
+        four-argument overload and years remain the only proof.
+
+        The optional explicit is the release's advisory flag as QML can carry
+        it: 1 explicit, 0 clean, anything else unknown (the default, which
+        answers exactly as before). A copy KNOWN to be the other edition is
+        then unproven here too, so the pill agrees with the bulk gate."""
         idx = self._library_index
         if idx is None:
             self._library_probe_miss(artist)
             return {"present": False}
+        flag = LibraryMixin._advisory_flag(explicit)
         # Memoized per index object: a republish makes EVERY visible pill
         # re-ask, and scrolling re-asks per row, all against the same index,
         # so the matcher kept re-deriving identical verdicts. The memo resets
@@ -1397,10 +1417,10 @@ class LibraryMixin:
         if self._presence_memo_src is not idx:
             self._presence_memo = {}
             self._presence_memo_src = idx
-        key = (title, artist, year, num_tracks, duration)
+        key = (title, artist, year, num_tracks, duration, flag)
         verdict = self._presence_memo.get(key)
         if verdict is None:
-            verdict = matching.decide_presence(title, artist, year, num_tracks, idx, duration)
+            verdict = matching.decide_presence(title, artist, year, num_tracks, idx, duration, flag)
             _remember(self._presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
         if not verdict.get("present"):
             # A miss on a share whose listing cannot be trusted is not an
@@ -1411,12 +1431,28 @@ class LibraryMixin:
             probe = getattr(self, "_library_probe_async", None)
             if probe is not None:
                 probe(artist)
+        have = verdict.get("local_explicit", -1)
+        if flag is not None and have in (0, 1) and bool(have) != flag:
+            # The copy is the other edition: no second opinion on the release
+            # may swear it is this one.
+            return verdict
         return self._mb_arbitrated(verdict, title, artist, year, num_tracks, duration)
+
+    @staticmethod
+    def _advisory_flag(value):
+        """A QML-carried advisory value as the matcher's flag: True for 1,
+        False for 0, None for anything else (unknown, the default)."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return {1: True, 0: False}.get(value)
+        return None
 
     @Slot(str, str, result="QVariant")
     @Slot(str, str, str, str, result="QVariant")
     @Slot(str, str, str, str, int, result="QVariant")
-    def libraryTrackPresence(self, artist, title, album="", album_year="", duration=0):
+    @Slot(str, str, str, str, int, int, result="QVariant")
+    def libraryTrackPresence(self, artist, title, album="", album_year="", duration=0, explicit=-1):
         """Synchronous: is this exact TRACK already in your local music library?
         Answered from the per-track index built in the same pass as the album
         one (no disk I/O on the GUI thread). Returns {present, sure,
@@ -1434,19 +1470,25 @@ class LibraryMixin:
         duration (TIDAL's seconds) lets the file's own play length prove or
         refute it as a second witness. A caller that leaves them all out gets
         sure False and the badge keeps its "?"; the two-argument overload
-        exists for exactly that case."""
+        exists for exactly that case.
+
+        The optional explicit is the track's own advisory flag (1 explicit, 0
+        clean, anything else unknown, the default): the same flag the claim
+        gate weighs, so the pill and the claim face never vouch for the other
+        cut."""
         idx = self._library_track_index
         if idx is None:
             self._library_probe_miss(artist)
             return {"present": False, "sure": False}
+        flag = LibraryMixin._advisory_flag(explicit)
         # Same memo shape as the album slot above, per track index object.
         if self._track_presence_memo_src is not idx:
             self._track_presence_memo = {}
             self._track_presence_memo_src = idx
-        key = (title, artist, album, album_year, duration)
+        key = (title, artist, album, album_year, duration, flag)
         verdict = self._track_presence_memo.get(key)
         if verdict is None:
-            verdict = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
+            verdict = matching.decide_track_presence(title, artist, idx, album, album_year, duration, flag)
             _remember(self._track_presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
         if not verdict.get("present"):
             probe = getattr(self, "_library_probe_async", None)  # as the album pill above
@@ -1546,6 +1588,11 @@ class LibraryMixin:
                     self._mb_pending.discard(key)
                     logger.info("MusicBrainz arbitration answered: %s", "proven" if answer else "not provable")
                     if answer:
+                        # The verdict changed without an index swap: date the
+                        # payloads dressed before it, or a card built after
+                        # this signal keeps wearing MAYBE beside a proven
+                        # IN LIBRARY on the same shelf.
+                        self._bump_library_stamp()
                         self._emit_from_worker("libraryPresenceChanged")
 
         self.threadpool.start(Worker(work))
@@ -1580,7 +1627,27 @@ class LibraryMixin:
         a scan finishing mid-queue starts answering without re-asking this."""
         return self._waves_pref_bool("library_enabled") and self._waves_pref_bool("library_bulk_skip")
 
-    def _library_claims_album(self, album) -> bool:
+    @staticmethod
+    def _release_explicit(album, explicit=None):
+        """The advisory flag the album gate may pass to the matcher: True or
+        False only when it can be vouched for, else None (the matcher then
+        weighs nothing on that axis, exactly as before the axis existed).
+
+        ``explicit`` is a caller's own verdict (a discography sweep that has
+        split the clean and explicit sides knows which side an album is on)
+        and wins when given. Otherwise the release's own flag is used only
+        when TIDAL actually said it: tidalapi leaves ``Album.explicit`` None
+        when the payload carried no flag and its class default is True, so a
+        non-bool is never read as a claim. Nothing here partitions on the
+        flag alone: a mismatch only withholds proof, so the worst a wrong
+        release flag can cost is one duplicate download (the fail-safe
+        direction), never a skip."""
+        if isinstance(explicit, bool):
+            return explicit
+        flag = getattr(album, "explicit", None)
+        return flag if isinstance(flag, bool) else None
+
+    def _library_claims_album(self, album, explicit=None) -> bool:
         """Whether the scan FULLY claims this tidalapi album: present, and
         strict on BOTH axes of the presence verdict (identity proven and
         coverage complete). Bulk actions use it to leave the whole album out before
@@ -1593,7 +1660,11 @@ class LibraryMixin:
         whose identity the matcher could not prove still queues here. The two
         bars differ because their mistakes cost different things. A wrong badge
         costs a re-click, so it can afford to speak up; a wrong skip costs the
-        user an album they never find out was missing, so it may not."""
+        user an album they never find out was missing, so it may not.
+
+        ``explicit`` is an optional caller-vouched advisory flag for the
+        release (see _release_explicit): a clean copy on disk then never
+        claims the explicit release, nor the reverse."""
         if album is None:
             return False
         title = str(getattr(album, "name", "") or "")
@@ -1622,6 +1693,7 @@ class LibraryMixin:
                 int(getattr(album, "num_tracks", 0) or 0),
                 idx,
                 int(getattr(album, "duration", 0) or 0),
+                LibraryMixin._release_explicit(album, explicit),
             )
         except Exception:
             # Any doubt means download: a wrong skip costs an album.
@@ -1629,12 +1701,23 @@ class LibraryMixin:
             return False
         return bool(p.get("present")) and not p.get("partial")
 
-    def _library_claims_track(self, artist: str, title: str, album: str = "", album_year: str = "", duration=0) -> bool:
-        return self._library_track_claim(artist, title, album, album_year, duration) is not None
+    def _library_claims_track(
+        self, artist: str, title: str, album: str = "", album_year: str = "", duration=0, explicit=None
+    ) -> bool:
+        return self._library_track_claim(artist, title, album, album_year, duration, explicit) is not None
 
-    def _library_track_claim(self, artist: str, title: str, album: str = "", album_year: str = "", duration=0):
+    def _library_track_claim(
+        self, artist: str, title: str, album: str = "", album_year: str = "", duration=0, explicit=None
+    ):
         """The presence verdict when the scan claims this track (None when it
         does not), so the caller also learns the local copy's class.
+
+        ``explicit`` is the TIDAL track's own advisory flag (Track.explicit is
+        parsed from the payload and reliable, unlike the release-wide one),
+        or None when the caller has no track object. A file on disk KNOWN to
+        be the other cut (clean where the track is explicit, or the reverse)
+        never proves the claim, so the track is fetched. Unknown on either
+        side leaves the verdict as it was.
 
         Whether the scan holds this track ALREADY FILED UNDER the release
         being fetched: present, and proven on the identity axis. Bulk actions
@@ -1661,7 +1744,8 @@ class LibraryMixin:
         if not idx:
             return None
         try:
-            v = matching.decide_track_presence(title, artist, idx, album, album_year, duration)
+            flag = explicit if isinstance(explicit, bool) else None
+            v = matching.decide_track_presence(title, artist, idx, album, album_year, duration, flag)
         except Exception:
             logger.debug("Track claim lookup failed; not gating", exc_info=True)
             return None
@@ -2192,8 +2276,39 @@ class LibraryMixin:
         self.threadpool.start(Worker(work))
 
     def _on_reveal_resolved(self, target: str) -> None:
-        """(GUI thread) Open the file manager at the worker-resolved folder."""
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(target))
+        """(GUI thread) Show the worker-resolved folder in the file manager."""
+        LibraryMixin._reveal_in_file_manager(target)
+
+    @staticmethod
+    def _reveal_in_file_manager(target: str) -> None:
+        """Show ``target`` in the OS file manager WITHOUT opening it.
+
+        openUrl on a folder hands it to the desktop's launcher, and on macOS
+        a folder whose name ends in a package suffix (.app, .pkg, .bundle and
+        the rest) is a package: the launcher runs it. A library folder is
+        named after an album title, and a library on a shared volume is
+        named by whoever writes there, so a click that promises to show the
+        album's folder must never execute anything. On macOS the item is
+        selected in its parent (Finder's reveal, ``open -R`` with a fixed
+        argument list and no shell), which shows a package as an icon
+        instead of launching it. Elsewhere a package-suffixed folder is shown
+        by opening its parent, and a plain folder opens as before."""
+        path = pathlib.Path(target)
+        if sys.platform == "darwin":
+            try:
+                subprocess.Popen(["/usr/bin/open", "-R", str(path)])  # noqa: S603 (fixed argv, no shell)
+            except OSError:
+                logger.debug("Finder reveal failed; opening the folder instead", exc_info=True)
+            else:
+                return
+        # The suffix alone decides, with no stat: this runs on the GUI thread,
+        # and a stat on a share that stopped answering freezes the window for
+        # the mount's timeout (the reason the ancestor walk runs on a worker).
+        # A package-suffixed FILE is shown by its parent as well, which only
+        # ever reveals instead of opening.
+        if path.suffix.lower() in _PACKAGE_SUFFIXES and path != path.parent:
+            path = path.parent
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
     # ---- Library source picker (Settings) -----------------------------------
     # The three backing prefs live in waves.json (library_enabled, off by

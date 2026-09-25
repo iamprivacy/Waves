@@ -300,18 +300,32 @@ def _icon_usable(icon: QIcon) -> bool:
     return not icon.isNull() and any(s.width() >= 32 for s in icon.availableSizes())
 
 
+_icon_debug_pending: list[str] = []
+
+
 def _icon_debug(msg: str) -> None:
     """Emit an icon-resolution diagnostic when ``WAVES_DEBUG`` is set.
 
     The packaged Windows build is console-less (``--windows-console-mode=disable``),
     so a stderr line is invisible there. Mirror the line to ``waves-icon-debug.log``
-    in the user's home dir so a failing taskbar icon can be diagnosed on a real
-    machine without a console. Best-effort: never let logging break startup.
+    beside the app's own log (the config folder, where a diagnostics bundle is
+    read from), never the home directory, and scrubbed first: the line names
+    the icon's resolved root, which is an absolute path carrying the account
+    name. Best-effort: never let logging break startup.
     """
+    msg = diagnostics.scrub(msg)
     print(msg, file=sys.stderr)
+    # The icon and AUMID lines run before the bridge installs diagnostics, so
+    # the log folder is not known yet: hold them, and write them out with the
+    # first line that arrives once it is (the window line, after the bridge).
+    _icon_debug_pending.append(msg)
+    log = diagnostics.log_path()
+    if log is None:
+        return
     try:
-        with open(Path.home() / "waves-icon-debug.log", "a", encoding="utf-8") as fh:
-            fh.write(msg + "\n")
+        with open(log.parent / "waves-icon-debug.log", "a", encoding="utf-8") as fh:
+            fh.write("".join(line + "\n" for line in _icon_debug_pending))
+        _icon_debug_pending.clear()
     except Exception:
         logging.getLogger(__name__).debug("icon debug log write failed", exc_info=True)
 
@@ -379,6 +393,20 @@ def _crash_log_path() -> Path:
     return Path(path_config_base()) / "crash.log"
 
 
+def _make_private(folder: Path) -> None:
+    """Owner-only access to the folder that holds settings, sign-in, the
+    ownership and library databases, logs and the cover cache. Files inside
+    are created with the process umask (often world-readable on Linux); a
+    0700 folder keeps other local accounts out of all of them at once."""
+    if os.name != "posix":
+        return  # %APPDATA% is already per-user
+    try:
+        if folder.stat().st_uid == os.getuid() and folder.stat().st_mode & 0o077:
+            folder.chmod(0o700)
+    except OSError:
+        logging.getLogger(__name__).debug("could not restrict the config folder", exc_info=True)
+
+
 def _open_crash_log():
     """Open crash.log for appending (rotating one old copy past ~512 KB) and
     stamp a session header. Returns the open handle, or None on any failure.
@@ -386,6 +414,7 @@ def _open_crash_log():
     the life of the process."""
     path = _crash_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    _make_private(path.parent)
     try:
         if path.is_file() and path.stat().st_size > 512 * 1024:
             path.replace(path.with_suffix(".log.1"))
@@ -582,6 +611,16 @@ def _log_config_migration() -> None:
         logging.getLogger("waves.config").warning("config migration failed; the legacy folder stays in use")
 
 
+def _start_boot_threads() -> None:
+    """Every thread the app itself (not the bridge) starts before the reveal.
+
+    One function so tests/test_boot_quiet_window.py can run it alongside the
+    bridge and see the same launch the user gets: the guard builds the bridge
+    directly, so a thread started here, inline in waves_activate, was invisible
+    to it."""
+    threading.Thread(target=_warm_tls, name="waves-tls-warm", daemon=True).start()
+
+
 def waves_activate(tidal: Tidal | None = None) -> int:
     _tune_interpreter_for_gui()
     _install_crash_diagnostics()
@@ -619,7 +658,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     if icon is not None:
         app.setWindowIcon(icon)
 
-    threading.Thread(target=_warm_tls, name="waves-tls-warm", daemon=True).start()
+    _start_boot_threads()
 
     engine = QQmlApplicationEngine()
     bridge = WavesBridge(tidal=tidal)
@@ -665,7 +704,13 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine.load(QUrl.fromLocalFile(str(_QML_MAIN)))
     root_objects = engine.rootObjects()
     if not root_objects:
+        # app.exec never runs, so aboutToQuit never fires: drain the pools and
+        # abort anything the bridge started (the token login, the library
+        # sweep) here, and say so where a crash report can see it.
+        logging.getLogger("waves").error("Failed to load the Waves QML UI")
         print("Failed to load Waves QML UI", file=sys.stderr)
+        bridge.shutdown()
+        diagnostics.flush_disk_log()
         return 1
 
     # The macOS back-swipe filter: installed on the window's CONTENT ITEM,
@@ -707,6 +752,10 @@ def waves_activate(tidal: Tidal | None = None) -> int:
         # (shutdown(), via aboutToQuit), so skip the fragile C++ teardown.
         sys.stdout.flush()
         sys.stderr.flush()
+        # os._exit skips atexit, so the disk log's writer thread never gets its
+        # stop: give the queued tail (the shutdown breadcrumbs) its bounded
+        # chance to land in the file first.
+        diagnostics.flush_disk_log()
         os._exit(rc)
     return rc
 

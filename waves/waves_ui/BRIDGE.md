@@ -150,12 +150,16 @@ it (pinned by `test_presence_never_reaches_the_download_engine`).
 | `librarySourceChanged`     | A library pref committed (switch, source or folder); the Settings card re-reads    |
 
 Synchronous slots (answered from the in-memory index, no disk I/O):
-`libraryAlbumPresence(artist, title, year, tracks[, duration])` (duration is
-TIDAL's total seconds, the play-length identity witness),
-`libraryTrackPresence(artist, title[, album, album_year[, duration]])` (the
-exact-song answer behind a track's pill and its download button's claim face;
-the album pair and the track's seconds are what the identity can be proven
-against, and callers that omit them get `sure` False),
+`libraryAlbumPresence(artist, title, year, tracks[, duration[, explicit]])`
+(duration is TIDAL's total seconds, the play-length identity witness),
+`libraryTrackPresence(artist, title[, album, album_year[, duration[, explicit]]])`
+(the exact-song answer behind a track's pill and its download button's claim
+face; the album pair and the track's seconds are what the identity can be
+proven against, and callers that omit them get `sure` False). `explicit` is
+the advisory flag the bulk gates weigh (1 explicit, 0 clean, -1 unknown, the
+default): a copy known to be the other edition is never `sure`. Every QML
+asker and the worker's dressing pass it; an album dict's `explicit` false may
+mean TIDAL said nothing, so album cards pass 1 or -1, never 0,
 `artistLibraryPresence(name)`, `libraryScanStatus()`, `libraryScanProgress()`,
 `librarySource()`, `libraryDownloadFolder()`,
 `rescanLibrary()` (forces a full re-list) and `revealLibraryAlbum(path)`
