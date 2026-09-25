@@ -56,8 +56,10 @@ QTQUICK_QML_DIRS=(
 
 # Qt.labs.* QML modules Waves never imports. `settings` stays: Main.qml uses
 # Settings {} via the QtCore import, whose plugin lives beside these.
+# folderlistmodel stays: Qt's own non-native Folder/File dialog imports it,
+# and that fallback is the only picker on a Linux desktop without a portal.
 QT_LABS_DIRS=(
-  StyleKit animation folderlistmodel qmlmodels sharedimage synchronizer
+  StyleKit animation qmlmodels sharedimage synchronizer
   wavefrontmesh
 )
 
@@ -103,7 +105,7 @@ MODULE_TOKENS=(
   QuickControls2MacOS
   ShaderTools Svg
   QuickVectorImage QmlLocalStorage
-  LabsAnimation LabsFolderListModel LabsPlatform LabsQmlModels
+  LabsAnimation LabsPlatform LabsQmlModels
   LabsSharedImage LabsStyleKit LabsSynchronizer LabsWavefrontMesh
 )
 
