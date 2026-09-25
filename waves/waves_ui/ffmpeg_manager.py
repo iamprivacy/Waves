@@ -234,6 +234,9 @@ class FfmpegManager:
     def __init__(self, app_dir: str | os.PathLike) -> None:
         self.app_dir = Path(app_dir)
         self.os_key, self.arch = _safe_target()
+        # Aside binaries (see _swap_in) are swept once per process, on the
+        # first status() call, which is the launch.
+        self._swept = False
 
     # ----- locations ----------------------------------------------------- #
     @property
@@ -275,6 +278,9 @@ class FfmpegManager:
         into ``path_binary_ffmpeg`` (see ``WavesBridge._resolve_ffmpeg``) can
         never be mistaken for a user override here.
         """
+        if not self._swept:
+            self._swept = True
+            self.sweep_aside()
         info = source_info(self.os_key)
         base = {
             "source": info["name"],
@@ -439,7 +445,8 @@ class FfmpegManager:
                 raise RuntimeError("FFmpeg downloaded but `ffmpeg -version` failed, keeping the existing binary")
 
             # 6. atomically swap the validated binary into place.
-            os.replace(staged, self.binary_path)
+            self.sweep_aside()
+            self._swap_in(staged)
         finally:
             zip_tmp.unlink(missing_ok=True)
             staged.unlink(missing_ok=True)
@@ -471,9 +478,91 @@ class FfmpegManager:
         return self.status()
 
     def remove(self) -> dict:
-        self.binary_path.unlink(missing_ok=True)
-        self.manifest_path.unlink(missing_ok=True)
-        return self.status()
+        """Delete the managed binary and its manifest, and report.
+
+        The status dict gains ``remove_error`` (plain wording) when the binary
+        could not be removed: on Windows a running ``ffmpeg.exe`` (a FLAC
+        extraction or a preview remux in flight) cannot be deleted, only
+        renamed, so it is moved aside and swept at the next launch; when even
+        that fails the caller gets a message instead of an exception from a
+        GUI slot.
+        """
+        error = ""
+        try:
+            if self.os_key == "windows" and self.binary_path.exists():
+                self._move_aside(self.binary_path)
+            self.binary_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("ffmpeg: could not remove the managed binary", exc_info=True)
+            error = "FFmpeg is in use right now; try again once downloads and previews have finished."
+        try:
+            self.manifest_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("ffmpeg: could not remove the manifest", exc_info=True)
+        self.sweep_aside()
+        status = self.status()
+        if error:
+            status["remove_error"] = error
+        return status
+
+    #: Suffix of a managed ``ffmpeg.exe`` that was renamed out of the way while
+    #: it was running (Windows lets a running executable be renamed, never
+    #: replaced or deleted). Swept at the next launch, see :meth:`sweep_aside`.
+    _ASIDE_SUFFIX = ".old-"
+
+    def _move_aside(self, path: Path) -> Path:
+        aside = path.with_name(f"{path.name}{self._ASIDE_SUFFIX}{os.getpid()}")
+        with contextlib.suppress(OSError):
+            aside.unlink(missing_ok=True)
+        os.replace(path, aside)
+        return aside
+
+    def _swap_in(self, staged: Path) -> None:
+        """Promote the validated staged binary to ``binary_path``.
+
+        On Windows ``os.replace`` over a running ``ffmpeg.exe`` fails with
+        access denied (python-ffmpeg spawns the managed binary for every FLAC
+        extraction, and a preview remux can be in flight), so the live file is
+        first renamed aside, which Windows allows, and the aside copy is
+        deleted best-effort at the next launch. Elsewhere the rename over a
+        running binary is fine. If the promote itself then fails, the aside
+        copy is moved back, so a failed update keeps the working binary
+        instead of leaving it for the next sweep to delete.
+        """
+        aside = None
+        if self.os_key == "windows" and self.binary_path.exists():
+            try:
+                aside = self._move_aside(self.binary_path)
+            except OSError:
+                logger.debug("ffmpeg: could not move the running binary aside", exc_info=True)
+        try:
+            os.replace(staged, self.binary_path)
+        except OSError:
+            if aside is not None and not self.binary_path.exists():
+                try:
+                    os.replace(aside, self.binary_path)
+                except OSError:
+                    logger.debug("ffmpeg: could not move the previous binary back", exc_info=True)
+            raise
+
+    def sweep_aside(self) -> None:
+        """Delete binaries an earlier install or remove renamed aside.
+
+        Best-effort and quiet: one that is still running (a Waves that has not
+        exited yet, or a straggling ffmpeg child) stays until the next sweep.
+        Only the manager's own ``<exe>.old-<pid>`` files under its ``bin``
+        folder are touched, never anything of the user's.
+        """
+        pattern = f"{_exe_name(self.os_key)}{self._ASIDE_SUFFIX}*"
+        try:
+            leftovers = list(self.install_dir.glob(pattern))
+        except OSError:
+            return
+        for path in leftovers:
+            try:
+                path.unlink()
+            except OSError:
+                logger.debug("ffmpeg: an aside binary is still in use, left for the next sweep")
 
     # ----- internals ----------------------------------------------------- #
     def _download(self, sess, url: str, dest: Path, progress_cb, abort: Event | None) -> None:
