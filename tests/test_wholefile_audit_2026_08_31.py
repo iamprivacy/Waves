@@ -1,6 +1,6 @@
 """The pre-release whole-file audit of 2026-08-31, one guard per finding.
 
-RELEASING.md's whole-file arm re-reads a fixed list of functions end to end
+The pre-release whole-file review re-reads a fixed list of functions end to end
 whether or not they changed, because the worst defects this app has shipped
 were silent: no crash, no error, just wrong behaviour repeating forever. This
 round found eight, and every one of them is fenced off here.

@@ -79,7 +79,12 @@ def test_live_applied_diagnostics_toggles_mark_the_schema_stale():
         assert anchor in source, f"{key} is no longer applied live; update this guard"
         body = _handler_body(source, anchor)
 
-        assert "page.setv(" in body, f"the {key} toggle no longer updates the edit map"
+        # setLive, not setv: the value is applied the moment it is clicked, so
+        # it is shown from the edit map but is never an UNSAVED change (setv
+        # marked the page dirty, which made CANCEL promise an undo it could
+        # not deliver; front-end audit 2026-09-17, G20).
+        assert "page.setLive(" in body, f"the {key} toggle no longer updates the edit map"
+        assert "page.setv(" not in body, f"the {key} toggle marks the page dirty again"
         assert re.search(r"needsRefresh\s*=\s*true", body), (
             f"the {key} toggle applies live but does not set needsRefresh, so reopening "
             "Settings renders the stale baked-in value"

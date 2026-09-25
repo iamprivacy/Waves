@@ -17,7 +17,7 @@ A denylist of "which bindings are remote" is fragile; an adversarial review show
 it leaks via bare component props, bracket access (``model['x']``), local aliases,
 and ``RichText``. So the guard is STRUCTURAL, with ZERO false negatives by design:
 
-* ``test_dynamic_text_is_plaintext``: in Main.qml (the TIDAL render surface) EVERY
+* ``test_dynamic_text_is_plaintext``: in Main.qml AND SettingsPage.qml EVERY
   ``Text``/``Label`` whose ``text:`` is a *dynamic* (non-literal) expression must be
   ``PlainText`` (or a ``RemoteText``, or an audited rich-text spot). No
   remote-vs-local guess, so a brand-new remote binding can't beacon however it is
@@ -54,6 +54,13 @@ QML_DIR = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 TIDAL_DATA_FILES = {"Main.qml"}
 LOCAL_ONLY_FILES = {"SettingsPage.qml"}
 FILES = sorted(TIDAL_DATA_FILES | LOCAL_ONLY_FILES)
+# Both files get the structural PlainText rule. SettingsPage.qml renders no
+# TIDAL data, but it does render NETWORK data (the updater's release metadata,
+# the FFmpeg installer's status and failure text, exception messages from both),
+# and the 2026-09-17 front-end audit found four such labels on the AutoText
+# default. The rule is cheaper than deciding which local strings are local
+# enough, so every dynamic label in scope is PlainText, full stop.
+STRUCTURAL_FILES = FILES
 
 # Remote markers: substrings that, inside a `text:` binding *in a TIDAL_DATA_FILE*,
 # mean the rendered string is (or may be) attacker-controllable. We match a DOTTED
@@ -542,13 +549,12 @@ def test_dynamic_text_is_plaintext():
     field can't beacon because it can't be dynamic-and-not-PlainText.
 
     Pure literals (``"✓"``, ``"ALBUM"``, ``"a" + "b"``) are exempt: they can never
-    carry a remote string. SettingsPage.qml is not structurally scanned here (it
-    renders only local app config, no TIDAL data); its rich-text path is still
-    covered by the StyledText/RichText backstop test below.
+    carry a remote string. SettingsPage.qml is scanned the same way: it renders
+    updater and FFmpeg-installer text that arrives over the network.
     """
     violations: list[str] = []
     audited = 0
-    for fname in sorted(TIDAL_DATA_FILES):
+    for fname in STRUCTURAL_FILES:
         src = (QML_DIR / fname).read_text(encoding="utf-8")
         for line_no, type_name, span, slug in _iter_audit_elements(src):
             tv = _find_own_text_value(span)
@@ -568,8 +574,9 @@ def test_dynamic_text_is_plaintext():
 
     # Vacuous-pass tripwire: Main.qml binds dozens of dynamic labels; if this
     # collapses the scanner silently broke and would never catch a regression.
-    assert audited >= 30, (
-        f"only found {audited} dynamic Text/Label elements in Main.qml; the scanner " "is probably broken."
+    assert audited >= 90, (
+        f"only found {audited} dynamic Text/Label elements across {STRUCTURAL_FILES}; "
+        "the scanner is probably broken."
     )
     assert not violations, (
         "Dynamic strings rendered on the rich-text-capable AutoText default: a "

@@ -197,6 +197,11 @@ class TestTheAnswerIsThePathNotABool:
         dl.event_run = threading.Event()
         dl.event_run.set()
 
+        # The plain download path records the fresh file under its id before
+        # post-processing; the symlink step now demands that evidence (or a
+        # matching tag) before it will touch the playlist-folder file.
+        dl._record_name_written(src, "111")
+
         with (
             patch("waves.download.read_item_id", side_effect=lambda p: ids.get(pathlib.Path(p).name, "")),
             patch(

@@ -34,6 +34,14 @@ NOT_OWNED = {"owned": False}
 PENDING = {"owned": False, "pending": True}
 
 
+def _bind_rollup(stub) -> None:
+    """The real rollup, unbound, on a stub that states only its ownershipOf
+    answers: _rollup_verdict reads through _rollup_scan (one walk answers the
+    verdict and the records the detail needs), so both are bound."""
+    stub._rollup_scan = WavesBridge._rollup_scan.__get__(stub, _LookupStub)
+    stub._rollup_verdict = WavesBridge._rollup_verdict.__get__(stub, _LookupStub)
+
+
 class _LookupStub:
     """A stand-in whose ownershipOf is a dict lookup, so each test states the
     per-member answers outright and only the roll-up logic is under test.
@@ -51,6 +59,7 @@ class _LookupStub:
 def _verdict(answers: dict, ids=None) -> str:
     """The REAL _rollup_verdict, unbound, over the given per-member answers."""
     stub = _LookupStub(answers)
+    _bind_rollup(stub)
     return WavesBridge._rollup_verdict(stub, list(answers) if ids is None else ids)
 
 
@@ -107,11 +116,11 @@ def test_collection_ownership_for_stringifies_ids_and_rolls_up():
     """QML hands the member list over as a QVariantList that may carry ints;
     the store keys ids as strings, so the slot must stringify before asking."""
     stub = _LookupStub({"10": OWNED_CURRENT, "20": OWNED_CURRENT})
-    stub._rollup_verdict = WavesBridge._rollup_verdict.__get__(stub, _LookupStub)
+    _bind_rollup(stub)
     assert WavesBridge.collectionOwnershipFor(stub, [10, 20]) == "owned"
     assert stub.asked == ["10", "20"], "ids must reach ownershipOf as strings"
     stub = _LookupStub({"10": OWNED_CURRENT, "20": OWNED_STALE})
-    stub._rollup_verdict = WavesBridge._rollup_verdict.__get__(stub, _LookupStub)
+    _bind_rollup(stub)
     assert WavesBridge.collectionOwnershipFor(stub, [10, 20]) == "no"
     assert WavesBridge.collectionOwnershipFor(stub, []) == "no"
 
@@ -144,6 +153,7 @@ def _bridge(store, *, quality):
         "_own_refresh",
         "_evict_own_cache_locked",
         "_rollup_verdict",
+        "_rollup_scan",
         "collectionOwnershipFor",
     ):
         setattr(b, name, getattr(WavesBridge, name).__get__(b, WavesBridge))
@@ -200,7 +210,7 @@ def test_a_member_stored_below_the_target_rank_un_says_the_album(tmp_path):
 # --------------------------------------------------------------------------- #
 def _detail(answers: dict, ids=None) -> dict:
     stub = _LookupStub(answers)
-    stub._rollup_verdict = WavesBridge._rollup_verdict.__get__(stub, _LookupStub)
+    _bind_rollup(stub)
     return WavesBridge._rollup_detail(stub, list(answers) if ids is None else ids)
 
 

@@ -265,6 +265,10 @@ def test_the_pasted_link_clears_the_buckets_under_the_lock():
 # --------------------------------------------------------------------------- #
 class _AlbumExpandStub:
     loadAlbumTracks = WavesBridge.loadAlbumTracks
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
+    _dress_panel_rows = WavesBridge._dress_panel_rows
 
     def __init__(self):
         self.threadpool = _HoldingPool()

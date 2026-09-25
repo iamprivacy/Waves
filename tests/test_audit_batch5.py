@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from _dispatch_stub import arm_queue
+from tidalapi.media import Quality
 
 from waves.waves_ui import updater as updater_mod
 from waves.waves_ui.backend import WavesBridge, _link_tiles_of
@@ -53,9 +54,16 @@ class _HeldPool:
 
 
 class _AlbumTracksStub:
+    def _set_status(self, text):  # a failed fetch now says so
+        pass
+
     loadAlbumTracks = WavesBridge.loadAlbumTracks
     _start_album_tracks_fetch = WavesBridge._start_album_tracks_fetch
     _record_album_members = WavesBridge._record_album_members
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
+    _dress_panel_rows = WavesBridge._dress_panel_rows
 
     def __init__(self, session_album=None):
         self._album_tracks_cache = {}
@@ -218,6 +226,20 @@ def test_a_failed_retry_refetch_leaves_the_row_retryable():
     assert stub.downloads == []
     assert stub._queue and stub._queue[0]["status"] == "failed", "the row keeps its RETRY"
     assert stub._refetch_inflight == set(), "a later click may try again"
+    assert "Could not fetch that item, try again" in stub.statuses, "an OSError is not a takedown (issue #25)"
+    assert "That item is no longer available" not in stub.statuses
+
+
+def test_a_retry_refetch_that_tidal_refuses_as_not_found_says_so():
+    from tidalapi.exceptions import ObjectNotFound
+
+    def gone(tid):
+        raise ObjectNotFound("gone")
+
+    stub = _RetryStub(session_track=gone)
+    stub.retryQueueItem(5)
+
+    assert stub.downloads == []
     assert "That item is no longer available" in stub.statuses
 
 
@@ -492,3 +514,40 @@ def test_back_restore_latch_clears_on_a_failed_artist_load():
     assert "function onArtistLoadFailed(id)" in MAIN_QML
     body = MAIN_QML.split("function onArtistLoadFailed(id)", 1)[1].split("\n        }", 1)[0]
     assert "_navRestoring = false" in body
+
+
+def test_best_of_both_plans_at_the_clicked_albums_choice_and_carries_it_to_the_identity():
+    """The clicked album was given its own tier. The plan is capped at that
+    tier, not the setting, and when the merge is queued under another edition's
+    id the JOB asks at that tier. The other edition's own quality choice is
+    never written (final audit C14: it changed that edition's badge, ownership
+    target and later plain downloads for the session)."""
+    stub = _BestOfBothStub()
+    stub._quality_overrides = {"a1": "LOSSLESS"}
+    seen: list = []
+    stub._merge_rank_fn = lambda quality=None: (seen.append(quality), (lambda o: 0))[1]
+    carried: list = []
+    stub.setQualityOverride = lambda mid, word: carried.append((mid, word))
+    with patch(
+        "waves.waves_ui.backend._build_merge_plan",
+        return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}, ""),
+    ):
+        stub.downloadAlbumBestOfBoth("a1")
+
+    assert seen == [Quality.high_lossless], "the plan was measured at the setting, not the click's tier"
+    assert carried == [], "the identity edition's own choice is never written"
+    assert stub._merge_asks == {"a2": (str(Quality.high_lossless.value), "LOSSLESS")}
+    assert stub._albumsQueued.emits == [(0, ["a2"])]
+
+
+def test_best_of_both_without_a_choice_plans_at_the_setting_and_carries_nothing():
+    stub = _BestOfBothStub()
+    seen: list = []
+    stub._merge_rank_fn = lambda quality=None: (seen.append(quality), (lambda o: 0))[1]
+    stub.setQualityOverride = lambda mid, word: (_ for _ in ()).throw(AssertionError("no choice to carry"))
+    with patch(
+        "waves.waves_ui.backend._build_merge_plan",
+        return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}, ""),
+    ):
+        stub.downloadAlbumBestOfBoth("a1")
+    assert seen == [None]

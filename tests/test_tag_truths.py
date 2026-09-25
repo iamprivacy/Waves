@@ -233,9 +233,11 @@ def test_a_filled_custom_field_is_left_alone(tmp_path):
 
 def test_the_empty_check_knows_both_spellings():
     # FLAC hands back [""], MP4 freeform hands back b"", plain MP4 atoms "".
-    for empty in ("", [""], b"", [b""]):
+    # An empty list is empty too: written as-is it became a bare atom with
+    # no data child (final audit 2026-09-24, L29).
+    for empty in ("", [""], b"", [b""], []):
         assert Metadata._is_empty_tag(empty) is True
-    for kept in ("x", ["x"], b"x", [b"x"], [0], [[1, 2]], [1], []):
+    for kept in ("x", ["x"], b"x", [b"x"], [0], [[1, 2]], [1]):
         assert Metadata._is_empty_tag(kept) is False
 
 

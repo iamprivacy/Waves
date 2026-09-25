@@ -37,7 +37,7 @@ class _AlbumStub:
     def downloadAlbumBestOfBoth(self, album_id):
         self.scans.append(album_id)
 
-    def _download(self, obj, type_media, name, template, collection, media_id, merge_plan=None):
+    def _download(self, obj, type_media, name, template, collection, media_id, merge_plan=None, keep_ask=None):
         self.downloads.append((media_id, merge_plan))
 
     def _refetch_for_download(self, bucket, media_id):  # pragma: no cover - not reached here

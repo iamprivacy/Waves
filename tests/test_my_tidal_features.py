@@ -123,14 +123,12 @@ def test_dismiss_download_folder_nudge_drops_pending_without_running():
 def test_reveal_download_path_opens_nearest_existing(tmp_path, monkeypatch):
     # Clicking the nudge's path opens the OS file manager at the download folder,
     # or the nearest existing ancestor if that folder doesn't exist yet.
+    # Final audit L04: the reveal goes through the shared helper, which shows
+    # the folder without opening it; patched so no file manager starts here.
     opened = []
-
-    class _FakeDS:
-        @staticmethod
-        def openUrl(url):
-            opened.append(url.toLocalFile())
-
-    monkeypatch.setattr(backend.QtGui, "QDesktopServices", _FakeDS)
+    monkeypatch.setattr(
+        backend.LibraryMixin, "_reveal_in_file_manager", staticmethod(lambda target: opened.append(target))
+    )
     fake = MagicMock()
     fake.settings.data.download_base_path = str(tmp_path)
     WavesBridge.revealDownloadPath(fake)

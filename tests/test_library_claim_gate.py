@@ -137,17 +137,17 @@ def test_an_album_job_names_its_own_release():
     # The job's album is the only place the release YEAR is reliably spelled
     # out: a track's embedded album usually carries a title and no date.
     job = types.SimpleNamespace(name="True", year=2013)
-    assert _adapter(_track("True", None), album=job) == ("Artist", "Song", "True", "2013", 200)
+    assert _adapter(_track("True", None), album=job)[:5] == ("Artist", "Song", "True", "2013", 200)
 
 
 def test_a_playlist_job_lets_each_track_name_its_own():
-    assert _adapter(_track("True", 2013)) == ("Artist", "Song", "True", "2013", 200)
+    assert _adapter(_track("True", 2013))[:5] == ("Artist", "Song", "True", "2013", 200)
 
 
 def test_a_track_with_no_release_to_name_asks_an_unprovable_question():
     # Which the matcher answers unproven, so the track is fetched. A wrong
     # skip costs a track nobody finds out was missing.
-    assert _adapter(_track("", None)) == ("Artist", "Song", "", "", 200)
+    assert _adapter(_track("", None))[:5] == ("Artist", "Song", "", "", 200)
 
 
 # ---- what a skip SAYS about the copy you hold ---------------------------------

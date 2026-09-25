@@ -127,6 +127,13 @@ def test_media_move_and_symlink_skips_symlink_when_unlink_fails(
         ),
     )
 
+    media = MagicMock()
+    media.id = 111
+    media.waves_identity_id = None
+    # The plain download path records the fresh file under its id before
+    # post-processing; the symlink step refuses a source without that evidence.
+    download_instance._record_name_written(source_path, "111")
+
     with (
         patch("waves.download.format_path_media", return_value="Tracks/Artist - Title"),
         patch.object(download_instance, "_move_file", return_value=True),
@@ -134,7 +141,7 @@ def test_media_move_and_symlink_skips_symlink_when_unlink_fails(
         patch.object(pathlib.Path, "symlink_to") as symlink_to_mock,
     ):
         result_path: pathlib.Path = download_instance.media_move_and_symlink(
-            MagicMock(),
+            media,
             source_path,
             ".flac",
         )

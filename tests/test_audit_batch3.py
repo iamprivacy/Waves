@@ -243,9 +243,16 @@ class _OwnershipSpy:
 
 
 class _AlbumTracksStub:
+    def _set_status(self, text):  # a failed fetch now says so
+        pass
+
     loadAlbumTracks = WavesBridge.loadAlbumTracks
     _start_album_tracks_fetch = WavesBridge._start_album_tracks_fetch
     _record_album_members = WavesBridge._record_album_members
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
+    _dress_panel_rows = WavesBridge._dress_panel_rows
 
     def __init__(self, album):
         self._album_tracks_cache: dict = {}
@@ -315,6 +322,7 @@ class _Favorites:
 
 class _FavStub:
     _favorite_ids = WavesBridge._favorite_ids
+    _all_favorites = WavesBridge._all_favorites  # the pager _favorite_ids delegates to
     _FAV_IDS_TTL = WavesBridge._FAV_IDS_TTL
 
     def __init__(self, favorites):
@@ -354,6 +362,10 @@ class _LoadLibStub:
     loadLibrary = WavesBridge.loadLibrary
     _lib_status = WavesBridge._lib_status
     _lib_count = staticmethod(WavesBridge._lib_count)
+    # The emit dresses its rows (no presence slots here, so they pass through).
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
 
     def __init__(self, page=None, fail=False):
         self._logged_in = True

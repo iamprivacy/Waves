@@ -33,18 +33,17 @@ from waves.waves_ui.backend import WavesBridge, _SingleFlightWriter
 def test_a_submit_burst_runs_first_plus_newest():
     w = _SingleFlightWriter()
     gate = threading.Event()
+    started = threading.Event()
     ran: list[str] = []
 
     def first():
         ran.append("first")
+        started.set()
         gate.wait(5)
 
     w.submit("k", first)
-    # Give the thread a beat to pick "first" up, then pile on while it blocks.
-    for _ in range(100):
-        if ran:
-            break
-        time.sleep(0.01)
+    # Pile on only once the thread has picked "first" up and is blocking in it.
+    assert started.wait(10), "the writer thread never picked the first submit up"
     w.submit("k", lambda: ran.append("stale-1"))
     w.submit("k", lambda: ran.append("stale-2"))
     w.submit("k", lambda: ran.append("newest"))
@@ -56,12 +55,10 @@ def test_a_submit_burst_runs_first_plus_newest():
 def test_flush_runs_leftovers_inline_when_the_thread_cannot_finish():
     w = _SingleFlightWriter()
     gate = threading.Event()
+    started = threading.Event()
     ran: list[str] = []
-    w.submit("slow", lambda: (ran.append("slow"), gate.wait(5)))
-    for _ in range(100):
-        if ran:
-            break
-        time.sleep(0.01)
+    w.submit("slow", lambda: (ran.append("slow"), started.set(), gate.wait(5)))
+    assert started.wait(10), "the writer thread never picked the slow submit up"
     w.submit("other", lambda: ran.append("other"))
     t0 = time.monotonic()
     w.flush(timeout=0.2)

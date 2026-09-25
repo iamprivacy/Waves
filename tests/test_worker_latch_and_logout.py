@@ -230,6 +230,7 @@ class _LibraryArtistStub(_StubBase):
     def __init__(self):
         super().__init__()
         self.artistLoaded = _Signal()
+        self.artistLoadFailed = _Signal()
 
     def _get_artist(self, artist_id):
         artist = _Artist()
@@ -257,6 +258,21 @@ def test_a_choking_library_page_clears_busy():
     assert stub.busy == [True, False]
     assert stub.statuses[-1] == "Could not load artist"
     assert stub.artistLoaded.emits == []
+    # A Back onto the scoped page waits on artistLoaded to clear its history
+    # latch; a silent failure left navPush dead until logout (front-end audit
+    # 2026-09-17, H1). Both failure exits now tell the QML.
+    assert stub.artistLoadFailed.emits == [("a1",)]
+
+
+def test_an_unresolvable_library_artist_still_reports_failure():
+    stub = _LibraryArtistStub()
+    stub._get_artist = lambda artist_id: None
+
+    stub.loadArtistLibrary("a1")
+
+    assert stub.busy == [True, False]
+    assert stub.statuses[-1] == "Could not load artist"
+    assert stub.artistLoadFailed.emits == [("a1",)]
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +289,10 @@ def test_logout_supersedes_every_inflight_search():
 
 class _AlbumTracksStub(_StubBase):
     _start_album_tracks_fetch = WavesBridge._start_album_tracks_fetch
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
+    _dress_panel_rows = WavesBridge._dress_panel_rows
 
     def __init__(self, album):
         super().__init__()
@@ -315,6 +335,10 @@ def test_album_tracks_landing_after_logout_are_dropped():
 
 class _PlaylistTracksStub(_StubBase):
     loadPlaylistTracks = WavesBridge.loadPlaylistTracks
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
+    _dress_panel_rows = WavesBridge._dress_panel_rows
 
     def __init__(self):
         super().__init__()

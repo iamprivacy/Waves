@@ -181,3 +181,63 @@ class TestSkipLogicAgreesWithTheMove:
             )
 
         assert skip_download is False, "a stranger's file may not stand in for this track"
+
+
+class TestSymlinkStepNeverTouchesAStrangerInThePlaylistFolder:
+    def test_a_stranger_in_the_playlist_folder_stays_when_the_track_is_already_in_place(self, tmp_path):
+        # The playlist folder holds a DIFFERENT track under this track's name
+        # (a colliding stranger the user kept) and the track folder already
+        # holds THIS track, so nothing was fetched. The symlink step used to
+        # treat the track folder's "already there" as "moved" and unlink the
+        # stranger's real file to put a symlink in its place.
+        dl = _make_download(tmp_path)
+        occupant = _plant(tmp_path / "Tracks" / "Song.flac", b"id-111")
+        stranger = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-999")
+
+        with (
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-999": "999", b"id-111": "111"})),
+        ):
+            destination = dl.media_move_and_symlink(_track(111), stranger, ".flac")
+
+        assert destination == stranger
+        assert not stranger.is_symlink(), "a user's file may not be replaced by a symlink"
+        assert stranger.read_bytes() == b"id-999", "a stranger's track may not be deleted"
+        assert occupant.read_bytes() == b"id-111"
+        assert sorted(p.name for p in (tmp_path / "Tracks").iterdir()) == ["Song.flac"]
+
+    def test_a_stranger_in_the_playlist_folder_is_not_moved_when_the_fetch_failed(self, tmp_path):
+        # Same stranger, but the track folder is empty (the stream fetch
+        # failed): the step used to MOVE the stranger's file into the track
+        # folder under this track's name and leave a symlink behind.
+        dl = _make_download(tmp_path)
+        stranger = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-999")
+
+        with (
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-999": "999"})),
+        ):
+            destination = dl.media_move_and_symlink(_track(111), stranger, ".flac")
+
+        assert destination == stranger
+        assert not stranger.is_symlink()
+        assert stranger.read_bytes() == b"id-999"
+        assert not (tmp_path / "Tracks").exists() or not any((tmp_path / "Tracks").iterdir())
+
+    def test_an_untagged_playlist_file_is_not_unlinked_either(self, tmp_path):
+        # A missing id tag is no evidence either way. It keeps a skip (an old
+        # library must not be re-downloaded wholesale) but it never licenses a
+        # deletion.
+        dl = _make_download(tmp_path)
+        occupant = _plant(tmp_path / "Tracks" / "Song.flac", b"id-111")
+        untagged = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"old-library")
+
+        with (
+            patch("waves.download.format_path_media", return_value=TRACK_DIR_RELATIVE),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-111": "111"})),
+        ):
+            dl.media_move_and_symlink(_track(111), untagged, ".flac")
+
+        assert not untagged.is_symlink()
+        assert untagged.read_bytes() == b"old-library"
+        assert occupant.read_bytes() == b"id-111"

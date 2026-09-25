@@ -74,6 +74,9 @@ ALLOWED_BOOT_JOBS = {
     "WavesBridge._try_token_login.<locals>.work",
     # The settings writer: asleep until a save is queued.
     "_SingleFlightWriter._run",
+    # app.py's own TLS warm-up (waves_activate starts it beside the bridge):
+    # builds Qt's default TLS configuration (a CA store read), no network.
+    "_warm_tls",
 }
 
 
@@ -175,6 +178,11 @@ def _run_scenario() -> int:
         json.dump({"library_enabled": True, "library_source": "separate", "library_folder": lib}, fh)
 
     bridge = WavesBridge(tidal=None)
+    # What waves_activate itself starts next to the bridge (the TLS warm-up):
+    # part of the same launch, so it is measured under the same water.
+    from waves.waves_ui.app import _start_boot_threads
+
+    _start_boot_threads()
     loop = QEventLoop()
     # What a real launch does between construction and the reveal: the
     # landing page is asked for, the water plays, the interface warms.

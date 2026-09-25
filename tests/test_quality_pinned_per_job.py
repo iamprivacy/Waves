@@ -103,6 +103,26 @@ def test_the_fetch_uses_the_jobs_quality_and_the_session_is_left_as_found():
     assert dl.tidal.restores == 1
 
 
+def test_a_settings_save_landing_mid_fetch_is_not_undone_by_the_pins_restore():
+    """The save waits on stream_lock but a timed-out wait still writes; the
+    restore must put back only what the pin put there, or the tier from
+    before the save silently wins."""
+    session = _Session(Quality.low_320k)
+    dl = _tracked(Quality.hi_res_lossless, session)
+    original = backend.Download._get_track_stream_info
+
+    def landing_save(self, m):
+        self.session.audio_quality = Quality.high_lossless  # Settings saved mid-fetch
+        return SimpleNamespace(media_stream=None, stream_manifest=None)
+
+    backend.Download._get_track_stream_info = landing_save
+    try:
+        backend._TrackedDownload._get_track_stream_info(dl, SimpleNamespace(id="1", audio_modes=[]))
+    finally:
+        backend.Download._get_track_stream_info = original
+    assert session.audio_quality == Quality.high_lossless, "the restore undid a Settings save that landed mid-fetch"
+
+
 def test_a_job_without_a_pin_is_left_entirely_alone():
     session = _Session(Quality.high_lossless)
     dl = _tracked(None, session)

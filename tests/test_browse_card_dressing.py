@@ -80,6 +80,23 @@ def test_a_dressed_card_says_which_published_index_answered_it():
     assert card["libStamp"] == 3, "the card cannot tell whether its answer is still current"
 
 
+def test_a_publish_landing_mid_verdict_leaves_the_old_stamp():
+    """The stamp is read BEFORE the verdict. A publish between the two then
+    pairs the old stamp with the old verdict and the card asks live. The
+    other order baked the old verdict under the NEW stamp, which the card
+    trusted and never re-asked, so IN LIBRARY stayed hidden until a publish
+    that for a settled library never comes."""
+    s = _stub(stamp=0, presence={"present": False})
+
+    def publish_lands():
+        s._library_stamp = 1
+
+    s = _stub(stamp=0, presence={"present": False}, on_presence=publish_lands)
+    card = _cards(s._dress_cards(_page()))[0]
+    assert card["lib"] == {"present": False}
+    assert card["libStamp"] == 0, "a verdict from the old index must carry the old stamp"
+
+
 def test_the_card_the_payload_came_from_is_left_undressed():
     """The cache holds the page, and a verdict persisted with it would be a
     stale one on the next launch."""
@@ -144,3 +161,21 @@ def test_the_cards_in_the_qml_compare_the_stamp_before_trusting_the_answer():
     for use in uses:
         assert "c.libStamp === root.libStamp" in use, f"a card trusts a verdict it cannot date: {use}"
     assert "root.libStamp = waves.libraryStamp()" in qml, "nothing refreshes the window's stamp on a publish"
+
+
+def test_a_pending_rollup_is_never_baked():
+    """ "pending" is a promise, not an answer: the cold members are answered on
+    the pool and announced once, ~80ms later, to the cards registered by then.
+    A card incubated after that batch trusted the baked "pending" (same
+    ownGen) and never heard the answer, so it printed DOWNLOAD over an album
+    already on disk. Undressed, it asks live at creation and registers first.
+    """
+    s = _stub(stamp=1, presence={"present": False})
+    s._own_generation = 4
+    s.collectionOwnership = lambda _id: {"ids": ["t1"], "verdict": "pending", "in_library": False, "folder": ""}
+    card = _cards(s._dress_cards(_page()))[0]
+    assert "own" not in card and "ownGen" not in card
+
+    s.collectionOwnership = lambda _id: {"ids": ["t1"], "verdict": "owned", "in_library": True, "folder": ""}
+    card = _cards(s._dress_cards(_page()))[0]
+    assert card["own"]["verdict"] == "owned" and card["ownGen"] == 4

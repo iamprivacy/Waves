@@ -225,6 +225,10 @@ def test_own_cache_is_bounded():
 
 class _MoreStub:
     loadMoreLibrary = WavesBridge.loadMoreLibrary
+    # The emit dresses its rows (no presence slots here, so they pass through).
+    _LIBRARY_DRESSED = WavesBridge._LIBRARY_DRESSED
+    _dress_library_row = WavesBridge._dress_library_row
+    _dress_library_rows = WavesBridge._dress_library_rows
 
     def __init__(self):
         self._logged_in = True

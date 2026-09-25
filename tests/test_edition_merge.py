@@ -726,3 +726,31 @@ def test_album_key_separates_same_title_different_track_counts():
     dupe = _KeyAlbum("Greatest Hits", "Band", 18)  # same release at another quality
     assert bridge._album_key(short) != bridge._album_key(long)  # different content -> kept apart
     assert bridge._album_key(short) == bridge._album_key(dupe)  # true duplicate -> still collapses
+
+
+# ---- the cap follows the album's own quality choice ------------------------
+def test_the_merge_cap_follows_the_albums_quality_choice():
+    """A plan for an album chosen at LOSSLESS is measured at LOSSLESS, whatever
+    the setting says: the job asks at the choice, and a merge planned at the
+    setting's HI-RES assembled an album from tiers that job never fetches."""
+    from waves.waves_ui.backend import _chosen_quality, _group_quality_choice
+
+    standard = _Album("std", [_Track("s-a", "A", 200), _Track("s-b", "B", 200)], rank=4)
+    deluxe = _Album("dlx", [_Track("d-a", "A", 200), _Track("d-b", "B", 200), _Track("d-c", "C", 200)], rank=3)
+    bridge = _bridge_capped_at(Quality.hi_res_lossless)
+    at_setting = bridge._merge_rank_fn()
+    identity, plan, reason = _build_merge_plan([standard, deluxe], _recs_of, at_setting)
+    assert reason == "" and identity is deluxe
+    chosen = _chosen_quality({"dlx": "LOSSLESS"}, "dlx")
+    assert chosen is Quality.high_lossless
+    at_choice = bridge._merge_rank_fn(chosen)
+    assert _build_merge_plan([standard, deluxe], _recs_of, at_choice) == (None, None, "no_upgrade")
+    assert (at_setting(standard.recs[0].obj), at_choice(standard.recs[0].obj)) == (4, 3)
+    # DEFAULT is the setting made explicit, and a cleared choice is no choice.
+    assert _chosen_quality({"dlx": "DEFAULT"}, "dlx") is None
+    assert _chosen_quality({}, "dlx") is None
+    # A discography group takes the first member's choice, in group order.
+    assert _group_quality_choice({"dlx": "HIGH"}, [standard, deluxe]) is Quality.low_320k
+    assert _group_quality_choice({"std": "LOW", "dlx": "HIGH"}, [standard, deluxe]) is Quality.low_96k
+    assert _group_quality_choice({}, [standard, deluxe]) is None
+    assert _group_quality_choice(None, [standard, deluxe]) is None

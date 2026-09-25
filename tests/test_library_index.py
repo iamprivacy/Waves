@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -234,10 +235,30 @@ def test_on_progress_rate_limited_by_default(tmp_path):
     assert [(e["done"], e["indexed"]) for e in committed] == [(200, 200), (250, 250)]
 
 
+class _Overlap:
+    """Counts calls in flight at once; a peak above one proves they overlap,
+    whatever the machine's load does to the wall clock."""
+
+    def __init__(self):
+        self.live = self.peak = 0
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        with self._lock:
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+        return self
+
+    def __exit__(self, *exc):
+        with self._lock:
+            self.live -= 1
+        return False
+
+
 def test_tag_reads_run_concurrently(tmp_path):
     # A cold NAS scan is latency-bound, so tag reads must overlap. A reader that
-    # sleeps 50ms per file over 16 albums takes 800ms serially; in parallel it
-    # finishes in a couple of pool rounds. Generous bound to stay un-flaky.
+    # sleeps 50ms per file over 16 albums would run one at a time on a serial
+    # scanner; the pool has several in flight at once.
     import time as _time
 
     lib = _mk(tmp_path, "lib", [])
@@ -246,15 +267,16 @@ def test_tag_reads_run_concurrently(tmp_path):
         d = _mk(tmp_path, f"lib/A/Album{i:02d}", ["1.flac"])
         tags[d] = {"album": f"Album{i:02d}", "artist": "A", "date": "2000"}
     base_reader = _reader(tags)
+    overlap = _Overlap()
 
     def slow_read(path):
-        _time.sleep(0.05)
+        with overlap:
+            _time.sleep(0.05)
         return base_reader(path)
 
     idx = LibraryIndex(str(tmp_path / "library.sqlite3"), read_tags=slow_read)
-    t0 = _time.monotonic()
     assert idx.refresh(lib) == 16
-    assert _time.monotonic() - t0 < 0.5  # serial would be >= 0.8s
+    assert overlap.peak > 1, "tag reads ran one at a time"
 
 
 def test_walk_lists_directories_concurrently(tmp_path, monkeypatch):
@@ -273,15 +295,16 @@ def test_walk_lists_directories_concurrently(tmp_path, monkeypatch):
     idx = _index(tmp_path, tags)
 
     real_scandir = os.scandir
+    overlap = _Overlap()
 
     def slow_scandir(path=".", *args, **kwargs):
-        _time.sleep(0.02)
+        with overlap:
+            _time.sleep(0.02)
         return real_scandir(path, *args, **kwargs)
 
     monkeypatch.setattr(li.os, "scandir", slow_scandir)
-    t0 = _time.monotonic()
     assert idx.refresh(lib) == 24
-    assert _time.monotonic() - t0 < 0.6  # serial would be >= 1s
+    assert overlap.peak > 1, "directory listings ran one at a time"
 
 
 def test_scan_status_ok_after_successful_scan(tmp_path):

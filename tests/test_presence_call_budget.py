@@ -128,16 +128,18 @@ def _run_scenario() -> int:  # (a linear boot -> drive -> measure scenario)
         # turns that silent death into a loud one.
         @Slot(str, str, str, int, result="QVariant")
         @Slot(str, str, str, int, int, result="QVariant")
-        def libraryAlbumPresence(self, artist, title, year, num_tracks, duration=0):
+        @Slot(str, str, str, int, int, int, result="QVariant")
+        def libraryAlbumPresence(self, artist, title, year, num_tracks, duration=0, explicit=-1):
             calls["n"] += 1
-            return WavesBridge.libraryAlbumPresence(self, artist, title, year, num_tracks, duration)
+            return WavesBridge.libraryAlbumPresence(self, artist, title, year, num_tracks, duration, explicit)
 
         @Slot(str, str, result="QVariant")
         @Slot(str, str, str, str, result="QVariant")
         @Slot(str, str, str, str, int, result="QVariant")
-        def libraryTrackPresence(self, artist, title, album="", album_year="", duration=0):
+        @Slot(str, str, str, str, int, int, result="QVariant")
+        def libraryTrackPresence(self, artist, title, album="", album_year="", duration=0, explicit=-1):
             tcalls["n"] += 1
-            return WavesBridge.libraryTrackPresence(self, artist, title, album, album_year, duration)
+            return WavesBridge.libraryTrackPresence(self, artist, title, album, album_year, duration, explicit)
 
         @Slot(str, result="QVariant")
         def artistLibraryPresence(self, name):

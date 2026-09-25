@@ -12,8 +12,12 @@ scratchpad/settings_place_probe.py against the live Main.qml.
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 
 from waves.waves_ui.backend import WavesBridge
+
+_QML_SRC = pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "SettingsPage.qml"
 
 
 class _Stub:
@@ -78,3 +82,15 @@ def _schema_stub():
     stub._user_ffmpeg_path = lambda: ""
     stub._ffmpeg_detected_path = lambda: ""
     return stub
+
+
+def test_a_hand_toggle_never_severs_the_card_open_binding():
+    # A card's `open` is a binding on page.sectionOpen(...). The header click
+    # used to assign card.open directly, which destroys that binding, so a
+    # later deep link (jumpToCard writes the pref) could no longer open a
+    # card the user had once toggled by hand (front-end audit 2026-09-17, H2).
+    src = _QML_SRC.read_text()
+    assert "property bool open: page.sectionOpen(" in src
+    assert re.search(r"\bcard\.open\s*=[^=]", src) is None
+    # The toggle goes through the page record, which the binding reads.
+    assert "page.setSectionOpen(card.modelData.id, !card.open)" in src

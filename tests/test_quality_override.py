@@ -392,3 +392,23 @@ def test_a_store_that_cannot_list_members_still_names_the_item():
     del b._objs
     del b._ownership
     assert b._quality_choice_scope("a1") == ["a1"]
+
+
+def test_the_ffmpeg_gate_replay_keeps_the_row_ask():
+    """A RETRY held by the FFmpeg gate re-enters _download through a stashed
+    replay. That replay dropped keep_ask, so once the user fixed FFmpeg the
+    retried row was queued at today's setting instead of its own tier."""
+    b = _bridge(setting=Quality.high_lossless)
+    stash = []
+
+    def hold(_mid, replay):
+        stash.append(replay)
+        return True
+
+    b._ffmpeg_gate_holds = hold
+    b._download(_track(), "track", "Song", "{tmpl}", False, "t1", keep_ask=("HIGH", "HIGH"))
+    assert b._queue == [] and len(stash) == 1, "the gate held the download"
+    b._ffmpeg_gate_holds = lambda *a, **k: False
+    b.settings.data.quality_audio = Quality.low_320k
+    stash[0]()
+    assert (b._queue[-1]["askQuality"], b._queue[-1]["quality"]) == ("HIGH", "HIGH")

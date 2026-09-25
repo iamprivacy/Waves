@@ -61,3 +61,17 @@ def test_signing_out_still_says_so(tmp_path):
     WavesBridge.logout(bridge)
 
     assert bridge._set_status.call_args.args == ("Signed out",)
+
+
+def test_signing_out_drops_the_queues_kept_objects_and_the_scan_marks(tmp_path):
+    """RETRY downloads from the row's kept object, and a best-of-both scan is
+    remembered per album: both are bound to the account being signed out
+    of, so the next account must re-fetch by id and re-scan."""
+    bridge = _bridge(tmp_path)
+    bridge._job_objs = {"7": object()}
+    bridge._merge_scanned = {"7"}
+
+    WavesBridge.logout(bridge)
+
+    assert bridge._job_objs == {}, "a RETRY on the next account would download under the old token"
+    assert bridge._merge_scanned == set()

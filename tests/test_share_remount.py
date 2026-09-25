@@ -80,6 +80,9 @@ def test_origin_recorded_on_proof_of_life(monkeypatch):
     assert b.settings.data.network_mount_origins == {"/Volumes/Media": "smb://u@nas/Media"}
     assert b._saved == 1
     assert "smb://u@nas/Media" in secrets and "//u@nas/Media" in secrets
+    # The mount point names the share and sits outside the home folder the
+    # redactor folds: registered here, where it is first proven alive.
+    assert "/Volumes/Media" in secrets, "the share name reaches the log through every download path"
 
 
 def test_origin_statfs_runs_once_per_volume_per_session(monkeypatch):

@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 from threading import Event, Lock, local
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import waves.waves_ui.backend as backend
 from waves.ownership import OwnershipStore
@@ -781,10 +782,44 @@ def _scoped_stub(tmp_path, library_root=""):
     stub = _BridgeStub(tmp_path)
     stub.settings.data.download_base_path = str(tmp_path / "downloads")
     stub._library_root = lambda: library_root
-    for name in ("_ownership_roots", "_forget_ownership_answers"):
+    for name in ("_ownership_roots", "_resolved_root", "_forget_ownership_answers", "_age_ownership_answers"):
         setattr(stub, name, getattr(WavesBridge, name).__get__(stub, _BridgeStub))
+    stub._ROOT_RESOLVE_TTL = WavesBridge._ROOT_RESOLVE_TTL
     stub._ownership.set_roots(stub._ownership_roots)
     return stub
+
+
+def test_a_copy_recorded_through_a_link_stays_owned_after_symlink_mode_is_turned_off(tmp_path):
+    """Symlink-to-track mode records each copy by its resolved path. Those
+    records are still true after the mode is turned off (the file is still
+    there), but the roots were only given their resolved spellings while the
+    mode was on, so every copy behind a linked library folder read as not
+    owned the moment the switch was flipped, and DOWNLOAD came back over
+    albums on disk."""
+    real_lib = tmp_path / "real_lib"
+    (real_lib / "A").mkdir(parents=True)
+    link = tmp_path / "library"
+    link.symlink_to(real_lib, target_is_directory=True)
+    stub = _scoped_stub(tmp_path, library_root=str(link))
+    stub.settings.data.symlink_to_track = True
+    f = link / "A" / "01.flac"
+    f.write_bytes(b"audio")
+    stub._ownership.record("9", os.path.realpath(str(f)), "LOSSLESS")
+    assert stub.own("9")["owned"] is True
+    stub.settings.data.symlink_to_track = False
+    stub._own_cache.clear()
+    assert stub.own("9")["owned"] is True, "the record outlived the mode; the root's resolved spelling must too"
+    assert os.path.realpath(str(link)) in stub._ownership_roots()
+
+
+def test_a_folder_is_resolved_once_per_window_not_per_question(tmp_path):
+    stub = _scoped_stub(tmp_path, library_root=str(tmp_path / "library"))
+    calls = []
+    with patch("waves.waves_ui.backend.os.path.realpath", side_effect=lambda p: (calls.append(p), p)[1]):
+        stub._ownership_roots()
+        stub._ownership_roots()
+        stub._ownership_roots()
+    assert len(calls) == 2, "two folders, one resolve each, however many questions are asked"
 
 
 def test_the_bridge_looks_only_in_the_download_and_library_folders(tmp_path):
@@ -818,3 +853,30 @@ def test_a_moved_folder_re_asks_every_cached_answer(tmp_path):
     stub._forget_ownership_answers()
     assert "7" in stub._own_announce
     assert stub.own("7")["owned"] is True
+
+
+def test_a_parked_page_learns_of_a_deleted_file_on_the_max_age_tick(tmp_path):
+    """The TTL is checked only when something asks. A page the user parked
+    on never asked again, so a file deleted in Finder read as DOWNLOADED
+    until the next navigation. The max-age tick ages every answer and
+    announces it, so the on-screen buttons re-ask."""
+    stub = _scoped_stub(tmp_path)
+    stub.settings.data.download_base_path = str(tmp_path / "music")
+    f = tmp_path / "music" / "01.flac"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"audio")
+    stub._ownership.record("7", str(f), "LOSSLESS")
+    assert stub.own("7")["owned"] is True
+
+    f.unlink()
+    assert stub.ownershipOf("7")["owned"] is True, "inside the TTL the cache still says owned"
+
+    stub._own_announce.clear()
+    stub._downloads_running = lambda: True
+    stub._age_ownership_answers()
+    assert stub._own_announce == [], "a running download is not made to share the volume with a re-stat storm"
+
+    stub._downloads_running = lambda: False
+    stub._age_ownership_answers()
+    assert "7" in stub._own_announce
+    assert stub.own("7") == {"owned": False}

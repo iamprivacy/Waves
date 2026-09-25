@@ -16,6 +16,9 @@ behaviors must hold:
 4. A glyph paste of three characters or fewer searches too (issue #28). The
    decoder reads a paste off a >=4-char jump, which a short one cannot make,
    so the handler runs the decode itself rather than waiting for a guess.
+5. Enter while the decode is still animating searches the PASTED text, not
+   the scramble on screen, and the settling decode does not search again
+   (issue #41).
 
 The scenario never touches the OS clipboard: a paste, to the decoder, is a
 multi-char text jump typing can't produce, so the test assigns the field's
@@ -203,14 +206,48 @@ def _run_scenario() -> int:
     settle(decode_ms)
     short_left_no_arm = bool(q("_searchSeq === -99"))
 
+    # 6. Enter while the decode is still running (issue #41): the search must
+    #    be for the PASTED text, not the scramble on screen, the field must
+    #    settle to that text at once, and the decode's own settle must not
+    #    fire a second search afterwards.
+    q("_searchSeq = -99")
+    q("searchField.clear()")
+    paste("monolink amniotic")
+    mid_decode = bool(q("searchDecoder.decoding")) and q("searchField.text") != "monolink amniotic"
+    q("searchField.accepted()")
+    enter_searched = bool(q("_searchSeq === _navSeq")) and q("searchField.text") == "monolink amniotic"
+    enter_settled = not bool(q("searchDecoder.decoding"))
+    q("_searchSeq = -99")
+    settle(decode_ms)
+    enter_once = bool(q("_searchSeq === -99")) and q("searchField.text") == "monolink amniotic"
+    enter_mid_decode = mid_decode and enter_searched and enter_settled and enter_once
+    # 6b. The same with the glyph's arm set: Enter drops the arm, so the
+    #     decode that Enter settled cannot search a second time.
+    q("_searchSeq = -99")
+    q("searchField.clear(); searchDecoder.submitPending = true")
+    paste("monolink amniotic")
+    q("searchField.accepted()")
+    armed_enter_searched = bool(q("_searchSeq === _navSeq"))
+    q("_searchSeq = -99")
+    settle(decode_ms)
+    armed_enter_once = bool(q("_searchSeq === -99")) and not bool(q("searchDecoder.submitArmed"))
+    enter_mid_decode = enter_mid_decode and armed_enter_searched and armed_enter_once
+    if not enter_mid_decode:
+        print(
+            f"enter mid-decode: mid_decode={mid_decode} searched={enter_searched} "
+            f"settled={enter_settled} once={enter_once} text={q('searchField.text')!r}",
+            file=sys.stderr,
+        )
+
     ok = armed_searched and plain_inert and url_searched and disarmed and stale_inert
     ok = ok and glyph_disarmed and empty_glyph_inert
-    ok = ok and short_searched and short_left_no_arm
+    ok = ok and short_searched and short_left_no_arm and enter_mid_decode
     print(
         f"armed_searched={armed_searched} plain_inert={plain_inert} url_searched={url_searched} "
         f"disarmed={disarmed} stale_inert={stale_inert} "
         f"glyph_disarmed={glyph_disarmed} empty_glyph_inert={empty_glyph_inert} "
-        f"short_searched={short_searched} short_left_no_arm={short_left_no_arm}",
+        f"short_searched={short_searched} short_left_no_arm={short_left_no_arm} "
+        f"enter_mid_decode={enter_mid_decode}",
         flush=True,
     )
     return _EXIT_OK if ok else _EXIT_REGRESSED

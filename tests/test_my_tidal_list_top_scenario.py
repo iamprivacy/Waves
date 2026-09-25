@@ -1,20 +1,18 @@
-"""Full-screen gates sit in the window's overlay layer, above any open Drawer.
+"""A My Tidal tab lands at its true top, the 8px header in view.
 
 WHAT THIS FENCES OFF
 --------------------
-A Qt Quick Controls ``Drawer`` (the download queue) does not render inside the
-page: it is placed in the window's OVERLAY layer, which paints over ordinary
-content regardless of the z that content carries. exitGate and updateOptInGate
-are full-screen Rectangles that used to be parented to the page with z 1200,
-which reads like "on top" but is not: with the queue drawer open, the exit
-prompt was masked by the drawer's dim and the window looked un-closable.
+The My Tidal lists carry an 8px header inside the scroll area, which puts a
+ListView's top at ``originY`` (-8), not at contentY 0. A fresh load used to
+scroll the list to a raw 0, so every tab opened 8px down: the first row sat
+tight under the tab bar and the list still scrolled up by a hair. On the real
+Main.qml, for a ListView tab (Albums) and the GridView tab (Artists):
 
-The fix is ``parent: Overlay.overlay``, which moves the gate into the same
-layer so its z finally means something. That is easy to "tidy" back out, since
-the z alone looks sufficient, so this test pins the parent.
+1. A fresh load lands at the top: ``contentY == originY``.
+2. A revalidate pin taken at the top restores to the top, not 8px down.
 
-Runs in a SUBPROCESS like the other Main.qml scenarios: building the bridge
-installs process-global handlers that must not leak into the suite.
+Rows are injected by emitting ``libraryLoaded`` from Python, offline, in a
+SUBPROCESS like the other Main.qml scenarios.
 """
 
 from __future__ import annotations
@@ -32,22 +30,18 @@ _EXIT_PRECONDITION = 78
 
 QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml"
 
-# The download gates joined the layer in the 2026-09-17 front-end audit fix
-# pass: with the queue drawer open, a blocked download's "no folder" /
-# "folder unreachable" / "FFmpeg missing" prompt sat under the drawer's dim.
-GATES = ("exitGate", "updateOptInGate", "folderGate", "folderUnreachableGate", "ffmpegBlockGate")
 
-
-def test_gates_are_in_the_overlay_layer_not_the_page():
+def test_my_tidal_tab_lands_at_its_true_top():
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
-    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="waves-gate-layer-test-")
+    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="waves-lib-top-test-")
+    env["HOME"] = env["XDG_CONFIG_HOME"]  # nothing in the scenario may reach the real home
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--run-scenario"],
         env=env,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=120,
     )
     tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-10:])
     import pytest
@@ -56,10 +50,7 @@ def test_gates_are_in_the_overlay_layer_not_the_page():
         pytest.skip("PySide6 / offscreen Qt unavailable")
     if proc.returncode == _EXIT_PRECONDITION:
         pytest.skip(f"could not set up the scenario in this environment:\n{tail}")
-    assert proc.returncode == _EXIT_OK, (
-        "a full-screen gate left the overlay layer, so an open queue drawer will mask it again. "
-        f"Scenario exit={proc.returncode}:\n{tail}"
-    )
+    assert proc.returncode == _EXIT_OK, f"My Tidal list top regressed. Scenario exit={proc.returncode}:\n{tail}"
 
 
 def _run_scenario() -> int:
@@ -109,21 +100,45 @@ def _run_scenario() -> int:
         QTimer.singleShot(ms, loop.quit)
         loop.exec()
 
-    settle(150)
-    q(PARK_LOGIN_QML)
-    settle(60)
-
-    # Open the drawer so the failure mode is actually present, then check each
-    # gate is a child of the overlay rather than of the page.
-    q("queueDrawer.open()")
     settle(120)
-    drawer_open = bool(q("queueDrawer.visible"))
+    q(PARK_LOGIN_QML)
+    root.setProperty("width", 1100)
+    root.setProperty("height", 760)
 
-    verdicts = {name: bool(q(f"{name}.parent === Overlay.overlay")) for name in GATES}
-    print(f"drawer_open={drawer_open} verdicts={verdicts}", flush=True)
+    albums = [
+        {
+            "id": str(i),
+            "title": f"Album {i}",
+            "artist": "A",
+            "art": "",
+            "year": "2020",
+            "date": "",
+            "tracks": 10,
+            "quality": "",
+            "popularity": 0,
+        }
+        for i in range(60)
+    ]
+    artists = [{"id": str(i), "name": f"Artist {i}", "art": ""} for i in range(60)]
+    verdicts: dict[str, bool] = {}
+    for cat, view, rows in (("albums", "libAlbumsList", albums), ("artists", "libArtistsGrid", artists)):
+        q(f'libraryOpen = true; libraryCategory = "{cat}"')
+        settle(60)
+        bridge.libraryLoaded.emit(cat, rows, False)
+        settle(150)
+        origin = float(q(f"{view}.originY"))
+        top = float(q(f"{view}.contentY"))
+        verdicts[f"{cat}_header"] = origin < 0
+        verdicts[f"{cat}_fresh_top"] = abs(top - origin) < 0.5
+        # A pinned revalidate taken at the top keeps the top.
+        q("libPinRefill = true")
+        bridge.libraryLoaded.emit(cat, list(reversed(rows)), False)
+        settle(150)
+        verdicts[f"{cat}_pinned_top"] = abs(float(q(f"{view}.contentY")) - float(q(f"{view}.originY"))) < 0.5
+        q("libPinRefill = false")
 
-    ok = drawer_open and all(verdicts.values())
-    return _EXIT_OK if ok else _EXIT_REGRESSED
+    print(" ".join(f"{k}={v}" for k, v in verdicts.items()), flush=True)
+    return _EXIT_OK if all(verdicts.values()) else _EXIT_REGRESSED
 
 
 if __name__ == "__main__":

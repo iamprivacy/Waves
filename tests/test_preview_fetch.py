@@ -164,16 +164,17 @@ def test_a_failed_segment_does_not_wait_out_the_queue_behind_it(tmp_path, monkey
     pointless, and letting the queue drain (each with its own 20s timeout) held
     the preview for minutes before ffmpeg was even handed the https playlist.
     """
-    seg, delay = 48, 0.2
+    seg, delay = 48, 0.3
     fake = _FakeHttp(delay=delay, fail="seg0.")
     monkeypatch.setattr(backend_mod, "_preview_http", lambda: fake)
 
-    t0 = time.monotonic()
     assert _HlsStub()._localise_hls(_playlist(seg), whole=True, work_dir=str(tmp_path)) is None
-    elapsed = time.monotonic() - t0
 
-    waves = -(-seg // backend_mod._PREVIEW_SEG_WORKERS)  # what draining would cost
-    assert elapsed < waves * delay * 0.5, f"gave up after {elapsed:.2f}s, the whole queue costs {waves * delay:.2f}s"
+    # Counted in fetches, not seconds: the failure lands with the first wave,
+    # so a fallback that starts at once fetches that wave and at most the one
+    # the pool had already handed out. Draining fetches all six.
+    workers = backend_mod._PREVIEW_SEG_WORKERS
+    assert len(fake.urls) <= 3 * workers, f"{len(fake.urls)} of {seg} segments fetched after the failure"
     assert len(fake.urls) < seg, "the segments queued behind the failure were fetched anyway"
 
 

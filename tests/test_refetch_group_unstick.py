@@ -18,7 +18,9 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
-from waves.waves_ui.backend import WavesBridge
+from tidalapi.exceptions import ObjectNotFound
+
+from waves.waves_ui.backend import _ITEM_FETCH_FAILED, _ITEM_GONE, WavesBridge
 
 
 class _Stub:
@@ -60,6 +62,9 @@ def _stub(session_video):
     stub._folder_groups = {}
     stub._folder_lock = Lock()
     stub._scan_gen = 0
+    stub.remembered: list = []
+    stub._remember = lambda bucket, key, obj: stub.remembered.append((bucket, key))
+    stub._mediaRefetched = _Sig()
     stub._bump_download_groups = _bind(stub, "_bump_download_groups")
     stub._bump_artist_group = _bind(stub, "_bump_artist_group")
     stub._bump_folder_group = _bind(stub, "_bump_folder_group")
@@ -77,6 +82,39 @@ def test_a_failed_refetch_settles_its_group_as_failed():
     assert ("art1", "failed") in stub.downloadState.emits, "the artist button must leave 'running'"
     assert ("9", "failed") in stub.downloadState.emits
     assert stub._refetch_inflight == set()
+    # A rate limit or a dropped connection is a fetch to try again, never a
+    # takedown (issue #25: the old wording claimed the item was delisted).
+    assert stub.statuses[-1] == _ITEM_FETCH_FAILED
+    assert _ITEM_GONE not in stub.statuses
+
+
+def test_only_tidals_own_not_found_says_the_item_is_gone():
+    def _gone(_vid):
+        raise ObjectNotFound("404")
+
+    stub = _stub(_gone)
+    stub._refetch_for_download("video", "9")
+    assert stub.statuses[-1] == _ITEM_GONE
+    assert ("9", "failed") in stub.downloadState.emits
+    assert stub._artist_groups == {} and stub._refetch_inflight == set()
+
+
+def test_a_stop_while_the_click_waits_on_its_metadata_cancels_the_click():
+    """STOP bumps _scan_gen; a fetch that lands after it must not start the
+    download the user just cancelled: the button goes back to idle."""
+    stub = _stub(lambda _vid: SimpleNamespace(id=9))
+    real_video = stub.tidal.session.video
+
+    def _stopped(vid):
+        stub._scan_gen += 1
+        return real_video(vid)
+
+    stub.tidal.session.video = _stopped
+    stub._refetch_for_download("video", "9")
+    assert ("9", "") in stub.downloadState.emits, "the button must go back to idle"
+    assert ("9", "failed") not in stub.downloadState.emits
+    assert stub.remembered == [] and stub._mediaRefetched.emits == [], "no download the user just stopped"
+    assert stub._artist_groups == {} and stub._refetch_inflight == set()
 
 
 def test_an_account_switch_mid_fetch_settles_the_group_too():

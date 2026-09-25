@@ -226,10 +226,15 @@ def _run_scenario() -> int:
     #    read the request for "queued" and "running" alone, the column sat
     #    blank for every track that had not started, which is most of them for
     #    most of the download.
+    # The fetched list names every track the registry knows: a registry row
+    # the fetch leaves out is shown after it (final audit C18, a short read),
+    # which is not what this step is about.
     bridge._merge_queue_tracks(
         qid,
         [
             {"id": "1", "num": 1, "title": "t1", "duration": "3:00"},
+            {"id": "2", "num": 2, "title": "t2", "duration": "3:00"},
+            {"id": "3", "num": 3, "title": "t3", "duration": "3:00"},
             {"id": "9", "num": 9, "title": "t9", "duration": "3:00"},
         ],
     )
@@ -252,8 +257,9 @@ def _run_scenario() -> int:
     # Track 1 landed (registry says LOSSLESS, full strength); track 9 has not
     # started (no registry row, so _merge_queue_tracks calls it pending) and
     # states the job's own HI-RES request, faded.
-    if ledger != "LOSSLESS@full | HI-RES@faded":
-        bad.append(f"the expanded ledger's tier column read {ledger!r}, want 'LOSSLESS@full | HI-RES@faded'")
+    want = "LOSSLESS@full | LOSSLESS@full | LOSSLESS@full | HI-RES@faded"
+    if ledger != want:
+        bad.append(f"the expanded ledger's tier column read {ledger!r}, want {want!r}")
 
     # 8. A row that leaves takes its expansion state with it, not just its
     #    track list: same per-qid state, same leak if it outlives its row.

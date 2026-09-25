@@ -897,7 +897,7 @@ def test_the_helper_rechecks_the_staged_tree_after_the_wait(tmp_path, monkeypatc
         ("v1.2.3", (1, 2, 3)),
         ("1.2", (1, 2)),
         ("v2", (2,)),
-        ("v1.2.0-beta.1", (1, 2, 0)),  # pre-release suffix ignored
+        ("v1.2.0-beta.1", (1, 2, 0)),  # the numeric part only; _parse_prerelease reads the suffix
         ("waves-3.4.5", (3, 4, 5)),
         ("nope", ()),
         ("", ()),
@@ -1579,7 +1579,14 @@ def _managed_up(monkeypatch, proc, latest=None):
 
 def test_managed_upgrade_runs_brew_and_reports_done(monkeypatch):
     argv_seen = {}
-    proc = _FakeProc(["==> Downloading waves", "==> Upgrading waves 1.0.0 -> 1.1.0", "🍺  waves was upgraded"])
+    proc = _FakeProc(
+        [
+            "==> Upgrading waves 1.0.0 -> 1.1.0",
+            "==> Downloading waves",
+            "==> Moving App 'Waves.app' to '/Applications/Waves.app'",
+            "🍺  waves was upgraded",
+        ]
+    )
     monkeypatch.setattr(u, "is_frozen", lambda: True)
     monkeypatch.setattr(u, "managed_channel", lambda: "homebrew-cask")
     monkeypatch.setattr(u, "_find_brew", lambda: "/opt/homebrew/bin/brew")
@@ -1598,13 +1605,23 @@ def test_managed_upgrade_runs_brew_and_reports_done(monkeypatch):
     assert argv_seen["argv"] == ["/opt/homebrew/bin/brew", "upgrade", "--cask", "iamprivacy/waves/waves"]
     assert result["ok"] is True and result["version"] == "v1.1.0" and result["relaunch"] is True
     assert pcts[-1] == 100.0
-    assert any("Upgrading" in m for m in logs), "the manager's output reaches the UI"
+    # The UI hears fixed phase words, never the manager's own lines (C04).
+    assert "Downloading" in logs and "Installing" in logs
+    assert not any("waves" in m.lower() and "==>" in m for m in logs), logs
 
 
-def test_managed_upgrade_failure_surfaces_output_tail(monkeypatch):
+def test_managed_upgrade_failure_keeps_the_output_tail_in_the_log(monkeypatch, caplog):
     up = _managed_up(monkeypatch, _FakeProc(["Error: some cask problem"], code=1))
-    with pytest.raises(UpdaterError, match=r"Homebrew reported an error[\s\S]*some cask problem"):
+    # Attach to the updater's logger itself: an earlier test that installs the
+    # diagnostics stack turns propagation off, so the root capture sees nothing.
+    monkeypatch.setattr(u.logger, "handlers", [*u.logger.handlers, caplog.handler])
+    with (
+        caplog.at_level("WARNING", logger=u.logger.name),
+        pytest.raises(UpdaterError, match=r"^Homebrew reported an error\.") as info,
+    ):
         up.install()
+    assert "some cask problem" not in str(info.value)
+    assert "some cask problem" in caplog.text
 
 
 def test_managed_upgrade_stale_tap_is_a_clear_error(monkeypatch):
