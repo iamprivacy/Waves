@@ -39,6 +39,16 @@ class Worker(QtCore.QRunnable):
         # fetch) is diagnosable instead of a silent stuck button or a hard crash.
         try:
             self.fn(*self.args, **self.kwargs)
+        except RuntimeError as error:
+            # A worker that outlived the bridge on quit (a page crawl, a search
+            # enrichment, an ownership refresh mid-network-read) reaches its
+            # emit after the QObject is gone. Nobody is left to receive it, so
+            # it is not a crash: at ERROR it dumped the breadcrumb ring into a
+            # clean session's log on every quit.
+            if "deleted" in str(error).lower():
+                logger.debug("Background worker outlived the bridge in %r", getattr(self.fn, "__name__", self.fn))
+            else:
+                logger.exception("Background worker crashed in %r", getattr(self.fn, "__name__", self.fn))
         except Exception:
             logger.exception("Background worker crashed in %r", getattr(self.fn, "__name__", self.fn))
 

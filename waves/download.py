@@ -69,6 +69,7 @@ from waves.helper.camelot import format_initial_key
 from waves.helper.exceptions import MediaMissing
 from waves.helper.path import (
     PATH_LENGTH_MAX,
+    _text_length,
     check_file_exists,
     format_path_media,
     name_comparison_key,
@@ -173,6 +174,13 @@ def _tidal_refuses_asset(error: HTTPError) -> str | None:
     return message or f"HTTP {status}"
 
 
+class UntaggableFile(OSError):
+    """The downloaded file could not be tagged (mutagen could not open or
+    save it), so it is not filed: an untagged file in the library reads as
+    identity unknown to every later skip check and is trusted as the track
+    forever. Raised where a failed metadata save already raises."""
+
+
 def _staging_path(path_destination: pathlib.Path) -> pathlib.Path:
     """The hidden temp sibling a destination is copied through before the swap.
 
@@ -202,9 +210,14 @@ def _staging_path(path_destination: pathlib.Path) -> pathlib.Path:
         pathlib.Path: A fresh staging path beside the destination.
     """
     budget_name: int = FILENAME_LENGTH_MAX - _STAGING_NAME_OVERHEAD
+    # The parent is measured the way the platform measures it (UTF-16 units on
+    # Windows, bytes elsewhere): a byte count against the Windows cap charged
+    # a CJK parent three units per character and cut the unique part of the
+    # staging name down to one character, which two concurrent tracks of one
+    # album could then share.
     budget_path: int = (
         _PATH_LENGTH_MAX
-        - len(os.fsencode(str(path_destination.parent)))
+        - _text_length(str(path_destination.parent))
         - 1  # the separator between parent and name
         - _STAGING_NAME_OVERHEAD
     )
@@ -486,6 +499,9 @@ class Download:
     # saturate any consumer link, so this does not gate throughput.
     _HTTP_POOL_MAXSIZE: int = 10
 
+    # Longest Retry-After the CDN session sleeps per retry (seconds).
+    _RETRY_AFTER_CAP = 10
+
     @classmethod
     def _shared_http(cls) -> requests.Session:
         """Return the process-wide session, building it on first use."""
@@ -495,7 +511,16 @@ class Download:
                     pool_connections=cls._HTTP_POOL_MAXSIZE,
                     pool_maxsize=cls._HTTP_POOL_MAXSIZE,
                     pool_block=True,
-                    max_retries=Retry(total=5, backoff_factor=1),
+                    # Retry-After is honoured (it is the only thing that makes
+                    # urllib3 retry a 413/429/503 here) but capped: uncapped,
+                    # urllib3 would sleep up to six hours, five times, inside
+                    # the request on a wall clock STOP cannot wake.
+                    max_retries=Retry(
+                        total=5,
+                        backoff_factor=1,
+                        respect_retry_after_header=True,
+                        retry_after_max=cls._RETRY_AFTER_CAP,
+                    ),
                 )
             return cls._http_shared
 
@@ -763,7 +788,8 @@ class Download:
                 # fn_logger may be a plain wrapper without .exception, so this
                 # stays .error (bound first, which also sidesteps TRY400).
                 log_error = self.fn_logger.error
-                log_error(f"Could not size the download, progress will be indeterminate: {error}")
+                # The class only: a requests error prints the stream URL.
+                log_error(f"Could not size the download, progress will be indeterminate: {type(error).__name__}")
                 progress_total = None
             finally:
                 if r:
@@ -2875,7 +2901,6 @@ class Download:
                 extras = self._handle_metadata_and_extras(
                     media, tmp_path_file, path_media_dst, is_parent_album, media_stream
                 )
-
                 self.fn_logger.info(f"Downloaded item '{log_content(name_builder_item(media))}'.")
 
                 self._note_stage(media, cum["tag"])
@@ -2979,9 +3004,17 @@ class Download:
 
         # Write metadata to file.
         if media_stream:
-            _result_metadata, tmp_path_lyrics, lyrics_suffix, tmp_path_cover = self.metadata_write(
+            result_metadata, tmp_path_lyrics, lyrics_suffix, tmp_path_cover = self.metadata_write(
                 media, tmp_path_file, is_parent_album, media_stream
             )
+            if not result_metadata:
+                # A file mutagen could not open or save: filed anyway it sat
+                # in the library with no title, no artist and no item id,
+                # counted as delivered, and trusted as the track by every
+                # later skip check (an untagged file answers "identity
+                # unknown"). Raised like a failed save: the collection loop
+                # counts it as this item's failure and the temp is dropped.
+                raise UntaggableFile(f"could not tag '{log_content(name_builder_item(media))}'")
 
         return tmp_path_lyrics, lyrics_suffix, tmp_path_cover
 
@@ -3091,6 +3124,20 @@ class Download:
         self._ensure_directory(path_media_dst.parent)
 
         # Move item and symlink it
+        if path_media_dst != path_media_src and not self._source_is_this_item(path_media_src, media):
+            # The playlist-folder name is held by a file this run never wrote
+            # and that does not carry this item's id: a colliding stranger the
+            # user kept (the fetch was skipped because the track folder already
+            # held this item, or the fetch failed). Moving or unlinking it
+            # would delete or mis-file a user's own file, so leave both where
+            # they are. A convenience pointer is never worth a file.
+            self.fn_logger.error(
+                f"Not replacing '{log_content(path_media_src.name)}' with a symlink: "
+                f"the file there is not this track."
+            )
+
+            return path_media_src
+
         if path_media_dst != path_media_src:
             # The same three decisions the plain download path makes (see
             # _perform_actual_download): is the destination really THIS item,
@@ -3155,6 +3202,33 @@ class Download:
 
         return path_media_dst
 
+    def _source_is_this_item(self, path_media_src: pathlib.Path, media: Track | Video) -> bool:
+        """Whether the playlist-folder file really is this item, by positive evidence only.
+
+        A symlink already there was made by an earlier run of this very step.
+        A real file counts only when this run wrote it under this item's id, or
+        when the id tag it carries is one of the item's own. An untagged file
+        is NOT this item for the purpose of unlinking it: a missing id is never
+        evidence of a different item for a skip decision, but it is never
+        evidence of the same item for a deletion either.
+        """
+        if path_media_src.is_symlink() or not path_media_src.exists():
+            # Nothing on disk at the source: there is nothing to protect, and
+            # the step's own missing-parent handling takes it from here.
+            return True
+
+        media_id = _waves_item_id(media)
+
+        if media_id and self._names_written.get(str(path_media_src)) == media_id:
+            return True
+
+        try:
+            occupant_id = read_item_id(path_media_src)
+        except Exception:
+            return False
+
+        return bool(occupant_id) and occupant_id in _waves_owned_ids(media)
+
     def _symlink_after_move(
         self,
         path_media_src: pathlib.Path,
@@ -3209,6 +3283,21 @@ class Download:
             self.fn_logger.error(  # noqa: TRY400
                 f"Unable to create playlist symlink {log_content(path_media_src)}: {_os_error_text(error)}"
             )
+            # Windows without the symlink privilege, or a share that refuses
+            # links: the move already emptied the playlist folder, and leaving
+            # it that way wrote an empty m3u there and recorded ownership on a
+            # path with no file behind it. A real copy keeps the folder, the
+            # playlist and the record truthful; the audio stays in the track
+            # folder either way.
+            if not path_media_src.exists() and path_media_dst.is_file():
+                try:
+                    shutil.copy2(path_media_dst, path_media_src)
+                    self._note_dir_filled(path_media_src)
+                    self.fn_logger.info(f"Kept a copy in the playlist folder instead: {log_content(path_media_src)}")
+                except OSError as copy_error:
+                    self.fn_logger.error(  # noqa: TRY400
+                        f"Could not keep a copy in the playlist folder either: {_os_error_text(copy_error)}"
+                    )
 
     def adjust_quality_audio(self, quality: Quality) -> Quality:
         """Temporarily set audio quality and return the previous value.
@@ -3624,7 +3713,11 @@ class Download:
             str: Path to the temp file.
         """
         result: pathlib.Path = dir_destination / str(uuid4())
-        encoding: str | None = "utf-8" if isinstance(content, str) else None
+        # The mode decides, not the content: a str handed to a binary mode
+        # raised ValueError (not OSError) and failed the whole track.
+        encoding: str | None = None if "b" in mode else "utf-8"
+        if "b" in mode and isinstance(content, str):
+            content = content.encode("utf-8")
 
         try:
             with open(result, mode=mode, encoding=encoding) as f:
@@ -3846,13 +3939,17 @@ class Download:
             cover_data_album_file = self._album_cover_file_data(
                 track, cover_data, cover_dimension, cover_file_dimension
             )
-            path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
+            # Its own fetch at the file size can fail ('' back) while the
+            # embedded one worked: the track still lands, without cover.jpg.
+            if cover_data_album_file:
+                path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
 
         metadata_target_upc = MetadataTargetUPC(self.settings.data.metadata_target_upc)
         target_upc: dict[str, str] = METADATA_LOOKUP_UPC[metadata_target_upc]
         explicit: bool = track.explicit if hasattr(track, "explicit") else False
         title = name_builder_title(track)
         title += METADATA_EXPLICIT if explicit and self.settings.data.mark_explicit else ""
+        borrowed_slot: bool = bool(getattr(track, "waves_identity_id", None))
 
         # `None` values are not allowed.
         #
@@ -3869,8 +3966,9 @@ class Download:
             m: Metadata = Metadata(
                 path_file=path_media,
                 target_upc=target_upc,
-                lyrics=lyrics_synced,
-                lyrics_unsynced=lyrics_unsynced,
+                # Fetched when either switch is on; embedded only when asked.
+                lyrics=lyrics_synced if self.settings.data.lyrics_embed else "",
+                lyrics_unsynced=lyrics_unsynced if self.settings.data.lyrics_embed else "",
                 copy_right=copy_right,
                 title=title,
                 artists=[a.name for a in track.artists],
@@ -3885,11 +3983,19 @@ class Download:
                 # in helper/path.py, writes nothing rather than a made-up one).
                 # 0 is how both containers spell "unknown".
                 totaltrack=album.num_tracks if album and album.num_tracks else 0,
-                totaldisc=album.num_volumes if album and album.num_volumes else 1,
+                totaldisc=album.num_volumes if album and album.num_volumes else 0,
                 discnumber=track.volume_num if track.volume_num else 1,
                 cover_data=cover_data if self.settings.data.metadata_cover_embed else None,
-                album_replay_gain=media_stream.album_replay_gain,
-                album_peak_amplitude=media_stream.album_peak_amplitude,
+                # A best-of-both member borrowed from another edition (it
+                # carries waves_identity_id) streams under its SOURCE track id,
+                # so the stream's album gain and peak belong to the source
+                # album, not the album this file is tagged as. One folder
+                # tagged as one album must not carry two album gains, and the
+                # identity album's value would not fit a different master
+                # either, so album gain and peak stay unwritten for that file.
+                # Track gain and peak describe this audio and stay.
+                album_replay_gain=None if borrowed_slot else media_stream.album_replay_gain,
+                album_peak_amplitude=None if borrowed_slot else media_stream.album_peak_amplitude,
                 track_replay_gain=media_stream.track_replay_gain,
                 track_peak_amplitude=media_stream.track_peak_amplitude,
                 url_share=track.share_url if track.share_url and self.settings.data.metadata_write_url else "",
@@ -3962,27 +4068,30 @@ class Download:
                 self.fn_logger.debug(f"No usable thumbnail for video {video.id}; tagging without a cover.")
 
         metadata_target_upc = MetadataTargetUPC(self.settings.data.metadata_target_upc)
-        m: Metadata = Metadata(
-            path_file=path_media,
-            target_upc=METADATA_LOOKUP_UPC[metadata_target_upc],
-            title=title,
-            artists=artists,
-            albumartist=albumartist,
-            album=album_name,
-            date=release_date,
-            cover_data=cover_data,
-            url_share=(
-                video.share_url if getattr(video, "share_url", "") and self.settings.data.metadata_write_url else ""
-            ),
-            replay_gain_write=False,
-            explicit=explicit,
-            is_video=True,
-            item_id=str(video.id),
-            artist_ids=artist_ids,
-            album_artist_ids=album_artist_ids,
-        )
-
+        # The construction opens the file through mutagen, which can raise on
+        # a malformed atom or a transient read error. It sits inside the try
+        # so that, as the contract says, a tagging failure never fails a
+        # complete, playable video.
         try:
+            m: Metadata = Metadata(
+                path_file=path_media,
+                target_upc=METADATA_LOOKUP_UPC[metadata_target_upc],
+                title=title,
+                artists=artists,
+                albumartist=albumartist,
+                album=album_name,
+                date=release_date,
+                cover_data=cover_data,
+                url_share=(
+                    video.share_url if getattr(video, "share_url", "") and self.settings.data.metadata_write_url else ""
+                ),
+                replay_gain_write=False,
+                explicit=explicit,
+                is_video=True,
+                item_id=str(video.id),
+                artist_ids=artist_ids,
+                album_artist_ids=album_artist_ids,
+            )
             m.save()
         except MetadataUnreadable:
             self.fn_logger.exception(
@@ -4553,7 +4662,8 @@ class Download:
         playlist_populate for the two modes)."""
         # Every audio file the directory holds, which is what an m3u describes.
         # The ordered list below is only allowed to REORDER this, never to
-        # shorten it.
+        # shorten it, with one exception: another copy of a file this run
+        # landed (see _without_other_copies) is the same song twice.
         path_tracks: list[pathlib.Path] = []
 
         for extension_audio in AudioExtensionsValid:
@@ -4624,7 +4734,52 @@ class Download:
             # file the way the filesystem actually stores it.
             ordered.append(here[key])
 
-        return ordered if len(ordered) == len(path_tracks) else path_tracks
+        # When the folder holds more than this run landed, some of that can be
+        # OTHER COPIES of the very files that landed: a stereo FLAC beside
+        # the Atmos .m4a of the same album (both deliberately kept), or the
+        # old 320k .m4a beside its FLAC upgrade (nothing is ever deleted).
+        # Listing both plays every song twice, alternating formats. A copy
+        # of a landed file is dropped; a file this run cannot account for
+        # (a skipped, failed or cancelled track) stays, and the folder
+        # listing stands as before.
+        kept = path_tracks if len(ordered) == len(path_tracks) else Download._without_other_copies(path_tracks, ordered)
+
+        return ordered if len(ordered) == len(kept) else kept
+
+    @staticmethod
+    def _without_other_copies(path_tracks: list[pathlib.Path], landed: list[pathlib.Path]) -> list[pathlib.Path]:
+        """``path_tracks`` minus every file that is another copy of a landed
+        one: same item id (read off the tags), or the same stem under a
+        different audio extension (an untagged file from an older release
+        can only be told apart by its name)."""
+        landed_keys: set[str] = {name_comparison_key(str(p)) for p in landed}
+        landed_stems: set[str] = {name_comparison_key(p.stem) for p in landed}
+        landed_ids: set[str] = set()
+
+        for p in landed:
+            item_id = read_item_id(p)
+
+            if item_id:
+                landed_ids.add(item_id)
+
+        kept: list[pathlib.Path] = []
+
+        for p in path_tracks:
+            if name_comparison_key(str(p)) in landed_keys:
+                kept.append(p)
+                continue
+
+            item_id = read_item_id(p)
+
+            if item_id and item_id in landed_ids:
+                continue
+
+            if name_comparison_key(p.stem) in landed_stems:
+                continue
+
+            kept.append(p)
+
+        return kept
 
     def _video_convert(self, path_file: pathlib.Path) -> pathlib.Path:
         """Convert a TS video file to MP4 using ffmpeg.

@@ -31,6 +31,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import stat as stat_mod
 import time
@@ -113,6 +114,9 @@ _SKIP_DIR_NAMES = frozenset(
 )
 
 
+_SKIP_DIR_NAMES_FOLDED = frozenset(n.casefold() for n in _SKIP_DIR_NAMES)
+
+
 def _is_skipped_dir_name(name: str) -> bool:
     """True for a folder name a walk never descends into: dot-prefixed (the
     hidden-directory rule) or one of the metadata names above.
@@ -123,7 +127,9 @@ def _is_skipped_dir_name(name: str) -> bool:
     later listing can ever match, so the parent is flagged untrusted forever and
     a Synology's @eaDir arrives in the library as an owned album.
     """
-    return name.startswith(".") or name in _SKIP_DIR_NAMES
+    # Folded: NTFS spells the recycle bin "$Recycle.Bin", FAT "$RECYCLE.BIN",
+    # and a deleted album inside it must never index as owned.
+    return name.startswith(".") or name.casefold() in _SKIP_DIR_NAMES_FOLDED
 
 
 def _has_skipped_segment(path: str, root: str) -> bool:
@@ -207,11 +213,19 @@ _SHAPE_MEASURED_KEY = "listing_shape_measured"
 # Set once a cache has had the folders an older probe_folders wrongly indexed
 # swept out of its tree (see _has_skipped_segment).
 _SKIPPED_PRUNED_KEY = "skipped_dirs_pruned"
+# The skip rule the stored marker swept under. A cache marked by an older rule
+# is swept once more: the NTFS "$Recycle.Bin" joined the rule (folded) after
+# every existing cache was already marked "1", so its recycled albums stayed
+# cached as owned until they aged out.
+_SKIPPED_PRUNED_RULE = "2"
 # "1" once a recovery through a fresh mount was checked and found to have left
 # nothing out: the untrusted listing is still untrusted, but everything the
 # share names under it is indexed. Persisted so a relaunch can say so before it
 # has scanned anything.
 _RECONCILED_KEY = "listing_reconciled"
+# The matching.KEY_NORMALISER_VERSION the stored presence and track keys were
+# derived with (see __init__: a mismatch drops them once for the backfill).
+_KEY_VERSION_KEY = "key_normaliser_version"
 
 SCAN_OK = "ok"  # the root was listed; the index reflects it
 SCAN_UNSET = "unset"  # no library folder is configured
@@ -380,6 +394,144 @@ def _numbered(value: str) -> tuple[int, int]:
     return one(number), one(total)
 
 
+_EASY_KEYS_REGISTERED = False
+
+
+def _register_easy_keys() -> None:
+    """Teach mutagen's 'easy' views the two iTunes-convention keys they do not
+    ship with, once per process: the advisory rating (``rtng`` on MP4,
+    ``TXXX:ITUNESADVISORY`` on ID3; Vorbis comments already answer any key)
+    and the MP4 compilation flag (``cpil``; ID3's ``TCMP`` is built in). Both
+    are read-only here, and a registration that fails (an older mutagen)
+    simply leaves the keys unanswered, which reads as "unknown"."""
+    global _EASY_KEYS_REGISTERED
+    if _EASY_KEYS_REGISTERED:
+        return
+    _EASY_KEYS_REGISTERED = True
+    with contextlib.suppress(Exception):
+        from mutagen.easyid3 import EasyID3
+
+        EasyID3.RegisterTXXXKey("itunesadvisory", "ITUNESADVISORY")
+    with contextlib.suppress(Exception):
+        from mutagen.easymp4 import EasyMP4Tags
+
+        EasyMP4Tags.RegisterIntKey("itunesadvisory", "rtng")
+        EasyMP4Tags.RegisterTextKey("compilation", "cpil")
+
+
+def _advisory_word(value: str) -> int:
+    """An iTunes advisory value as the stored fact: 1 explicit, 0 clean, -1
+    unknown. The convention is shared by ``rtng`` and ``ITUNESADVISORY``: 1
+    (and the older 4) mark explicit, 2 marks a clean cut, 0 is "none", which
+    Waves itself writes for a clean track and iTunes writes for content with
+    nothing to warn about, so it reads clean. A value that is not a number is
+    a tagger's own vocabulary and says nothing."""
+    try:
+        code = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return -1
+    if code in (1, 4):
+        return 1
+    return 0 if code in (0, 2) else -1
+
+
+def _flag_word(value: str) -> bool:
+    """A boolean tag as taggers spell it (``1``, ``true``, ``yes``)."""
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
+_FOLDER_EXPLICIT_RE = re.compile(r"[\[(]\s*(explicit|e)\s*[\])]", re.IGNORECASE)
+_FOLDER_CLEAN_RE = re.compile(r"[\[(]\s*clean\s*[\])]", re.IGNORECASE)
+
+
+def _marker_word(*texts: str) -> int:
+    """The advisory fact a NAME carries: Waves' own ``{album_explicit}``
+    folder marker (" (Explicit)"), or a "(Clean)"/"(Explicit)" spelled into
+    the folder or the album tag by whoever ripped it. 1, 0 or -1 when no text
+    says. Only a fallback for files whose tags never said: an unmarked name is
+    not a clean claim, because the default naming template writes no marker."""
+    for text in texts:
+        if _FOLDER_EXPLICIT_RE.search(text or ""):
+            return 1
+        if _FOLDER_CLEAN_RE.search(text or ""):
+            return 0
+    return -1
+
+
+# The artist an album row is filed under when its files say it is a
+# compilation, or credit no one artist: matching.is_various_artists refuses
+# it, so the row carries no key and can never answer for a real artist.
+_VARIOUS_ARTISTS = "Various Artists"
+
+
+def _overwhelming(agree: int, dissent: int) -> bool:
+    """The folder vote: a single dissenter, or nine agreeing files in ten, and
+    the majority ahead."""
+    return (dissent == 1 or dissent <= (agree + dissent) * 0.1) and agree > dissent
+
+
+# How a collaboration credit joins its names once norm_artist has folded "&"
+# and "+" to " and ": a comma, a spaced "and", "x", "with" or "vs". norm_artist
+# itself keeps these (Earth, Wind and Fire is one band), so the folder vote
+# compares only the names in front of them.
+_COLLAB_SPLIT_RE = re.compile(r"\s*,\s*|\s+(?:and|x|with|vs\.?)\s+")
+
+
+def _primary_credit(credit: str) -> str:
+    """The first name of a normalised track credit, for the album-artist vote:
+    "jay-z and kanye west", "jay-z, beyonce" and "jay-z x future" are all
+    Jay-Z's tracks. The whole credit when nothing precedes a separator."""
+    return _COLLAB_SPLIT_RE.split(credit, maxsplit=1)[0].strip() or credit
+
+
+def _explicit_of(tags: dict) -> int:
+    """A tag dict's advisory fact, -1 when the reader never reported one (an
+    older reader, the tests' stubs) or reported junk."""
+    try:
+        value = int(tags.get("explicit", -1))
+    except (TypeError, ValueError):
+        return -1
+    return value if value in (0, 1) else -1
+
+
+def _disc_pair(tags: dict) -> tuple[int, int]:
+    """One file's (disc number, track total) claim, 0 for whichever it left out."""
+    return int(tags.get("disc_no", 0) or 0), int(tags.get("track_total", 0) or 0)
+
+
+def _flat_set_declared(pairs: list[tuple[int, int]], held: int) -> int:
+    """The release's declared track count for a set sitting FLAT in one
+    folder (its files name different discs), read from each disc's claim.
+
+    Two conventions share the field: Picard and iTunes write each disc's own
+    count, Waves writes the release's count on every file. Every disc must
+    carry one agreed claim, or nothing is declared. Differing claims can only
+    be per-disc, so they add up. Equal claims are read by the files held,
+    exactly as matching._declared_total reads a joined set: more files than
+    the claim means per-disc (summed), fewer is short under either reading
+    (the claim stands as a floor), and exactly the claim is ambiguous (either
+    a complete release-wide set or short discs adding up to it), so nothing
+    is declared and the count on screen decides."""
+    per_disc: dict[int, set[int]] = defaultdict(set)
+    for disc, total in pairs:
+        if disc > 0:
+            per_disc[disc].add(total)
+    claims = []
+    for totals in per_disc.values():
+        totals -= {0}
+        if len(totals) != 1:
+            return 0
+        claims.append(totals.pop())
+    if not claims:
+        return 0
+    if len(set(claims)) > 1:
+        return sum(claims)
+    total = claims[0]
+    if held > total:
+        return sum(claims)
+    return total if held < total else 0
+
+
 def _read_album_tags(path: str) -> dict | None:
     """Album / album-artist / date from one audio file's tags, via mutagen's
     format-neutral 'easy' interface (standard frames across FLAC/MP3/MP4/OGG), so
@@ -390,6 +542,7 @@ def _read_album_tags(path: str) -> dict | None:
     try:
         import mutagen
 
+        _register_easy_keys()
         m = mutagen.File(path, easy=True)
     except Exception:
         return None
@@ -408,8 +561,11 @@ def _read_album_tags(path: str) -> dict | None:
 
     album = first("album")
     # album-artist is the album's identity; fall back to the track artist when a
-    # ripper left album-artist blank (common on single-artist albums).
-    artist = first("albumartist") or first("artist")
+    # ripper left album-artist blank (common on single-artist albums). The raw
+    # album-artist rides along so the folder read can tell a blank one apart
+    # and put the fallback to a vote across the folder's files (see _read_row).
+    albumartist = first("albumartist")
+    artist = albumartist or first("artist")
     # The file's OWN identity, for the per-track rows: its title, and its track
     # artist first (a featured guest is credited there, not in album-artist).
     title = first("title")
@@ -441,12 +597,22 @@ def _read_album_tags(path: str) -> dict | None:
     return {
         "album": album,
         "artist": artist,
+        "albumartist": albumartist,
         "title": title,
         "track_artist": track_artist,
         "date": date,
         "track_total": track_total,
         "disc_no": disc_no,
         "disc_total": disc_total,
+        # The file's own advisory fact (1 explicit, 0 clean, -1 never said):
+        # rtng on MP4, ITUNESADVISORY on ID3 and Vorbis comments. It is the
+        # one thing that tells a clean cut from its explicit twin, which
+        # share every other fact the matcher weighs.
+        "explicit": _advisory_word(first("itunesadvisory")),
+        # The iTunes compilation flag (cpil / TCMP / COMPILATION): a set one
+        # says this folder is a Various-Artists record whatever its first
+        # file's artist tag says.
+        "compilation": _flag_word(first("compilation")),
         "codec": codec,
         "bitrate": int(getattr(info, "bitrate", 0) or 0) // 1000,  # kbps
         "bits": int(getattr(info, "bits_per_sample", 0) or 0),
@@ -633,7 +799,8 @@ class LibraryIndex:
                        declared    INTEGER,
                        disc_no     INTEGER,
                        disc_total  INTEGER,
-                       runtime     INTEGER
+                       runtime     INTEGER,
+                       explicit    INTEGER
                    )""")
             # Migrate a pre-quality cache in place: the added columns default to
             # NULL codec, which _unchanged treats as "needs a re-read", so the
@@ -663,6 +830,10 @@ class LibraryIndex:
                 # read as unchanged forever, the exact blindness force_full
                 # exists to cure.
                 "raw_count INTEGER",
+                # The folder's advisory fact (1 explicit, 0 clean, -1 the
+                # files and the name never said). NULL is a row from before
+                # the fact was read: one backfill re-read, like declared.
+                "explicit INTEGER",
             ):
                 with contextlib.suppress(sqlite3.OperationalError):  # column already exists
                     self._conn.execute(f"ALTER TABLE albums ADD COLUMN {col}")
@@ -729,13 +900,17 @@ class LibraryIndex:
                        bitrate     INTEGER NOT NULL DEFAULT 0,
                        bits        INTEGER NOT NULL DEFAULT 0,
                        rate        INTEGER NOT NULL DEFAULT 0,
-                       length      INTEGER NOT NULL DEFAULT 0
+                       length      INTEGER NOT NULL DEFAULT 0,
+                       explicit    INTEGER NOT NULL DEFAULT -1
                    )""")
             # A pre-length tracks table migrates in place; its rows read length
             # 0 ("the file never said") until the album row's NULL runtime
             # forces the folder's one backfill re-read, which rewrites them.
-            with contextlib.suppress(sqlite3.OperationalError):  # column already exists
-                self._conn.execute("ALTER TABLE tracks ADD COLUMN length INTEGER NOT NULL DEFAULT 0")
+            # The per-file advisory fact migrates the same way (-1, "never
+            # said", until the album row's NULL explicit forces the re-read).
+            for col in ("length INTEGER NOT NULL DEFAULT 0", "explicit INTEGER NOT NULL DEFAULT -1"):
+                with contextlib.suppress(sqlite3.OperationalError):  # column already exists
+                    self._conn.execute(f"ALTER TABLE tracks ADD COLUMN {col}")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_path)")
             for col in ("tkey_title TEXT", "tkey_artist TEXT"):
                 with contextlib.suppress(sqlite3.OperationalError):  # column already exists
@@ -744,6 +919,18 @@ class LibraryIndex:
             # Small key/value store: the scan root last walked (a change wipes the
             # tree so the new root walks fresh) and the monotonic scan generation.
             self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if self._meta_get(_KEY_VERSION_KEY) != matching.KEY_NORMALISER_VERSION:
+                # The stored keys were derived by another version of the
+                # normaliser (or by one that never stamped itself). Every
+                # TIDAL-side key is computed by the running code, so a row
+                # keyed by the old one would sit unreachable behind an
+                # unchanged mtime forever (badges dark, the bulk gate
+                # re-downloading owned albums). Drop the keys once; the
+                # scanner's backfill_keys pass rebuilds them from the raw
+                # album, artist and title still on the rows.
+                self._conn.execute("UPDATE albums SET pkey_title = NULL, pkey_artist = NULL")
+                self._conn.execute("UPDATE tracks SET tkey_title = NULL, tkey_artist = NULL")
+                self._meta_set(_KEY_VERSION_KEY, matching.KEY_NORMALISER_VERSION)
             if self._meta_get(_ROOT_JUDGED_KEY) is None:
                 # A cache from before listings were judged has never had its
                 # root's listing looked at for repeats, and a warm scan REUSES
@@ -772,7 +959,7 @@ class LibraryIndex:
                 # entries the folder reported against how few were different.
                 self._conn.execute("UPDATE dirs SET mtime = 0 WHERE unreliable = 1")
             self._meta_set(_SHAPE_MEASURED_KEY, "1")
-            if self._meta_get(_SKIPPED_PRUNED_KEY) is None:
+            if self._meta_get(_SKIPPED_PRUNED_KEY) != _SKIPPED_PRUNED_RULE:
                 # A cache written before probe_folders applied the walk's own
                 # skip rule can hold @eaDir and #recycle subtrees that no
                 # listing will ever name again. Left alone they would age out
@@ -794,7 +981,7 @@ class LibraryIndex:
                     )
                     self._conn.execute("DELETE FROM tracks WHERE folder_path NOT IN (SELECT folder_path FROM albums)")
                     logger.info("dropped %d cached folder(s) the scan never walks", len(doomed))
-                self._meta_set(_SKIPPED_PRUNED_KEY, "1")
+                self._meta_set(_SKIPPED_PRUNED_KEY, _SKIPPED_PRUNED_RULE)
             self._conn.commit()
         # A relaunch opens the cache the last scan left: what that scan could
         # not trust is still not trusted, so the badges seeded from this cache
@@ -1856,11 +2043,11 @@ class LibraryIndex:
         with self._lock:
             rows = self._conn.execute("""SELECT folder_path, dir_mtime, codec, track_count, recorded_at,
                           (SELECT COUNT(*) FROM tracks WHERE tracks.folder_path = albums.folder_path),
-                          declared, runtime
+                          declared, runtime, explicit
                    FROM albums""").fetchall()
-        for path, mtime, codec, count, recorded, tracks, declared, runtime in rows:
+        for path, mtime, codec, count, recorded, tracks, declared, runtime, explicit in rows:
             resting = now - float(recorded or 0) < _UNREADABLE_RETRY_S
-            fresh = codec is not None and declared is not None and runtime is not None
+            fresh = codec is not None and declared is not None and runtime is not None and explicit is not None
             out[path] = (mtime, fresh and tracks > 0 and (tracks >= count or resting))
         return out
 
@@ -1969,6 +2156,7 @@ class LibraryIndex:
             int(tags.get("bits", 0) or 0),
             int(tags.get("rate", 0) or 0),
             int(tags.get("length", 0) or 0),
+            _explicit_of(tags),
         )
 
     def _read_row(self, job: _Candidate, alive: Callable[[], bool]) -> tuple | None:
@@ -2021,6 +2209,21 @@ class LibraryIndex:
         # declaring different discs are not a folder in conflict, they are a set
         # sitting flat in one folder, and its own file count already covers it.
         shape = {k: {int(tags.get(k, 0) or 0)} for k in ("track_total", "disc_no", "disc_total")}
+        # Each file's (disc, tracktotal) pair, for the flat set: there a
+        # per-disc TRACKTOTAL is one disc's count, not the release's.
+        pairs = [_disc_pair(tags)]
+        # The album-artist vote. A blank album-artist tag used to be filled
+        # from ONE file's track artist, so a Various-Artists comp ripped
+        # without TPE2 was keyed under whichever artist sorted first and could
+        # claim that artist's same-titled album. The fallback now has to win
+        # the folder the way the album tag does (see below); a folder whose
+        # track artists disagree is a compilation and goes keyless. A reader
+        # that never reports the raw album-artist (older callers, the tests'
+        # stubs) keeps the old fallback untouched.
+        voting = "albumartist" in tags and not str(tags.get("albumartist", "") or "").strip()
+        lead = matching.norm_artist(matching.canon(str(tags.get("track_artist", "") or tags.get("artist", "") or "")))
+        artist_agree, artist_dissent = (1 if lead else 0), 0
+        compilation_votes = 1 if tags.get("compilation") else 0
         agree, dissent = (1 if want else 0), 0
         for name in audio:
             if name == first_audio:
@@ -2043,7 +2246,30 @@ class LibraryIndex:
                     dissent += 1
             for key, seen in shape.items():
                 seen.add(int(other.get(key, 0) or 0))
+            pairs.append(_disc_pair(other))
+            if other.get("compilation"):
+                compilation_votes += 1
+            if voting and lead:
+                credit = matching.norm_artist(
+                    matching.canon(str(other.get("track_artist", "") or other.get("artist", "") or ""))
+                )
+                # A collaboration led by the same artist agrees: 'A and B' is
+                # still A's track. Only a different primary name dissents, so
+                # a real compilation still goes keyless.
+                if credit:  # silence is not disagreement, as everywhere here
+                    if _primary_credit(credit) == _primary_credit(lead):
+                        artist_agree += 1
+                    else:
+                        artist_dissent += 1
             tracks.append(self._track_row(dirpath, other))
+        artist = str(tags.get("artist", "") or "")
+        if compilation_votes * 2 > len(tracks):
+            # The files themselves say this is a compilation. Filed as one, it
+            # carries no key (see _album_keys), so it can never answer for the
+            # artist its first file happens to credit.
+            artist = _VARIOUS_ARTISTS
+        elif voting and artist_dissent and not _overwhelming(artist_agree, artist_dissent):
+            artist = _VARIOUS_ARTISTS
         if dissent:
             # Only the files that positively voted for the majority album are
             # counted. Subtracting the dissenters from the raw file count
@@ -2052,8 +2278,7 @@ class LibraryIndex:
             # doubt: 10 agreeing files + 1 stray + 1 unreadable landed on
             # exactly the release's 11 tracks and the bulk gate skipped an
             # album the user holds 10 of.
-            overwhelming = dissent == 1 or dissent <= (agree + dissent) * 0.1
-            count = agree if overwhelming and agree > dissent else 0
+            count = agree if _overwhelming(agree, dissent) else 0
 
         def agreed(key: str) -> int:
             if dissent:
@@ -2063,10 +2288,35 @@ class LibraryIndex:
             seen = shape[key] - {0}
             return seen.pop() if len(seen) == 1 else 0
 
+        disc_no = agreed("disc_no")
+        # A set sitting flat (files declaring different discs) is tagged the
+        # Picard/iTunes way as often as not: TRACKTOTAL is one DISC's count,
+        # and recording it as the release's said a complete 2x10 copy held
+        # "10 of 20", which unswore it. The per-disc claims are read together.
+        if dissent:
+            declared = 0
+        elif len(shape["disc_no"] - {0}) > 1:
+            declared = _flat_set_declared(pairs, count)
+        else:
+            declared = agreed("track_total")
+        # The folder's advisory fact, from its files: explicit when any file
+        # is (a release with one explicit cut is the explicit release), clean
+        # when every file that knows says clean, otherwise the name marker
+        # (Waves' own " (Explicit)" folder token, or a "(Clean)" the ripper
+        # spelled out), or -1. A folder in conflict declares nothing here
+        # either: the strays may be the other edition.
+        words = {t[8] for t in tracks} - {-1}
+        if dissent:
+            explicit = -1
+        elif words:
+            explicit = 1 if 1 in words else 0
+        else:
+            explicit = _marker_word(os.path.basename(dirpath), str(tags.get("album", "") or ""))
+
         return (
             dirpath,
             tags.get("album", ""),
-            tags.get("artist", ""),
+            artist,
             tags.get("date", ""),
             count,
             mtime,
@@ -2075,8 +2325,8 @@ class LibraryIndex:
             int(tags.get("bitrate", 0) or 0),
             int(tags.get("bits", 0) or 0),
             int(tags.get("rate", 0) or 0),
-            agreed("track_total"),
-            agreed("disc_no"),
+            declared,
+            disc_no,
             agreed("disc_total"),
             # The folder's summed play length, believed only when EVERY read
             # file reported one (only positive evidence, like agreed() above)
@@ -2089,6 +2339,7 @@ class LibraryIndex:
                 else 0
             ),
             raw,
+            explicit,
             tuple(tracks),
         )
 
@@ -2098,7 +2349,8 @@ class LibraryIndex:
     # (the album bucket entries and the track bucket entries), so the matcher
     # is handed the same facts it always was.
     _ALBUM_FACT_COLUMNS = (
-        "album, year, track_count, folder_path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime"
+        "album, year, track_count, folder_path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime,"
+        " explicit"
     )
 
     def _read(self, sql: str, params: tuple = ()) -> list:
@@ -2123,7 +2375,7 @@ class LibraryIndex:
 
     @staticmethod
     def _album_fact(row) -> dict:
-        album, year, tracks, path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime = row
+        album, year, tracks, path, codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, explicit = row
         return {
             "title": str(album or ""),
             "year": str(year or ""),
@@ -2137,6 +2389,8 @@ class LibraryIndex:
             "disc_no": int(disc_no or 0),
             "disc_total": int(disc_total or 0),
             "runtime": int(runtime or 0),
+            # 1 explicit, 0 clean, -1 unknown (a NULL, pre-capture row too).
+            "explicit": -1 if explicit is None else int(explicit),
         }
 
     def presence_facts(self, key) -> list[dict]:
@@ -2172,13 +2426,13 @@ class LibraryIndex:
             return []
         rows = self._read(
             "SELECT t.title, t.artist, t.folder_path, t.codec, t.bitrate, t.bits, t.rate, t.length, "
-            "a.album, a.year "
+            "a.album, a.year, t.explicit "
             "FROM tracks t LEFT JOIN albums a ON a.folder_path = t.folder_path "
             "WHERE t.tkey_artist = ? AND t.tkey_title = ?",
             (artist_key, title_key),
         )
         out = []
-        for title, artist, path, codec, bitrate, bits, rate, length, album, album_year in rows:
+        for title, artist, path, codec, bitrate, bits, rate, length, album, album_year, explicit in rows:
             out.append(
                 {
                     "id": str(path or ""),
@@ -2190,6 +2444,8 @@ class LibraryIndex:
                     "album_year": str(album_year or ""),
                     "length": int(length or 0),
                     "guests": sorted(matching.feat_guests(str(title or ""), str(artist or ""))),
+                    # The file's own advisory fact (1, 0, -1 never said).
+                    "explicit": -1 if explicit is None else int(explicit),
                 }
             )
         return out
@@ -2294,7 +2550,7 @@ class LibraryIndex:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT album, artist, year, track_count, folder_path, codec, bitrate, bits, rate,"
-                " declared, disc_no, disc_total, runtime FROM albums"
+                " declared, disc_no, disc_total, runtime, explicit FROM albums"
             ).fetchall()
         for (
             album,
@@ -2310,6 +2566,7 @@ class LibraryIndex:
             disc_no,
             disc_total,
             runtime,
+            explicit,
         ) in rows:
             yield {
                 "title": str(album or ""),
@@ -2326,6 +2583,8 @@ class LibraryIndex:
                 "disc_total": int(disc_total or 0),
                 # Summed play length in seconds, 0 when the files never said.
                 "runtime": int(runtime or 0),
+                # The folder's advisory fact: 1 explicit, 0 clean, -1 unknown.
+                "explicit": -1 if explicit is None else int(explicit),
             }
 
     def iter_tracks(self) -> Iterator[dict]:
@@ -2346,10 +2605,10 @@ class LibraryIndex:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT t.title, t.artist, t.folder_path, t.codec, t.bitrate, t.bits, t.rate, t.length, "
-                "a.album, a.year "
+                "a.album, a.year, t.explicit "
                 "FROM tracks t LEFT JOIN albums a ON a.folder_path = t.folder_path"
             ).fetchall()
-        for title, artist, path, codec, bitrate, bits, rate, length, album, album_year in rows:
+        for title, artist, path, codec, bitrate, bits, rate, length, album, album_year, explicit in rows:
             yield {
                 "title": str(title or ""),
                 "artist": str(artist or ""),
@@ -2362,6 +2621,8 @@ class LibraryIndex:
                 "album_year": str(album_year or ""),
                 # The file's own play length in seconds, 0 when it never said.
                 "length": int(length or 0),
+                # The file's own advisory fact: 1 explicit, 0 clean, -1 unknown.
+                "explicit": -1 if explicit is None else int(explicit),
             }
 
     def poll_containers_changed(self, root: str) -> bool | None:
@@ -2437,7 +2698,7 @@ class LibraryIndex:
             row = self._conn.execute(
                 """SELECT dir_mtime, track_count, codec, recorded_at,
                           (SELECT COUNT(*) FROM tracks WHERE tracks.folder_path = albums.folder_path),
-                          declared, runtime, raw_count
+                          declared, runtime, raw_count, explicit
                    FROM albums WHERE folder_path = ?""",
                 (folder_path,),
             ).fetchone()
@@ -2451,7 +2712,7 @@ class LibraryIndex:
         count, and the verdict itself is plain Python (_unchanged_verdict)."""
         with self._lock:
             rows = self._conn.execute("""SELECT albums.folder_path, dir_mtime, track_count, codec, recorded_at,
-                          COALESCE(tc.n, 0), declared, runtime, raw_count
+                          COALESCE(tc.n, 0), declared, runtime, raw_count, explicit
                    FROM albums
                    LEFT JOIN (SELECT folder_path, COUNT(*) AS n FROM tracks
                               GROUP BY folder_path) tc
@@ -2486,6 +2747,8 @@ class LibraryIndex:
             # NULL runtime is a row from before duration capture; one re-read
             # backfills it (0, "the files never said", is a finished answer).
             and row[6] is not None
+            # NULL explicit likewise (-1, "never said", is a finished answer).
+            and row[8] is not None
             and row[4] > 0
             and (row[4] >= row[1] or time.time() - float(row[3] or 0) < _UNREADABLE_RETRY_S)
         )
@@ -2495,15 +2758,15 @@ class LibraryIndex:
             return
         # The presence keys are derived here, once per row written, on the
         # scanner's thread (see the key columns in __init__).
-        albums = [(*row[:16], *_album_keys(row[1], row[2])) for row in batch]
-        tracks = [(*t, *_track_keys(t[1], t[2])) for row in batch for t in row[16]]
+        albums = [(*row[:17], *_album_keys(row[1], row[2])) for row in batch]
+        tracks = [(*t, *_track_keys(t[1], t[2])) for row in batch for t in row[17]]
         with self._lock:
             self._conn.executemany(
                 """INSERT INTO albums
                        (folder_path, album, artist, year, track_count, dir_mtime, recorded_at,
                         codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, raw_count,
-                        pkey_title, pkey_artist)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        explicit, pkey_title, pkey_artist)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(folder_path) DO UPDATE SET
                        album=excluded.album, artist=excluded.artist, year=excluded.year,
                        track_count=excluded.track_count, dir_mtime=excluded.dir_mtime,
@@ -2511,7 +2774,7 @@ class LibraryIndex:
                        bitrate=excluded.bitrate, bits=excluded.bits, rate=excluded.rate,
                        declared=excluded.declared, disc_no=excluded.disc_no,
                        disc_total=excluded.disc_total, runtime=excluded.runtime,
-                       raw_count=excluded.raw_count,
+                       raw_count=excluded.raw_count, explicit=excluded.explicit,
                        pkey_title=excluded.pkey_title, pkey_artist=excluded.pkey_artist""",
                 albums,
             )
@@ -2520,9 +2783,9 @@ class LibraryIndex:
             # or re-tagged file) must not linger beside the fresh ones.
             self._conn.executemany("DELETE FROM tracks WHERE folder_path = ?", [(row[0],) for row in batch])
             self._conn.executemany(
-                "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length,"
+                "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length, explicit,"
                 " tkey_title, tkey_artist)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tracks,
             )
             self._conn.commit()

@@ -296,6 +296,16 @@ def strip_edition_quals_ext(title: str) -> str:
 # --- Keys ----------------------------------------------------------------------
 
 
+# The version of the key normaliser (presence_key and track_key and everything
+# they fold through: canon, norm_title, norm_artist, strip_edition_quals_ext,
+# the edition and diacritic tables). The library cache stores the keys on its
+# rows and stamps this value beside them; a cache stamped with another value
+# has its stored keys dropped once at open and rebuilt from the raw tags, so
+# a change here never leaves an unchanged folder filed under a key the app no
+# longer derives. BUMP THIS whenever any of those folds changes.
+KEY_NORMALISER_VERSION = "1"
+
+
 def presence_key(title: str, artist: str) -> tuple[str, str]:
     """The cross-catalog album key: (base title, normalised artist), each canon'd
     first. BOTH components must be equal for a match.
@@ -484,6 +494,12 @@ def _discs_by_name(best: dict, survivors: list) -> tuple[list, str] | None:
     nums = [_disc_number(str(c.get("id", "") or "")) for c in discs]
     if None in nums or len(set(nums)) != len(nums):
         return None
+    # Discs that declare DIFFERENT disc totals are positive evidence of two
+    # releases (disc 1 of a 3-disc deluxe beside disc 2 of the 2-disc
+    # standard), not one set spelled two ways. The tag path already refuses
+    # that pairing; the name path must not sum it into "the release".
+    if len({_as_int(c.get("disc_total")) for c in discs} - {0}) > 1:
+        return None
     if _short_of_its_discs(discs):
         return None
     # Reveal the album, not disc 2 of it. For "Album/CD2" the album folder holds
@@ -529,11 +545,64 @@ def _short_of_its_discs(discs: list) -> bool:
 
 
 def _declared_total(discs: list) -> int:
-    """The tracks a joined set DECLARES: the sum, believed only when every disc
-    carries a claim. One silent disc makes the sum an undercount, and an
-    undercount is exactly what would call a short copy complete."""
+    """The tracks a joined set DECLARES, believed only when every disc carries
+    a claim. One silent disc makes the sum an undercount, and an undercount is
+    exactly what would call a short copy complete.
+
+    Two tagging conventions share the TRACKTOTAL field. Picard and iTunes
+    write each disc's own count (10 on disc 1, 12 on disc 2), and those add
+    up. Waves writes the RELEASE's count on every file (20 on both discs of a
+    20-track set), and adding those called a complete split set "20 OF 40".
+    Differing claims can only be per-disc, so they are summed. Equal claims
+    are read by the files held: more files than the claim is only possible
+    per disc (summed); fewer is short under either reading, so the claim
+    stands as the floor; exactly the claim is either a complete release-wide
+    set or two short discs that happen to add up, which nothing in the tags
+    can tell apart, so the set declares nothing and TIDAL's count decides."""
     claims = [_as_int(c.get("declared")) for c in discs]
-    return sum(claims) if all(claims) else 0
+    if not all(claims):
+        return 0
+    if len(set(claims)) > 1:
+        return sum(claims)
+    total = claims[0]
+    held = sum(_as_int(c.get("tracks")) for c in discs)
+    if held > total:
+        return sum(claims)
+    return total if held < total else 0
+
+
+def _joined_explicit(discs: list) -> int:
+    """A set's advisory fact from its discs': explicit when any disc is,
+    clean when every disc that knows says clean, unknown when none knows."""
+    words = {_explicit_word(c) for c in discs} - {-1}
+    if not words:
+        return -1
+    return 1 if 1 in words else 0
+
+
+def _explicit_word(candidate: dict) -> int:
+    """A candidate's stored advisory fact: 1 explicit, 0 clean, -1 unknown
+    (absent on rows from before the fact was recorded, or a garbage value)."""
+    value = candidate.get("explicit", -1)
+    if value is None or isinstance(value, bool):
+        return -1 if value is None else int(value)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return -1
+    return value if value in (0, 1) else -1
+
+
+def _explicit_disagrees(candidate: dict, explicit) -> bool:
+    """Whether the copy and the release on screen are KNOWN to sit on opposite
+    sides of the clean/explicit divide. Unknown on either side never
+    disagrees: that keeps every verdict exactly as it was before the fact
+    existed, and only a known clash withholds proof (the copy is the other
+    edition, so the release is fetched, the fail-safe direction)."""
+    if explicit is None:
+        return False
+    have = _explicit_word(candidate)
+    return have != -1 and bool(have) != bool(explicit)
 
 
 def _join_discs(best: dict, survivors: list) -> tuple[dict, int, int]:
@@ -558,7 +627,7 @@ def _join_discs(best: dict, survivors: list) -> tuple[dict, int, int]:
     runtimes = [_as_int(c.get("runtime")) for c in discs]
     runtime = sum(runtimes) if all(r > 0 for r in runtimes) else 0
     return (
-        dict(best, id=reveal, runtime=runtime),
+        dict(best, id=reveal, runtime=runtime, explicit=_joined_explicit(discs)),
         sum(_as_int(c.get("tracks")) for c in discs),
         _declared_total(discs),
     )
@@ -886,16 +955,26 @@ def _year_veto_survivors(candidates: list, ty: int | None, tt: int, want_len: in
     return survivors
 
 
-def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
+def decide_presence(title, artist, year, tracks, index, duration=0, explicit=None) -> dict:
     """Decide whether an album is present in a local album index (the scanned
     music folder).
 
     ``index`` maps presence_key -> a list of candidate dicts ``{"title": <str>,
     "year": <str|int|None>, "tracks": <int>, "id": <str>}`` (plus the optional
-    quality facts ``codec``/``bitrate``/``bits``/``rate`` and the release's own
-    declared shape ``declared``/``disc_no``/``disc_total``). Returns ``{"present",
-    "partial", "sure", "full", "local_album_id", "local_tracks", "local_year"}``
-    and the ``local_*`` quality readout.
+    quality facts ``codec``/``bitrate``/``bits``/``rate``, the release's own
+    declared shape ``declared``/``disc_no``/``disc_total`` and its advisory
+    fact ``explicit``: 1, 0 or -1 unknown). Returns ``{"present", "partial",
+    "sure", "full", "local_album_id", "local_tracks", "local_year"}`` and the
+    ``local_*`` quality readout.
+
+    ``explicit`` is the release on screen's own advisory flag (True/False),
+    or None when the caller cannot vouch for one. The clean and explicit
+    editions of an album share a title, a year, a track count and, within
+    seconds, a runtime, so nothing else here can tell them apart, and the
+    title folds their markers on purpose. When BOTH sides are known and
+    disagree the copy is the other edition and identity is withheld (the
+    pill hedges, the bulk gate fetches). Unknown on either side changes
+    nothing.
 
     PRESENCE (which lights the pill) stays generous: a key match whose year does
     not actively contradict. Being wrong here costs a misleading badge.
@@ -923,6 +1002,7 @@ def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
     hidden = {"present": False, "partial": False, "sure": False, "full": False}
     hidden.update({"local_album_id": "", "local_tracks": 0, "local_year": "", "local_declared": 0})
     hidden["local_runtime"] = 0
+    hidden["local_explicit"] = -1
     hidden.update({"local_quality": "", "local_codec": "", "local_lossless": False, "local_bits": 0, "local_rate": 0})
     hidden["local_class"] = ""
     if not index or is_various_artists(artist):
@@ -953,13 +1033,25 @@ def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
     # Prefer a candidate that can actually satisfy the gate (same title down to
     # its edition, however each catalog spells it) over a merely longer one, so
     # holding both "Album" and "Album (Deluxe)" still resolves against the
-    # edition being viewed.
+    # edition being viewed. Among those, a copy on the release's own side of
+    # the clean/explicit divide wins over one KNOWN to be the other cut: with
+    # both editions on disk, a tie left the choice to row order, and landing
+    # on the other edition withheld proof of the one the user holds.
     want_title = str(title or "")
     best = max(
         survivors,
-        key=lambda c: (same_edition(str(c.get("title", "") or ""), want_title), _as_int(c.get("tracks"))),
+        key=lambda c: (
+            same_edition(str(c.get("title", "") or ""), want_title),
+            not _explicit_disagrees(c, explicit),
+            _as_int(c.get("tracks")),
+        ),
     )
+    chosen = best
     best, local_tracks, declared = _join_discs(best, survivors)
+    # A lone folder that says it is disc N of a multi-disc set (no sibling
+    # disc joined it) holds one disc of the record, whatever its own file
+    # count. A flat set (disc_no 0, every disc in one folder) is not lone.
+    lone_disc = best is chosen and _as_int(best.get("disc_no")) > 0 and _as_int(best.get("disc_total")) > 1
     if local_tracks <= 0:
         return hidden
     by = to_year_int(best.get("year"))
@@ -1004,6 +1096,9 @@ def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
         # viewed. Only a shortfall rules identity out, never a surplus, because
         # a deluxe copy still contains the standard's tracks.
         and not (declared > 0 and tt > 0 and declared < tt)
+        # The clean and explicit editions agree on everything above. Only a
+        # KNOWN clash of advisory facts refuses; see the docstring.
+        and not _explicit_disagrees(best, explicit)
     )
     # The count a complete copy has to reach. Normally TIDAL's, but tidalapi
     # reports None/-1 when numberOfTracks is absent, and with nothing to compare
@@ -1011,7 +1106,9 @@ def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
     # "partially in library" forever. The release's own claim settles it without
     # TIDAL, once identity is settled: a copy holding every track its files SAY
     # the release has is a complete copy. Unproven and unnumbered, nothing can.
-    needed = tt if tt > 0 else (declared if sure else 0)
+    # Nor can a lone disc of a set: its TRACKTOTAL may well be its own disc's
+    # count, and "every track disc 1 says it has" is a third of the record.
+    needed = tt if tt > 0 else (declared if sure and not lone_disc else 0)
     full = needed > 0 and local_tracks >= needed  # short by even one track is not the album
     # Whatever TIDAL says the album holds, a folder holding fewer files than its
     # OWN release claims is short a track, and a copy short a track is not the
@@ -1038,6 +1135,10 @@ def decide_presence(title, artist, year, tracks, index, duration=0) -> dict:
         # arbitrating an unproven match can hand a third party the one fact
         # that pins the copy to an edition.
         "local_runtime": have_len,
+        # The copy's advisory fact (1 explicit, 0 clean, -1 unknown), so an
+        # overlay that may upgrade an unproven match can tell a copy that is
+        # KNOWN to be the other edition from one that is merely unproven.
+        "local_explicit": _explicit_word(best),
         # Quality of the local copy (from its representative file), so the badge
         # can say WHAT you have.
         "local_quality": local_quality_label(
@@ -1105,13 +1206,20 @@ def _track_length_word(want_len: int, c: dict) -> bool | None:
     return False if abs(have - want_len) > 5 * _TRACK_DURATION_TOL_S else None
 
 
-def decide_track_presence(title, artist, index, album="", album_year="", duration=0) -> dict:
+def decide_track_presence(title, artist, index, album="", album_year="", duration=0, explicit=None) -> dict:
     """Decide whether one TRACK is present in the local per-track index.
 
     ``index`` maps track_key -> a list of candidate dicts ``{"id": <album
-    folder path>, "codec", "bitrate", "bits", "rate", "album", "album_year"}``.
+    folder path>, "codec", "bitrate", "bits", "rate", "album", "album_year"}``
+    (plus the file's own advisory fact ``explicit``: 1, 0 or -1 unknown).
     Returns ``{present, sure, local_album_id}`` plus the ``local_*`` quality
     readout of the best copy.
+
+    ``explicit`` is the track on screen's own advisory flag (True/False; None
+    when unknown). The clean and explicit cuts of a song share their title,
+    artist, album, year and length, so it is the only fact that separates
+    them: a copy whose file is KNOWN to sit on the other side never proves
+    the match (the track is fetched). Unknown on either side changes nothing.
 
     There is no completeness bar here because there is nothing to complete: a
     track is either on disk or not. ``present`` is therefore the loosest thing
@@ -1180,6 +1288,10 @@ def decide_track_presence(title, artist, index, album="", album_year="", duratio
         if _track_length_word(want_len, c) is False:
             # A copy minutes from the track on screen is a different recording
             # wearing the same name, whatever its folder says.
+            return False
+        if _explicit_disagrees(c, explicit):
+            # The other edition's cut: same song, same seconds, other side of
+            # the clean/explicit divide. Never proof of this one.
             return False
         if not gate_title(want_album) or ty is None:
             return False

@@ -208,7 +208,9 @@ def _serve_one(worker: _Worker, writer: _EventWriter, raw: bytes) -> bool:
             writer.send({"ev": "error", "id": job.get("id"), "message": f"unknown op {op!r}"})
     except Exception as exc:  # the job failed; the process serves on
         logger.debug("library worker job failed", exc_info=True)
-        writer.send({"ev": "error", "id": job.get("id"), "message": f"{type(exc).__name__}: {exc}"})
+        # The class only: an OSError renders the path it failed on (an album
+        # folder on a share), and the parent logs this at WARNING, on disk.
+        writer.send({"ev": "error", "id": job.get("id"), "message": type(exc).__name__})
     return True
 
 

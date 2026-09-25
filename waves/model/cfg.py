@@ -166,7 +166,7 @@ class Settings:
 class HelpSettings:
     skip_existing: str = "Skip download if file already exists."
     confirm_category_download: str = (
-        "Ask before queueing a whole Browse playlist category with DOWNLOAD ALL. "
+        "Ask before DOWNLOAD ALL queues a whole Browse playlist category or every track in My Tidal. "
         'Turning the dialog off with its "Don\'t ask again" box switches this off; '
         "switch it back on here."
     )
@@ -186,7 +186,7 @@ class HelpSettings:
     album_info_save: str = "Save album info to track?"
     video_download: str = "Allow download of videos."
     multi_thread: str = "Download several tracks in parallel."
-    download_delay: str = "Activate randomized download delay to mimic human behaviour."
+    download_delay: str = "Adds a small random pause between downloads so a long run paces itself."
     download_base_path: str = "Where to store the downloaded media."
     quality_audio: str = (
         'Desired audio download quality: "LOW" (96kbps), "HIGH" (320kbps), '

@@ -1,4 +1,5 @@
 import contextlib
+import enum
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import time
+import typing
 from collections.abc import Callable
 from json import JSONDecodeError
 from pathlib import Path
@@ -56,11 +58,40 @@ def _replace_with_retry(tmp_path: str, file_path: str) -> None:
             return
 
 
+def _set_aside(path: str, error: Exception) -> bool:
+    """Move an unusable config file aside, never deleting an older backup.
+
+    Returns whether the move happened. When it did not, the file is still the
+    only copy of whatever the user had in it, so the caller must not write
+    defaults over it."""
+    path_bak = path + ".bak"
+    if os.path.exists(path_bak):
+        path_bak = f"{path}.{int(time.time())}.bak"
+    try:
+        shutil.move(path, path_bak)
+    except OSError:
+        logger.warning("Could not set aside the unusable %s", os.path.basename(path), exc_info=True)
+        return False
+    logger.warning(
+        "%s was unusable (%s); it was kept as %s and defaults were used",
+        os.path.basename(path),
+        type(error).__name__,
+        os.path.basename(path_bak),
+    )
+    return True
+
+
 class BaseConfig:
     data: ModelSettings | ModelToken
     file_path: str
     cls_model: ModelSettings | ModelToken
     path_base: str = path_config_base()
+    # Set by read() when the file on disk could not be read, or was unusable
+    # and could not be set aside. That file may still hold the user's real
+    # config, so this session runs on in-memory defaults and writes nothing
+    # over it: not read()'s own write-back, not a migration persist, not a
+    # later save from the app. The next launch reads the file again.
+    _keep_file_untouched: bool = False
 
     def save(self, config_to_compare: str = None) -> None:
         data_json = self.data.to_json()
@@ -75,6 +106,12 @@ class BaseConfig:
         """The disk half of :meth:`save`, for a caller that serialized the data
         itself (the GUI snapshots the JSON on its thread, microseconds, and
         hands only this fsync-bearing part to a background writer)."""
+        if self._keep_file_untouched:
+            logger.warning(
+                "Not saving %s: it could not be read at launch, so it is left as it is",
+                os.path.basename(self.file_path),
+            )
+            return
         # Try to create the base folder.
         os.makedirs(self.path_base, exist_ok=True)
 
@@ -124,36 +161,43 @@ class BaseConfig:
     def read(self, path: str) -> bool:
         result: bool = False
         settings_json: str = ""
+        self._keep_file_untouched = False
 
         try:
             with open(path, encoding="utf-8") as f:
                 settings_json = f.read()
 
+            settings_json = _drop_unusable_fields(settings_json, self.cls_model)
             self.data = self.cls_model.from_json(settings_json)
             result = True
-        except (JSONDecodeError, TypeError, FileNotFoundError, ValueError, AttributeError) as e:
+        except FileNotFoundError:
+            self.data = self.cls_model()
+        except (JSONDecodeError, TypeError, ValueError, AttributeError) as e:
             # AttributeError is what a file of valid JSON whose top level is not
             # an object raises: dataclasses_json asks the parsed value for
             # .items(), and "[]", "null", a bare string or a number has none. It
             # crashed every launch with a traceback, past the very self-heal this
             # arm exists to do, and only deleting the file by hand recovered the
-            # app. A file that is there and unusable is a broken config whatever
-            # shape it is broken in.
-            if isinstance(e, ValueError | AttributeError):
-                path_bak = path + ".bak"
-
-                # First check if a backup file already exists. If yes, remove it.
-                if os.path.exists(path_bak):
-                    os.remove(path_bak)
-
-                # Move the invalid config file to the backup location.
-                shutil.move(path, path_bak)
-                print(
-                    "Something is wrong with your config. Maybe it is not compatible anymore due to a new app version."
-                    f" You can find a backup of your old config here: '{path_bak}'. A new default config was created."
-                )
-
+            # app. TypeError is a field of the wrong shape (a list where a number
+            # belongs): it used to skip the set-aside, so the defaults written
+            # back below replaced the only copy. A file that is there and
+            # unusable is a broken config whatever shape it is broken in.
             self.data = self.cls_model()
+            if not _set_aside(path, e):
+                # Not moved (a lock, a read-only folder), so it is still the
+                # only copy: defaults for this session, nothing written over it.
+                self._keep_file_untouched = True
+                return False
+        except OSError as e:
+            # There but unreadable (permissions, a folder under that name, a
+            # Windows lock with no read share). Start on defaults for this
+            # session and never write them over a file that may be fine.
+            logger.warning(
+                "Could not read %s (%s); using defaults for this session", os.path.basename(path), type(e).__name__
+            )
+            self.data = self.cls_model()
+            self._keep_file_untouched = True
+            return False
 
         # Call save in case of we need to update the saved config, due to changes in code.
         # This write-back is an optional upgrade persist: if another process
@@ -322,6 +366,58 @@ def api_waits_wake_for(event) -> None:
     _api_waits.event = event
 
 
+def _quality_or_default(value) -> tidalapi.Quality:
+    """``value`` as a tidalapi Quality, or the model's default when it is not
+    one (a None or a stray string that got past the reader)."""
+    try:
+        return tidalapi.Quality(value)
+    except (ValueError, TypeError):
+        logger.warning("Config: audio quality unusable, using the default")
+        return tidalapi.Quality(ModelSettings().quality_audio)
+
+
+def _field_unusable(hint, value) -> bool:
+    """A null, or a value that is not a member of the enum the field holds."""
+    if value is None:
+        return True
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):
+        try:
+            hint(value)
+        except (ValueError, TypeError):
+            return True
+    return False
+
+
+def _drop_unusable_fields(settings_json: str, cls_model) -> str:
+    """The stored JSON with every field the model could not use removed, so
+    the dataclass default fills it in and the rest of the file survives.
+
+    Two shapes reached the whole-file bail-out below (settings.json moved to
+    .bak, every setting back to stock): a null value (a hand edit, a sync
+    tool, a half-merged file), which dataclasses_json keeps as None and then
+    crashes the launch in settings_apply or the migration compare, and an
+    enum member this build does not know (a rollback past a newer tier),
+    which raises out of from_json for that one field and threw away the
+    download folder, every template and every toggle with it."""
+    try:
+        raw = json.loads(settings_json)
+    except (JSONDecodeError, TypeError):
+        return settings_json
+    if not isinstance(raw, dict):
+        return settings_json
+    try:
+        hints = typing.get_type_hints(cls_model)
+    except Exception:
+        return settings_json
+    dropped = [key for key, value in raw.items() if key in hints and _field_unusable(hints[key], value)]
+    if not dropped:
+        return settings_json
+    for key in dropped:
+        del raw[key]
+    logger.warning("Config: %d unusable field(s) reset to default", len(dropped))
+    return json.dumps(raw)
+
+
 class _ApiRetry(Retry):
     """A Retry that cannot be told to wait indefinitely, or to fall over.
 
@@ -469,7 +565,18 @@ class Tidal(BaseConfig, metaclass=SingletonMeta):
             self.settings = settings
 
         if not self.is_atmos_session:
-            self.session.audio_quality = tidalapi.Quality(self.settings.data.quality_audio)
+            # A job on the pool pins its row's tier onto this same session
+            # under stream_lock for the length of one manifest request; a
+            # write from the GUI thread in that window fetched that track at
+            # today's setting. The wait is bounded (the manifest request is
+            # sub-second) so a stuck lock cannot freeze the GUI.
+            lock = getattr(self, "stream_lock", None)
+            held = bool(lock is not None and lock.acquire(timeout=2.0))
+            try:
+                self.session.audio_quality = _quality_or_default(self.settings.data.quality_audio)
+            finally:
+                if held:
+                    lock.release()
         self.session.video_quality = tidalapi.VideoQuality.high
 
         return True
