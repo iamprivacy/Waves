@@ -22,6 +22,119 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.31 (2026-09-24)
+
+### ✨ Added
+
+- ⬇️ My Tidal > Tracks has a DOWNLOAD ALL button that queues every favorite track after confirming the count ([issue #43](https://github.com/iamprivacy/Waves/issues/43)).
+- ⬇️ My Tidal > Albums, Artists, Playlists, Mixes and Videos now have the same DOWNLOAD ALL button, each after confirming the count: Albums queues every favorite album, Artists every favorite artist's full discography, Playlists every playlist (folders included), Mixes every mix and Videos every favorite video.
+
+### 🔧 Changed
+
+- 📚 My Tidal pages open faster: a page arrives knowing which rows are already in your library.
+- 📀 Expanding an album or playlist is faster too: its song rows arrive knowing which ones you already have.
+- 🔄 A My Tidal page that quietly refreshes keeps the rows it already shows, instead of rebuilding every one; an open album stays open and a selection stays selected.
+- ⏱️ A My Tidal page left open for a long time now quietly picks up favorites you added elsewhere, the way Browse already did.
+- 🗑️ A page left open for a while now notices when you delete a downloaded file outside Waves, instead of showing DOWNLOADED until you navigate.
+- 🎤 A playlist, mix, album or artist page left open for a long time now quietly picks up changes, such as a new release or a rebuilt editorial playlist.
+- 🔖 M4A files now store the ISRC where tag editors and library managers look for it, and FLAC and MP3 files carry the explicit flag the way M4A files already did.
+- 📝 The download delay setting now says plainly that it paces a long run.
+- ⏸️ On macOS, with the window hidden or minimized and nothing downloading, Waves checks a network download folder every ten minutes instead of every minute.
+
+### 🐛 Fixed
+
+- 🔎 Pressing Enter while a pasted search is still animating in now searches the pasted text, not the animation ([issue #41](https://github.com/iamprivacy/Waves/issues/41)).
+- 🔙 Going back to a library artist page that failed to load no longer stops the Back and Forward history from recording later pages.
+- ⚙️ A settings section you once opened or closed by hand now still opens when an update notice or folder warning links to it.
+- 🖱️ The quality menu rows and the Browse tiles no longer bounce past their resting size when hovered.
+- 📂 The missing-folder, folder-unreachable and FFmpeg-missing prompts now appear above the download queue when it is open.
+- 🔄 An update check that could not reach the server now says "Could not check" instead of "Up to date", for both Waves and FFmpeg.
+- 🔁 After signing out, the next account's Browse shelves load more again and its My Tidal sort choices start fresh.
+- 📥 An album or playlist downloaded earlier in the same session now opens the REDOWNLOAD prompt without a restart.
+- 💿 An expanded album whose track list is still loading no longer flashes DOWNLOAD over a copy you already have.
+- 🔙 Going back to the My Tidal category you were already on now refreshes it quietly, like every other visit.
+- 🧰 Turning the diagnostics toggles on or off no longer marks Settings as having unsaved changes.
+- 🃏 In the Console Browse layout, cards now show DONE for albums, playlists and mixes downloaded in an earlier session, and clicking one opens the redownload prompt.
+- 🎞️ Track rows in an expanded album no longer flash the download arrow before Waves has checked what you already downloaded.
+- 🔗 With "symlink to track" on, a playlist folder file that belongs to a different track is now left alone instead of being replaced by a link or moved.
+- 🎛️ Downloading a mix while hovering over another mix card no longer risks queuing the wrong mix's tracks.
+- 🃏 A Browse card built a moment after the page loaded no longer shows DOWNLOAD over an album you already downloaded.
+- 🔁 A RETRY that waited for FFmpeg now keeps the quality its row was queued at, even if the setting changed meanwhile.
+- 🎚️ Saving a new audio quality while a download is fetching a track no longer changes that track's quality.
+- 🏷️ A library match confirmed through MusicBrainz now shows the same badge on every card of a page, not only the ones already on screen.
+- 🔒 Log lines and diagnostics exports no longer include a network share's folder name, a scanner failure's file path, or a stream address.
+- 🙈 The "also hide titles and searches" export switch now hides a title that contains « or » and very long titles in full.
+- 🫧 A paused preview's cover no longer keeps animating on hidden tabs or in a minimized window.
+- 🖼️ A release shown in two places in Browse keeps updating its download status after one of the two cards goes away.
+- 🎬 A hover video that fails while its full-quality version is ready now keeps playing instead of pausing.
+- 📋 The download queue opens faster when Completed is collapsed with many finished items.
+- 🔍 Switching the search result filter to Albums or Tracks is quicker.
+- 🎬 Picking a video quality in the player no longer stalls playback for a moment.
+- 🧭 A Browse page is no longer shown before it has finished building.
+- 🚀 The update notice and the FFmpeg setup card now fade in with the interface instead of appearing over the launch animation.
+- 🧱 The tools the packaged app is built with were updated, to address a rare crash shortly after launch.
+- 🏷️ IN LIBRARY badges no longer fade in all over again every time you move between My Tidal categories or tabs.
+- 🏷️ Opening a My Tidal category while the library is still being read no longer draws the page bare and then lights every IN LIBRARY badge a moment later.
+- 🔗 Turning "symlink to track" off no longer makes albums downloaded while it was on read as not downloaded when your download or library folder is reached through a link.
+- 🎚️ A Best of Both download for an album given its own quality choice is now planned at that choice, not at the Settings quality, and the choice follows the download when it is queued under another edition.
+- 🔐 Signing out while My Tidal is still reading your playlists or favourites no longer lets the next account see the previous account's playlists, folders or favourites.
+- 🔁 RETRY after switching accounts now fetches the item again under the account that is signed in, instead of downloading through the previous one.
+- 📂 The Videos fold and the SHOW ALL state of every artist-page section are remembered across launches like the other sections.
+- 🧹 Reset application also removes the saved recent searches.
+- ⚙️ A settings file with an empty value or a quality this version does not know now resets just that one setting, instead of setting the whole file aside or stopping Waves from starting.
+- 🪟 An album or playlist whose tracks could not be loaded now says so in the panel and tries again when you collapse and expand it, instead of showing an empty list.
+- 🛑 Pressing STOP while a download is still waiting for its playlist folders or its details now cancels it, instead of starting it after the press.
+- 🚫 A download that could not fetch its item because of a rate limit or a connection drop now says "try again" instead of claiming the item is gone.
+- 🏠 A first Home load or a scroll that fails now says so instead of reading as an empty library, and RETRY ALL says how many rows it could not restart.
+- 🔎 A library rescan that fails now says so in Settings instead of returning to "Rescan" silently.
+- ⏳ A throttled cover-art or track server can no longer hold a download for hours: it is retried after a short wait, and STOP works.
+- 🔗 With "symlink to track" on, a system or share that refuses links now keeps a real copy in the playlist folder instead of leaving it empty with an empty playlist file.
+- 🪟 On Windows, a deep folder with non-Latin characters no longer shrinks the temporary file name so far that two tracks could share it.
+- 🍎 On macOS, tracks in a library or download folder whose name carries an accent are recognized as yours whichever way the volume spells the name.
+- 🏷️ A downloaded file that cannot be tagged is no longer filed in your library untagged and counted as done; the row fails so you can retry it.
+- 🔒 On macOS and Linux, the folder holding your settings, sign-in, caches and logs is now open to your account only, as the Privacy section always said.
+- 🖼️ A track whose separate cover.jpg fetch fails now still lands, without the cover file, instead of failing the whole track.
+- 🎤 Lyrics are written into the audio file only when "Embed lyrics" is on; "Save lyrics next to the track" alone now writes just the sidecar.
+- 🧯 A settings or sign-in file that cannot be opened no longer stops Waves from launching, and a damaged one is now kept as a backup (without replacing an older backup) before defaults are used.
+- 🌐 With "symlink to track" on, a library or download folder on a share that stopped answering no longer makes every ownership check wait on it at the same time.
+- 🗑️ On Windows, albums sitting in the NTFS recycle bin inside your library folder no longer count as owned.
+- 🐧 On Linux desktops without a system file picker, Browse in Settings opens a folder picker again.
+- 🕵️ A Windows profile name with a space in it is now fully hidden in diagnostics, not just its first word.
+- 🌙 A minimized Waves no longer checks TIDAL for fresher pages every five minutes.
+- 📜 An album playlist no longer lists the same song twice when the folder holds a stereo copy beside its Atmos copy, or an old file beside its upgrade.
+- 🎚️ A track borrowed from another edition in a best of both download no longer carries that edition's album loudness value.
+- 🏷️ A file that arrives with an empty tag block is tagged instead of failing, and a track with no album artist no longer gets an empty artist field written.
+- 💿 A track whose disc count is unknown is no longer tagged as disc 2 of 1.
+- 🎬 A finished music video that the tagger cannot open is kept instead of being reported as failed.
+- 🌐 A network share's server and share name no longer appear in the diagnostics log on Windows (UNC paths) or Linux (gvfs mounts).
+- 🔞 When an album's files or folder name say whether it is clean or explicit, the library check and the IN LIBRARY badge no longer count a clean copy as the explicit release, or the reverse, so the other edition is still downloaded.
+- 💿 A two-disc album kept in CD1 and CD2 folders, or kept flat and tagged per disc, now reads as complete instead of partial (such as "20 of 40").
+- 🎭 A compilation with no album-artist tag can no longer stand in for an artist's album of the same name.
+- 📀 One disc of a multi-disc set no longer reads as the whole album when TIDAL gives no track count, and disc folders from two different editions are no longer added up into one album.
+- 📂 On macOS, revealing an album folder now selects it in Finder instead of opening it, so a folder named like an app is never launched.
+- 🎛️ A best of both download whose borrowed tracks TIDAL refuses now fetches the album's own copies instead of finishing short and blaming TIDAL.
+- 🎵 A radio edit that shares a code with the album version can no longer land under the album version's title, or be silently skipped, in a best of both download.
+- 📋 Expanding a queued album that TIDAL listed short now shows every track, including the ones that failed, and a borrowed track predicts the tier it will really land at.
+- 🔞 "Most-complete edition only" no longer swaps a clean album for a fuller explicit one, or the reverse, in a discography or on the artist page.
+- 🎤 Two different guest tracks with the same title are no longer merged into one in a discography download.
+- 🔊 An album offered only in Dolby Atmos that you download from now on no longer reads DOWNLOAD afterwards when Atmos is off and the quality is Lossless or Max.
+- 💽 A track already on disk that Waves has no record of (after a reset, or written by another computer) is recorded when a download finds it, so its button settles instead of reading DOWNLOAD forever.
+- 🔢 A complete album with music videos no longer shows as partly in your library.
+- ⚙️ A settings file that cannot be written no longer stops Waves from starting during its one-time video setting migration.
+- 🗂️ Signing out or resetting while a page snapshot was being saved no longer leaves the old account's pages on disk.
+- 🪟 On Windows, a preferences write that collides with an antivirus scan is retried instead of dropped.
+- 🧵 A network folder that stops answering no longer piles up one stuck check after another for as long as it is down.
+- 🔗 Editorial page links from TIDAL are fetched only when they point inside TIDAL's own API.
+- 🧹 The artist credits kept for shown rows are cleared at sign-out, a queue row that is cleared frees its progress state, and decorative animations stop while the window is hidden.
+- 🪟 On Windows, clicking Restart hours after an update was installed now applies the update instead of just closing Waves.
+- 🪟 On Windows, an update that could not be applied because the install folder was in use now says so instead of asking for a restart again and again.
+- 🍺 A Homebrew-managed update shows Downloading, Installing and Finishing instead of Homebrew's own output.
+- 🛑 Update and FFmpeg install failures show a plain reason instead of raw error text, without folder paths or other machine details.
+- 🪟 On Windows, updating or removing the managed FFmpeg works while a download or preview is still using it.
+- 💾 An update copy that runs out of disk space no longer leaves a partial copy next to the app.
+- 🔏 A release without a signed checksum manifest is refused before the download starts, and a pre-release build is offered its final release.
+- 📜 My Tidal tabs now open at the very top instead of a few pixels down, so the first row no longer sits tight under the tab bar.
+
 ## 🗂️ v0.1.30 (2026-09-15)
 
 ### 🐛 Fixed
