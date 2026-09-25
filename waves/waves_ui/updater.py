@@ -125,6 +125,43 @@ class UpdateCancelled(Exception):
     """Raised when an install is aborted via its :class:`~threading.Event`."""
 
 
+def user_facing_error(
+    exc: BaseException,
+    fallback: str,
+    plain: tuple[type, ...] = (),
+    *,
+    server: str = "the update server",
+    folder: str = "its install folder",
+) -> str:
+    """Fixed, plain wording for an install or update failure the user reads.
+
+    An :class:`UpdaterError` (and any type in ``plain``) is written for the
+    user and is shown as is. Everything else is library or OS text (requests'
+    ``HTTPSConnectionPool(host=...)``, ``404 Client Error ... for url``, a
+    ``[WinError 5]``) and is mapped to a sentence that names the situation
+    instead; ``str(exc)`` belongs in the log only, which the caller writes
+    separately. Nothing here can carry a path, a host or a URL. ``server``
+    and ``folder`` name what was reached and written, so the FFmpeg installer
+    does not talk about the app's own update server and install folder.
+    """
+    if isinstance(exc, (UpdaterError, *plain)):
+        return str(exc).strip() or fallback
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 404:
+            return "The download is not available right now"
+        return f"{server[:1].upper()}{server[1:]} returned an error"
+    if isinstance(exc, requests.exceptions.ConnectionError | requests.exceptions.Timeout):
+        return f"Could not reach {server}"
+    if isinstance(exc, PermissionError):
+        return f"Waves could not write to {folder}"
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return "Not enough disk space"
+    if isinstance(exc, ValueError) and "checksum" in str(exc).lower():
+        return "The download did not verify"
+    return fallback
+
+
 @dataclass(frozen=True)
 class Release:
     """A resolved release + the asset to install for the current platform."""
@@ -306,35 +343,81 @@ def _current_exe() -> Path:
     return Path(sys.executable).resolve()
 
 
+_VERSION_RE = re.compile(r"\d+(?:\.\d+)*")
+
+
 def _parse_version(tag: str) -> tuple[int, ...]:
     """Parse a ``vX.Y.Z`` / ``X.Y.Z`` tag into a comparable int tuple.
 
-    Leading ``v`` and any pre-release/build suffix are ignored; missing parts
-    read as 0 so ``1.2`` and ``1.2.0`` compare equal. Unparseable → ``()``.
+    Leading ``v`` and any pre-release/build suffix are dropped here (see
+    :func:`_parse_prerelease` for the suffix); missing parts read as 0 so
+    ``1.2`` and ``1.2.0`` compare equal. Unparseable → ``()``.
     """
-    m = re.search(r"\d+(?:\.\d+)*", tag or "")
+    m = _VERSION_RE.search(tag or "")
     if not m:
         return ()
     return tuple(int(p) for p in m.group(0).split("."))
 
 
+def _parse_prerelease(tag: str) -> tuple:
+    """The pre-release segment of ``tag`` as a sort key, ``()`` for a final.
+
+    ``v0.1.31-rc1``, ``0.1.31rc1``, ``0.1.31-beta.2`` and ``0.1.31.dev3`` all
+    carry one; ``0.1.31`` and ``0.1.31+build7`` (build metadata only) do not.
+    Identifiers are split on ``.`` and ``-``; a numeric one sorts below an
+    alphabetic one and numerics compare as numbers, the semver ordering, so
+    ``rc1 < rc2 < rc10`` and ``beta < rc``. Unparseable → ``()``.
+    """
+    m = _VERSION_RE.search(tag or "")
+    if not m:
+        return ()
+    rest = tag[m.end() :].split("+", 1)[0].strip().lstrip("-._")
+    if not rest:
+        return ()
+    parts: list[tuple[int, object]] = []
+    for ident in re.split(r"[.\-_]+", rest):
+        # "rc1" is one identifier in semver but reads better as rc, 1.
+        for piece in re.findall(r"\d+|[A-Za-z]+", ident):
+            parts.append((0, int(piece)) if piece.isdigit() else (1, piece.lower()))
+    return tuple(parts)
+
+
+def _version_key(tag: str, width: int) -> tuple:
+    """A total order over tags: the numeric part padded to ``width``, then
+    "final beats pre-release", then the pre-release identifiers."""
+    nums = _parse_version(tag)
+    nums = nums + (0,) * (width - len(nums))
+    pre = _parse_prerelease(tag)
+    return (nums, 1 if not pre else 0, pre)
+
+
 def _is_newer(latest: str, current: str) -> bool:
-    """True if release tag ``latest`` is strictly newer than ``current``."""
+    """True if release tag ``latest`` is strictly newer than ``current``.
+
+    A pre-release sits below its own final (``0.1.31-rc1 < 0.1.31``), so a
+    user on the release candidate is still offered the final build. An
+    unparseable ``latest`` is never newer.
+    """
     lt, ct = _parse_version(latest), _parse_version(current)
     if not lt:
         return False
-    # Pad to equal length for a lexicographic tuple compare (1.2 == 1.2.0).
     width = max(len(lt), len(ct))
-    return lt + (0,) * (width - len(lt)) > ct + (0,) * (width - len(ct))
+    return _version_key(latest, width) > _version_key(current, width)
 
 
 def _is_older(candidate: str, current: str) -> bool:
-    """True if ``candidate`` is strictly older than ``current`` (1.2 == 1.2.0)."""
+    """True if ``candidate`` is strictly older than ``current`` (1.2 == 1.2.0).
+
+    This is the anti-rollback gate, so it fails closed: a candidate version
+    that cannot be parsed counts as older (refused), and the same pre-release
+    order as :func:`_is_newer` applies, so a signed ``0.1.31-rc1`` manifest
+    replayed to a ``0.1.31`` install is a downgrade.
+    """
     cv, ct = _parse_version(candidate), _parse_version(current)
     if not cv:
-        return False
+        return True
     width = max(len(cv), len(ct))
-    return cv + (0,) * (width - len(cv)) < ct + (0,) * (width - len(ct))
+    return _version_key(candidate, width) < _version_key(current, width)
 
 
 def _manifest_version(manifest_text: str) -> str:
@@ -346,6 +429,35 @@ def _manifest_version(manifest_text: str) -> str:
     """
     m = re.search(r"^#\s*waves-version:\s*(\S+)", manifest_text, re.MULTILINE)
     return m.group(1) if m else ""
+
+
+#: The three words a package-manager upgrade is allowed to put on screen, in
+#: the order they happen, with the coarse progress each one lands on. Not
+#: "upgrading": brew prints "==> Upgrading 1 outdated package" before it
+#: downloads anything, and phases never move back to Downloading.
+_MANAGED_PHASES = (
+    ("Downloading", 35.0, ("downloading", "fetching", "already downloaded")),
+    ("Installing", 70.0, ("installing", "backing app", "removing app", "moving", "linking", "unpacking")),
+    ("Finishing", 90.0, ("purging", "cleanup", "was upgraded", "successfully", "🍺")),
+)
+
+
+def _managed_phase(line: str, current: str) -> tuple[str, float]:
+    """Map one line of manager output to ``(phase word, progress)``.
+
+    Phases only move forward: a "Downloading" line printed after the install
+    started (a second cask dependency) does not send the button backwards.
+    A line that matches nothing keeps the current phase, and ``progress`` is
+    0 when nothing changed.
+    """
+    low = line.lower()
+    ranks = {name: i for i, (name, _, _) in enumerate(_MANAGED_PHASES)}
+    for name, pct, needles in _MANAGED_PHASES:
+        if any(n in low for n in needles):
+            if current and ranks[name] < ranks.get(current, -1):
+                return current, 0.0
+            return name, pct
+    return current, 0.0
 
 
 def _running_appimage() -> str:
@@ -546,6 +658,10 @@ class AppUpdater:
         # before the next update, so the message must say so rather than
         # promising a folder Waves cannot actually keep.
         self.kept_unprotected: bool = False
+        # Plain wording for a Windows swap the helper reported as failed at the
+        # previous exit (the install folder was in use), found at this launch.
+        # Empty when the last swap went through or nothing was staged.
+        self.swap_failure: str = ""
 
     # ----- configuration / locations ------------------------------------- #
     def is_configured(self) -> bool:
@@ -595,6 +711,9 @@ class AppUpdater:
             # the helper's own keep, which has no other voice than update.log.
             "kept_backup": self.kept_backup,
             "kept_unprotected": self.kept_unprotected,
+            # The helper's own report that the last swap did not happen, in
+            # words the card can show; "" when there is nothing to report.
+            "swap_failure": self.swap_failure,
             "can_self_install": configured and frozen and not channel,
             # A managed install whose manager has a runnable upgrade command
             # (and the manager's binary is present) still gets one-click
@@ -769,6 +888,23 @@ class AppUpdater:
         """The download, verify and apply half of :meth:`install`, under the lock."""
         _check_abort()
 
+        # Verification is mandatory and fail-closed: the updater downloads and
+        # *executes* code, so it must prove both authenticity and integrity
+        # BEFORE anything is extracted, swapped in, or de-quarantined. The trust
+        # anchor is an Ed25519 signature over the SHA256SUMS manifest, checked
+        # against UPDATE_PUBLIC_KEY, a key baked into this binary, never on the
+        # download host. A same-channel .sha256 alone proves only transport
+        # integrity; the signature is what stops a tampered release. Order matters:
+        # the manifest's signature is verified first, and only the authenticated
+        # manifest's hash is then trusted to check the payload.
+        #
+        # All of it runs BEFORE the payload download: a release that has no
+        # signed manifest, a bad signature, an older version or an asset the
+        # manifest does not list can never pass, so the hundreds of megabytes
+        # are not fetched (again, on every retry) only to be refused.
+        expected = self._verify_release(release, sess, _log)
+        _check_abort()
+
         _log(f"downloading {release.version} ({release.asset})")
         # release.asset comes from the (untrusted, pre-verification) release JSON, so
         # strip any path component before it reaches the filesystem as a temp suffix.
@@ -779,44 +915,6 @@ class AppUpdater:
         try:
             self._download(sess, release.url, payload, progress_cb, abort)
             _check_abort()
-
-            # Verification is mandatory and fail-closed: the updater downloads and
-            # *executes* code, so it must prove both authenticity and integrity
-            # BEFORE anything is extracted, swapped in, or de-quarantined. The trust
-            # anchor is an Ed25519 signature over the SHA256SUMS manifest, checked
-            # against UPDATE_PUBLIC_KEY, a key baked into this binary, never on the
-            # download host. A same-channel .sha256 alone proves only transport
-            # integrity; the signature is what stops a tampered release. Order matters:
-            # the manifest's signature is verified first, and only the authenticated
-            # manifest's hash is then trusted to check the payload.
-            if not UPDATE_PUBLIC_KEY:
-                raise UpdaterError("Refusing to install an update: this build has no update-signing key configured.")
-            if not release.sha256sums_url or not release.sig_url:
-                raise UpdaterError("Refusing to install an update: the release has no signed checksum manifest.")
-            _log("verifying update signature")
-            manifest = self._fetch_manifest(sess, release.sha256sums_url)
-            signature = self._fetch_signature(sess, release.sig_url)
-            if not manifest or not signature:
-                raise UpdaterError("Refusing to install an update: could not fetch the signed checksum manifest.")
-            if not verify_signature(manifest, signature, UPDATE_PUBLIC_KEY):
-                raise UpdaterError("Refusing to install an update: the checksum manifest's signature is invalid.")
-            manifest_text = manifest.decode("utf-8", "replace")
-            # Anti-rollback: the signed manifest carries the release version, so an
-            # attacker can't replay an older (still-validly-signed) release to force a
-            # downgrade to a build with known holes. The version is trusted only
-            # because it lives inside the signature-verified manifest (not the
-            # unsigned GitHub API tag).
-            mver = _manifest_version(manifest_text)
-            if not mver:
-                raise UpdaterError("Refusing to install an update: the signed manifest has no version line.")
-            if _is_older(mver, self.current_version):
-                raise UpdaterError(
-                    f"Refusing to install {mver}: it is older than the installed {self.current_version} (downgrade protection)."
-                )
-            sums = parse_sha256sums(manifest_text)
-            expected = sums.get(release.asset)
-            if not expected:
-                raise UpdaterError(f"Refusing to install an update: {release.asset} is not in the signed manifest.")
             _log("verifying checksum")
             actual = _sha256_file(payload)
             if actual.lower() != expected.lower():
@@ -856,6 +954,46 @@ class AppUpdater:
             # caller never has to guess which it is holding.
             "already_staged": False,
         }
+
+    def _verify_release(self, release: Release, sess, _log) -> str:
+        """Authenticate ``release`` and return the payload's expected sha256.
+
+        Everything that can refuse a release without its payload happens here:
+        the baked-in key, the presence of SHA256SUMS and its signature, the
+        signature itself, the signed version line (anti-rollback) and the
+        asset's presence in the manifest. Only the byte hash needs the payload,
+        and :meth:`_install_locked` checks that after the download.
+        """
+        if not UPDATE_PUBLIC_KEY:
+            raise UpdaterError("Refusing to install an update: this build has no update-signing key configured.")
+        if not release.sha256sums_url or not release.sig_url:
+            raise UpdaterError("Refusing to install an update: the release has no signed checksum manifest.")
+        _log("verifying update signature")
+        manifest = self._fetch_manifest(sess, release.sha256sums_url)
+        signature = self._fetch_signature(sess, release.sig_url)
+        if not manifest or not signature:
+            raise UpdaterError("Refusing to install an update: could not fetch the signed checksum manifest.")
+        if not verify_signature(manifest, signature, UPDATE_PUBLIC_KEY):
+            raise UpdaterError("Refusing to install an update: the checksum manifest's signature is invalid.")
+        manifest_text = manifest.decode("utf-8", "replace")
+        # Anti-rollback: the signed manifest carries the release version, so an
+        # attacker can't replay an older (still-validly-signed) release to force a
+        # downgrade to a build with known holes. The version is trusted only
+        # because it lives inside the signature-verified manifest (not the
+        # unsigned GitHub API tag). _is_older fails closed on a version line
+        # that does not parse.
+        mver = _manifest_version(manifest_text)
+        if not mver:
+            raise UpdaterError("Refusing to install an update: the signed manifest has no version line.")
+        if _is_older(mver, self.current_version):
+            raise UpdaterError(
+                f"Refusing to install {mver}: it is older than the installed {self.current_version} (downgrade protection)."
+            )
+        sums = parse_sha256sums(manifest_text)
+        expected = sums.get(release.asset)
+        if not expected:
+            raise UpdaterError(f"Refusing to install an update: {release.asset} is not in the signed manifest.")
+        return expected
 
     # ----- a staged swap that has not happened yet ----------------------- #
     _LOCK_NAME = "install.lock"
@@ -909,20 +1047,125 @@ class AppUpdater:
         if self._armed_result is not None:
             return dict(self._armed_result)
         if self._read_armed_marker() is None:
+            self._clear_swap_outcome()  # a report with nothing staged is stale
             return None  # the common case: nothing staged, no lock taken
         lock = _StagingLock(self.staging_dir / self._LOCK_NAME)
         if not lock.try_acquire():
             return None  # another copy of Waves owns this update; it will apply it
         keep_lock = False
         try:
-            result = self._take_over_staged_swap()
-            if result is not None:
+            result = self._resume_after_failed_swap() or self._take_over_staged_swap()
+            if result is not None and self._armed_result is not None:
                 self._armed_lock = lock
                 keep_lock = True
             return result
         finally:
             if not keep_lock:
                 lock.release()
+
+    #: Written by the Windows helper beside armed.json when its swap did not
+    #: happen: one line, ``swap_failed <reason>``. The helper used to say so
+    #: only in update.log, which nothing reads, so every later launch re-armed
+    #: the same swap and promised "restart to finish" in a loop.
+    _OUTCOME_NAME = "swap_outcome.txt"
+
+    def _swap_outcome(self) -> Path:
+        return self.staging_dir / self._OUTCOME_NAME
+
+    def _read_swap_outcome(self) -> str:
+        """The reason word of a failed swap the helper reported, or ""."""
+        try:
+            text = self._swap_outcome().read_text("ascii", errors="replace")
+        except OSError:
+            return ""
+        words = text.split()
+        if len(words) < 1 or words[0] != "swap_failed":
+            return ""
+        reason = re.sub(r"[^a-z_]", "", words[1].lower())[:32] if len(words) > 1 else ""
+        return reason or "unknown"
+
+    def _clear_swap_outcome(self) -> None:
+        try:
+            self._swap_outcome().unlink(missing_ok=True)
+        except OSError:
+            logger.debug("could not clear the swap outcome", exc_info=True)
+
+    @staticmethod
+    def _swap_failure_message(reason: str) -> str:
+        if reason == "in_use":
+            return "The update could not be applied because the install folder was in use."
+        if reason in ("swap_in", "no_exe"):
+            return "The update could not be applied, so the previous version was kept."
+        return "The update could not be applied."
+
+    def _resume_after_failed_swap(self) -> dict | None:
+        """The launch after a helper reported ``swap_failed``, lock held.
+
+        Returns None when there is no report to act on (the ordinary
+        take-over runs). Otherwise the staged version is checked against the
+        running one: if the swap really did not land, the result carries
+        ``swap_failed`` with plain ``message`` wording, and the helper is
+        re-armed at most ONCE (``rearmed`` says whether it was): a second
+        failure clears the marker and the staged tree so the loop ends and
+        a fresh Install is the way forward.
+        """
+        reason = self._read_swap_outcome()
+        if not reason:
+            return None
+        self._clear_swap_outcome()
+        pending = self._read_armed_marker()
+        if pending is None or not _is_newer(pending.get("version", ""), self.current_version):
+            return None  # the swap landed after all, or nothing is staged: the ordinary path clears up
+        message = self._swap_failure_message(reason)
+        self.swap_failure = message
+        logger.warning("updater: the staged swap did not happen (%s)", reason)
+        failed = {
+            **pending,
+            "already_staged": True,
+            "ok": False,
+            "swap_failed": True,
+            "swap_reason": reason,
+            "message": message,
+        }
+        if int(pending.get("rearmed_after_failure") or 0) >= 1:
+            self._clear_armed_marker()
+            target = _current_exe()
+            _rmtree(_spare_sibling(target.parent, ".new", target.name))
+            _rmtree(target.with_suffix(target.suffix + ".new"))
+            return {**failed, "rearmed": False}
+        self._write_armed_marker({**pending, "rearmed_after_failure": 1})
+        armed = self._take_over_staged_swap()
+        if armed is None:
+            return {**failed, "rearmed": False}
+        return {**armed, **failed, "rearmed": True}
+
+    def rearm_for_restart(self) -> bool:
+        """Make sure a helper is waiting before the Restart button quits.
+
+        The helper is armed when the update installs and gives up after
+        ``_HELPER_WAIT_TICKS``; a Restart clicked hours later closed Waves
+        with nothing left to swap or relaunch. The helper deletes its own
+        script when it exits, so a script still on disk means a live helper
+        (never arm a second one for the same pid: both would wake on the same
+        exit and the loser's rmdir hits the winner's backup). A missing script
+        means it gave up, and a fresh one is armed against this process.
+        Returns whether a helper is now waiting; False also when nothing is
+        armed or this is not Windows. The staging lock is already held.
+        """
+        if self.os_key != "windows" or self._armed_result is None:
+            return False
+        if (self.staging_dir / f"apply_update_{os.getpid()}.bat").is_file():
+            return True
+        logger.info("updater: the swap helper gave up waiting, arming a fresh one for the restart")
+        try:
+            armed = self._take_over_staged_swap()
+        except Exception:
+            logger.warning("updater: could not re-arm the staged swap", exc_info=True)
+            return False
+        if armed is None:
+            self._armed_result = None
+            return False
+        return True
 
     def _take_over_staged_swap(self) -> dict | None:
         """Arm a helper for a swap staged earlier, or clear one that is spent.
@@ -1053,6 +1296,13 @@ class AppUpdater:
 
             Thread(target=_abort_watch, daemon=True).start()
         lines: list[str] = []
+        # What the manager prints is raw tool text: cache paths under the
+        # user's home, download URLs, digests. None of it belongs on the
+        # Settings button or the update toast, so the UI is told a fixed
+        # phase word and the line itself goes to the log alone, scrubbed.
+        from . import diagnostics
+
+        phase = ""
         try:
             # stdout=PIPE above guarantees a stream; `or ()` keeps a typing
             # stub / exotic Popen replacement from crashing the loop.
@@ -1061,13 +1311,13 @@ class AppUpdater:
                 if not line:
                     continue
                 lines.append(line)
-                low = line.lower()
-                if progress_cb:
-                    if "downloading" in low or "fetching" in low:
-                        progress_cb(35.0)
-                    elif "installing" in low or "upgrading" in low or "moving" in low:
-                        progress_cb(70.0)
-                log(line[:160])
+                logger.debug("%s: %s", label, diagnostics.scrub(line[:400]))
+                next_phase, pct = _managed_phase(line, phase)
+                if next_phase != phase:
+                    phase = next_phase
+                    if progress_cb and pct:
+                        progress_cb(pct)
+                    log(phase)
             code = proc.wait()
         finally:
             reader_done.set()
@@ -1077,8 +1327,13 @@ class AppUpdater:
             raise UpdateCancelled()
         output = "\n".join(lines)
         if code != 0:
-            tail = "\n".join(lines[-4:])
-            raise UpdaterError(f"{label} reported an error:\n{tail}" if tail else f"{label} exited with code {code}.")
+            # The tail is the manager's own text (download URLs, curl errors,
+            # cache paths), so it goes to the log alone, scrubbed, and the
+            # card gets fixed wording with the command to run by hand.
+            tail = diagnostics.scrub("\n".join(lines[-4:]))
+            logger.warning("%s upgrade exited with code %s: %s", label, code, tail)
+            hint = channel_hint(channel)
+            raise UpdaterError(f"{label} reported an error." + (f" Try `{hint}` in a terminal." if hint else ""))
         if re.search(r"already (installed|up-to-date)|not upgrading", output, re.IGNORECASE):
             raise UpdaterError(
                 f"{label} does not see the new version yet; its package lists may be stale."
@@ -1427,8 +1682,14 @@ class AppUpdater:
                 raise
             tmp = target.with_name(target.name + ".new")
             tmp.unlink(missing_ok=True)
-            shutil.copy2(staged, tmp)
-            _chmod_exec(tmp)
+            try:
+                shutil.copy2(staged, tmp)
+                _chmod_exec(tmp)
+            except OSError:
+                # A copy that stopped partway (disk full) must not leave a
+                # partial binary beside the install; the live file is untouched.
+                tmp.unlink(missing_ok=True)
+                raise
             os.replace(tmp, target)  # same filesystem now → atomic
             staged.unlink(missing_ok=True)
         return target
@@ -1454,7 +1715,14 @@ class AppUpdater:
         # 1. Land the new tree on the install volume so the final swap is same-device.
         staged_same_dev = _spare_sibling(install_root, ".new", target.name)
         _rmtree(staged_same_dev)
-        shutil.move(str(new_tree), str(staged_same_dev))  # rename if same-dev, copy if cross-dev
+        try:
+            shutil.move(str(new_tree), str(staged_same_dev))  # rename if same-dev, copy if cross-dev
+        except OSError:
+            # A cross-volume copy that stopped partway (disk full) would
+            # otherwise leave a partial tree beside the install, which keeps
+            # the disk full and is never reclaimed. Same as the Windows twin.
+            _rmtree(staged_same_dev)
+            raise
         # 2. Back up the live install, then swap the new tree in (both same-device).
         backup = _spare_sibling(install_root, ".old", target.name)
         _rmtree(backup)
@@ -1602,6 +1870,7 @@ class AppUpdater:
             f'set "TARGET=%WAVES_UPDATE_4%"\r\n'
             f'set "KEPT=%BACKUP%\\{_KEPT_MARKER}"\r\n'
             f'set "LOG=%~dp0update.log"\r\n'
+            f'set "OUTCOME=%~dp0{self._OUTCOME_NAME}"\r\n'
             f'echo helper start %date% %time% > "%LOG%"\r\n'
             f'if not exist "%NEWTREE%" (echo nothing staged, nothing applied >> "%LOG%" & goto done)\r\n'
             f"set tries=0\r\n"
@@ -1619,10 +1888,11 @@ class AppUpdater:
             f'move "%INSTALL%" "%BACKUP%" >> "%LOG%" 2>&1 && goto swapin\r\n'
             f"if %mtries% LSS 30 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n"
             f'echo backup rename failed, relaunching old build >> "%LOG%"\r\n'
+            f'echo swap_failed in_use> "%OUTCOME%"\r\n'
             f"goto relaunch\r\n"
             f":swapin\r\n"
-            f'move "%NEWTREE%" "%INSTALL%" >> "%LOG%" 2>&1 || (echo swap-in failed >> "%LOG%" & goto restore)\r\n'
-            f'if not exist "%TARGET%" (echo swap left no {target.name} >> "%LOG%" & goto restore)\r\n'
+            f'move "%NEWTREE%" "%INSTALL%" >> "%LOG%" 2>&1 || (echo swap-in failed >> "%LOG%" & echo swap_failed swap_in> "%OUTCOME%" & goto restore)\r\n'
+            f'if not exist "%TARGET%" (echo swap left no {target.name} >> "%LOG%" & echo swap_failed no_exe> "%OUTCOME%" & goto restore)\r\n'
             f'echo swap ok, reclaiming anything that was not part of Waves >> "%LOG%"\r\n'
             f'robocopy "%BACKUP%" "%INSTALL%" /E /MOVE /XC /XN /XO /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1\r\n'
             f'if %ERRORLEVEL% GEQ 8 (echo could not reclaim, keeping the backup folder >> "%LOG%" & echo Waves kept this folder because it holds files that were not part of the app.> "%KEPT%" & goto relaunch)\r\n'
@@ -1668,7 +1938,13 @@ class AppUpdater:
             inside = "Contents/MacOS"
             staged_same_dev = _spare_sibling(bundle, ".new", inside)
             _rmtree(staged_same_dev)
-            shutil.move(str(staged), str(staged_same_dev))
+            try:
+                shutil.move(str(staged), str(staged_same_dev))
+            except OSError:
+                # A partial bundle copy (disk full) is cleaned up, not left
+                # beside the app; the live bundle has not been touched yet.
+                _rmtree(staged_same_dev)
+                raise
             backup = _spare_sibling(bundle, ".old", inside)
             _rmtree(backup)
             backed_up = False
@@ -1775,6 +2051,7 @@ class AppUpdater:
             f'set "BACKUP=%WAVES_UPDATE_2%"\r\n'
             f'set "NEWEXE=%WAVES_UPDATE_3%"\r\n'
             f'set "LOG=%~dp0update.log"\r\n'
+            f'set "OUTCOME=%~dp0{self._OUTCOME_NAME}"\r\n'
             f'echo helper start %date% %time% > "%LOG%"\r\n'
             f"set tries=0\r\n"
             f":wait\r\n"
@@ -1795,9 +2072,10 @@ class AppUpdater:
             f'move /Y "%TARGET%" "%BACKUP%" >> "%LOG%" 2>&1 && goto newin\r\n'
             f"if %mtries% LSS 30 (ping -n 2 127.0.0.1 >nul & goto swap)\r\n"
             f'echo backup move failed, relaunching old build >> "%LOG%"\r\n'
+            f'echo swap_failed in_use> "%OUTCOME%"\r\n'
             f'start "" "%TARGET%" & del "%~f0" & exit /b 1\r\n'
             f":newin\r\n"
-            f'move /Y "%NEWEXE%" "%TARGET%" >> "%LOG%" 2>&1 || (echo new-in move failed, restoring >> "%LOG%" & move /Y "%BACKUP%" "%TARGET%" >nul & start "" "%TARGET%" & del "%~f0" & exit /b 1)\r\n'
+            f'move /Y "%NEWEXE%" "%TARGET%" >> "%LOG%" 2>&1 || (echo new-in move failed, restoring >> "%LOG%" & echo swap_failed swap_in> "%OUTCOME%" & move /Y "%BACKUP%" "%TARGET%" >nul & start "" "%TARGET%" & del "%~f0" & exit /b 1)\r\n'
             f'del /F /Q "%BACKUP%" >nul 2>&1\r\n'
             f'start "" "%TARGET%"\r\n'
             f'echo relaunched >> "%LOG%"\r\n'
@@ -2096,7 +2374,7 @@ def _rmtree(path: Path) -> None:
         elif path.exists():
             path.unlink()
     except Exception:
-        logger.debug("could not remove %s", path, exc_info=True)
+        logger.debug("could not remove %s", os.path.basename(str(path)), exc_info=True)
 
 
 def _chmod_exec(path: Path) -> None:
