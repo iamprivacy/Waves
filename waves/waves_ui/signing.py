@@ -33,6 +33,24 @@ UPDATE_PUBLIC_KEY = "cetggrhiqyMN5HsBCi/f2gJL75FVPOYGU/sd4dI5b+0="
 
 _RAW_PUBKEY_LEN = 32  # an Ed25519 public key is exactly 32 bytes
 
+# DER prefix of a SubjectPublicKeyInfo for an Ed25519 key (RFC 8410): the raw 32
+# bytes appended to this make the PEM body OpenSSL's ``pkeyutl`` reads.
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+
+
+def public_key_pem(public_key_b64: str = UPDATE_PUBLIC_KEY) -> str:
+    """The release public key as a PEM block a user can hand to ``openssl``.
+
+    The README's verify section and the release notes footer both print this,
+    so the identity a cautious user checks against is the very key the binary
+    verifies updates with, never a copy that could drift.
+    """
+    raw = base64.b64decode(public_key_b64, validate=True)
+    if len(raw) != _RAW_PUBKEY_LEN:
+        raise ValueError("not a raw Ed25519 public key")  # noqa: TRY003
+    body = base64.b64encode(_ED25519_SPKI_PREFIX + raw).decode("ascii")
+    return f"-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n"
+
 
 def keygen() -> tuple[str, str]:
     """Generate a fresh Ed25519 keypair for signing releases.
