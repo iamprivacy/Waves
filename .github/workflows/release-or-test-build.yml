@@ -281,8 +281,13 @@ jobs:
           # Linux legs ship BOTH a zip of the standalone tree and a single-file
           # AppImage of the same tree (tools/build_appimage.sh); the in-app
           # updater keeps each install on its own format.
-          - os: "ubuntu-24.04"
-            TARGET: "ubuntu-24.04"
+          # Built on the oldest still-supported Ubuntu LTS: the bundle links the
+          # build host's glibc, so a 24.04 build (glibc 2.39) will not start on
+          # 22.04, Debian 12 or anything else older. Raise this only when 22.04
+          # leaves support. ARM64 stays on 24.04: every PySide6 aarch64 wheel
+          # is manylinux_2_39, so Qt itself needs glibc 2.39 there.
+          - os: "ubuntu-22.04"
+            TARGET: "ubuntu-22.04"
             OS_ARCH: ${{needs.compute.outputs.ARCH_LINUX_X64}}
             CMD_BUILD: >
               source $VENV &&
@@ -360,7 +365,7 @@ jobs:
       # offscreen; this mirrors a user's desktop, it is not shipped.
       - name: Install Linux GL runtime for smoke-launch
         if: ${{ runner.os == 'Linux' && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libopengl0 libxkbcommon0 libfontconfig1 libpulse0 libasound2t64
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libopengl0 libxkbcommon0 libfontconfig1 libpulse0 libasound2
       - name: Smoke-launch trimmed bundle
         if: ${{ (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
         env:
@@ -492,7 +497,7 @@ jobs:
           BASE="${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}"
           for ASSET in "${BASE}${{needs.compute.outputs.ASSET_EXTENSION}}" "${BASE}.AppImage"; do
             [ -e "$ASSET" ] || continue
-            python -c "import hashlib,sys; p=sys.argv[1]; open(p+'.sha256','w').write(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p+chr(10))" "$ASSET"
+            python -c "import hashlib,sys; p=sys.argv[1]; open(p+'.sha256','w',newline=chr(10)).write(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p+chr(10))" "$ASSET"
             cat "$ASSET.sha256"
           done
       - name: Upload checksum artifact
@@ -608,11 +613,15 @@ jobs:
           BANNER
             cat NOTES_HEADER.md RELEASE_NOTES.md > RELEASE_NOTES.tmp && mv RELEASE_NOTES.tmp RELEASE_NOTES.md
           fi
-          if [ -s RELEASE_NOTES.md ]; then
-            echo "----- RELEASE_NOTES.md -----"; cat RELEASE_NOTES.md
-          else
-            echo "::warning::CHANGELOG.md has no '## ${RELEASE_TAG}' section; the Release body will be empty."
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::warning::CHANGELOG.md has no '## ${RELEASE_TAG}' section; the Release body carries only the Verify footer."
           fi
+          # The Verify footer: every asset's expected hash next to the download,
+          # the release public key and the copyable check, generated from the
+          # manifest just signed so the page can never disagree with it.
+          source $VENV
+          { echo; poetry run python tools/release_verify_notes.py SHA256SUMS; } >> RELEASE_NOTES.md
+          echo "----- RELEASE_NOTES.md -----"; cat RELEASE_NOTES.md
       - name: Set release notes body
         # The build job creates the Release (as a bodyless draft) before this job
         # runs, and softprops/action-gh-release does NOT overwrite the body of an
