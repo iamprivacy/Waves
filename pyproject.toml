@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.31"
+version = "0.1.32"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -140,6 +140,9 @@ ignore = [
 # Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
 # helper for real on macOS (S603, fixed argv).
 "tests/test_apple_double_cleanup.py" = ["S603"]
+# Runs the README's own verification commands through bash against a manifest
+# signed with a throwaway key (S603, S607: the commands are the README's text).
+"tests/test_release_verify_notes.py" = ["S603", "S607"]
 # Measures import-time metadata cost in a fresh interpreter: this interpreter
 # runs a literal probe script (S603, fixed argv).
 "tests/test_lazy_metadata.py" = ["S603"]
