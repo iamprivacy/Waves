@@ -625,7 +625,8 @@ def test_album_artist_with_no_credits_is_empty_not_a_crash():
 
 def _session_with_mixes(mixes_result):
     favorites = SimpleNamespace(
-        playlists_paginated=lambda: [SimpleNamespace(id="p1")],
+        playlists=lambda limit, offset, order, order_direction: [SimpleNamespace(id="p1")] if offset == 0 else [],
+        get_playlists_count=lambda: 1,
         playlist_folders=lambda limit, offset, parent_folder_id: [],
     )
     return SimpleNamespace(user=SimpleNamespace(favorites=favorites), mixes=mixes_result)
