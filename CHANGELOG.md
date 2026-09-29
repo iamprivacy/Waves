@@ -22,6 +22,17 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.32 (2026-09-28)
+
+### ✨ Added
+
+- 🔐 The release page now prints every download's expected SHA-256 next to it, together with the release public key and copyable verification steps; the README has a Verify a download section with the same steps for macOS, Linux and Windows.
+
+### 🐛 Fixed
+
+- 📋 My Tidal > Playlists lists each playlist once, and playlists that were missing from the list are back ([issue #46](https://github.com/iamprivacy/Waves/issues/46)).
+- 🐧 The x64 Linux zip and AppImage start on Ubuntu 22.04, Debian 12 and other distributions older than Ubuntu 24.04, where they quit at launch with a GLIBC error.
+
 ## 🗂️ v0.1.31 (2026-09-24)
 
 ### ✨ Added
