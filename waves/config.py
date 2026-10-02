@@ -15,7 +15,7 @@ from threading import Event, Lock
 from typing import Any
 
 import tidalapi
-from requests.adapters import HTTPAdapter, Retry
+from requests.adapters import Retry
 from urllib3.exceptions import InvalidHeader
 
 from waves.constants import (
@@ -26,6 +26,7 @@ from waves.constants import (
 )
 from waves.helper.decorator import SingletonMeta
 from waves.helper.path import path_config_base, path_file_settings, path_file_token
+from waves.http_pool import IdleDropAdapter
 from waves.model.cfg import Settings as ModelSettings
 from waves.model.cfg import Token as ModelToken
 
@@ -477,13 +478,16 @@ class _ApiRetry(Retry):
             raise ApiCallStopped
 
 
-class _ApiAdapter(HTTPAdapter):
+class _ApiAdapter(IdleDropAdapter):
     """The catalog adapter: bounded retries, plus a timeout on every call.
 
     tidalapi passes no timeout, so a black-holed connection parks a download
     worker forever and, with the queue running one job at a time, the whole
     queue with it. requests only applies a default when the caller gave none,
-    which is exactly the gap this fills.
+    which is exactly the gap this fills. Connections that sat through a long
+    gap or a sleep are dropped before reuse, like the download session's
+    (issue #47, see waves.http_pool): the catalog is asked from several
+    threads at once too (an artist page's five sections, search enrichment).
     """
 
     def send(self, request, **kwargs):

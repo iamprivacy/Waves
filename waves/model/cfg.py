@@ -250,7 +250,11 @@ class HelpSettings:
         "accordingly."
     )
     playlist_create: str = "Creates a '_playlist.m3u8' file for downloaded albums, playlists and mixes."
-    metadata_replay_gain: str = "Replay gain information will be written to metadata."
+    metadata_replay_gain: str = (
+        "Writes the loudness TIDAL measured for each track and album as ReplayGain tags. A player that honours "
+        "them (Rockbox, foobar2000, VLC, Plexamp and others) turns loud masters down, often by 8 to 12 dB, so these "
+        "tracks play quieter than files without the tags. Turn it off if you do not want that."
+    )
     metadata_write_url: str = "URL of the media file will be written to metadata."
     window_x: str = "X-Coordinate of saved window location."
     window_y: str = "Y-Coordinate of saved window location."

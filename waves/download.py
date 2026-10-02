@@ -30,7 +30,7 @@ from mutagen import MutagenError
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 from pathvalidate import sanitize_filename
-from requests.adapters import HTTPAdapter, Retry
+from requests.adapters import Retry
 from requests.exceptions import HTTPError
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
 from tidalapi.exceptions import AssetNotAvailable, ObjectNotFound, StreamNotAvailable, TooManyRequests
@@ -91,6 +91,7 @@ from waves.helper.tidal import (
     name_builder_item,
     name_builder_title,
 )
+from waves.http_pool import IdleDropAdapter
 from waves.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
 from waves.metadata import Metadata, MetadataUnreadable, read_item_id
 from waves.model.downloader import DownloadSegmentResult, TrackStreamInfo
@@ -414,7 +415,7 @@ class RequestsClient:
         return o.text, o.url
 
 
-class _SharedContextAdapter(HTTPAdapter):
+class _SharedContextAdapter(IdleDropAdapter):
     """HTTPAdapter that gives every pooled connection one shared, preloaded
     SSLContext.
 
@@ -425,6 +426,10 @@ class _SharedContextAdapter(HTTPAdapter):
     every core (the CPU spike at download start, worst on modest Windows
     boxes). Loading certifi once and sharing the context leaves only the
     handshake itself per connection, which is a few milliseconds.
+
+    Connections that sat through a long gap or a sleep are dropped before
+    reuse (issue #47), the rule every pooled adapter shares: see
+    waves.http_pool.
     """
 
     def __init__(self, ssl_context, **kwargs) -> None:
@@ -2590,6 +2595,13 @@ class Download:
 
         self.fn_logger.exception(f"Something went wrong. Skipping '{log_content(name_builder_item(media))}'.")
 
+    def _atmos_preferred(self) -> bool:
+        """Whether this run fetches Dolby Atmos where a track offers both
+        Atmos and stereo: the "Download Dolby Atmos" setting. The GUI's
+        tracked download answers with what its own job was queued with, so a
+        stereo tier chosen on one item fetches that item in stereo."""
+        return bool(self.settings.data.download_dolby_atmos)
+
     def _get_track_stream_info(self, media: Track) -> TrackStreamInfo:
         """
         Gets stream info for a Track, handling Atmos/Normal session switching.
@@ -2611,7 +2623,7 @@ class Download:
         modes = getattr(media, "audio_modes", None) or []
         has_atmos = AudioMode.dolby_atmos.value in modes
         atmos_only = bool(modes) and all(mode == AudioMode.dolby_atmos.value for mode in modes)
-        want_atmos = has_atmos and (self.settings.data.download_dolby_atmos or atmos_only)
+        want_atmos = has_atmos and (self._atmos_preferred() or atmos_only)
 
         if want_atmos:
             if not self.tidal.switch_to_atmos_session():
@@ -2623,6 +2635,18 @@ class Download:
                 return TrackStreamInfo(None, "", False, None)
 
         media_stream = self.session.track(media.id).get_stream() if want_atmos else media.get_stream()
+
+        if want_atmos and str(getattr(media_stream, "audio_mode", "") or "") != AudioMode.dolby_atmos.value:
+            # Asked for Dolby Atmos, answered in stereo: TIDAL is not granting
+            # Atmos to this account, its region or the Atmos client. The file
+            # still lands, labelled with the tier it really came at. This line
+            # is what lets a diagnostic report tell that apart from a copy that
+            # is Atmos but was labelled wrong (TIDAL files Atmos under LOW).
+            logger.warning(
+                "Asked TIDAL for Dolby Atmos and got a %s stream at %s",
+                str(getattr(media_stream, "audio_mode", "") or "unlabelled"),
+                str(getattr(media_stream, "audio_quality", "") or "no stated tier"),
+            )
 
         stream_manifest = media_stream.get_stream_manifest()
         file_extension = stream_manifest.file_extension
