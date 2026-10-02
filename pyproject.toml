@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.32"
+version = "0.1.33"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -155,6 +155,8 @@ ignore = [
 # The quality badge menu scenario re-runs itself in a subprocess to isolate the
 # Qt boot (S603, fixed argv).
 "tests/test_quality_pick_qml.py" = ["S603"]
+# The ATMOS badge scenario, likewise (S603, fixed argv).
+"tests/test_atmos_badge_qml.py" = ["S603"]
 # The My Tidal list-top scenario re-runs itself in a subprocess to isolate the
 # Qt boot (S603, fixed argv).
 "tests/test_my_tidal_list_top_scenario.py" = ["S603"]
@@ -163,6 +165,18 @@ ignore = [
 # isolate the Qt boot (S603, fixed argv), and its build -> correct -> assert
 # scenario is one deliberately linear function (C901).
 "tests/test_search_refresh_in_place.py" = ["S603", "C901"]
+# The artist page async-build scenario: the same subprocess isolation (S603,
+# fixed argv) and the same build -> correct -> assert linear shape (C901).
+"tests/test_artist_page_async_build.py" = ["S603", "C901"]
+# The search page's twin of it: the same isolation and the same linear shape.
+"tests/test_search_page_async_build.py" = ["S603", "C901"]
+# The incubation handback check loads a real window offscreen in a fresh
+# interpreter (S603, fixed argv).
+"tests/test_incubation_open_pacing.py" = ["S603", "C901"]
+# The Browse growth scenario: subprocess isolation (S603, fixed argv) and one
+# deliberately linear grow -> correct -> assert flow (C901).
+"tests/test_browse_growth_in_place.py" = ["S603", "C901"]
+"tests/test_browse_landing_refresh_in_place.py" = ["S603", "C901"]
 # The library scanner's directory walk (_walk_album_dirs) is a small state
 # machine over each folder's probe result (unchanged / relist / transient error /
 # vanished / root offline); the branching is the point and the function was kept
