@@ -150,6 +150,7 @@ class _FlakyArtist:
 class _LoadArtistStub:
     loadArtist = WavesBridge.loadArtist
     _start_artist_build = WavesBridge._start_artist_build
+    _artist_art_summary = staticmethod(WavesBridge._artist_art_summary)
 
     def __init__(self, artist, cached=None):
         self._artist = artist
@@ -161,6 +162,7 @@ class _LoadArtistStub:
         self._browse_gen = 0
         self.threadpool = _InlinePool()
         self.artistLoaded = _Signal()
+        self.artistPagePrefetched = _Signal()
         self.remembered: list = []
         self.saved = 0
 

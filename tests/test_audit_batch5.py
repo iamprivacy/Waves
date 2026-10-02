@@ -410,6 +410,19 @@ class _BestOfBothStub:
         self._identity_id = identity_id
         self._scan_raises = scan_raises
         self._scan_complete = scan_complete
+        # The clicked album's ask, read the way _download reads it, is what
+        # rides on the job when the merge runs under another edition's id.
+        self.settings = SimpleNamespace(
+            data=SimpleNamespace(quality_audio=Quality.hi_res_lossless, download_dolby_atmos=False)
+        )
+        for name in (
+            "_ask_quality_for",
+            "_ask_atmos_for",
+            "_quality_override_key",
+            "_queued_quality_value",
+            "_target_tier",
+        ):
+            setattr(self, name, getattr(WavesBridge, name).__get__(self, WavesBridge))
 
     def _set_status(self, text):
         self.statuses.append(text)
@@ -536,8 +549,26 @@ def test_best_of_both_plans_at_the_clicked_albums_choice_and_carries_it_to_the_i
 
     assert seen == [Quality.high_lossless], "the plan was measured at the setting, not the click's tier"
     assert carried == [], "the identity edition's own choice is never written"
-    assert stub._merge_asks == {"a2": (str(Quality.high_lossless.value), "LOSSLESS")}
+    assert stub._merge_asks == {"a2": (str(Quality.high_lossless.value), "LOSSLESS", False)}
     assert stub._albumsQueued.emits == [(0, ["a2"])]
+
+
+def test_best_of_both_carries_an_atmos_choice_to_the_identity():
+    """ATMOS is a word on the clicked album but not a tier: the plan is
+    measured at the setting, and the job under the other edition's id still
+    asks for Atmos (setting off). Dropped, the merge landed in stereo under a
+    badge reading ATMOS."""
+    stub = _BestOfBothStub()
+    stub._quality_overrides = {"a1": "ATMOS"}
+    seen: list = []
+    stub._merge_rank_fn = lambda quality=None: (seen.append(quality), (lambda o: 0))[1]
+    with patch(
+        "waves.waves_ui.backend._build_merge_plan",
+        return_value=(SimpleNamespace(id="a2", full_name="Album DX"), {"a2": []}, ""),
+    ):
+        stub.downloadAlbumBestOfBoth("a1")
+    assert seen == [None]
+    assert stub._merge_asks == {"a2": (str(Quality.hi_res_lossless.value), "HI-RES", True)}
 
 
 def test_best_of_both_without_a_choice_plans_at_the_setting_and_carries_nothing():

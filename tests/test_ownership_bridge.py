@@ -112,6 +112,7 @@ class _BridgeStub:
             # carcass, so up_to_date is judged against the setting.
             "_override_target_rank",
             "_quality_override_key",
+            "_ask_atmos_for",
             "collectionMemberIds",
             # The quality menu's IN LIBRARY mark (issue #36).
             "ownedTierOf",
@@ -242,6 +243,29 @@ def test_item_attaches_path_and_quality_on_real_download(monkeypatch, tmp_path):
     assert done[0]["path"] == str(fpath)
     assert done[0]["quality"]["tier"] == "LOSSLESS"
     assert td._delivered == {}, "the captured quality must be popped after use"
+
+
+def test_a_running_event_predicts_atmos_for_a_track_fetched_in_atmos(monkeypatch, tmp_path):
+    """Issue #45: the ledger's prediction for a running track comes from this
+    event. TIDAL now ships stereo and Atmos under one track id, advertised as
+    HI-RES, and with Dolby Atmos on the engine fetches it in Atmos: the honest
+    prediction is ATMOS, not the stereo tier the job asked for."""
+    _patch_item_helpers(monkeypatch, (True, _make_file(tmp_path)))
+    td = _new_tracked()
+    track = backend.Track.__new__(backend.Track)
+    track.id, track.track_num, track.volume_num, track.duration = 7, 1, 1, 162
+    track.audio_modes = ["STEREO", "DOLBY_ATMOS"]
+    track.media_metadata_tags = ["LOSSLESS", "HIRES_LOSSLESS", "DOLBY_ATMOS"]
+    track.audio_quality = "LOSSLESS"
+
+    def running_expected(atmos_on):
+        td._track_signals = _Relay()
+        td.settings.data.download_dolby_atmos = atmos_on
+        td.item(media=track)
+        return [e["expected"] for e in td._track_signals.track_event.emits if e["status"] == "running"]
+
+    assert running_expected(True) == ["ATMOS"]
+    assert running_expected(False) == ["HI-RES"], "with Atmos off the stereo copy is fetched"
 
 
 def test_item_skip_carries_no_quality(monkeypatch, tmp_path):
@@ -741,6 +765,38 @@ def test_an_album_with_a_tierless_copy_is_not_marked(tmp_path):
     assert stub.ownedTierOf("a1") == ""
 
 
+def test_an_atmos_copy_is_never_marked_as_the_low_tier(tmp_path):
+    """Issue #45: TIDAL files every Dolby Atmos stream under LOW (measured live
+    2026-10-01: audioMode DOLBY_ATMOS, audioQuality LOW, at every requested
+    tier), so ranked as a tier an Atmos copy read as LOW and the quality menu
+    marked LOW, AAC 96 as the quality the user holds."""
+    stub = _BridgeStub(tmp_path, atmos=True)
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.m4a")), "LOW", audio_mode="DOLBY_ATMOS")
+    stub.own("t1")
+    assert stub.ownedTierOf("t1") == "ATMOS"
+    # A real LOW copy is still LOW: only the mode turns the word.
+    stub._ownership.record("t2", str(_make_file(tmp_path, "t2.m4a")), "LOW", audio_mode="STEREO")
+    stub.own("t2")
+    assert stub.ownedTierOf("t2") == "LOW"
+
+
+def test_an_album_held_in_atmos_says_atmos_and_a_mixed_one_says_nothing(tmp_path):
+    stub = _BridgeStub(tmp_path, atmos=True)
+    stub._ownership.record_members_replace("a1", ["t1", "t2"])
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.m4a")), "LOW", audio_mode="DOLBY_ATMOS")
+    stub._ownership.record("t2", str(_make_file(tmp_path, "t2.m4a")), "LOW", audio_mode="DOLBY_ATMOS")
+    stub.own("t1")
+    stub.own("t2")
+    assert stub.ownedTierOf("a1") == "ATMOS", "an album held in Atmos was marked as a stereo tier"
+    # One track held in stereo beside the Atmos ones: no single quality is
+    # true of the album, so no row may be marked (the weakest-tier rule would
+    # have named LOW, the Atmos copies' filing tier).
+    stub._ownership.record_members_replace("a2", ["t1", "t3"])
+    stub._ownership.record("t3", str(_make_file(tmp_path, "t3.flac")), "LOSSLESS", audio_mode="STEREO")
+    stub.own("t3")
+    assert stub.ownedTierOf("a2") == ""
+
+
 def test_owned_tier_of_never_stats_on_the_calling_thread(tmp_path, monkeypatch):
     """Same rule as ownershipOf: the menu opens on the GUI thread, and a stat
     on a dropped network mount hangs for seconds."""
@@ -880,3 +936,22 @@ def test_a_parked_page_learns_of_a_deleted_file_on_the_max_age_tick(tmp_path):
     stub._age_ownership_answers()
     assert "7" in stub._own_announce
     assert stub.own("7") == {"owned": False}
+
+
+def test_a_stereo_choice_on_an_atmos_copy_offers_the_stereo_download(tmp_path):
+    """A release carrying Atmos beside stereo, held in Atmos, with the setting
+    on: the copy is current. Choosing a stereo tier on it in the quality menu
+    asks for a stereo file, which the Atmos copy is not, so the button offers
+    the download instead of reading DOWNLOADED over a file that is not what
+    was asked for."""
+    stub = _BridgeStub(tmp_path, quality_audio="HI_RES_LOSSLESS", atmos=True)
+    stub._ownership.record("t1", str(_make_file(tmp_path, "t1.m4a")), "LOW", audio_mode="DOLBY_ATMOS")
+    stub._objs["track"]["t1"] = _catalog_track(["HIRES_LOSSLESS", "LOSSLESS"], modes=("STEREO", "DOLBY_ATMOS"))
+    assert stub.own("t1")["up_to_date"] is True
+    stub._quality_overrides = {"t1": "LOSSLESS"}
+    stub.expire("t1")
+    assert stub.own("t1")["up_to_date"] is False, "a stereo choice still read the Atmos copy as current"
+    # DEFAULT is no choice: it follows the setting, Atmos.
+    stub._quality_overrides = {"t1": "DEFAULT"}
+    stub.expire("t1")
+    assert stub.own("t1")["up_to_date"] is True

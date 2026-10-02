@@ -19,12 +19,14 @@ inherits its album's.
 HOW THIS STAYS FIXED
 --------------------
 Method-bound stubs, no display and no session: the store accepts exactly the
-four tiers and DEFAULT; ``_ask_quality_for`` answers own / inherited / none;
+four tiers, DEFAULT and ATMOS; ``_ask_quality_for`` answers own / inherited /
+none and ``_ask_atmos_for`` answers the choice before the setting;
 ``_enqueue`` writes what it is handed; ``_download`` (with every gate
 stubbed open) queues a row at the choice and leaves it standing, on the
 duplicate-row short cut too; the ownership currency check targets the
-choice, so a lower owned copy reads as an upgrade; and a bare stub without
-the store falls through to the setting.
+choice, so a lower owned copy reads as an upgrade; the row's Atmos answer
+reaches the engine; and a bare stub without the store falls through to the
+setting.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def _bridge(setting=Quality.high_lossless):
     b = SimpleNamespace()
     b._quality_overrides = {}
     b._objs = {"track": {}, "album": {}}
-    b.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=setting))
+    b.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=setting, download_dolby_atmos=False))
     b.qualityOverridesChanged = _Emit()
     b.qualityChoiceChanged = _Emit()
     b.ownershipChanged = _Emit()
@@ -85,6 +87,7 @@ def _bridge(setting=Quality.high_lossless):
         "_quality_choice_scope",
         "_quality_override_key",
         "_ask_quality_for",
+        "_ask_atmos_for",
         "_override_target_rank",
         "_queued_quality_value",
         "_target_tier",
@@ -119,25 +122,125 @@ def _plain_helpers(monkeypatch):
 # ---- the store ---------------------------------------------------------------
 
 
-def test_the_store_takes_the_four_tiers_and_default_and_nothing_else():
+def test_the_store_takes_the_four_tiers_default_and_atmos_and_nothing_else():
     b = _bridge()
     b.setQualityOverride("t1", "high")
     b.setQualityOverride("t2", "HI-RES")
     b.setQualityOverride("a1", "default")
-    assert b._quality_overrides == {"t1": "HIGH", "t2": "HI-RES", "a1": "DEFAULT"}
-    assert len(b.qualityOverridesChanged.calls) == 3
+    b.setQualityOverride("a2", "atmos")
+    assert b._quality_overrides == {"t1": "HIGH", "t2": "HI-RES", "a1": "DEFAULT", "a2": "ATMOS"}
+    b.setQualityOverride("a2", "")
+    assert len(b.qualityOverridesChanged.calls) == 5
     b.setQualityOverride("t3", "ULTRA")
     b.setQualityOverride("", "HIGH")
     assert "t3" not in b._quality_overrides and "" not in b._quality_overrides
-    assert len(b.qualityOverridesChanged.calls) == 3, "a refused word announced a change"
+    assert len(b.qualityOverridesChanged.calls) == 5, "a refused word announced a change"
     b.setQualityOverride("t1", "HIGH")
-    assert len(b.qualityOverridesChanged.calls) == 3, "re-setting the same word announced a change"
+    assert len(b.qualityOverridesChanged.calls) == 5, "re-setting the same word announced a change"
     b.setQualityOverride("t1", "")
     assert "t1" not in b._quality_overrides
     assert b.qualityOverrideOf("t1") == "" and b.qualityOverrideOf("t2") == "HI-RES"
-    assert len(b.qualityOverridesChanged.calls) == 4
+    assert len(b.qualityOverridesChanged.calls) == 6
     b.setQualityOverride("t1", "")
-    assert len(b.qualityOverridesChanged.calls) == 4, "clearing what was not set announced a change"
+    assert len(b.qualityOverridesChanged.calls) == 6, "clearing what was not set announced a change"
+
+
+# ---- Dolby Atmos: the ATMOS badge, and a stereo tier chosen under it ----------
+# A release carrying Atmos beside stereo reads ATMOS while "Download Dolby
+# Atmos" is on, and its menu still offers the stereo tiers. Choosing one is the
+# way to get that item in stereo; ATMOS (no choice) and DEFAULT follow the
+# setting.
+
+
+def _dual(tid="t1", album_id="a1"):
+    t = _track(tid, album_id)
+    t.audio_modes = ["STEREO", "DOLBY_ATMOS"]
+    return t
+
+
+def test_a_stereo_choice_is_the_one_thing_that_turns_atmos_off_for_an_item():
+    b = _bridge()
+    b.settings.data.download_dolby_atmos = True
+    assert b._ask_atmos_for(_dual(), "track", "t1") is True
+    b.setQualityOverride("t1", "HIGH")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+    # A track inherits its album's stereo choice, and DEFAULT under it is
+    # no choice again: the setting, Atmos.
+    b.setQualityOverride("t1", "")
+    b.setQualityOverride("a1", "LOSSLESS")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+    assert b._ask_atmos_for(SimpleNamespace(id="a1"), "album", "a1") is False
+    b.setQualityOverride("t1", "DEFAULT")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is True
+    # With the setting off no choice (DEFAULT included) asks for Atmos.
+    b.settings.data.download_dolby_atmos = False
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+
+
+def test_an_atmos_choice_asks_for_atmos_with_the_setting_off():
+    """The menu offers ATMOS on a release carrying it beside stereo whatever
+    the setting says; with the setting off, choosing it is the way to get that
+    item in Atmos. It reaches an album's tracks, a track's own stereo or
+    DEFAULT choice stops it, and the tier asked stays the Settings tier (the
+    stereo fallback for a track with no Atmos to give)."""
+    b = _bridge(Quality.low_320k)
+    b.settings.data.download_dolby_atmos = False
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+    b.setQualityOverride("t1", "ATMOS")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is True
+    assert b._ask_quality_for(_dual(), "track", "t1")[1] == "HIGH"
+    b.setQualityOverride("t1", "")
+    b.setQualityOverride("a1", "ATMOS")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is True
+    assert b._ask_atmos_for(SimpleNamespace(id="a1"), "album", "a1") is True
+    b.setQualityOverride("t1", "DEFAULT")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+    b.setQualityOverride("t1", "LOSSLESS")
+    assert b._ask_atmos_for(_dual(), "track", "t1") is False
+    # The queue row pins it, so the job fetches Atmos.
+    b.setQualityOverride("a1", "")
+    b.setQualityOverride("t1", "ATMOS")
+    b._download(_dual(), "track", "Song", "{tmpl}", False, "t1")
+    row = b._queue[-1]
+    assert (row["askAtmos"], row["expected"]) == (True, "ATMOS")
+
+
+def test_a_download_pins_atmos_on_its_row_and_a_stereo_choice_pins_stereo():
+    """The row carries the job's Atmos answer for its whole life, like its
+    tier, and states ATMOS from the moment it is queued. The stereo choice
+    here is the Settings tier itself (HIGH): under an ATMOS badge that is a
+    real choice, so it must not be taken for a duplicate of the Atmos row."""
+    b = _bridge(Quality.low_320k)
+    b.settings.data.download_dolby_atmos = True
+    b._download(_dual(), "track", "Song", "{tmpl}", False, "t1")
+    atmos_row = b._queue[-1]
+    assert (atmos_row["askAtmos"], atmos_row["expected"]) == (True, "ATMOS")
+    b.setQualityOverride("t1", "HIGH")
+    b._download(_dual(), "track", "Song", "{tmpl}", False, "t1")
+    assert len(b._queue) == 2, "the stereo ask was folded into the Atmos row"
+    stereo_row = b._queue[-1]
+    assert (stereo_row["askAtmos"], stereo_row["quality"], stereo_row["expected"]) == (False, "HIGH", "HI-RES")
+    # Each job answers from its own row, whatever the setting says now.
+    _bind(b, "_job_atmos")
+    b.settings.data.download_dolby_atmos = False
+    assert b._job_atmos(atmos_row["qid"]) is True
+    assert b._job_atmos(stereo_row["qid"]) is False
+
+
+def test_a_retry_keeps_the_atmos_answer_its_row_was_queued_with():
+    b = _bridge()
+    b.settings.data.download_dolby_atmos = True
+    _bind(b, "_job_atmos", "_row_ask")
+    b.setQualityOverride("t1", "HIGH")
+    b._download(_dual(), "track", "Song", "{tmpl}", False, "t1")
+    first = b._queue[-1]
+    assert b._row_ask(first["qid"]) == ("HIGH", "HIGH", False)
+    # The choice is gone by the time of the retry: the retry still asks for
+    # the stereo file its row was queued for.
+    b.setQualityOverride("t1", "")
+    first["status"] = "failed"
+    b._download(_dual(), "track", "Song", "{tmpl}", False, "t1", keep_ask=b._row_ask(first["qid"]))
+    assert b._queue[-1]["askAtmos"] is False
 
 
 # ---- what a download asks for -------------------------------------------------
@@ -412,3 +515,81 @@ def test_the_ffmpeg_gate_replay_keeps_the_row_ask():
     b.settings.data.quality_audio = Quality.low_320k
     stash[0]()
     assert (b._queue[-1]["askQuality"], b._queue[-1]["quality"]) == ("HIGH", "HIGH")
+
+
+# ---- the row's Atmos answer reaches the engine, and the guards around it -----
+
+
+def test_the_runner_hands_its_rows_atmos_answer_to_the_engine():
+    """The wire from the row to the fetch: the runner passes the row's pin to
+    _build_download, _build_download hands it to the tracked download, and a
+    download pinned to Atmos fetches Atmos with the setting off (one pinned
+    to stereo fetches stereo with it on). A row from before the field follows
+    the setting."""
+    import inspect
+
+    src = inspect.getsource(backend.WavesBridge)
+    call = src[src.index("dl = self._build_download(") :]
+    call = call[: call.index("\n        )")]
+    assert "atmos_on=self._job_atmos(qid)" in call, call
+    build = inspect.getsource(backend.WavesBridge._build_download)
+    assert "atmos_on=atmos_on" in build, build
+    dl = backend._TrackedDownload.__new__(backend._TrackedDownload)
+    dl.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=False))
+    dl._atmos_on = True
+    assert dl._wants_atmos(_dual()) is True
+    dl.settings.data.download_dolby_atmos = True
+    dl._atmos_on = False
+    assert dl._wants_atmos(_dual()) is False
+    dl._atmos_on = None
+    assert dl._wants_atmos(_dual()) is True
+    assert dl._wants_atmos(_track()) is False, "a stereo-only track has no Atmos to fetch"
+
+
+def test_a_setting_flip_does_not_queue_a_stereo_only_item_twice():
+    """The Atmos answer tells two rows apart only where the item has Atmos to
+    give. Toggling Download Dolby Atmos between two clicks on a stereo-only
+    track asks for the identical file twice: one row. A dual-mode track asks
+    for a different file: its own row."""
+    b = _bridge()
+    b.settings.data.download_dolby_atmos = False
+    b._download(_track(), "track", "Song", "{tmpl}", False, "t1")
+    b.settings.data.download_dolby_atmos = True
+    b._download(_track(), "track", "Song", "{tmpl}", False, "t1")
+    assert len(b._queue) == 1, "a stereo-only track was queued twice across a setting flip"
+    b._download(_dual("t2"), "track", "Song", "{tmpl}", False, "t2")
+    b.settings.data.download_dolby_atmos = False
+    b._download(_dual("t2"), "track", "Song", "{tmpl}", False, "t2")
+    assert len(b._queue) == 3, "the stereo ask for a dual-mode track was folded into its Atmos row"
+
+
+def test_a_best_of_both_merge_carries_the_clicked_albums_whole_ask():
+    """When the merge downloads under another edition's id, the clicked
+    album's ask rides on the job as keep_ask: tier AND Atmos answer, stashed
+    whenever ANY word stands on the clicked album. ATMOS and DEFAULT are not
+    tiers: an ATMOS choice with the setting off used to be dropped here, and
+    the merge landed in stereo under a badge reading ATMOS."""
+    import inspect
+
+    src = inspect.getsource(backend.WavesBridge)
+    at = src.index("asks = self._merge_asks = {}")
+    before = src[at - 700 : at]
+    assert 'if album_id in (getattr(self, "_quality_overrides", None) or {}):' in before, before
+    assert "if chosen is not None:" not in before, "the stash is gated on a stereo tier again"
+    stash = src[at : src.index("self._albumsQueued.emit", at)]
+    assert '*self._ask_quality_for(obj, "album", album_id)' in stash, stash
+    assert 'self._ask_atmos_for(obj, "album", album_id)' in stash, stash
+
+
+def test_flipping_download_dolby_atmos_re_asks_every_button():
+    """The Atmos answer is part of up_to_date (an Atmos copy is current for a
+    job that fetches Atmos), so the toggle broadcasts ownershipChanged like a
+    new audio quality does; the badges alone turning left the buttons on
+    their old verdict."""
+    import inspect
+
+    src = inspect.getsource(backend.WavesBridge.applySettings)
+    block = src[src.index('if "download_dolby_atmos" in values:') :]
+    block = block[: block.index('if "quality_audio" in values:')]
+    assert "self.atmosOnChanged.emit()" in block, block
+    assert 'self.ownershipChanged.emit("")' in block, block

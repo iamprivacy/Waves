@@ -100,3 +100,41 @@ def test_cert_verify_falls_back_for_custom_verify(tmp_path):
     conn = _Conn()
     adapter.cert_verify(conn, "https://example.com", verify=certifi.where(), cert=None)
     assert conn.ca_certs == certifi.where()
+
+
+# --- Idle pool reset (issue #47) -------------------------------------------
+# A Mac that slept comes back with every pooled keep-alive dead, and reusing
+# one is where a packaged build crashed (issue #47). The rule that drops them
+# is shared with the catalog adapter and tested in test_http_pool_idle_drop.py;
+# pinned here is only that the download session carries it.
+
+
+def test_the_download_session_drops_connections_after_an_idle_gap_or_a_sleep():
+    from waves.http_pool import IdleDropAdapter
+
+    adapter = Download._shared_http().get_adapter("https://example.com")
+    assert isinstance(adapter, IdleDropAdapter)
+    assert adapter.idle_reset_sec == 60.0
+    assert adapter.sleep_gap_sec > 0
+
+
+def test_dropping_closes_every_queued_connection_and_leaves_the_slot_free():
+    """urllib3 2.x's PoolManager.clear() only drops its references (no
+    dispose callback), so the dead sockets would linger until garbage
+    collection; the drop must close each waiting connection explicitly, and
+    leave an empty slot in its place so a worker waiting on the blocking pool
+    is served a fresh connection instead of waiting forever."""
+    adapter = Download._shared_http().get_adapter("https://example.com")
+    pool = adapter.poolmanager.connection_from_host("example.com", 443, scheme="https")
+    slots = pool.pool
+    conn = pool._get_conn()
+    pool._put_conn(conn)
+    closed = []
+    conn.close = lambda: closed.append(conn)
+
+    adapter._drop_pooled_connections()
+
+    assert closed == [conn]
+    assert pool.pool is slots
+    assert slots.qsize() == pool.pool.maxsize
+    assert all(c is None for c in list(slots.queue))

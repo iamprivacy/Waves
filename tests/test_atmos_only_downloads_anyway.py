@@ -91,6 +91,32 @@ def test_no_modes_at_all_is_a_normal_fetch():
     assert _session_reached(_track(modes=[]), atmos_on=True) == "normal"
 
 
+def test_an_atmos_request_answered_in_stereo_is_logged(caplog):
+    """Issue #45: a diagnostic report has to tell "TIDAL is not granting Atmos
+    here" apart from an Atmos copy that was only labelled wrong (TIDAL files
+    every Atmos stream under LOW). The engine says so when the answer to an
+    Atmos request is not Atmos, and stays quiet when it is."""
+
+    def fetch(answer_mode: str) -> list[str]:
+        stream = SimpleNamespace(
+            audio_mode=answer_mode,
+            audio_quality="LOW",
+            get_stream_manifest=lambda: SimpleNamespace(file_extension=".m4a", codecs="EAC3"),
+        )
+        dl = Download.__new__(Download)
+        dl.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=True, extract_flac=False))
+        dl.fn_logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+        dl.tidal = SimpleNamespace(switch_to_atmos_session=lambda: True, restore_normal_session=lambda: True)
+        dl.session = SimpleNamespace(track=lambda _id: SimpleNamespace(get_stream=lambda: stream))
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="waves.download"):
+            dl._get_track_stream_info(_track(modes=[ATMOS, "STEREO"]))
+        return [r.getMessage() for r in caplog.records if "Dolby Atmos" in r.getMessage()]
+
+    assert fetch("STEREO") == ["Asked TIDAL for Dolby Atmos and got a STEREO stream at LOW"]
+    assert fetch(ATMOS) == []
+
+
 def test_the_bridge_mirror_agrees_with_the_engine_on_every_shape():
     """_delivers_atmos claims to be the engine's want_atmos, and the ownership
     gate ranks owned copies on the scale it names. Check every combination
@@ -169,3 +195,38 @@ def test_the_exclusion_apparatus_is_fully_retired():
     assert "excluded" not in inspect.getsource(backend.WavesBridge._download_merge_plan)
     qml = (backend.pathlib.Path(backend.__file__).parent / "qml" / "Main.qml").read_text()
     assert "ATMOS ONLY" not in qml
+
+
+def test_a_job_queued_for_stereo_fetches_a_dual_mode_track_in_stereo():
+    """A stereo tier chosen under the ATMOS badge rides on the job as
+    _atmos_on=False: the engine takes the normal session for a track that
+    has stereo, whatever the setting says, and still takes the Atmos session
+    for one that has nothing else. None is the setting's own answer."""
+
+    class _Pinned(Download):
+        def _atmos_preferred(self):
+            return False
+
+    reached: list[str] = []
+    stream = SimpleNamespace(get_stream_manifest=lambda: SimpleNamespace(file_extension=".m4a", codecs="EAC3"))
+    for modes, want in (([ATMOS, "STEREO"], "normal"), ([ATMOS], "atmos")):
+        reached.clear()
+        dl = _Pinned.__new__(_Pinned)
+        dl.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=True, extract_flac=False))
+        dl.fn_logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+        dl.tidal = SimpleNamespace(
+            switch_to_atmos_session=lambda: (reached.append("atmos"), True)[1],
+            restore_normal_session=lambda: (reached.append("normal"), True)[1],
+        )
+        dl.session = SimpleNamespace(track=lambda _id: SimpleNamespace(get_stream=lambda: stream))
+        media = _track(modes=modes)
+        media.get_stream = lambda: stream
+        dl._get_track_stream_info(media)
+        assert reached[0] == want, modes
+
+    td = _TrackedDownload.__new__(_TrackedDownload)
+    td.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=True))
+    assert td._wants_atmos(_track(modes=[ATMOS, "STEREO"])) is True, "None must read the setting"
+    td._atmos_on = False
+    assert td._wants_atmos(_track(modes=[ATMOS, "STEREO"])) is False
+    assert td._wants_atmos(_track(modes=[ATMOS])) is True

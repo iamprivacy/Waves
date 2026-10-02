@@ -99,6 +99,7 @@ class _Stub:
                 download_base_path="/tmp/waves-out",
                 download_delay=delay,
                 downloads_concurrent_max=2,
+                download_dolby_atmos=False,
             )
         )
         self.dl_pool = _InlinePool()
@@ -121,6 +122,9 @@ class _Stub:
     def _ask_quality_for(self, obj, type_media, media_id):
         return ("LOSSLESS", "LOSSLESS")
 
+    def _ask_atmos_for(self, obj, type_media, media_id):
+        return False
+
     def _row_ask(self, qid):
         return None
 
@@ -135,6 +139,9 @@ class _Stub:
 
     def _job_quality(self, qid):
         return None
+
+    def _job_atmos(self, qid):
+        return False
 
     def _gate_reachability(self, retry, media_id) -> bool:
         return True

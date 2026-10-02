@@ -118,6 +118,9 @@ def _bridge(track_ids=("t1", "t2"), other_track_ids=("u1",)):
     b._job_tracks = {}
     b._job_owned = {}
     b._job_fetched = {}
+    # The fetch names a track the run takes in Dolby Atmos as ATMOS, so it
+    # reads the setting.
+    b.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=False))
     predict = _Prediction()
     b._predict_skips = predict
 

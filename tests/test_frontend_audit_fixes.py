@@ -114,8 +114,15 @@ def test_the_hidden_artist_grid_is_not_built_on_a_type_chip():
     """Gated on the section condition, never on artistFlow.visible: that is
     EFFECTIVE visibility, false while an artist, My Tidal, Browse or Settings
     page covers the results, and it tore the grid down on every navigation
-    and rebuilt every card synchronously on Back."""
-    assert ('active: !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)') in MAIN
+    and rebuilt every card synchronously on Back. A grid that has been shown
+    is kept built (hidden) until the next search, as the list rows are; one
+    that never was is never built by a chip."""
+    grid = MAIN.split("id: artistGridRep", 1)[1].split("sourceComponent:", 1)[0]
+    assert (
+        'readonly property bool shown: index >= 0 && !root.searchArtistsStripMode && root.sectionVisible("artists", '
+        "artistsModel.count)"
+    ) in grid
+    assert "active: shown || (index >= 0 && root._searchKeptArtists)" in grid
     assert not re.search(
         r"^[^/\n]*artistFlow\.visible", MAIN, re.M
     ), "no code line may read the Flow's effective visibility"
@@ -148,8 +155,21 @@ def test_a_dead_glance_plays_the_upgrade():
 
 def test_the_browse_veil_counts_only_the_cards_it_joined():
     assert "function _browseCardTick(counted) { if (counted) _browseBuildTick() }" in MAIN
-    assert MAIN.count("Component.onCompleted: counted = root._browseCardStart(asynchronous)") == 2
-    assert MAIN.count("onLoaded: root._browseCardTick(counted)") == 2
+    assert "function _browsePageCardTick(counted) { if (counted) _browsePageBuildTick() }" in MAIN
+    # Both card shelves hand the start call's verdict to the tick, on the
+    # landing's count or the drilled page's, whichever veil the shelf is under.
+    assert MAIN.count("Component.onCompleted: counted = bsec.landing ? root._browseCardStart(asynchronous)") == 2
+    assert MAIN.count(": root._browsePageCardStart(asynchronous)") == 2
+    # The tick clears `counted` once it has reported, and runs on destruction
+    # too (a card taken down mid-build), so a card never ticks a count twice.
+    assert (
+        MAIN.count(
+            "function tick() { if (bsec.landing) root._browseCardTick(counted); else root._browsePageCardTick(counted); counted = false }"
+        )
+        == 2
+    )
+    assert MAIN.count("onLoaded: tick()") == 2
+    assert MAIN.count("Component.onDestruction: tick()") == 2
 
 
 def test_small_polish_pins():

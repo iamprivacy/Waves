@@ -170,6 +170,7 @@ class _Stub:
         self._downloads_running = lambda: downloads_running
         self._target_quality_rank = lambda: 0
         self._override_target_rank = lambda tid: 0  # no per-item quality choice here
+        self._ask_atmos_for = lambda obj, kind, mid: False  # Atmos is off here
         self._ownership = MagicMock()
         self.ownershipChanged = MagicMock()
         self.settings = SimpleNamespace(

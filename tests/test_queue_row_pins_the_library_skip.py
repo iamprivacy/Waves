@@ -67,6 +67,7 @@ class _Stub:
     _set_queue_status = WavesBridge._set_queue_status
     _job_library_skip = WavesBridge._job_library_skip
     _job_quality = WavesBridge._job_quality
+    _job_atmos = WavesBridge._job_atmos
     _queued_quality_value = WavesBridge._queued_quality_value
     _target_tier = WavesBridge._target_tier
     _target_quality_rank = WavesBridge._target_quality_rank
@@ -75,6 +76,7 @@ class _Stub:
     # The per-item quality choice _download reads at queue time (issue #36);
     # this carcass holds none, so the ask is the setting's.
     _ask_quality_for = WavesBridge._ask_quality_for
+    _ask_atmos_for = WavesBridge._ask_atmos_for
     _quality_override_key = WavesBridge._quality_override_key
     _row_ask = WavesBridge._row_ask
 

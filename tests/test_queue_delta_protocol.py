@@ -67,7 +67,7 @@ def _delta_stub():
     stub._queued_quality_value = lambda: "LOSSLESS"
     # The per-item quality choice _download reads at queue time (issue #36);
     # none here, so every ask is the setting's.
-    _bind(stub, "_ask_quality_for", "_quality_override_key", "_row_ask")
+    _bind(stub, "_ask_quality_for", "_ask_atmos_for", "_quality_override_key", "_row_ask")
     stub._library_bulk_skip_on = lambda: True
     stub._QUEUE_SETTLED = WavesBridge._QUEUE_SETTLED
     stub._QUEUE_HISTORY_MAX = WavesBridge._QUEUE_HISTORY_MAX
@@ -232,7 +232,12 @@ def _job_stub(pool=None):
     stub = _delta_stub()
     stub._logged_in = True
     stub.settings = SimpleNamespace(
-        data=SimpleNamespace(download_base_path="/tmp/waves-out", download_delay=False, downloads_concurrent_max=2)
+        data=SimpleNamespace(
+            download_base_path="/tmp/waves-out",
+            download_delay=False,
+            downloads_concurrent_max=2,
+            download_dolby_atmos=False,
+        )
     )
     stub.dl_pool = pool if pool is not None else _HoldPool()
     stub.downloadState = _Sig(stub.log, "state")
@@ -246,6 +251,7 @@ def _job_stub(pool=None):
     stub._download_gate = lambda: "ok"
     stub._ffmpeg_gate_holds = lambda media_id, retry: False
     stub._job_quality = lambda qid: None
+    stub._job_atmos = lambda qid: False
     stub._job_library_skip = lambda qid: False
     stub._gate_reachability = lambda retry, media_id: True
     stub._set_queue_progress = lambda qid, pct: None

@@ -355,7 +355,7 @@ def test_the_gate_stamps_atmos_only_onto_an_old_atmos_record(tmp_path):
     store.record("101", str(song), "HIGH", audio_mode="DOLBY_ATMOS")  # atmos_only defaults to 0
     atmos_off = SimpleNamespace(settings=SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=False)))
     _bind(atmos_off, "_would_refetch_atmos")
-    assert atmos_off._would_refetch_atmos(store.ownership_of("101")) is False, "the button's state before"
+    assert atmos_off._would_refetch_atmos(store.ownership_of("101"), False) is False, "the button's state before"
     td = _TrackedDownload.__new__(_TrackedDownload)
     td._ownership_of = store.ownership_of
     td._ownership_stamp = None
@@ -367,7 +367,7 @@ def test_the_gate_stamps_atmos_only_onto_an_old_atmos_record(tmp_path):
     verdict, rec = td._ownership_decision(media)
     assert verdict == "skip" and rec["atmos_only"] is True
     assert store.ownership_of("101")["atmos_only"] is True
-    assert atmos_off._would_refetch_atmos(store.ownership_of("101")) is True, "the id-only button settles too"
+    assert atmos_off._would_refetch_atmos(store.ownership_of("101"), False) is True, "the id-only button settles too"
 
 
 def test_a_stereo_row_is_never_stamped_atmos_only(tmp_path):

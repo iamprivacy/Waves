@@ -427,9 +427,12 @@ def _download_stub(existing_status="queued", existing_quality="LOSSLESS"):
     s._ffmpeg_gate_holds = lambda media_id, retry: False
     s._queued_quality_value = lambda: "LOSSLESS"
     s._target_tier = lambda: "LOSSLESS"
+    # A queued row predicts ATMOS for a release the run takes in Dolby Atmos,
+    # so _download reads the setting.
+    s.settings = SimpleNamespace(data=SimpleNamespace(download_dolby_atmos=False))
     # The per-item quality choice _download reads at queue time (issue #36):
     # none on this carcass, so the ask is _queued_quality_value's.
-    for name in ("_ask_quality_for", "_quality_override_key"):
+    for name in ("_ask_quality_for", "_ask_atmos_for", "_quality_override_key"):
         setattr(s, name, _bind(s, name))
     s._queue = [
         {
@@ -537,11 +540,13 @@ def _body_stub(fail=False):
     # takes its hold, and a press landing in there has to reach it.
     s._download_failed_with_folder = lambda retry, media_id, qid, name, abort=None: False
     s._job_quality = lambda qid: None
+    s._job_atmos = lambda qid: False
     s._build_download = lambda signals, **kw: s.dl
     s._enqueue = lambda *a, **kw: 41
     # The per-item quality choice _download reads at queue time (issue #36):
     # none on this carcass.
     s._ask_quality_for = lambda obj, type_media, media_id: ("LOSSLESS", "LOSSLESS")
+    s._ask_atmos_for = lambda obj, type_media, media_id: False
     s._row_ask = lambda qid: None  # a held retry asks at what its row asked; no row ask here
     # Three arguments, as the real slot has taken since 1333a46: the failure
     # branch calls it with a reason, and a two-argument stub raised there,
@@ -566,7 +571,12 @@ def _body_stub(fail=False):
     s._queue = []
     s._queue_lock = Lock()
     s.settings = SimpleNamespace(
-        data=SimpleNamespace(download_base_path="/tmp/waves-out", download_delay=False, downloads_concurrent_max=2)
+        data=SimpleNamespace(
+            download_base_path="/tmp/waves-out",
+            download_delay=False,
+            downloads_concurrent_max=2,
+            download_dolby_atmos=False,
+        )
     )
     s.dl_pool = _InlinePool()
     s.downloadState = _Sig()

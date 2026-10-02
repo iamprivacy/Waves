@@ -148,6 +148,41 @@ def test_merge_seed_and_load_queue_tracks_read_the_catalog_ceiling(monkeypatch):
     assert reg["i-1"]["expected"] == "LOSSLESS"
 
 
+def _media(modes, tags, tier):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(audio_modes=modes, media_metadata_tags=tags, audio_quality=tier)
+
+
+# The three shapes TIDAL ships, as measured live on 2026-10-01: a new release
+# carries stereo AND Atmos under one id; an older one has a separate Atmos
+# edition whose every track is Atmos only (filed under LOW); and plain stereo.
+_DUAL = (["STEREO", "DOLBY_ATMOS"], ["LOSSLESS", "HIRES_LOSSLESS", "DOLBY_ATMOS"], "LOSSLESS")
+_ATMOS_ONLY = (["DOLBY_ATMOS"], ["DOLBY_ATMOS"], "LOW")
+_STEREO = (["STEREO"], ["LOSSLESS"], "LOSSLESS")
+
+
+def test_expected_word_names_atmos_whenever_the_run_fetches_it():
+    """Issue #45: the prediction follows the engine's own Atmos condition."""
+    from waves.waves_ui import backend
+
+    assert backend._expected_word(_media(*_DUAL), True) == "ATMOS"
+    assert backend._expected_word(_media(*_DUAL), False) == "HI-RES"
+    # Nothing else to fetch: Atmos whatever the setting says.
+    assert backend._expected_word(_media(*_ATMOS_ONLY), False) == "ATMOS"
+    assert backend._expected_word(_media(*_STEREO), True) == "LOSSLESS"
+
+
+def test_merge_seed_predicts_atmos_for_a_source_fetched_in_atmos(monkeypatch):
+    from waves.waves_ui import backend
+
+    monkeypatch.setattr(backend, "name_builder_title", lambda t: "S")
+    src = _media(*_DUAL)
+    src.id, src.duration = "s", 10
+    assert backend._seed_merge_registry([(src, 1, 1, "i-1")], atmos_on=True)["i-1"]["expected"] == "ATMOS"
+    assert backend._seed_merge_registry([(src, 1, 1, "i-1")])["i-1"]["expected"] == "HI-RES"
+
+
 # ---- the real drawer -------------------------------------------------------------
 def test_drawer_states_the_floor_and_holds_it():
     env = dict(os.environ)
@@ -232,6 +267,10 @@ def _run_scenario() -> int:
         ("HI-RES", "", "HI-RES"),
         ("", "LOSSLESS", "LOSSLESS"),
         ("HIGH", "HI-RES", "HIGH"),
+        # An Atmos fetch arrives at its own fixed tier, whatever was asked.
+        ("HIGH", "ATMOS", "ATMOS"),
+        ("HI-RES", "ATMOS", "ATMOS"),
+        ("", "ATMOS", "ATMOS"),
     ):
         got = str(q(f"root.tierFloor('{req}', '{ceil}')"))
         if got != want:
@@ -312,6 +351,22 @@ def _run_scenario() -> int:
     got = ledger()
     if got != "LOSSLESS@full | HI-RES@faded":
         bad.append(f"after track 1 landed at LOSSLESS the ledger read {got!r}")
+
+    # A release this run fetches in Dolby Atmos (issue #45). It used to read
+    # HIGH, the stereo tier it was queued at, all the way to a file that
+    # landed as Atmos.
+    bridge._enqueue("Album B", "album", media_id="m2", collection=True, tracks=1, expected="ATMOS")
+    bridge.queueChanged.emit(list(bridge._queue))
+    settle(200)
+    tier_b = str(q("""(function () {
+                for (var i = 0; i < queueList.count; ++i) {
+                    var it = queueList.itemAtIndex(i)
+                    if (it && it.model && it.model.name === 'Album B') return it.tier
+                }
+                return '<no row>'
+            })()"""))
+    if tier_b != "ATMOS":
+        bad.append(f"a release fetched in Dolby Atmos states {tier_b!r} on its queued pill, want ATMOS")
 
     if bad:
         for b in bad:

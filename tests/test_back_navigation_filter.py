@@ -126,7 +126,7 @@ def test_filter_is_installed_on_the_content_item_not_the_window():
     assert "root_objects[0].installEventFilter(bridge)" not in src
     assert "app.installEventFilter(bridge)" not in src
     assert re.search(
-        r"contentItem\(\).*\n.*installEventFilter\(bridge\)", src
+        r"_content_item\(root_objects\[0\]\)\n.*installEventFilter\(bridge\)", src
     ), "the swipe filter belongs on the content item"
 
 

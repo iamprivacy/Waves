@@ -73,7 +73,9 @@ class _Stub:
         self._search_gen = 0  # logout supersedes in-flight search workers by bumping this
         self._artist_pop_cache: dict = {}
         self._objs_lock = Lock()  # every bucket clear takes it
-        self.settings = type("S", (), {"data": type("D", (), {"path_binary_ffmpeg": ""})()})()
+        self.settings = type(
+            "S", (), {"data": type("D", (), {"path_binary_ffmpeg": "", "download_dolby_atmos": False})()}
+        )()
         self._ffmpeg_user_path = ""
         # Fake signals
         self.queueChanged = _Signal()

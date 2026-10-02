@@ -613,6 +613,9 @@ class _GateStub:
     def _job_quality(self, qid):
         return None
 
+    def _job_atmos(self, qid):
+        return False
+
     def _build_download(self, signals, **kwargs):
         return self.dl
 

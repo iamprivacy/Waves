@@ -145,6 +145,7 @@ class _OwnBridge:
             # this carcass, so it answers with the setting's rank.
             "_override_target_rank",
             "_quality_override_key",
+            "_ask_atmos_for",
         ):
             setattr(self, name, getattr(backend.WavesBridge, name).__get__(self, _OwnBridge))
 

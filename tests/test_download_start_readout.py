@@ -73,7 +73,9 @@ class _Stub:
         self._library_claim_overrides: set = set()
         self._queue: list = []
         self._queue_lock = Lock()
-        self.settings = SimpleNamespace(data=SimpleNamespace(download_base_path="/tmp/waves-out", download_delay=False))
+        self.settings = SimpleNamespace(
+            data=SimpleNamespace(download_base_path="/tmp/waves-out", download_delay=False, download_dolby_atmos=False)
+        )
         self.dl_pool = _InlinePool()
         self.downloadState = _Recorder("state", log)
         self.downloadProgress = _Recorder("progress", log)
@@ -88,6 +90,9 @@ class _Stub:
     # none here, so the ask is the setting's.
     def _ask_quality_for(self, obj, type_media, media_id):
         return ("LOSSLESS", "LOSSLESS")
+
+    def _ask_atmos_for(self, obj, type_media, media_id):
+        return False
 
     def _row_ask(self, qid):
         return None
@@ -106,6 +111,9 @@ class _Stub:
         # The real bridge pins the row's queued audio quality onto its job;
         # this stub keeps no rows, so it answers "no pin".
         return None
+
+    def _job_atmos(self, qid):
+        return False
 
     def _gate_reachability(self, retry, media_id) -> bool:
         return True

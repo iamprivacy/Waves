@@ -251,7 +251,9 @@ def test_the_row_records_the_setting_it_was_queued_at():
     stub._qdirty_added = []  # _enqueue marks the new row for the delta flush
     stub._emit_queue = lambda: None
     stub._target_tier = lambda: "HI-RES"
-    stub.settings = SimpleNamespace(data=SimpleNamespace(quality_audio=Quality.hi_res_lossless))
+    stub.settings = SimpleNamespace(
+        data=SimpleNamespace(quality_audio=Quality.hi_res_lossless, download_dolby_atmos=False)
+    )
     stub._queued_quality_value = backend.WavesBridge._queued_quality_value.__get__(stub, type(stub))
     # The other value a row pins at birth, tested on its own in
     # tests/test_queue_row_pins_the_library_skip.py.

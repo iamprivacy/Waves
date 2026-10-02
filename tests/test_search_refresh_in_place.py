@@ -4,15 +4,14 @@ WHAT THIS FENCES OFF
 --------------------
 The search page paints from a cached result and then corrects itself when the
 wire answers (the backend's stale-then-revalidate). That correction runs with
-the build veil down, on purpose: the page the user is already reading just
-becomes current, with no loading flash. Every result Loader reads that same
-veil flag for its ``asynchronous`` property, so with the veil down a
-clear-and-rebuild refill incubates the whole result set SYNCHRONOUSLY on the
-GUI thread. Measured offscreen on the real Main.qml with the page laid out, a
-cap-sized correction differing by one album cost 258 to 319 ms of frozen
-window (median 294), against 13 to 14 ms for the fresh handler, on the one
-code path whose entire purpose is to feel instant. The same measurement after
-the in-place reconcile: 12.8 to 14.5 ms, median 13.7.
+no veil, on purpose: the page the user is already reading just becomes
+current, with no loading flash. A clear-and-rebuild refill there rebuilds every
+row in front of the reader. Measured offscreen on the real Main.qml with the
+page laid out, back when every result Loader built synchronously outside the
+old build veil, a cap-sized correction differing by one album cost 258 to 319
+ms of frozen window (median 294), against 13 to 14 ms for the fresh handler,
+on the one code path whose entire purpose is to feel instant. The same
+measurement after the in-place reconcile: 12.8 to 14.5 ms, median 13.7.
 
 Speed is only half of it, and the half a test cannot see. What this pins is
 the other half: that reconciling by id still produces exactly what a refill
@@ -222,7 +221,7 @@ def _run_scenario() -> int:
 
     # The page must not have been veiled: this path is the one that never
     # flashes, and a veil here would mean it fell back to a full rebuild.
-    check(q("root.searchBuilding") is False, "the in-place refresh raised the build veil")
+    check(q("root.searchBuilding") is False, "the in-place refresh raised the veil")
 
     if failures:
         for f in failures:
