@@ -65,6 +65,9 @@ ApplicationWindow {
     property var qualityOverrides: waves.qualityOverrides || ({})
     // The Settings tier, the DEFAULT mark in every badge's menu.
     property string targetTier: waves.targetTier || ""
+    // The "Download Dolby Atmos" setting: a release carrying Atmos beside
+    // stereo reads ATMOS on its badge while it is on (see QualPick.atmosFace).
+    property bool atmosOn: waves.atmosOn === true
     function qualOverrideFor(mediaId, albumId) {
         var o = qualityOverrides
         var own = mediaId !== "" ? o[mediaId] : undefined
@@ -74,10 +77,12 @@ ApplicationWindow {
     }
     // The ground a chosen tier's badge sits on: the tier's own container
     // colour, so a badge stating what YOU asked for reads apart from one
-    // stating what the catalog offers (plain surface2).
+    // stating what the catalog offers (plain surface2). ATMOS wears no
+    // ladder colour (see qualBg), so a chosen ATMOS fills its outline grey:
+    // filled where the catalog's own ATMOS pill is outline only.
     function qualTint(q) {
         return (q === "HI-RES" || q === "VIDEO") ? goldCont : q === "LOSSLESS" ? greenCont
-             : q === "HIGH" ? cyanCont : surface3
+             : q === "HIGH" ? cyanCont : q === "ATMOS" ? outline : surface3
     }
     Connections {
         target: waves
@@ -686,11 +691,23 @@ ApplicationWindow {
     property bool artistEpsCollapsed: waves.wavesPref("artist_sec_eps_collapsed") === true
     property bool artistVideosCollapsed: waves.wavesPref("artist_sec_videos_collapsed") === true
     function toggleArtistSection(which) {
+        // Unfolding builds the section's rows in place, under the header
+        // just clicked: a screenful of them in this click (see
+        // _artistPlanSync), the rest incubating below.
         var v
-        if (which === "tracks") { v = artistTracksCollapsed = !artistTracksCollapsed }
-        else if (which === "albums") { v = artistAlbumsCollapsed = !artistAlbumsCollapsed }
-        else if (which === "videos") { v = artistVideosCollapsed = !artistVideosCollapsed }
-        else { v = artistEpsCollapsed = !artistEpsCollapsed }
+        if (which === "tracks") {
+            if (artistTracksCollapsed) { _artistSyncFromTracks = 0; _artistSyncTracks = _artistScreenful(_artistTrackPitch); _artistReachFrom(which, _artistSyncTracks, true) }
+            v = artistTracksCollapsed = !artistTracksCollapsed
+        } else if (which === "albums") {
+            if (artistAlbumsCollapsed) { _artistSyncFromAlbums = 0; _artistSyncAlbums = _artistScreenful(_artistAlbumPitch); _artistReachFrom(which, _artistSyncAlbums, true) }
+            v = artistAlbumsCollapsed = !artistAlbumsCollapsed
+        } else if (which === "videos") {
+            if (artistVideosCollapsed) { _artistSyncFromVideos = 0; _artistSyncVideos = _artistScreenful(_artistVideoPitch()) * artistVideoGrid.cols; _artistReachFrom(which, _artistSyncVideos, true) }
+            v = artistVideosCollapsed = !artistVideosCollapsed
+        } else {
+            if (artistEpsCollapsed) { _artistSyncFromEps = 0; _artistSyncEps = _artistScreenful(_artistAlbumPitch); _artistReachFrom(which, _artistSyncEps, true) }
+            v = artistEpsCollapsed = !artistEpsCollapsed
+        }
         waves.setWavesPref("artist_sec_" + which + "_collapsed", v)
     }
     // Every artist-page section shows its first 5 (videos: whole rows) with a
@@ -704,11 +721,41 @@ ApplicationWindow {
     property bool artistEpsExpanded: waves.wavesPref("artist_sec_eps_expanded") === true
     property bool artistVideosExpanded: waves.wavesPref("artist_sec_videos_expanded") === true
     function toggleArtistExpand(which) {
+        // SHOW ALL builds the rows it reveals: the screenful right under the
+        // rows already shown in this click, the rest incubating below (see
+        // _artistPlanSync). SHOW LESS keeps them built, hidden (the kept
+        // flags, set here before the reveal).
         var v
-        if (which === "tracks") v = topTracksExpanded = !topTracksExpanded
-        else if (which === "albums") v = artistAlbumsExpanded = !artistAlbumsExpanded
-        else if (which === "eps") v = artistEpsExpanded = !artistEpsExpanded
-        else v = artistVideosExpanded = !artistVideosExpanded
+        if (which === "tracks") {
+            if (!topTracksExpanded) {
+                _artistSyncTracks = Math.max(_artistSyncTracks, 5 + _artistScreenful(_artistTrackPitch))
+                _artistKeptTracks = true
+                _artistReachFrom(which, _artistSyncTracks, false)
+            }
+            v = topTracksExpanded = !topTracksExpanded
+        } else if (which === "albums") {
+            if (!artistAlbumsExpanded) {
+                _artistSyncAlbums = Math.max(_artistSyncAlbums, 5 + _artistScreenful(_artistAlbumPitch))
+                _artistKeptAlbums = true
+                _artistReachFrom(which, _artistSyncAlbums, false)
+            }
+            v = artistAlbumsExpanded = !artistAlbumsExpanded
+        } else if (which === "eps") {
+            if (!artistEpsExpanded) {
+                _artistSyncEps = Math.max(_artistSyncEps, 5 + _artistScreenful(_artistAlbumPitch))
+                _artistKeptEps = true
+                _artistReachFrom(which, _artistSyncEps, false)
+            }
+            v = artistEpsExpanded = !artistEpsExpanded
+        } else {
+            if (!artistVideosExpanded) {
+                _artistSyncVideos = Math.max(_artistSyncVideos, artistVideoGrid.fillCount
+                                             + _artistScreenful(_artistVideoPitch()) * artistVideoGrid.cols)
+                _artistKeptVideos = true
+                _artistReachFrom(which, _artistSyncVideos, false)
+            }
+            v = artistVideosExpanded = !artistVideosExpanded
+        }
         waves.setWavesPref("artist_sec_" + which + "_expanded", v)
     }
     // The search page (mixed All view) shows each section's first 5 results with
@@ -720,9 +767,9 @@ ApplicationWindow {
     // ARTISTS is the exception to the layout: its collapsed view is a horizontal
     // scroll strip of fixed-size cards (a resize reveals more cards, never
     // re-fits the ones on screen, which is what keeps it smooth) and SHOW ALL
-    // expands it to a fill grid. stripMode drives which layout is live and gates
-    // the two layouts' Loaders so exactly one set is active, which keeps the
-    // build veil's one-tick-per-artist accounting balanced. Its expanded state
+    // expands it to a fill grid. stripMode says which layout is on screen;
+    // each one's cards are built when it is first shown and kept until the
+    // next search, as the list sections keep their rows. Its expanded state
     // persists the same as the list sections.
     property bool searchArtistsExpanded: waves.wavesPref("search_sec_artists_expanded") === true
     readonly property bool searchArtistsStripMode: root.filterType === "all" && !root.searchArtistsExpanded
@@ -732,14 +779,36 @@ ApplicationWindow {
     property bool searchPlaylistsExpanded: waves.wavesPref("search_sec_playlists_expanded") === true
     property bool searchMixesExpanded: waves.wavesPref("search_sec_mixes_expanded") === true
     function toggleSearchSection(which) {
+        // SHOW ALL builds the rows it reveals: those on the screen in this
+        // click, the rest incubating below (see the search results build).
+        // SHOW LESS keeps them built, hidden (the kept flags). Planned from
+        // the section's header as well as the screen: SHOW LESS scrolls back
+        // up to it, and the strip it puts back sits right under it.
+        _searchSyncClose()
         var v
-        if (which === "artists") v = searchArtistsExpanded = !searchArtistsExpanded
-        else if (which === "albums") v = searchAlbumsExpanded = !searchAlbumsExpanded
-        else if (which === "tracks") v = searchTracksExpanded = !searchTracksExpanded
-        else if (which === "videos") v = searchVideosExpanded = !searchVideosExpanded
-        else if (which === "playlists") v = searchPlaylistsExpanded = !searchPlaylistsExpanded
-        else v = searchMixesExpanded = !searchMixesExpanded
+        if (which === "artists") { v = searchArtistsExpanded = !searchArtistsExpanded; if (v) _searchKeptArtists = true }
+        else if (which === "albums") { v = searchAlbumsExpanded = !searchAlbumsExpanded; if (v) _searchKeptAlbums = true }
+        else if (which === "tracks") { v = searchTracksExpanded = !searchTracksExpanded; if (v) _searchKeptTracks = true }
+        else if (which === "videos") { v = searchVideosExpanded = !searchVideosExpanded; if (v) _searchKeptVideos = true }
+        else if (which === "playlists") { v = searchPlaylistsExpanded = !searchPlaylistsExpanded; if (v) _searchKeptPlaylists = true }
+        else { v = searchMixesExpanded = !searchMixesExpanded; if (v) _searchKeptMixes = true }
         waves.setWavesPref("search_sec_" + which + "_expanded", v)
+        _searchPlanSync(results.contentY, which)
+    }
+    // A type chip. A section's own chip shows every row of it, so it builds
+    // them the way SHOW ALL does (and keeps them, so the chip back to All
+    // frees nothing); the screen the page lands on is built in the click.
+    function setSearchFilter(name) {
+        if (name === filterType) return
+        _searchSyncClose()
+        if (name === "artists") _searchKeptArtists = true
+        else if (name === "albums") _searchKeptAlbums = true
+        else if (name === "tracks") _searchKeptTracks = true
+        else if (name === "videos") _searchKeptVideos = true
+        else if (name === "playlists") _searchKeptPlaylists = true
+        else if (name === "mixes") _searchKeptMixes = true
+        filterType = name
+        _searchPlanSync(results.contentY)
     }
     // A per-section cap for the mixed All view: the section's first 5 rows, or
     // everything once it is expanded; a specific section filter is never capped.
@@ -889,6 +958,39 @@ ApplicationWindow {
     // browsePage, keyed by its TIDAL api path so a slow load for a chip the
     // user has already left is ignored (see onBrowsePageLoaded).
     property var browseSections: []
+    // One slot per landing section: the content shelves' Repeater takes THIS
+    // model, never the array. A payload refreshing a landing already built
+    // used to reassign the array, and a reassigned array is a Repeater
+    // reset: every shelf torn down and every card rebuilt, ~100ms of frozen
+    // window with the landing on screen, and at boot the whole landing
+    // again behind the overlay (the revalidate re-emits almost every launch
+    // now that the landing embeds For You rows). The slots stay put: a
+    // refresh rebinds each section in place (its cards rebind with it, see
+    // BrowseSection), a longer landing appends sections, a shorter one drops
+    // its trailing slots. Filled from the change handler, never from a
+    // binding (see bsecSlots for why).
+    ListModel { id: browseSecSlots }
+    property int _browseSecSlotN: 0
+    // The array before the latest assignment (prev). A slot a shorter array
+    // no longer covers is released by the trim below, but a released
+    // delegate's bindings still evaluate until it is deleted, and reading
+    // past the new array's end would put the dying section on undefined for
+    // that instant, a TypeError per read: it reads the section it had from
+    // prev instead. prev lags one change behind on purpose, so it holds the
+    // dropped sections for the whole change that drops them. A plain object
+    // mutated in place: a property reassigned here would fire every slot's
+    // binding a second time.
+    readonly property var _browseSecHeld: ({ prev: [], cur: [] })
+    onBrowseSectionsChanged: {
+        var n = browseSections.length
+        _browseSecHeld.prev = _browseSecHeld.cur
+        _browseSecHeld.cur = browseSections
+        if (_browseSecSlotN > n) { browseSecSlots.remove(n, _browseSecSlotN - n); _browseSecSlotN = n }
+        // Sections past the ones a landing already has were appended by a
+        // refresh: they incubate on their own and no veil counts them.
+        var late = _browseSecSlotN > 0
+        while (_browseSecSlotN < n) { browseSecSlots.append({ slot: _browseSecSlotN, late: late }); _browseSecSlotN++ }
+    }
     // The clicked card's own title, kept while its page payload is in flight,
     // so the breadcrumb (and a snapshot of a page left mid-load) can name the
     // page immediately instead of flashing the "Browse" fallback until
@@ -906,10 +1008,10 @@ ApplicationWindow {
     // assembling: while building, the shelf loaders render at opacity 0
     // (heights still resolve) and the "Reading the wire…" hint stays up; when
     // the last loader reports ready the page appears complete in one paint,
-    // exactly the pre-async look. Revalidations of a landing the user is
-    // looking at, and endless-scroll growth, rebuild synchronously instead
-    // (an in-place swap, no loading flash), so _browseAsyncBuild is set per
-    // assignment by onBrowseLoaded / browseGrew.
+    // exactly the pre-async look. A refresh of a landing already built
+    // rebinds its sections in place (see browseSecSlots) and raises no
+    // veil: the flag stays as the fresh build left it, and a section the
+    // refresh appends incubates on its own (BrowseSection.late).
     property bool _browseAsyncBuild: false
     property int _browseBuildTotal: 0
     property int _browseBuildReady: 0
@@ -925,26 +1027,35 @@ ApplicationWindow {
     function applyBrowseLanding(p) {
         root.browseError = !!p.error
         var secs = p.sections || []
-        // Fresh build (nothing on screen): async + veil. Refresh of a landing
-        // already showing: synchronous, swaps in place. While the launch
-        // overlay is still up nothing is "showing" yet, and the boot-time
-        // revalidate re-emit fires almost every launch now that the landing
-        // embeds For You rows (their ordering shifts between sessions), so
-        // build that one asynchronously too: the synchronous shelf rebuild
-        // froze the GUI thread mid boot sequence and the water/nav animations
-        // visibly hitched (reported from livetesting).
-        root._browseAsyncBuild = root.browseSections.length === 0 || !bootOverlay.done
-        // +4 = the wayfinding groups (Playlists / Genres / Moods / Decades)
-        // rendered as async shelves alongside the content sections.
-        root._browseBuildStart(root._browseAsyncBuild && !p.error ? secs.length + 4 : 0)
+        var chips = { genres: p.genres || [], moods: p.moods || [], decades: p.decades || [] }
+        var chipsChanged = JSON.stringify(chips) !== JSON.stringify(root.browseChips)
+        // Fresh build (nothing built yet): async + veil. A landing already
+        // built refreshes IN PLACE: the section slots rebind (see
+        // browseSecSlots), so nothing is torn down, nothing is watched
+        // assembling, and there is nothing to veil, at boot behind the
+        // overlay (the revalidate re-emit fires almost every launch now that
+        // the landing embeds For You rows, and its rebuild used to hitch the
+        // water, reported from livetesting) or later with the page on screen.
+        var fresh = root.browseSections.length === 0
+        if (fresh) {
+            root._browseAsyncBuild = true
+            // +4 = the wayfinding groups (Playlists / Genres / Moods /
+            // Decades), rendered as async shelves alongside the content
+            // sections when the chips change (an unchanged set keeps the
+            // shelves it has, so they would never report in).
+            root._browseBuildStart(p.error ? 0 : secs.length + (chipsChanged ? 4 : 0))
+        }
         root.browseArtistsSideMap(secs)
-        // Refresh of a landing already built: hold the spot across the
-        // shelf rebuild (see holdScroll). The landing pane is alive even
+        // Refresh: hold the spot across the rebind (see holdScroll), for the
+        // rare shelf that changes height. The landing pane is alive even
         // behind a drilled page, and the clamp does not care that it is
         // hidden, so the hold arms regardless of which pane is showing.
-        if (root.browseSections.length > 0) browseLanding.holdScroll()
+        if (!fresh) browseLanding.holdScroll()
         root.browseSections = secs
-        root.browseChips = { genres: p.genres || [], moods: p.moods || [], decades: p.decades || [] }
+        // The wayfinding tile shelves hang off the chips: a refresh carrying
+        // the same set leaves them alone instead of rebuilding four shelves
+        // of tiles to show what they already show.
+        if (chipsChanged) root.browseChips = chips
         // An open (or stacked) local: row page snapshotted a row this payload
         // may have just refreshed; bring it in line.
         root.refreshLocalBrowsePages(p.sections || [])
@@ -970,6 +1081,39 @@ ApplicationWindow {
     // through a fixed 800ms and drop the veil mid-incubation, and the rest of
     // the page was then watched arriving shelf by shelf.
     Timer { id: browseBuildGuard; interval: 800; onTriggered: root.browseBuilding = false }
+    // --- Drilled Browse page build veil -----------------------------------
+    // The landing veil's twin for a drilled page (an editorial page, a
+    // genre, a listing, an album). Its shelves' cards and the track rows in
+    // view were created inline in the payload's turn: 191ms of frozen
+    // window for a thirteen-shelf genre page (measured 2026-09-30), one
+    // hard stop for a scroll under way. A fresh page now incubates behind
+    // its "Reading the wire…" hint and fades in complete; a revalidate
+    // re-emit of the page on screen, a Back and a local listing still land
+    // synchronously, in place. The sections tick as they complete, and
+    // their cards and in-view rows add themselves to the count the way the
+    // landing's cards do (_browsePageCardStart / _browsePageCardTick).
+    property int _browsePageBuildTotal: 0
+    property int _browsePageBuildReady: 0
+    property bool browsePageBuilding: false
+    function _browsePageBuildStart(n) {
+        _browsePageBuildTotal = n; _browsePageBuildReady = 0
+        browsePageBuilding = n > 0
+        if (browsePageBuilding) browsePageBuildGuard.restart(); else browsePageBuildGuard.stop()
+    }
+    function _browsePageBuildTick() {
+        if (!browsePageBuilding) return
+        browsePageBuildGuard.restart()   // progress: the guard watches for a STALL
+        if (++_browsePageBuildReady >= _browsePageBuildTotal) { browsePageBuilding = false; browsePageBuildGuard.stop() }
+    }
+    function _browsePageCardStart(async) { if (async && browsePageBuilding) { ++_browsePageBuildTotal; return true } return false }
+    function _browsePageCardTick(counted) { if (counted) _browsePageBuildTick() }
+    Timer { id: browsePageBuildGuard; interval: 800; onTriggered: root.browsePageBuilding = false }
+    property real browsePageReveal: 1
+    onBrowsePageBuildingChanged: {
+        if (browsePageBuilding) { browsePageRevealRise.stop(); browsePageReveal = 0 }
+        else browsePageRevealRise.restart()
+    }
+    NumberAnimation { id: browsePageRevealRise; target: root; property: "browsePageReveal"; to: 1; duration: 180; easing.type: Easing.OutQuad }
     // Always-on freshness: revalidate-on-tab-return alone lets the landing
     // freeze for a user who parks on Browse. The backend's 60s throttle is a
     // floor (don't re-hit the API more often than this), not a ceiling, so
@@ -1109,62 +1253,358 @@ ApplicationWindow {
         // A window hidden across midnight corrects the moment it is shown.
         function onOnScreenChanged() { if (root.onScreen) root.refreshNewCutoff() }
     }
-    // --- Search results build veil ----------------------------------------
-    // Same treatment for a fresh search: every result card (artists, albums,
-    // tracks, videos, playlists, mixes) incubates through an asynchronous
-    // Loader while searchBuilding holds the pane at opacity 0 behind the
-    // "Reading the wire…" hint, then the finished page appears in one paint.
-    // The Loaders' asynchronous flag reads searchBuilding itself, so refills
-    // outside a fresh search (the albums sort control) stay synchronous, an
-    // in-place swap with no loading flash.
-    property int _searchBuildTotal: 0
-    property int _searchBuildReady: 0
+    // --- Search results build ----------------------------------------------
+    // A search's results are up, finished, in the frame after they arrive,
+    // by the artist page's two rules (see the artist page build below).
+    //
+    // A row past its section's cap (the mixed view's first 5, the videos'
+    // first whole grid rows) is not built until SHOW ALL or the section's
+    // own chip shows it, and an artist card is not built until the strip
+    // comes within a screen of it. The page used to build every row of every
+    // section (231 for a full result set, 8 of them on screen) and hold the
+    // whole page at opacity 0 behind the loading hint until the last one
+    // existed, then fade it in: measured offscreen, 650 ms before a big
+    // result set appeared at all, the same again when the cache served the
+    // search a second time. And of the rows that are shown, the ones on the
+    // screen the page lands on are built in the handler, so the first frame
+    // is the finished screen, while the rest incubate below the fold with
+    // their heights reserved (nothing on screen moves when they land).
+    //
+    // The inline rows are a window of indices per section, [from, to), that
+    // each row's Loader compares its index with. Everything that makes rows
+    // appear (a fresh search, SHOW ALL or LESS, a chip, the sort control)
+    // first closes the windows, then makes its change, which sets every new
+    // row incubating, and only then plans and opens them: a Loader whose
+    // asynchronous turns false finishes its incubation on the spot, so the
+    // rows in a window are built right there and the rest carry on. Opening
+    // a window with the old rows still standing would instead force any of
+    // them still incubating to finish on its way out.
+    property int _searchSyncFromArtists: 0
+    property int _searchSyncArtists: 0
+    property int _searchSyncFromAlbums: 0
+    property int _searchSyncAlbums: 0
+    property int _searchSyncFromTracks: 0
+    property int _searchSyncTracks: 0
+    property int _searchSyncFromVideos: 0
+    property int _searchSyncVideos: 0
+    property int _searchSyncFromPlaylists: 0
+    property int _searchSyncPlaylists: 0
+    property int _searchSyncFromMixes: 0
+    property int _searchSyncMixes: 0
+    // Set by a section's SHOW ALL or its own chip, and from the expanded
+    // prefs for a fresh search: rows past the cap stay built (hidden) once
+    // shown, so SHOW LESS or the chip back to All frees nothing in one go and
+    // the next SHOW ALL costs nothing. A flag the page owns rather than each
+    // Loader latching on its own item, which a row built inline would change
+    // in the middle of writing `active` (a binding loop).
+    property bool _searchKeptArtists: false   // the grid; the strip keeps its own (the reach)
+    property bool _searchKeptAlbums: false
+    property bool _searchKeptTracks: false
+    property bool _searchKeptVideos: false
+    property bool _searchKeptPlaylists: false
+    property bool _searchKeptMixes: false
+    // The ARTISTS strip scrolls sideways, so its cards past the cap are the
+    // ones past its right edge: the first this many are built, a screen more
+    // than the strip shows, and its own scroll and width extend it. A big
+    // result set holds 60 artists, and most searches never scroll the strip
+    // past the first five.
+    property int _searchStripReach: 0
+    function _searchStripGrow() {
+        if (!searchArtistsStripMode) return
+        var r = Math.ceil((artistStrip.contentX + 2 * artistStrip.width) / (artistStrip.cardW + artistRow.spacing)) + 1
+        if (r > _searchStripReach) _searchStripReach = r
+    }
+    // The end of each window first: the window never widens on its way shut.
+    function _searchSyncClose() {
+        _searchSyncArtists = 0; _searchSyncFromArtists = 0
+        _searchSyncAlbums = 0; _searchSyncFromAlbums = 0
+        _searchSyncTracks = 0; _searchSyncFromTracks = 0
+        _searchSyncVideos = 0; _searchSyncFromVideos = 0
+        _searchSyncPlaylists = 0; _searchSyncFromPlaylists = 0
+        _searchSyncMixes = 0; _searchSyncFromMixes = 0
+    }
+    // Plans and opens the windows for the page as it now stands (chip, SHOW
+    // ALL states, row counts): every shown row that overlaps the screen the
+    // page lands on at atY (where the view will clamp it once the page has
+    // its new height), and every row from the header of fromSection down
+    // when one is named (SHOW LESS scrolls back up to it). Measured in the
+    // page's own layout (contentCol: spacing 8, a header 36, a SHOW ALL line
+    // 15, the rows' reserved heights) against the WINDOW's height plus a
+    // margin: the pane's own height is stale or zero while it is hidden, and
+    // the bars above it only make the real screen shorter, so an error
+    // builds a row more inline, never one fewer.
+    function _searchPlanSync(atY, fromSection) {
+        var all = filterType === "all"
+        var w = root.width - 44
+        var y = 8
+        var heads = {}, secs = {}
+        function block(h) { y += h + 8 }
+        // n rows, `per` to a line of height h, `gap` between the lines.
+        function rows(k, n, h, gap, per) {
+            secs[k] = { y: y, n: n, pitch: h + gap, per: per }
+            var lines = Math.ceil(n / per)
+            if (lines > 0) block(lines * (h + gap) - gap)
+        }
+        function list(k, n, h, expanded) {
+            if (!sectionVisible(k, n)) return
+            heads[k] = y; block(36)
+            rows(k, (!all || expanded) ? n : Math.min(n, 5), h, 8, 1)
+            if (all && n > 5) block(15)
+        }
+        if (all && searchTop) { block(36); block(searchTop.kind === "album" || searchTop.kind === "playlist" ? 64 : 62) }
+        var na = artistsModel.count
+        var pitch = artistStrip.cardW + artistRow.spacing
+        if (sectionVisible("artists", na)) {
+            heads.artists = y; block(36)
+            if (searchArtistsStripMode) {
+                secs.strip = { y: y }
+                block(artistStrip.cardW + 119)
+            } else {
+                var gc = Math.max(1, Math.floor((w + 12) / (190 + 12)))
+                rows("artists", na, (w - (gc - 1) * 12) / gc + 119, 12, gc)
+            }
+            if (all && (searchArtistsExpanded || na * pitch - artistRow.spacing > w + 1)) block(15)
+        }
+        list("albums", albumsModel.count, 64, searchAlbumsExpanded)
+        list("tracks", tracksModel.count, 62, searchTracksExpanded)
+        var nv = videosModel.count
+        if (sectionVisible("videos", nv)) {
+            var vc = Math.max(2, Math.floor(w / 320)), vcap = vc * Math.ceil(5 / vc)
+            heads.videos = y; block(36)
+            rows("videos", (!all || searchVideosExpanded) ? nv : Math.min(nv, vcap),
+                 Math.round((w - (vc - 1) * 18) / vc * 9 / 16) + 54, 18, vc)
+            if (all && nv > vcap) block(15)
+        }
+        list("playlists", playlistsModel.count, 64, searchPlaylistsExpanded)
+        list("mixes", mixesModel.count, 66, searchMixesExpanded)
+        // y is now contentCol's height plus 16, and the page is that plus 32.
+        var land = Math.max(0, Math.min(atY, y + 16 - root.height))
+        var top = heads[fromSection] !== undefined ? Math.min(land, heads[fromSection]) : land
+        var bottom = land + root.height + 64
+        function win(s) {
+            if (!s) return [0, 0]
+            var a = Math.floor((top - s.y) / s.pitch), b = Math.ceil((bottom - s.y) / s.pitch)
+            return [Math.max(0, Math.min(s.n, a * s.per)), Math.max(0, Math.min(s.n, b * s.per))]
+        }
+        // The start of each window first: it never widens on its way open.
+        var s = win(secs.artists)
+        if (secs.strip) {
+            var cx = artistStrip.contentX
+            var onScreen = secs.strip.y < bottom && secs.strip.y + artistStrip.cardW + 119 > top
+            s = onScreen ? [Math.min(na, Math.floor(cx / pitch)), Math.min(na, Math.ceil((cx + w) / pitch))] : [0, 0]
+        }
+        _searchSyncFromArtists = s[0]; _searchSyncArtists = s[1]
+        if (secs.strip) _searchStripReach = Math.max(_searchStripReach, Math.ceil((artistStrip.contentX + 2 * w) / pitch) + 1)
+        s = win(secs.albums); _searchSyncFromAlbums = s[0]; _searchSyncAlbums = s[1]
+        s = win(secs.tracks); _searchSyncFromTracks = s[0]; _searchSyncTracks = s[1]
+        s = win(secs.videos); _searchSyncFromVideos = s[0]; _searchSyncVideos = s[1]
+        s = win(secs.playlists); _searchSyncFromPlaylists = s[0]; _searchSyncPlaylists = s[1]
+        s = win(secs.mixes); _searchSyncFromMixes = s[0]; _searchSyncMixes = s[1]
+    }
+    // The page holds for the library, and only for it. A search made before
+    // the library has answered even once (a launch-time window: the first
+    // scan has not published yet) would wear badges read from an index that
+    // says "not present" for everything, and light every one of them a moment
+    // later. So the pane stays at opacity 0 behind the loading hint until
+    // that first answer has landed and every badge on it has re-resolved
+    // (one event-loop pass, see searchLibraryReveal), then fades in; the
+    // badges' own fade is off for the duration, so behind the veil they are
+    // simply there. The rows are built exactly as they are without it, so
+    // the reveal is the finished page. A warm library never raises it, and
+    // searchBuildGuard ends it whatever the library is doing. The same wait
+    // My Tidal holds (see the My Tidal build veil).
     property bool searchBuilding: false
-    // The library has not answered yet, so the badges the finished cards will
-    // wear are not knowable and every pill would resolve to "not present".
-    // Revealing here is what made a search during the first scan render bare
-    // and then light every badge at once one frame later; the veil is already
-    // up, so waiting costs nothing but the wait, and searchBuildGuard is still
-    // the ceiling that ends it whatever the library is doing.
-    property bool _searchAwaitingLibrary: false
     function _searchBuildStart(n) {
-        _searchBuildTotal = n; _searchBuildReady = 0
-        _searchAwaitingLibrary = n > 0 && !waves.libraryIndexReady()
-        searchBuilding = n > 0
-        // A pending release from the PREVIOUS build would clear this one's wait
-        // a pass after it started, revealing the new page unanswered.
+        // A pending release from the PREVIOUS search would end this one's
+        // wait a pass after it started, revealing the new page unanswered.
         searchLibraryReveal.stop()
+        searchBuilding = n > 0 && !waves.libraryIndexReady()
         if (searchBuilding) searchBuildGuard.restart(); else searchBuildGuard.stop()
     }
-    function _searchBuildTick() {
-        if (!searchBuilding) return
-        searchBuildGuard.restart()   // progress: the guard watches for a STALL
-        if (++_searchBuildReady >= _searchBuildTotal) _searchBuildMaybeReveal()
-    }
-    // Both conditions, from either side: the last card can finish before the
-    // index publishes or after it, and whichever lands second drops the veil.
-    function _searchBuildMaybeReveal() {
-        if (!searchBuilding) return
-        if (_searchBuildReady < _searchBuildTotal || _searchAwaitingLibrary) return
-        searchBuilding = false
-        searchBuildGuard.stop()
-    }
-    // A loader that errors (or a miscount) must never pin the veil, and neither
-    // must a library that never answers. Re-armed by every loader that reports,
-    // so this is an inactivity timeout rather than a budget for the whole
-    // build: a full result set is well over a hundred async Loaders and used to
-    // blow through a fixed 800ms, dropping the veil mid-incubation so the rest
-    // of the page (its badges included) was watched arriving card by card.
-    Timer {
-        id: searchBuildGuard; interval: 800
-        onTriggered: { root._searchAwaitingLibrary = false; root.searchBuilding = false }
-    }
+    // A library that never answers must never pin the veil.
+    Timer { id: searchBuildGuard; interval: 800; onTriggered: root.searchBuilding = false }
     // One event-loop pass between the library answering and the veil dropping,
     // so every badge on the page has re-resolved first (see the presence
     // handler for why the order is not free).
-    Timer {
-        id: searchLibraryReveal; interval: 0
-        onTriggered: { root._searchAwaitingLibrary = false; root._searchBuildMaybeReveal() }
+    Timer { id: searchLibraryReveal; interval: 0; onTriggered: root.searchBuilding = false }
+    // --- Artist page build -------------------------------------------------
+    // A page is up, finished, in the frame after the click that opened it.
+    //
+    // Two rules get it there. A row past its section's cap (the first 5, or
+    // the videos' first whole grid rows) is not built until SHOW ALL shows
+    // it: the page used to build every row of every section (156 for an
+    // 80-album artist, 21 of them on screen) and held the whole page at
+    // opacity 0 behind a loading hint until the last one existed, then faded
+    // it in, so even a page served at once from the cache took most of a
+    // second to appear (a revisit exactly as long as a first visit). And of
+    // the rows that are shown, the ones the page opens on are built in the
+    // handler, so the first frame is the finished screen, while the rest
+    // incubate below the fold where nobody watches them land (their heights
+    // are reserved, so nothing on screen moves when they do). Building every
+    // row inline was the problem before the incubation (457ms frozen on a
+    // 113-album artist); the opening screen is a handful of rows.
+    //
+    // The budgets are per section: each row's Loader compares its index as
+    // it activates, so SHOW ALL and unfolding a section plan their own.
+    property int _artistSyncTracks: 0
+    property int _artistSyncAlbums: 0
+    property int _artistSyncEps: 0
+    property int _artistSyncVideos: 0
+    // The start of each window: a Back restored deep down a long page
+    // builds the rows on the screen it lands on, not every row above them
+    // (a prefix budget built the whole page above the spot inline).
+    property int _artistSyncFromTracks: 0
+    property int _artistSyncFromAlbums: 0
+    property int _artistSyncFromEps: 0
+    property int _artistSyncFromVideos: 0
+    // How far down each section rows exist at all. Qt incubates the newest
+    // Loader first, so a section whose every row was created at once landed
+    // its LAST rows first and the rows right under the opening screen last
+    // of all (about 1.2 s behind a hundred rows). Rows are created a
+    // screenful at a time instead: the next batch once the one before it
+    // has landed, so the page fills in from the fold down.
+    property int _artistReachTracks: 0
+    property int _artistReachAlbums: 0
+    property int _artistReachEps: 0
+    property int _artistReachVideos: 0
+    property int _artistLandedTracks: 0
+    property int _artistLandedAlbums: 0
+    property int _artistLandedEps: 0
+    property int _artistLandedVideos: 0
+    function _artistSecKey(which) { return which === "tracks" ? "Tracks" : which === "albums" ? "Albums" : which === "eps" ? "Eps" : "Videos" }
+    function _artistBatch(which) {
+        return which === "videos" ? _artistScreenful(_artistVideoPitch()) * artistVideoGrid.cols
+             : _artistScreenful(which === "tracks" ? _artistTrackPitch : _artistAlbumPitch)
+    }
+    // The rows a section would create with no reach in the way.
+    function _artistActiveCount(which) {
+        if (which === "tracks") return (topTracksExpanded || _artistKeptTracks) ? artistTracksModel.count : Math.min(artistTracksModel.count, 5)
+        if (which === "albums") return (artistAlbumsExpanded || _artistKeptAlbums) ? artistAlbumsModel.count : Math.min(artistAlbumsModel.count, 5)
+        if (which === "eps") return (artistEpsExpanded || _artistKeptEps) ? artistEpModel.count : Math.min(artistEpModel.count, 5)
+        return (artistVideosExpanded || _artistKeptVideos) ? artistVideosModel.count : Math.min(artistVideosModel.count, artistVideoGrid.fillCount)
+    }
+    // A section's rows exist from the start down to the end of its inline
+    // window plus a batch; called wherever a window is (re)planned.
+    function _artistReachFrom(which, syncEnd, fresh) {
+        var k = _artistSecKey(which)
+        if (fresh) root["_artistLanded" + k] = 0
+        root["_artistReach" + k] = Math.max(fresh ? 0 : root["_artistReach" + k], syncEnd + _artistBatch(which))
+    }
+    // A row landed: once every row within reach has, the reach grows by a
+    // batch and the next rows are created. The growth runs from the event
+    // loop, never from the row's own loaded signal: a row built inline
+    // loads while its Loader is still writing `active`, which reads the
+    // reach, and growing it there is a binding loop.
+    function _artistRowLanded(which) {
+        ++root["_artistLanded" + _artistSecKey(which)]
+        Qt.callLater(_artistReachCheck)
+    }
+    function _artistReachCheck() {
+        var secs = ["tracks", "albums", "eps", "videos"]
+        for (var i = 0; i < secs.length; ++i) {
+            var k = _artistSecKey(secs[i]), reach = root["_artistReach" + k]
+            if (root["_artistLanded" + k] >= Math.min(_artistActiveCount(secs[i]), reach))
+                root["_artistReach" + k] = reach + _artistBatch(secs[i])
+        }
+    }
+    // Set by a section's SHOW ALL, cleared for a fresh page: the rows it
+    // built stay built (hidden) through SHOW LESS, so a second SHOW ALL
+    // costs nothing and SHOW LESS frees nothing in one go. A flag the page
+    // owns rather than each Loader latching on its own item, which a row
+    // built inline would change in the middle of writing `active` (a
+    // binding loop).
+    property bool _artistKeptTracks: false
+    property bool _artistKeptAlbums: false
+    property bool _artistKeptEps: false
+    property bool _artistKeptVideos: false
+    // Pitch of each kind of row in artistCol (its spacing included), and
+    // of the videos' grid rows, for the plans below. A section header is
+    // 36 + 12, a SHOW ALL line about 16 + 12.
+    readonly property int _artistTrackPitch: 62 + 12
+    readonly property int _artistAlbumPitch: 64 + 12
+    // The grid is not laid out until the page has been shown once.
+    function _artistVideoPitch() { return Math.round(Math.max(artistVideoGrid.cellW, 200) * 9 / 16) + 54 + 18 }
+    // The rows to build in the handler for page p: every shown row that
+    // starts above the bottom of the screen the page opens on (the top, the
+    // spot a Back restores, or atY when the caller lands the page there
+    // itself). Measured from the header at its shortest, the collapsed row
+    // heights and the WINDOW's height (the page's own is stale or zero while
+    // it is hidden, and the layout only sizes it after this handler), so an
+    // error builds a row more inline, never one fewer.
+    function _artistPlanSync(p, atY) {
+        var restoring = artistView.pendingRestoreY >= 0 && artistView.pendingRestoreKey === ("" + p.id)
+        var top = atY > 0 ? atY : restoring ? artistView.pendingRestoreY : 0
+        var bottom = top + root.height + 64
+        var y = 8 + 150 + 12
+        // [from, to): the rows of a section that overlap the screen.
+        function fit(n, pitch) {
+            if (n <= 0) return [0, 0]
+            y += 36 + 12
+            var k = 0, from = -1
+            while (k < n && y < bottom) {
+                if (from < 0 && y + pitch > top) from = k
+                y += pitch; ++k
+            }
+            y += (n - k) * pitch + 16 + 12
+            return [from < 0 ? k : from, k]
+        }
+        var t = (p.tracks || []).length, a = (p.albums || []).length
+        var e = (p.eps || []).length, v = (p.videos || []).length
+        var w = artistTracksCollapsed ? [0, 0] : fit(topTracksExpanded ? t : Math.min(t, 5), _artistTrackPitch)
+        _artistSyncFromTracks = w[0]; _artistSyncTracks = w[1]
+        w = artistAlbumsCollapsed ? [0, 0] : fit(artistAlbumsExpanded ? a : Math.min(a, 5), _artistAlbumPitch)
+        _artistSyncFromAlbums = w[0]; _artistSyncAlbums = w[1]
+        w = artistEpsCollapsed ? [0, 0] : fit(artistEpsExpanded ? e : Math.min(e, 5), _artistAlbumPitch)
+        _artistSyncFromEps = w[0]; _artistSyncEps = w[1]
+        var cols = artistVideoGrid.cols
+        var vShown = artistVideosExpanded ? v : Math.min(v, artistVideoGrid.fillCount)
+        w = artistVideosCollapsed ? [0, 0] : fit(Math.ceil(vShown / cols), _artistVideoPitch())
+        _artistSyncFromVideos = w[0] * cols; _artistSyncVideos = w[1] * cols
+        _artistReachFrom("tracks", _artistSyncTracks, true)
+        _artistReachFrom("albums", _artistSyncAlbums, true)
+        _artistReachFrom("eps", _artistSyncEps, true)
+        _artistReachFrom("videos", _artistSyncVideos, true)
+    }
+    // A section about to show more rows in place (SHOW ALL, or unfolding
+    // it) builds a screenful of them in that click and lets the rest
+    // incubate: this is the screenful, in rows of the given pitch.
+    function _artistScreenful(pitch) { return Math.ceil(artistView.height / pitch) + 1 }
+    // The one place that fills the four artist-page models. A fresh page
+    // clears the old rows, THEN plans its inline rows and only then appends:
+    // each row's Loader reads its budget as it is created, and a budget
+    // raised while the old rows still stood would make any of them still
+    // incubating finish inline on its way out. A revalidate's refresh, and
+    // the page the view already holds opened again, reconcile by id instead
+    // (inPlace): the rows the user is reading, and maybe scrolling, are kept
+    // and only the fields that changed are written, as the search page's
+    // refresh does (see reconcileById for the measurement). atY: where the
+    // caller will land the page, when it lands it itself (see _artistPlanSync).
+    function fillArtistPage(p, inPlace, atY) {
+        var albums = p.albums || [], eps = p.eps || [], tracks = p.tracks || [], videos = p.videos || []
+        if (inPlace) {
+            // Rows kept, so every row the payload carries may exist.
+            _artistReachFrom("tracks", tracks.length, false)
+            _artistReachFrom("albums", albums.length, false)
+            _artistReachFrom("eps", eps.length, false)
+            _artistReachFrom("videos", videos.length, false)
+            reconcileById(artistAlbumsModel, albums, true)
+            reconcileById(artistEpModel, eps, true)
+            reconcileById(artistTracksModel, tracks, true)
+            reconcileById(artistVideosModel, videos, true)
+            return
+        }
+        artistAlbumsModel.clear(); artistEpModel.clear(); artistTracksModel.clear(); artistVideosModel.clear()
+        _artistPlanSync(p, atY)
+        // A section that opens expanded keeps its rows through SHOW LESS
+        // exactly as one expanded by a click does.
+        _artistKeptTracks = topTracksExpanded
+        _artistKeptAlbums = artistAlbumsExpanded
+        _artistKeptEps = artistEpsExpanded
+        _artistKeptVideos = artistVideosExpanded
+        appendMedia(artistAlbumsModel, albums)
+        appendMedia(artistEpModel, eps)
+        appendMedia(artistTracksModel, tracks)
+        appendMedia(artistVideosModel, videos)
     }
     // --- My Tidal build veil ----------------------------------------------
     // The library half of the search veil, and only that half. A category's
@@ -1210,10 +1650,11 @@ ApplicationWindow {
     // the whole page fades in quickly (over the ambient water, which stays
     // visible behind the "Reading the wire…" hint) rather than snapping in
     // as one hard paint. The animation runs in ONE direction only: raising
-    // the veil for a new build snaps the value to 0 in the same frame. A
+    // the veil for a new search snaps the value to 0 in the same frame. A
     // two-way Behavior here let the freshly refilled headers and SHOW ALL
     // links ghost-fade for 180ms over the loading hint on every new search,
-    // a glitchy flash of half-transparent furniture between pages.
+    // a glitchy flash of half-transparent furniture between pages. Raised
+    // only while the library has not answered yet (see _searchBuildStart).
     property real searchReveal: 1
     onSearchBuildingChanged: {
         if (searchBuilding) { searchRevealRise.stop(); searchReveal = 0 }
@@ -1252,7 +1693,16 @@ ApplicationWindow {
     // LOADED left Back and tab-restore showing the previous album's badge on
     // this album, pointing at the wrong folder, so hang it off the property
     // itself: every assignment re-resolves, and nothing has to remember to.
-    onBrowsePageChanged: root._resolveLibraryPresence()
+    onBrowsePageChanged: {
+        root._resolveLibraryPresence()
+        // Only a page off the wire builds behind the veil (onBrowsePageLoaded
+        // arms it before assigning). Every other assignment (Back, a history
+        // restore, a local listing) lands in place, and drops a veil the
+        // page it replaces may still have up: Back from a page mid-build
+        // used to hide the page returned to until the guard.
+        if (!root._browsePageWire) root._browsePageBuildStart(0)
+    }
+    property bool _browsePageWire: false
     // The header's explicit is the release's flag as the album gate reads it
     // (true, false, or null when TIDAL never said; absent on a page cached
     // before it existed), so here false IS proof of a clean release.
@@ -1779,7 +2229,7 @@ ApplicationWindow {
         var ids = []
         var secs = sections || []
         for (var i = 0; i < secs.length; ++i) {
-            var items = secs[i].items || []
+            var items = browseSecItems(secs[i])
             for (var j = 0; j < items.length; ++j) {
                 if (items[j].id) ids.push(items[j].id)
             }
@@ -2542,14 +2992,12 @@ ApplicationWindow {
                     var pageLoaded = artistData && ("" + artistData.id) === ("" + s.artistData.id)
                         && !!artistData.libraryScoped === !!s.artistData.libraryScoped
                     artistData = s.artistData
-                    if (!pageLoaded) {
-                        fillMedia(artistAlbumsModel, s.artistData.albums || [])
-                        fillMedia(artistEpModel, s.artistData.eps || [])
-                        fillMedia(artistTracksModel, s.artistData.tracks || [])
-                        fillMedia(artistVideosModel, s.artistData.videos || [])
-                    }
+                    // The expansion state before the fill: the rows on the
+                    // screen it lands on are built in the fill, and one built
+                    // folded and expanded after would animate open.
                     resetExpandedAlbums(s.expandedAlbums)
                     bioExpanded = !!s.bio
+                    if (!pageLoaded) fillArtistPage(s.artistData, false, s.artistY || 0)
                     artistOpen = true
                     browseOpen = false; libraryOpen = false; settingsOpen = false
                     // Same-frame restore: the pane becomes visible this frame,
@@ -2690,7 +3138,7 @@ ApplicationWindow {
         browseArtHint = ""              // editorial pages have no hero
         browsePageError = false
         browsePageLoading = true
-        waves.openBrowsePage(path, title)
+        _browseAsk(function() { waves.openBrowsePage(path, title) })
     }
     // Re-issue the current drilled page's fetch after an error. The key alone
     // says which backend entry built the page: openBrowsePage only answers
@@ -2702,13 +3150,13 @@ ApplicationWindow {
         browsePageError = false
         browsePageLoading = true
         if (key.indexOf("pl:") === 0) {
-            waves.openBrowsePlaylists(key.substring(3), browseTitleHint)
+            _browseAsk(function() { waves.openBrowsePlaylists(key.substring(3), browseTitleHint) })
         } else if (key.indexOf("item:") === 0) {
             var rest = key.substring(5)
             var cut = rest.indexOf(":")
-            waves.openBrowseItem(rest.substring(0, cut), rest.substring(cut + 1))
+            _browseAsk(function() { waves.openBrowseItem(rest.substring(0, cut), rest.substring(cut + 1)) })
         } else {
-            waves.openBrowsePage(key, browseTitleHint)
+            _browseAsk(function() { waves.openBrowsePage(key, browseTitleHint) })
         }
     }
     // Some rows (Custom mixes, Radio stations, New releases…) have no TIDAL
@@ -2757,8 +3205,12 @@ ApplicationWindow {
             var match = cur.data ? r.data === cur.data
                                  : (r.rowKind === cur.rowKind && r.title === cur.title)
             if (!match) continue
+            // Against the page's rows as grown: a revalidate carries the
+            // growth the user scrolled into (the backend grafts it), and
+            // reading that as a changed head re-cut the page inline for
+            // nothing, its rows and the user's place with it.
             var head = r.items || []
-            if (ids(head, -1) === ids(cur.items || [], head.length)) return null   // unchanged
+            if (ids(head, -1) === ids(browseSecItems(cur), head.length)) return null   // unchanged
             return { key: pg.key, title: pg.title,
                      sections: [{ rowKind: r.rowKind, title: r.title || pg.title,
                                   items: head, more: "",
@@ -2808,7 +3260,7 @@ ApplicationWindow {
         browseArtHint = ""              // a playlist grid has no hero
         browsePageError = false
         browsePageLoading = true
-        waves.openBrowsePlaylists(path, title)
+        _browseAsk(function() { waves.openBrowsePlaylists(path, title) })
     }
     function openPlaylistsRoot() {
         var key = "cloud:All Playlists"
@@ -2857,40 +3309,97 @@ ApplicationWindow {
     // ask when scrolled to their end, drilled pages when the view hits bottom.
     // One in-flight fetch per data path; results splice into whichever views
     // hold the row at that offset (backend keeps its caches in step).
+    // True only while a drilled page is being asked of the bridge. A page
+    // the bridge holds (cached, or a hover prefetch) is emitted inside that
+    // very call, and such a page must paint whole on the click (the whole
+    // point of prefetching); only a page that comes back later, off the
+    // wire, incubates behind the hint it already shows.
+    property bool _browseOpening: false
+    function _browseAsk(fn) {
+        _browseOpening = true
+        try { fn() } finally { _browseOpening = false }
+    }
     property var browseGrowing: ({})
+    // Endless-scroll growth lives BESIDE the sections, keyed by the row's
+    // paging handle (``data``), never inside them. Growth used to merge the
+    // fetched rows into the section object and reassign browseSections and
+    // browsePage, and a reassigned array is a Repeater reset: every landing
+    // shelf and every page section was torn down and rebuilt inline, 400 to
+    // 550ms of frozen window per 50-row fetch, under a scroll of the very
+    // list that grew (measured 2026-09-30). The sections now stay as they
+    // arrived; each BrowseSection reads its rows through browseSecItems and
+    // appends the new ones to a slot model it owns, so a fetch adds rows at
+    // the bottom and nothing above them is touched. The landing row and a
+    // local page cut from it share one handle, so they grow together, from
+    // one offset.
+    // Growth is keyed by the window it continued from: the row's paging
+    // handle AND the offset its base rows end at. A landing shelf and the
+    // TIDAL "show more" page it leads to share a handle with different
+    // windows (12 vs 50 cards), and growth keyed by the handle alone went to
+    // both: the page could not grow (its offset never matched the answer),
+    // or showed the shelf's growth twice, and Back put the page's growth
+    // under the shelf. A local page cut from a shelf copies the shelf's
+    // offset, so those two still grow together. Each entry also keeps a
+    // signature of the base rows it continued from: a row re-emitted with
+    // a different head (a revalidate that changed it, or the backend's
+    // cached copy that already holds the growth) no longer matches, so
+    // grown rows never show twice and growth never rides a reordered base.
+    // The map is bounded; the oldest entries go first.
+    property var browseGrowth: ({})
+    readonly property int _browseGrowthMax: 24
+    function browseGrowthKey(sec) { return (sec && sec.data) ? sec.data + "@" + (sec.offset || 0) : "" }
+    function browseBaseSig(sec) { return ((sec && sec.items) || []).map(function(it) { return "" + it.id }).join(",") }
+    function browseGrowthOf(sec) {
+        var g = browseGrowth[browseGrowthKey(sec)]
+        return g && g.base === browseBaseSig(sec) ? g : null
+    }
+    function browseSecOffset(sec) { var g = browseGrowthOf(sec); return g ? g.offset : ((sec && sec.offset) || 0) }
+    function browseSecTotal(sec) { var g = browseGrowthOf(sec); return g ? g.total : ((sec && sec.total) || 0) }
+    function browseSecItems(sec) {
+        var base = (sec && sec.items) || []
+        var g = browseGrowthOf(sec)
+        return g ? base.concat(g.items) : base
+    }
     function browseCanGrow(sec) {
-        return !!(sec && sec.data) && (sec.offset || 0) < (sec.total || 0)
+        return !!(sec && sec.data) && browseSecOffset(sec) < browseSecTotal(sec)
     }
     function browseGrow(sec) {
         if (!browseCanGrow(sec) || browseGrowing[sec.data]) return
-        var g = Object.assign({}, browseGrowing); g[sec.data] = true; browseGrowing = g
-        waves.loadBrowseSectionMore(browsePageKey, sec.data, sec.offset || 0,
+        // The latch names the window asking, so the answer is written to it
+        // and to nothing else that shares the handle (the backend latches
+        // per handle too, a second request while one is out is dropped).
+        var g = Object.assign({}, browseGrowing); g[sec.data] = browseGrowthKey(sec); browseGrowing = g
+        waves.loadBrowseSectionMore(browsePageKey, sec.data, browseSecOffset(sec),
                                     sec.modType || "", sec.title || "")
     }
     function browseGrew(p) {
+        var key = browseGrowing[p.data] || ""
         var g = Object.assign({}, browseGrowing); delete g[p.data]; browseGrowing = g
         if (p.error || (p.items || []).length === 0) return
+        // The window that asked: the section carrying the latched key (a
+        // landing row and a local page cut from it share one), or, with no
+        // latch to read, the section at the offset the answer continues.
+        var sec = null
+        var pools = [browseSections || [], (browsePage && browsePage.sections) || []]
+        for (var k = 0; k < pools.length && !sec; ++k)
+            for (var i = 0; i < pools[k].length; ++i) {
+                var cand = pools[k][i]
+                if (key !== "" ? browseGrowthKey(cand) === key
+                               : (cand.data === p.data && browseSecOffset(cand) === p.reqOffset)) { sec = cand; break }
+            }
+        // Stale: the row is gone, or the window already moved past this answer.
+        if (!sec || browseSecOffset(sec) !== p.reqOffset) return
+        key = browseGrowthKey(sec)
         browseArtistsSideMap([p])
-        function grown(rows) {
-            var hit = false
-            var out = (rows || []).map(function(r) {
-                if (r.data !== p.data || (r.offset || 0) !== p.reqOffset) return r
-                hit = true
-                return Object.assign({}, r, { items: (r.items || []).concat(p.items),
-                                              offset: p.offset,
-                                              total: p.more ? r.total : p.offset })
-            })
-            return hit ? out : null
-        }
-        _browseAsyncBuild = false   // growth re-lays the landing in place, never streamed
-        var s = grown(browseSections)
-        var ps = (browsePage && browsePage.sections) ? grown(browsePage.sections) : null
-        // Growth rebuilds a column in place; hold the user's spot across it,
-        // on whichever pane actually re-lays.
-        if (s) browseLanding.holdScroll()
-        if (ps) browseDrill.holdScroll()
-        if (s) browseSections = s
-        if (ps) browsePage = Object.assign({}, browsePage, { sections: ps })
+        var cur = browseGrowthOf(sec)
+        var grown = {}
+        var keys = Object.keys(browseGrowth).filter(function(k) { return k !== key })
+        for (var j = Math.max(0, keys.length - (_browseGrowthMax - 1)); j < keys.length; ++j) grown[keys[j]] = browseGrowth[keys[j]]
+        grown[key] = { items: (cur ? cur.items : []).concat(p.items),
+                       offset: p.offset,
+                       total: p.more ? browseSecTotal(sec) : p.offset,
+                       base: browseBaseSig(sec) }
+        browseGrowth = grown
     }
     // Open one playlist / mix / album as its own page inside Browse (art
     // header + track list). Drilling from an editorial page pushes it onto
@@ -2925,7 +3434,7 @@ ApplicationWindow {
         browseArtHint = art || ""       // faces the hero until the payload lands
         browsePageError = false
         browsePageLoading = true
-        waves.openBrowseItem(kind, id)
+        _browseAsk(function() { waves.openBrowseItem(kind, id) })
     }
     function browseBack() {
         browsePageLoading = false
@@ -3532,6 +4041,9 @@ ApplicationWindow {
     // the prefetch handler warms at it, and the pool keys on the exact size,
     // so two literals that drift apart would silently warm nothing.
     readonly property int discDecode: 68
+    // The album row's cover (AlbumBlock), in px: Art decodes at twice its
+    // width, and the artist page's cover warm-up asks for exactly that.
+    readonly property int albumRowArt: 46
     property var _warmSeen: ({})   // "url@w" -> true; mutated in place (nothing binds to it)
     function warmArt(u, w, h) {
         if (!u || w <= 0) return
@@ -3594,6 +4106,12 @@ ApplicationWindow {
     // hover pays it before the click.
     property string _hoverPrefetchKey: ""
     property var _hoverPrefetchCard: null
+    // The card or row whose pending arm a link inside it (an artist's name
+    // in a track row) took over, with the link that took it: the card's arm
+    // comes back when the link's hover ends with the card still hovered,
+    // since the card's own HoverHandler never re-arms. Without it an album
+    // opened cold whenever the pointer had crossed a name on its way in.
+    property var _hoverPrefetchOuter: null
     function _cardPrefetchKey(card) {
         if (!card) return ""
         var kind = card.kind || ""
@@ -3611,6 +4129,10 @@ ApplicationWindow {
         var k = _cardPrefetchKey(card)
         if (k === "" || root.browsePageKey === "item:" + k) return   // not a page, or already on it
         if (root.artistOpen && root.artistData && k === "artist:" + root.artistData.id) return   // the page under the pointer
+        if (_hoverPrefetchCard !== null && _hoverPrefetchCard !== card)
+            _hoverPrefetchOuter = { card: _hoverPrefetchCard, dwell: hoverPrefetchTimer.interval, inner: card }
+        else if (_hoverPrefetchOuter !== null && _hoverPrefetchOuter.card === card)
+            _hoverPrefetchOuter = null
         _hoverPrefetchKey = k; _hoverPrefetchCard = card
         hoverPrefetchTimer.interval = dwell > 0 ? dwell : 200
         hoverPrefetchTimer.restart()
@@ -3624,6 +4146,10 @@ ApplicationWindow {
         if (_hoverPrefetchCard !== null && _hoverPrefetchCard === card) {
             hoverPrefetchTimer.stop(); _hoverPrefetchKey = ""; _hoverPrefetchCard = null
         }
+        var o = _hoverPrefetchOuter
+        if (o === null) return
+        if (o.card === card) _hoverPrefetchOuter = null                     // the card itself was left
+        else if (o.inner === card) { _hoverPrefetchOuter = null; hoverPrefetch(o.card, o.dwell) }   // the link was, the card still hovered
     }
     Timer {
         id: hoverPrefetchTimer
@@ -4083,11 +4609,14 @@ ApplicationWindow {
     // The lower of two tiers: what a download will most likely land at when
     // the request is one and the catalog's advertised ceiling is the other.
     // Either side empty yields the other; a word neither ranks yields the
-    // request, since that is at least what the job asked for.
+    // request, since that is at least what the job asked for. ATMOS is the
+    // exception: it says the fetch will be Dolby Atmos (the backend's
+    // _expected_word), which arrives at its own fixed tier whatever was
+    // requested, so it is the prediction outright.
     readonly property var _tierRank: ({ "HI-RES": 0, "LOSSLESS": 1, "HIGH": 2, "LOW": 3 })
     function tierFloor(request, ceiling) {
         request = "" + (request || ""); ceiling = "" + (ceiling || "")
-        if (request === "") return ceiling
+        if (request === "" || ceiling === "ATMOS") return ceiling
         if (ceiling === "") return request
         var r = _tierRank[request], c = _tierRank[ceiling]
         if (r === undefined || c === undefined) return request
@@ -4327,7 +4856,8 @@ ApplicationWindow {
 
     // The quality badge you can choose a tier on (issue #36): the row's
     // QualTag, untouched at rest, that grows a caret when hovered and drops a
-    // menu of the four tiers when clicked. A choice repaints the pill in the
+    // menu of the four stereo tiers (and ATMOS, where the item carries Dolby
+    // Atmos beside stereo) when clicked. A choice repaints the pill in the
     // tier's container colour (plain ground = the catalog says, tinted = you
     // said) and holds until the item is given another tier: downloading at a
     // chosen tier leaves the pill stating it, so the badge and the copy on
@@ -4345,18 +4875,46 @@ ApplicationWindow {
         property string catalog: ""      // the tier the catalog advertises (QualTag.q)
         property var mix: []             // QualTag.mix: the album spans tiers
         property bool pickable: true     // false for a video row
-        readonly property var tiers: ["HI-RES", "LOSSLESS", "HIGH", "LOW"]
+        property bool atmos: false       // the item carries Dolby Atmos, beside stereo or alone
         readonly property string override: root.qualOverrideFor(mediaId, albumId)
         // The best tier on offer: a MIXED album's top rung, else the catalog's.
         readonly property string ceiling: (mix && mix.length > 1) ? "" + mix[0].q : catalog
         readonly property bool canPick: pickable && root._tierRank[ceiling] !== undefined
+        // This item carries Dolby Atmos beside stereo (how TIDAL ships new
+        // releases, one id for both): the menu offers ATMOS above the four
+        // stereo tiers, whatever the setting says. An Atmos-only release
+        // already reads ATMOS from its catalog word and has nothing to pick.
+        readonly property bool atmosOffer: atmos && canPick
+        // The setting asks for Dolby Atmos too: a download with no choice
+        // lands in Atmos, so the badge says ATMOS and ATMOS is the DEFAULT
+        // row. Choosing a stereo tier fetches this item in stereo at that
+        // tier (the bridge's _ask_atmos_for); choosing ATMOS again is no
+        // choice at all. With the setting off it is the other way round:
+        // the Settings tier is the DEFAULT row and ATMOS is a real choice,
+        // held as the word ATMOS on the item.
+        readonly property bool atmosFace: root.atmosOn && atmosOffer
+        readonly property var tiers: atmosOffer ? ["ATMOS", "HI-RES", "LOSSLESS", "HIGH", "LOW"]
+                                                : ["HI-RES", "LOSSLESS", "HIGH", "LOW"]
+        // The row a download with no choice asks for, marked DEFAULT: ATMOS
+        // under an ATMOS face, else the Settings tier floored to what the
+        // catalog can land for this item (a Max setting on a release that
+        // tops out at Lossless lands LOSSLESS, so LOSSLESS is the row). On
+        // the bare Settings tier, that row read NOT OFFERED and nothing was
+        // DEFAULT, so an ATMOS choice made with the setting off could not
+        // be taken back: every row on offer stored a word.
+        readonly property string defaultTier: atmosFace ? "ATMOS" : root.tierFloor(root.targetTier, ceiling)
+        // An album's ATMOS choice reaching one of its tracks with no Atmos is
+        // no choice there: that track downloads in stereo at the setting.
         readonly property bool tinted: override !== "" && override !== "DEFAULT"
+                                       && (override !== "ATMOS" || atmosOffer)
         // What the pill states: the choice, floored by what the catalog can
         // land (an album's HI-RES choice on its LOSSLESS-only track says
-        // LOSSLESS), else the catalog's own word.
-        readonly property string shown: tinted ? root.tierFloor(override, ceiling) : catalog
+        // LOSSLESS), else ATMOS when that is what lands, else the catalog's
+        // own word.
+        readonly property string shown: tinted ? (override === "ATMOS" ? "ATMOS" : root.tierFloor(override, ceiling))
+                                               : atmosFace ? "ATMOS" : catalog
         // The tier a download queued now would ask for, the row the menu checks.
-        readonly property string effective: tinted ? shown : root.tierFloor(root.targetTier, ceiling)
+        readonly property string effective: tinted ? shown : atmosFace ? "ATMOS" : root.tierFloor(root.targetTier, ceiling)
         readonly property bool hot: canPick && (hoverMa.containsMouse || menuOpen)
         // The menu is BUILT ON THE FIRST PRESS, never with the badge. A
         // results page carries one of these on every row, and the menu is some
@@ -4374,10 +4932,12 @@ ApplicationWindow {
         // library word, so a tier you already hold is not asked for again by
         // mistake. ASKED WHEN THE MENU OPENS, never bound: a page of badges
         // must not each query the ownership cache on every paint, and the
-        // answer is only ever read inside the open menu.
+        // answer is only ever read inside the open menu. A copy held in Dolby
+        // Atmos answers ATMOS, which marks the ATMOS row where the menu has
+        // one and no row (and no room kept for the word) where it has not.
         property string ownedTier: ""
-        readonly property bool anyNotOffered: !offered(tiers[0])
-        readonly property int menuW: root.qualMenuWidth(anyNotOffered, ownedTier !== "")
+        readonly property bool anyNotOffered: !offered("HI-RES")
+        readonly property int menuW: root.qualMenuWidth(anyNotOffered, tiers.indexOf(ownedTier) >= 0)
         function refreshOwnedTier() {
             ownedTier = (canPick && mediaId !== "") ? ("" + (waves.ownedTierOf(mediaId) || "")) : ""
         }
@@ -4390,14 +4950,21 @@ ApplicationWindow {
             if (m.visible) m.close(); else m.open()
         }
         function closeMenu() { if (menuLoader.item) menuLoader.item.close() }
-        function offered(t) { return ceiling === "" || root._tierRank[t] >= root._tierRank[ceiling] }
+        function offered(t) {
+            if (t === "ATMOS") return atmosOffer
+            return ceiling === "" || root._tierRank[t] >= root._tierRank[ceiling]
+        }
         function choose(t) {
             closeMenu()
-            // Choosing the Settings tier is "no choice", unless the album
+            // Choosing the DEFAULT row is "no choice", unless the album
             // chose otherwise: then it is a choice this track keeps, pinned as
-            // DEFAULT so the album's does not reach it.
+            // DEFAULT so the album's does not reach it. Under an ATMOS face
+            // the Settings tier is a real choice (stereo at that tier), so
+            // only the ATMOS row clears; with the setting off ATMOS is the
+            // real choice and the DEFAULT row (the Settings tier, floored to
+            // what this item can land) clears.
             var albumChose = qpk.albumId !== "" && root.qualityOverrides[qpk.albumId] !== undefined
-            var v = t === root.targetTier ? (albumChose ? "DEFAULT" : "") : t
+            var v = t === qpk.defaultTier ? (albumChose ? "DEFAULT" : "") : t
             waves.setQualityOverride(qpk.mediaId, v)
         }
         implicitWidth: tag.implicitWidth - extraW
@@ -4462,15 +5029,21 @@ ApplicationWindow {
         // which tier is chosen: choosing the tier a plain pill already states
         // only tints it (colour alone, no dip), while choosing anything on a
         // MIXED album replaces its whole face even when `shown` is unmoved.
-        readonly property string face: (mix && mix.length > 1 && !tinted) ? "MIXED" : shown
+        readonly property string face: (mix && mix.length > 1 && !tinted && !atmosFace) ? "MIXED" : shown
         property string lastFace: ""
         // Colour and width ease on ANY choice; the letters dip only when there
         // are different letters to arrive at.
         onOverrideChanged: if (armed && root.hoverMotion) { swapping = true; swapDone.restart() }
+        // Only a badge that can be seen dips its letters: a flip of the Dolby
+        // Atmos setting turns every dual-mode face at once, on pages behind
+        // the current one and rows parked off screen too (measured at 21 to
+        // 28 ms of GUI-thread work for 130 badges). The hidden ones take
+        // their new face plain; lastFace still moves so the next visible
+        // change dips from the right word.
         onFaceChanged: {
             var prev = lastFace
             lastFace = face
-            if (armed && root.hoverMotion && prev !== "") startDip(prev)
+            if (armed && root.hoverMotion && prev !== "" && qpk.visible) startDip(prev)
         }
         // The letters on their way out, held here so the pill underneath can
         // turn immediately while they leave.
@@ -4505,7 +5078,7 @@ ApplicationWindow {
         QualTag {
             id: tag
             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-            q: qpk.shown; mix: qpk.tinted ? [] : qpk.mix
+            q: qpk.shown; mix: (qpk.tinted || qpk.atmosFace) ? [] : qpk.mix
             bg: qpk.pillBg; edge: qpk.pillEdge; ink: qpk.pillInk; specInk: qpk.pillSpecInk; dotInk: qpk.pillDot
             extraW: qpk.extraW
             pillW: qpk.pillW
@@ -4615,13 +5188,14 @@ ApplicationWindow {
     // One row of a QualPick's menu: the tier as a pill-shaped line (dot, word,
     // spec) resting in white like the Settings dropdown, lit in the tier's own
     // colours under the pointer and on the tier a download would ask for; a
-    // DEFAULT mark on the setting's tier, NOT OFFERED (dimmed, inert) on a tier
-    // the catalog cannot land for this item.
+    // DEFAULT mark on the row a download with no choice lands on (QualPick's
+    // defaultTier), NOT OFFERED (dimmed, inert) on a tier the catalog cannot
+    // land for this item.
     component QualPickRow: Rectangle {
         id: qpr
         property var pick: null
         property string t: ""
-        readonly property bool isDefault: t === root.targetTier
+        readonly property bool isDefault: pick ? t === pick.defaultTier : t === root.targetTier
         readonly property bool isCurrent: pick && t === pick.effective
         readonly property bool ok: pick ? pick.offered(t) : true
         // The copy on disk is this tier: say so, in the library badge's own
@@ -4653,7 +5227,10 @@ ApplicationWindow {
             }
             Text {
                 textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
-                text: root.qualSpec(qpr.t); color: qpr.lit ? root.qualSpecFg(qpr.t) : root.textHi
+                // ATMOS has no container ink of its own (qualSpecFg falls to
+                // textLo): lit, its SPATIAL keeps the plain ink rather than
+                // dimming under the pointer.
+                text: root.qualSpec(qpr.t); color: qpr.lit && qpr.t !== "ATMOS" ? root.qualSpecFg(qpr.t) : root.textHi
                 font.family: root.mono; font.pixelSize: 10
                 Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
             }
@@ -6598,7 +7175,9 @@ ApplicationWindow {
             var r
             if (collectionIds !== null) {
                 _ownKeys = root.ownKeys(collectionIds)
-                var cd = waves.collectionOwnershipDetail(collectionIds)
+                // Judged by THIS collection's own ask (its quality choice,
+                // else the setting), the one its job pins for every member.
+                var cd = waves.collectionOwnershipDetail(collectionIds, mediaId)
                 r = _rollupWord(cd ? cd.verdict : "no")
                 ownInLibrary = !!(cd && cd.in_library === true)
                 ownFolder = cd && cd.folder ? "" + cd.folder : ""
@@ -8670,6 +9249,7 @@ ApplicationWindow {
         property var libBaked
         property var libStamp
         property string quality: ""
+        property bool atmos: false       // TIDAL offers it in Dolby Atmos (beside stereo or alone)
         property int popularity: 0
         // Expand state is held globally (keyed by album id) so it survives
         // ListView delegate recycling in the virtualised My Tidal lists.
@@ -8741,7 +9321,7 @@ ApplicationWindow {
                     Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
                     Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
-                Art { width: 46; height: 46; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
+                Art { width: root.albumRowArt; height: root.albumRowArt; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
                     // Title with the presence pill floating right beside the
@@ -8811,7 +9391,7 @@ ApplicationWindow {
                         anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                         // ab.albumId, qualified: a bare albumId here is the
                         // picker's own (empty) inheritance property.
-                        mediaId: ab.albumId; catalog: ab.quality; mix: ab.qualMix
+                        mediaId: ab.albumId; catalog: ab.quality; atmos: ab.atmos; mix: ab.qualMix
                     }
                 }
                 DownloadButton {
@@ -8919,7 +9499,7 @@ ApplicationWindow {
                     Column {
                         id: abPanelMeta
                         spacing: 8; topPadding: 4
-                        QualPick { anchors.right: parent.right; mediaId: ab.albumId; catalog: ab.quality; mix: ab.qualMix }
+                        QualPick { anchors.right: parent.right; mediaId: ab.albumId; catalog: ab.quality; atmos: ab.atmos; mix: ab.qualMix }
                         PopMeter { anchors.right: parent.right; value: popularity }
                     }
                 }
@@ -9464,6 +10044,12 @@ ApplicationWindow {
                         anchors.fill: parent; hoverEnabled: true
                         cursorShape: alName.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: if (alName.linkable) waves.loadArtist(modelData.id)
+                        // Resting on the name: have the artist's page built
+                        // before the click, as an artist card does (see
+                        // hoverPrefetch).
+                        readonly property var prefetchCard: ({ kind: "artist", id: "" + (modelData.id || "") })
+                        onContainsMouseChanged: containsMouse && alName.linkable ? root.hoverPrefetch(prefetchCard)
+                                                                                 : root.hoverPrefetchCancel(prefetchCard)
                     }
                 }
                 Text { visible: index < al.artists.length - 1; text: ", "; color: root.textLo; font.pixelSize: al.px }
@@ -9509,6 +10095,7 @@ ApplicationWindow {
         property var libBaked
         property var libStamp
         property string quality: ""
+        property bool atmos: false       // TIDAL offers it in Dolby Atmos (beside stereo or alone)
         property int popularity: 0
         property bool hi: false          // "you came here for this track" marker
         property int num: 0              // track # (album position, or playlist order); 0 hides
@@ -9662,7 +10249,7 @@ ApplicationWindow {
                     Layout.preferredWidth: qtMetric.implicitWidth + 14; Layout.preferredHeight: 22; Layout.alignment: Qt.AlignVCenter
                     QualPick {
                         anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                        mediaId: trow.tId; albumId: trow.albumId; catalog: trow.quality
+                        mediaId: trow.tId; albumId: trow.albumId; catalog: trow.quality; atmos: trow.atmos
                         pickable: trow.kind !== "video"
                     }
                 }
@@ -9811,7 +10398,11 @@ ApplicationWindow {
                 }
             }
             Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
-            PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: aPop }
+            // The meter keeps its line whether the popularity is known yet
+            // or not (unlit until it is): a card that grew 20px when the
+            // enrichment landed pushed the page's reservations off by that
+            // much per row, and the strip with every card of it.
+            PopMeter { anchors.horizontalCenter: parent.horizontalCenter; value: aPop; visible: true }
             // Preview + Download live in the card body (never overlaid on the
             // photo); each has its own MouseArea that consumes the click so the
             // card-wide open-artist MouseArea (z:-1, below) only fires elsewhere.
@@ -9877,7 +10468,9 @@ ApplicationWindow {
             if (v === "owned") owned = true
         }
         function refreshOwned(live) {
-            if (!bc.ownable) { owned = false; return }
+            // The card's own kind, as in resolveLibPresence.
+            var kind = (bc.card && bc.card.kind) || ""
+            if (!(kind === "album" || kind === "playlist" || kind === "mix")) { owned = false; return }
             applyOwn((!live && ("own" in bc.card) && bc.card.ownGen === root.ownGen) ? bc.card.own
                      : waves.collectionOwnership("" + (bc.card.id || "")))
         }
@@ -9917,7 +10510,9 @@ ApplicationWindow {
         function resolveLibPresence(live) {
             _libResolved = true
             var c = bc.card
-            if (!(bc.kind === "album" && c && c.title)) { libPresence = null; return }
+            // The card's own kind, not bc.kind: see ArtCard.resolveLibPresence.
+            var kind = (c && c.kind) || ""
+            if (!(kind === "album" && c && c.title)) { libPresence = null; return }
             libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
                 ? c.lib
                 : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
@@ -10560,7 +11155,11 @@ ApplicationWindow {
         function resolveLibPresence(live) {
             _libResolved = true
             var c = ac.card
-            if (!(ac.kind === "album" && c && c.title)) { libPresence = null; return }
+            // The card's own kind, not ac.kind: a card REBOUND in place (a
+            // landing refresh) runs this from onCardChanged, and the derived
+            // property may not have re-evaluated yet in that same cascade.
+            var kind = (c && c.kind) || ""
+            if (!(kind === "album" && c && c.title)) { libPresence = null; return }
             libPresence = (!live && ("lib" in c) && c.libStamp === root.libStamp)
                 ? c.lib
                 : waves.libraryAlbumPresence("" + (c.artist || ""), "" + c.title,
@@ -10602,7 +11201,9 @@ ApplicationWindow {
             if (v === "owned") owned = true
         }
         function refreshOwned(live) {
-            if (!ac.ownable) { owned = false; return }
+            // The card's own kind, as in resolveLibPresence.
+            var kind = (ac.card && ac.card.kind) || ""
+            if (!(kind === "album" || kind === "playlist" || kind === "mix")) { owned = false; return }
             // One bridge call for the whole collection (member ids + verdict):
             // a call per member was ~15 interpreter round-trips per card, and
             // under the launch-time scan each of them queued for its turn.
@@ -11184,6 +11785,10 @@ ApplicationWindow {
         property var sec: null
         property int secIndex: 0
         property bool landing: false
+        // Appended by a refresh of a landing already built (a slot past the
+        // fresh build's, see browseSecSlots): incubates with its cards, and
+        // no veil counts it.
+        property bool late: false
         // The scroll pane and content column this section lives in, for
         // wheel redirection, row windowing and highlight centering.
         property Item pane: null
@@ -11223,11 +11828,57 @@ ApplicationWindow {
             if (sec.more) root.openBrowseLink(sec.more, sec.title || "More")
             else root.openBrowseSection(sec)
         }
+        // The rows this section shows: what it arrived with plus whatever
+        // endless scroll fetched since (root.browseGrowth, see browseGrew).
+        // A section nothing grew keeps the very array it arrived with.
+        readonly property var growth: root.browseGrowthOf(sec)
+        readonly property var items: growth ? ((sec.items || []).concat(growth.items)) : ((sec && sec.items) || [])
+        // One slot per row. The views below take THIS model, never the
+        // array: a JS array handed to a view is a reset on every change
+        // (every row torn down and rebuilt), a model that only ever grows
+        // appends delegates at the end and leaves the rows above alone.
+        // Filled from handlers, never from a binding: a model binding that
+        // appended as it was evaluated could run inside the page column's
+        // own layout pass (the rows it created changed the heights being
+        // positioned), after which the column stayed at height 0 and the
+        // page showed nothing (seen live, not offscreen).
+        ListModel { id: bsecSlots }
+        property int _slotN: 0
+        // The rows before the latest trim, for a slot a shorter row no
+        // longer covers: its card binding still fires around the trim below
+        // (the same order as root._browseSecHeld, see there), so it reads
+        // the row it had from prev for that instant. prev holds the last
+        // LONGER row, not merely the previous one: a slot trimmed away and
+        // then changed under again (growth let go, then a refresh) read an
+        // undefined card and threw from every binding on it.
+        readonly property var _itemsHeld: ({ prev: [], cur: [] })
+        function syncSlots() {
+            var n = items.length
+            if (_itemsHeld.cur.length > n) _itemsHeld.prev = _itemsHeld.cur
+            _itemsHeld.cur = items
+            // A shorter row drops its trailing slots only: the rows that
+            // remain keep their cards (a refresh rebinds them in place).
+            if (_slotN > n) { bsecSlots.remove(n, _slotN - n); _slotN = n }
+            while (_slotN < n) { bsecSlots.append({ slot: _slotN }); _slotN++ }
+        }
+        onItemsChanged: syncSlots()
+        Component.onCompleted: {
+            syncSlots()
+            // A list view applies an insert on its next polish; applied now,
+            // the cards exist inside the section's own creation, where the
+            // build veils count them. A card created a frame later would
+            // join the count after the section had already reported in.
+            if (bsecArtShelf.model) bsecArtShelf.forceLayout()
+            if (bsecConsoleShelf.model) bsecConsoleShelf.forceLayout()
+        }
+        // Rows that arrived with the section; everything past them is growth
+        // and incubates (a 50-row fetch created inline is the freeze again).
+        readonly property int baseCount: ((sec && sec.items) || []).length
         spacing: 8
         SectionHeader {
             visible: !bsec.artStyle && bsec.showHeadline
             label: (bsec.sec.title || "More").toUpperCase() + (bsec.headlinable ? "  \u203a" : "")
-            count: (bsec.sec.items || []).length
+            count: bsec.items.length
             MouseArea {
                 anchors.fill: parent
                 enabled: bsec.headlinable
@@ -11261,25 +11912,53 @@ ApplicationWindow {
         // of dumped on the right until the window grows enough to add
         // another column.
         Flow {
+            id: bgridFlow
             visible: bsec.grid
             readonly property real cardW: bsec.artStyle ? 200 : 156
             spacing: bsec.artStyle ? 14 : 12
-            readonly property int cols: root.gridCols(cardW, spacing, (bsec.sec.items || []).length, parent.width)
+            readonly property int cols: root.gridCols(cardW, spacing, bsec.items.length, parent.width)
             width: cols * (cardW + spacing) - spacing
             x: Math.max(0, (parent.width - width) / 2)
             Repeater {
-                model: bsec.grid ? bsec.sec.items : []
+                model: bsec.grid ? bsecSlots : null
                 delegate: Loader {
                     id: bgridLd
-                    required property var modelData
+                    required property int index
+                    required property int slot   // never -1, unlike index on removal
+                    readonly property var card: bsec.items[slot] || bsec._itemsHeld.prev[slot] || ({})
+                    // The card's own size, held while it incubates, so the
+                    // grid keeps its geometry (and the page its height).
+                    width: bsec.artStyle ? 200 : 156
+                    height: bsec.artStyle ? 246 : 236
+                    // Where this card sits in the pane's scroll space, from
+                    // the grid's own arithmetic (the Flow has not placed it
+                    // when `asynchronous` is read).
+                    readonly property real cardTop: bsec.secTop + bgridFlow.y
+                        + Math.floor(index / Math.max(1, bgridFlow.cols)) * (height + bgridFlow.spacing)
+                    // Growth cards incubate (a 50-card fetch created inline
+                    // is the freeze again), except the ones on the screen
+                    // the page is shown at: a Back to a grown listing builds
+                    // what it lands on inline and lets the rest come in. Qt
+                    // incubates the newest Loader first, so the cards in
+                    // view, created before the ones below, used to land
+                    // last and the page came back blank where it was read.
+                    readonly property bool inView: cardTop < bsec.pane.rowAnchorY + bsec.pane.height + height
+                                                   && cardTop + height > bsec.pane.rowAnchorY - height
+                    asynchronous: root.browsePageBuilding || (index >= bsec.baseCount && !inView)
+                    property bool counted: false
+                    Component.onCompleted: counted = root._browsePageCardStart(asynchronous)
+                    onLoaded: { root._browsePageCardTick(counted); counted = false }
+                    // A card taken down mid-build (the page re-cut under it)
+                    // reports in as it goes, or the veil waits for the guard.
+                    Component.onDestruction: root._browsePageCardTick(counted)
                     sourceComponent: bsec.artStyle ? bgridArt : bgridConsole
                     Component {
                         id: bgridArt
-                        ArtCard { card: bgridLd.modelData }
+                        ArtCard { card: bgridLd.card }
                     }
                     Component {
                         id: bgridConsole
-                        BrowseCard { card: bgridLd.modelData }
+                        BrowseCard { card: bgridLd.card }
                     }
                 }
             }
@@ -11305,7 +11984,7 @@ ApplicationWindow {
                     anchors.verticalCenter: parent.verticalCenter
                     text: parent.parent.loadingMore
                             ? "Loading more…"
-                            : (bsec.sec.items || []).length + " total"
+                            : bsec.items.length + " total"
                     color: root.textDim; font.family: root.mono; font.pixelSize: 11
                 }
                 Rectangle {
@@ -11317,6 +11996,7 @@ ApplicationWindow {
         }
         // horizontal card shelf, console (framed cards)
         ListView {
+            id: bsecConsoleShelf
             visible: !bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
             width: parent.width; height: 238
             orientation: ListView.Horizontal
@@ -11330,17 +12010,25 @@ ApplicationWindow {
             // to Browse. Keeping the cards alive across a hidden pane is
             // the whole point of the two-pane design.
             model: !bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
-                   ? bsec.sec.items : []
+                   ? bsecSlots : null
             // Async per card, as the art shelf below (see its comment).
             delegate: Loader {
                 id: bcLd
-                required property var modelData
+                required property int index
+                required property int slot   // never -1, unlike index on removal
+                readonly property var card: bsec.items[slot] || bsec._itemsHeld.prev[slot] || ({})
                 width: 156; height: 236
-                asynchronous: bsec.landing && root._browseAsyncBuild
+                asynchronous: bsec.landing ? (root._browseAsyncBuild || bsec.late) : root.browsePageBuilding
                 property bool counted: false
-                Component.onCompleted: counted = root._browseCardStart(asynchronous)
-                onLoaded: root._browseCardTick(counted)
-                sourceComponent: BrowseCard { card: bcLd.modelData }
+                Component.onCompleted: counted = bsec.landing ? root._browseCardStart(asynchronous)
+                                                              : root._browsePageCardStart(asynchronous)
+                function tick() { if (bsec.landing) root._browseCardTick(counted); else root._browsePageCardTick(counted); counted = false }
+                onLoaded: tick()
+                // A card taken down mid-build (a refresh landing on the
+                // page under construction) reports in as it goes, or the
+                // veil waits for the guard.
+                Component.onDestruction: tick()
+                sourceComponent: BrowseCard { card: bcLd.card }
             }
             ShelfWheelRedirect { pane: bsec.pane }
             ShelfEdgeFades {}
@@ -11350,6 +12038,7 @@ ApplicationWindow {
         }
         // horizontal card shelf, art-first (unframed covers)
         ListView {
+            id: bsecArtShelf
             visible: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
             width: parent.width; height: bsec.hero ? 284 : 250
             orientation: ListView.Horizontal
@@ -11357,7 +12046,7 @@ ApplicationWindow {
             boundsBehavior: Flickable.StopAtBounds
             // Local terms, not `visible` (see the console shelf above).
             model: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
-                   ? bsec.sec.items : []
+                   ? bsecSlots : null
             // Each card incubates behind an asynchronous Loader of the card's
             // fixed size, so the shelf's own creation is a row of empty slots
             // (cheap) and the cards fill in across frames. A shelf whose eight
@@ -11369,18 +12058,25 @@ ApplicationWindow {
             // covered until the cards are in, not just the shelves.
             delegate: Loader {
                 id: acLd
-                required property var modelData
+                required property int index
+                required property int slot   // never -1, unlike index on removal
+                readonly property var card: bsec.items[slot] || bsec._itemsHeld.prev[slot] || ({})
                 readonly property real artSize: bsec.hero ? 280 : 200
                 width: artSize; height: bsec.hero ? artSize : artSize + 46
-                // Only while the landing itself builds asynchronously (behind
-                // the veil): a synchronous in-place refresh, and every drilled
-                // page, still creates its cards inline so nothing is watched
-                // filling in.
-                asynchronous: bsec.landing && root._browseAsyncBuild
+                // While the landing, or a fresh drilled page, builds behind
+                // its veil, and in a section a refresh appended: a refresh
+                // of the rows already there rebinds them in place and
+                // creates nothing, so nothing is watched filling in.
+                asynchronous: bsec.landing ? (root._browseAsyncBuild || bsec.late) : root.browsePageBuilding
                 property bool counted: false
-                Component.onCompleted: counted = root._browseCardStart(asynchronous)
-                onLoaded: root._browseCardTick(counted)
-                sourceComponent: ArtCard { card: acLd.modelData; hero: bsec.hero }
+                Component.onCompleted: counted = bsec.landing ? root._browseCardStart(asynchronous)
+                                                              : root._browsePageCardStart(asynchronous)
+                function tick() { if (bsec.landing) root._browseCardTick(counted); else root._browsePageCardTick(counted); counted = false }
+                onLoaded: tick()
+                // Taken down mid-build: reports in as it goes (see the
+                // console shelf).
+                Component.onDestruction: tick()
+                sourceComponent: ArtCard { card: acLd.card; hero: bsec.hero }
             }
             ShelfWheelRedirect { pane: bsec.pane }
             ShelfEdgeFades {}
@@ -11392,7 +12088,7 @@ ApplicationWindow {
             visible: bsec.sec.rowKind === "tracks"
             width: parent.width
             Repeater {
-                model: bsec.sec.rowKind === "tracks" ? bsec.sec.items : []
+                model: bsec.sec.rowKind === "tracks" ? bsecSlots : null
                 // Fixed-height shells, content windowed: a long playlist
                 // used to create every TrackRow in one synchronous pass,
                 // 1.7s of frozen GUI per click (measured, budget 100ms).
@@ -11405,10 +12101,11 @@ ApplicationWindow {
                 // actually looking at is never a shell.
                 delegate: Loader {
                     id: btrLd
-                    required property var modelData
                     required property int index
+                    required property int slot   // never -1, unlike index on removal
+                    readonly property var row: bsec.items[slot] || bsec._itemsHeld.prev[slot]
                     width: bsec.width; height: 62   // TrackRow's fixed height
-                    readonly property bool hiRow: root.browseHighlightId !== "" && modelData.id === root.browseHighlightId
+                    readonly property bool hiRow: root.browseHighlightId !== "" && row.id === root.browseHighlightId
                     // A screenful of rows, used to size the live window.
                     readonly property real rps: Math.max(1, bsec.pane.height / 62)
                     // Row 0 of THIS shelf, in the pane's scroll space, so the
@@ -11418,7 +12115,7 @@ ApplicationWindow {
                     // A shelf no longer than the window it would be measured
                     // against is never worth windowing, and a short shelf is
                     // exactly the case an aiming error can blank completely.
-                    readonly property bool shortSec: (bsec.sec.items || []).length <= 3 * rps
+                    readonly property bool shortSec: bsec.items.length <= 3 * rps
                     // WINDOWED, not just incubated. Incubating every row
                     // spread the build cost out but still left them all
                     // alive: a 579-track playlist put ~76,000 items under
@@ -11439,12 +12136,34 @@ ApplicationWindow {
                                 && index < anchorRow + 3 * rps)
                     asynchronous: {
                         if (hiRow) return false
-                        // A few rows of slack either side absorb the fact
-                        // that anchorRow moves in bands, not per pixel.
+                        // Behind a fresh drilled page's veil the rows in
+                        // view incubate too (and report in like a card, see
+                        // counted below), so the payload's turn builds
+                        // nothing but shells.
+                        if (!bsec.landing && root.browsePageBuilding) return true
+                        // Only the screen itself builds inline; the slack
+                        // rows ahead of it incubate, and they are created
+                        // two screens early, so a scroll meets them built.
+                        // The slack used to build inline too, twenty rows
+                        // per band shift, ~100ms stalls while scrolling a
+                        // long shelf (measured 2026-09-30). The anchor is
+                        // floored to a ten-row band, so the screen starts
+                        // up to ten rows below it: the band reaches a row
+                        // above and ten rows plus one below the screen.
                         // rowAnchorY, not contentY: this binding must not
                         // re-evaluate on every scrolled frame (see there).
-                        return index < anchorRow - 8 || index > anchorRow + rps + 12
+                        return index < anchorRow - 1 || index > anchorRow + rps + 11
                     }
+                    property bool counted: false
+                    Component.onCompleted: if (!bsec.landing && active) counted = root._browsePageCardStart(asynchronous)
+                    onLoaded: { root._browsePageCardTick(counted); counted = false }
+                    // A counted row that leaves the window before it lands
+                    // (the layout placed the section lower and the band
+                    // moved under it) or goes down with the page reports in
+                    // as it goes: a long list kept its veil up until the
+                    // guard, waiting on rows that no longer existed.
+                    onActiveChanged: if (!active) { root._browsePageCardTick(counted); counted = false }
+                    Component.onDestruction: root._browsePageCardTick(counted)
                     // Empty row card while the content incubates, so a
                     // streaming list reads as rows filling in, not holes.
                     Rectangle {
@@ -11455,16 +12174,16 @@ ApplicationWindow {
                     sourceComponent: TrackRow {
                         id: btr
                         width: btrLd.width
-                        tId: btrLd.modelData.id; kind: btrLd.modelData.kind || "track"
-                        title: btrLd.modelData.title; artistName: btrLd.modelData.artist || ""; artistId: btrLd.modelData.artist_id || ""
-                        album: btrLd.modelData.album || ""; art: btrLd.modelData.art || ""; year: "" + (btrLd.modelData.year || ""); date: btrLd.modelData.date || ""
-                        duration: btrLd.modelData.duration || ""; durationSec: btrLd.modelData.duration_sec || 0; quality: btrLd.modelData.quality || ""; popularity: btrLd.modelData.popularity || 0
-                        explicit: btrLd.modelData.explicit
+                        tId: btrLd.row.id; kind: btrLd.row.kind || "track"
+                        title: btrLd.row.title; artistName: btrLd.row.artist || ""; artistId: btrLd.row.artist_id || ""
+                        album: btrLd.row.album || ""; art: btrLd.row.art || ""; year: "" + (btrLd.row.year || ""); date: btrLd.row.date || ""
+                        duration: btrLd.row.duration || ""; durationSec: btrLd.row.duration_sec || 0; quality: btrLd.row.quality || ""; atmos: btrLd.row.atmos === true; popularity: btrLd.row.popularity || 0
+                        explicit: btrLd.row.explicit
                         // Numbers only on item pages, where they're ordered
                         // (album track #s / playlist positions), editorial
                         // track shelves would all read "1".
-                        num: (!bsec.landing && root.browsePage && root.browsePage.header) ? (btrLd.modelData.num || 0) : 0
-                        albumId: btrLd.modelData.album_id || ""
+                        num: (!bsec.landing && root.browsePage && root.browsePage.header) ? (btrLd.row.num || 0) : 0
+                        albumId: btrLd.row.album_id || ""
                         hi: btrLd.hiRow
                         // Track click landed here: hide the page while it
                         // lays out, center this row, then reveal, so the
@@ -12367,16 +13086,17 @@ ApplicationWindow {
     // In-place refill keyed by id, for the search page's stale-then-refresh.
     //
     // fill() clears and rebuilds, which destroys and recreates every delegate.
-    // The refresh path deliberately runs with searchBuilding false (no veil,
-    // no loading flash, the page the user is reading just becomes current), and
-    // the Loaders read that same flag for their asynchronous property, so every
-    // one of those rebuilds happens SYNCHRONOUSLY on the GUI thread. A full
-    // result set measured 272 to 316ms of frozen window against 13 to 14ms for
-    // the fresh handler, on the one path whose whole purpose was to feel
-    // instant. A refresh normally differs by a row or two, so almost every
-    // delegate here is kept and only the fields that really changed are
-    // written. Rows are matched by id, so a row that merely MOVED is moved
-    // rather than rebuilt.
+    // The refresh path runs with no veil and no loading flash (the page the
+    // user is reading just becomes current), so a refill there rebuilt the
+    // rows in front of the reader: when every result Loader still built
+    // synchronously outside the old build veil, a full result set measured
+    // 272 to 316ms of frozen window against 13 to 14ms for the fresh handler,
+    // on the one path whose whole purpose was to feel instant. A refresh
+    // normally differs by a row or two, so almost every delegate here is kept
+    // and only the fields that really changed are written. Rows are matched
+    // by id, so a row that merely MOVED is moved rather than rebuilt; a new
+    // row is built where the search page's inline windows say (on the screen
+    // the page opened on, inline, otherwise in the background).
     //
     // ``media`` mirrors appendMedia: the artists list is lifted out of the row
     // into artistsById rather than stored as a nested ListModel.
@@ -12629,6 +13349,8 @@ ApplicationWindow {
             // A shelf still marked as growing would refuse its next "load
             // more" on the new account (browseGrow checks the latch first).
             root.browseGrowing = ({})
+            root.browseGrowth = ({})
+            root._browsePageBuildStart(0)
             // Including a landing payload parked mid-handover: it is the
             // previous account's, and applying it after the reveal would put
             // their personalized rows back on screen.
@@ -12686,11 +13408,11 @@ ApplicationWindow {
             root.browseLoading = false
             // The handover is the reveal itself: the wordmark zooming out and
             // the interface fading up over ~1.4s. bootOverlay.done is still
-            // false throughout, so a revalidate landing in that window took the
-            // fresh-build path, raised the veil and blanked the landing under
-            // the fade. That is precisely the "watched the page assemble
-            // itself" symptom the launch hold exists to prevent, newly
-            // reachable since the second build became asynchronous.
+            // false throughout, and a revalidate landing in that window used
+            // to take the fresh-build path, raise the veil and blank the
+            // landing under the fade. The refresh now rebinds in place, but
+            // it still touches every card (and re-asks their art) in one
+            // turn, which the reveal's frames would pay for.
             // Park it and apply it on the other side, where it is an ordinary
             // in-place refresh. Only a landing that already has content can
             // wait: a first build has nothing to reveal and must go through.
@@ -12728,6 +13450,20 @@ ApplicationWindow {
             for (var i = 0; i < arts.length && i < 16; ++i)
                 root.warmArt("" + arts[i], root.discDecode, root.discDecode)
         }
+        // The artist page's twin: a hover found or built the page, or a
+        // click's build has its sections in. Its opening covers go into the
+        // warm pool at the sizes the page decodes them (the 150 px photo at
+        // 300, the track discs at discDecode, album and EP rows at twice
+        // albumRowArt), for the sections the page shows unfolded, so it
+        // paints them from the pixmap cache. Five a section at most (the
+        // backend sends no more), against the pool's 220; warmArt dedupes.
+        function onArtistPagePrefetched(p) {
+            if (p.art) root.warmArt("" + p.art, 300, 300)
+            function warm(arts, size) { for (var i = 0; i < (arts || []).length; ++i) root.warmArt("" + arts[i], size, size) }
+            if (!root.artistTracksCollapsed) warm(p.tracks, root.discDecode)
+            if (!root.artistAlbumsCollapsed) warm(p.albums, root.albumRowArt * 2)
+            if (!root.artistEpsCollapsed) warm(p.eps, root.albumRowArt * 2)
+        }
         function onBrowsePageLoaded(p) {
             if (p.key !== root.browsePageKey) return   // stale: user already left this page
             root.markRender("browse page render")
@@ -12745,7 +13481,15 @@ ApplicationWindow {
             // A revalidate re-emit of the page already showing swaps it in
             // place; hold the user's spot across the rebuild (see holdScroll).
             if (root.browsePage && !p.error) browseDrill.holdScroll()
-            root.browsePage = p.error ? null : p
+            // A fresh page off the wire (nothing of it on screen yet, and
+            // not handed over inside the open itself, see _browseAsk)
+            // incubates behind the hint, one tick per section; a re-emit of
+            // the page showing, and a cached or prefetched page, swap in at
+            // once. Armed BEFORE the assignment: every Loader the sections
+            // create reads browsePageBuilding as it is created.
+            root._browsePageBuildStart((!root.browsePage && !p.error && !root._browseOpening) ? (p.sections || []).length : 0)
+            root._browsePageWire = true
+            try { root.browsePage = p.error ? null : p } finally { root._browsePageWire = false }
             // Whether this TIDAL album is already in the user's local library is
             // resolved by onBrowsePageChanged above, which covers every way a
             // page can arrive. Re-resolve here too for the one case that is not
@@ -12766,7 +13510,7 @@ ApplicationWindow {
             // re-resolved, and the badges then faded in over the page they had
             // just been held back for. One event-loop pass puts the whole page
             // behind the reveal, which is the point of waiting at all.
-            if (root._searchAwaitingLibrary) searchLibraryReveal.restart()
+            if (root.searchBuilding) searchLibraryReveal.restart()
             // The My Tidal pane waiting behind its own veil, the same way.
             if (root.libraryBuilding) libLibraryReveal.restart()
         }
@@ -12859,7 +13603,7 @@ ApplicationWindow {
                 // The wire's answer to a search painted from an older result
                 // (the backend's stale-then-revalidate, see search()): the
                 // rows swap in place and nothing else moves. No history
-                // entry, no scroll reset, no build veil, no cache reset: the
+                // entry, no scroll reset, no veil, no cache reset: the
                 // page the user is already reading just becomes current.
                 root.searchTop = r.top || null
                 if (root.searchTop && root.searchTop.artists) {
@@ -12870,11 +13614,13 @@ ApplicationWindow {
                     abm2[root.searchTop.id] = root.searchTop.artists
                     root.artistsById = abm2
                 }
-                // Reconciled, not refilled. This branch runs with the build
-                // veil down, so a clear+rebuild would incubate every card
-                // synchronously on the GUI thread and freeze the window for
-                // the length of it. See reconcileById.
+                // Reconciled, not refilled: the rows the reader is looking at
+                // are kept, and a refill would rebuild them in front of them.
+                // See reconcileById.
                 root.reconcileById(artistsModel, r.artists, false)
+                // The strip's reach is 0 while a search has no artists; a
+                // refresh bringing the first ones must give it its screen.
+                root._searchStripGrow()
                 root.albumsRaw = r.albums || []
                 root.tracksRaw = r.tracks || []
                 root.videosRaw = r.videos || []
@@ -12905,6 +13651,12 @@ ApplicationWindow {
             // would show yesterday's tracks with no refetch to correct them.
             root.playlistTrackCache = ({})
             root.expandedPlaylists = ({})
+            // Nothing is built inline while the old rows go and the new ones
+            // are made: the windows open on the new page's top screen once it
+            // is filled (see the search results build). The strip starts over
+            // with no card built.
+            root._searchSyncClose()
+            root._searchStripReach = 0
             // The type chip is a filter on ONE set of results, not a mode: left
             // sticky, an earlier Albums click hid the ARTISTS section of every
             // later search (an artist could not be found at all). Reset here,
@@ -12912,14 +13664,20 @@ ApplicationWindow {
             root.filterType = "all"
             // A section a user expanded stays expanded on the next search
             // (searchArtistsExpanded and the list-section flags are pref-backed),
-            // so nothing is reset here.
-            // Arm the build veil BEFORE the fills: the Loaders each delegate
-            // creates read searchBuilding for their asynchronous flag, and the
-            // ready ticks only ever arrive on later frames, never mid-fill.
-            root._searchBuildStart((r.artists || []).length + (r.albums || []).length
-                                 + (r.tracks || []).length + (r.videos || []).length
-                                 + (r.playlists || []).length + (r.mixes || []).length
-                                 + (r.top ? 1 : 0))
+            // so nothing is reset here, and it keeps its rows built through
+            // SHOW LESS as one expanded by a click does. Set before the fill:
+            // a flag left from the last search would build every row past the
+            // cap of this one.
+            root._searchKeptArtists = root.searchArtistsExpanded
+            root._searchKeptAlbums = root.searchAlbumsExpanded
+            root._searchKeptTracks = root.searchTracksExpanded
+            root._searchKeptVideos = root.searchVideosExpanded
+            root._searchKeptPlaylists = root.searchPlaylistsExpanded
+            root._searchKeptMixes = root.searchMixesExpanded
+            var any = (r.artists || []).length + (r.albums || []).length + (r.tracks || []).length
+                    + (r.videos || []).length + (r.playlists || []).length + (r.mixes || []).length
+                    + (r.top ? 1 : 0)
+            root._searchBuildStart(any)
             // The pinned row reads its clickable artists from the same side
             // map the section rows fill (appendMedia); the same item lands
             // there too, but register it here so the pin never depends on it.
@@ -12934,9 +13692,9 @@ ApplicationWindow {
             root.applySort()
             root.fill(playlistsModel, r.playlists)
             root.fill(mixesModel, r.mixes)
-            var any = (r.artists || []).length + (r.albums || []).length + (r.tracks || []).length
-                    + (r.videos || []).length + (r.playlists || []).length + (r.mixes || []).length
-                    + (r.top ? 1 : 0)
+            // The screen the page opens on, built here: its first frame is
+            // the finished one.
+            root._searchPlanSync(0)
             root.searchNoResultsFor = any === 0 ? root.lastSearchQuery : ""
         }
         // Assign a NEW object so the `var` property fires a change notification
@@ -12975,16 +13733,21 @@ ApplicationWindow {
                     || ("" + root.artistData.id) !== ("" + p.id)) return
                 artistView.holdScroll()   // in-place swap: keep the user's spot
                 root.artistData = p
-                root.fillMedia(artistAlbumsModel, p.albums)
-                root.fillMedia(artistEpModel, p.eps)
-                root.fillMedia(artistTracksModel, p.tracks)
-                root.fillMedia(artistVideosModel, p.videos || [])
+                root.fillArtistPage(p, true)
                 return
             }
             if (root.videoNow) root.closeVideo()   // artist link from the video player
             if (root._navRestoring) root._navRestoring = false
             else root.navPush()
             root.markNav("artist render")
+            // The page the view already holds, opened again (its artist's
+            // link on an album page, a card for the artist just left): the
+            // rows on it are this payload's rows, so they are reconciled in
+            // place rather than thrown away and built again. The scope must
+            // agree as well as the id: a library-scoped page shares both the
+            // id and these models (see openSearch).
+            var held = !!root.artistData && ("" + root.artistData.id) === ("" + p.id)
+                       && !!root.artistData.libraryScoped === !!p.libraryScoped
             root.artistData = p
             // A Back into this artist re-applies the snapshot's expansion state
             // (armed in navBack); any other load starts the page collapsed.
@@ -12999,10 +13762,7 @@ ApplicationWindow {
             }
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
             root.libraryOpen = false
-            root.fillMedia(artistAlbumsModel, p.albums)
-            root.fillMedia(artistEpModel, p.eps)
-            root.fillMedia(artistTracksModel, p.tracks)
-            root.fillMedia(artistVideosModel, p.videos || [])
+            root.fillArtistPage(p, held)
         }
         // The whole queue (a full resync); updateQueueCounts, at the end of
         // the reconcile, rebuilds every mirror and count from it.
@@ -13394,7 +14154,7 @@ ApplicationWindow {
                             implicitHeight: 44; implicitWidth: 156
                             model: ["Relevance", "Release date", "Name", "Popularity"]
                             currentIndex: Math.max(0, root.sortKeys.indexOf(waves.wavesPref("search_sort")))
-                            onActivated: { waves.setWavesPref("search_sort", root.sortKeys[currentIndex]); root.applySort() }
+                            onActivated: { waves.setWavesPref("search_sort", root.sortKeys[currentIndex]); root.resortSearch() }
                             background: Rectangle { radius: 8; color: root.surface2; border.color: sortBox.popup.visible ? root.accent : root.outline }
                             contentItem: Text {
                                 textFormat: Text.PlainText
@@ -13436,7 +14196,7 @@ ApplicationWindow {
                                 anchors.centerIn: parent; text: root.sortAsc ? "↑" : "↓"
                                 color: sortBox.currentIndex === 0 ? root.textDim : root.textHi; font.family: root.mono; font.pixelSize: 18
                             }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.sortAsc = !root.sortAsc; waves.setWavesPref("search_sort_asc", root.sortAsc); root.applySort() } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.sortAsc = !root.sortAsc; waves.setWavesPref("search_sort_asc", root.sortAsc); root.resortSearch() } }
                         }
                         // The audio-quality picker that used to sit here was a duplicate of
                         // the Quality setting in Settings; it set the same value but never
@@ -13467,13 +14227,13 @@ ApplicationWindow {
                                     Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: tchip.on ? root.accent : root.textDim }
                                     Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: tchip.modelData[1]; color: tchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
                                 }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.filterType = tchip.modelData[0] }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setSearchFilter(tchip.modelData[0]) }
                                 // Cascade in left-to-right the moment results land, decoupled
-                                // from the card build veil (searchBuilding): gating the chips on
+                                // from the page's veil (searchBuilding): gating the chips on
                                 // the veil made them arrive late on a cold first search and flicker
-                                // out then back in on every re-search. They now appear as soon as
-                                // results exist and stay put while the cards paint behind the veil.
-                                // Reset when cleared.
+                                // out then back in on every re-search. They appear as soon as
+                                // results exist and stay put while a held page waits behind the
+                                // veil. Reset when cleared.
                                 states: State {
                                     name: "in"; when: root.hasResults
                                     PropertyChanges { target: tchip; opacity: 1 }
@@ -13670,21 +14430,30 @@ ApplicationWindow {
                     // each shelf's delegate tree then incubates across
                     // frames, so the nav-tab strike animation keeps its
                     // frames instead of freezing for the ~250 ms a
-                    // synchronous build of every shelf used to take.
+                    // synchronous build of every shelf used to take. The
+                    // Repeater takes the slot model, not the array (see
+                    // browseSecSlots): a refresh rebinds each section's
+                    // `sec` in place and the shelves stay as they are.
                     Repeater {
-                        model: root.browseSections
+                        model: browseSecSlots
                         delegate: Loader {
                             id: bsecLd
-                            required property var modelData
-                            required property int index
+                            // The slot role, not `index`: a delegate being
+                            // removed has its index set to -1 before it is
+                            // deleted, and its bindings would read the
+                            // section at -1 (undefined) in that instant.
+                            required property int slot
+                            required property bool late
                             width: browseLandingCol.width
-                            asynchronous: root._browseAsyncBuild
+                            asynchronous: root._browseAsyncBuild || late
                             // Invisible while the veil is up, but still laid out.
                             opacity: root.browseBuilding ? 0 : 1
-                            onLoaded: root._browseBuildTick()
+                            // A late section joined no count (see browseSecSlots).
+                            onLoaded: if (!late) root._browseBuildTick()
                             sourceComponent: BrowseSection {
-                                sec: bsecLd.modelData
-                                secIndex: bsecLd.index
+                                sec: root.browseSections[bsecLd.slot] || root._browseSecHeld.prev[bsecLd.slot]
+                                secIndex: bsecLd.slot
+                                late: bsecLd.late
                                 landing: true
                                 pane: browseLanding
                                 col: browseLandingCol
@@ -13948,8 +14717,13 @@ ApplicationWindow {
                                     MouseArea {
                                         anchors.fill: parent
                                         enabled: bihSubtitle.linked
+                                        hoverEnabled: enabled
                                         cursorShape: bihSubtitle.linked ? Qt.PointingHandCursor : Qt.ArrowCursor
                                         onClicked: waves.loadArtist(browseItemHeader.hd.artist_id)
+                                        // Resting on the artist: build the page before the click.
+                                        readonly property var prefetchCard: ({ kind: "artist", id: browseItemHeader.hd ? "" + (browseItemHeader.hd.artist_id || "") : "" })
+                                        onContainsMouseChanged: containsMouse ? root.hoverPrefetch(prefetchCard)
+                                                                              : root.hoverPrefetchCancel(prefetchCard)
                                     }
                                 }
                                 Text {
@@ -14013,7 +14787,7 @@ ApplicationWindow {
                     // The shared loading hint (WireHint.qml owns the look).
                     WireHint {
                         id: browseDrillHint
-                        active: root.signedIn && root.browsePageLoading
+                        active: root.signedIn && (root.browsePageLoading || root.browsePageBuilding)
                         width: parent.width; tint: root.textLo
                         onScreen: root.onScreen
                         // Under a skeleton header the hint belongs to the list
@@ -14078,6 +14852,10 @@ ApplicationWindow {
                             landing: false
                             pane: browseDrill
                             col: browseDrillCol
+                            // Invisible while the page build veil is up, but
+                            // still laid out (see browsePageBuilding).
+                            opacity: root.browsePageReveal
+                            Component.onCompleted: root._browsePageBuildTick()
                         }
                     }
                 }
@@ -14121,11 +14899,13 @@ ApplicationWindow {
                 contentY = Math.min(_resizeRatio * maxY, maxY)
             }
 
-            // While a search builds, the ambient wave video behind this
-            // transparent pane stays in view on purpose: the "Reading the
-            // wire…" hint sits on the living water and the finished result
-            // cards then fade in over it (searchReveal), instead of a black
-            // floor snapping to cards in one hard paint.
+            // While a search waits for the library's first answer, the
+            // ambient wave video behind this transparent pane stays in view on
+            // purpose: the "Reading the wire…" hint sits on the living water
+            // and the finished result cards then fade in over it
+            // (searchReveal), instead of a black floor snapping to cards in
+            // one hard paint. Every other search opens finished at once (see
+            // the search results build).
             Column {
                 id: contentCol
                 x: 22; y: 8; width: results.width - 44; spacing: 8
@@ -14168,19 +14948,22 @@ ApplicationWindow {
                 // section's own delegate (AlbumBlock, TrackRow, PlaylistBlock),
                 // and the item keeps its place in its section below; this is
                 // a pointer, not a move. A one-item Repeater rather than a
-                // lone Loader so each search rebuilds the row and its build
-                // veil tick lands exactly once, like every section row.
+                // lone Loader so each search rebuilds the row, like every
+                // section row.
                 SectionHeader { id: topHead; opacity: root.searchReveal; visible: root.filterType === "all" && root.searchTop !== null; label: "TOP RESULT" }
                 Repeater {
+                    id: searchTopRep
                     model: root.searchTop ? [root.searchTop] : []
                     delegate: Loader {
                         id: topLd
                         required property var modelData
                         visible: root.filterType === "all"
                         width: contentCol.width
-                        asynchronous: root.searchBuilding
+                        // The first row of the page, so built where it is
+                        // set (see the search results build), unless a chip
+                        // has it hidden.
+                        asynchronous: root.filterType !== "all"
                         opacity: root.searchReveal
-                        onLoaded: root._searchBuildTick()
                         sourceComponent: topLd.modelData.kind === "album" ? topAlbumComp
                                        : topLd.modelData.kind === "playlist" ? topPlaylistComp : topTrackComp
                         Component {
@@ -14188,7 +14971,7 @@ ApplicationWindow {
                             AlbumBlock {
                                 albumId: topLd.modelData.id; title: topLd.modelData.title; artistName: topLd.modelData.artist; artistId: topLd.modelData.artist_id || ""
                                 art: topLd.modelData.art; year: "" + (topLd.modelData.year || ""); releaseDate: topLd.modelData.date || ""; listedDate: topLd.modelData.listed || ""; trackCount: topLd.modelData.tracks || 0
-                                durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
+                                durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; atmos: topLd.modelData.atmos === true; popularity: topLd.modelData.popularity || 0
                                 explicit: topLd.modelData.explicit === true
                             }
                         }
@@ -14198,7 +14981,7 @@ ApplicationWindow {
                                 tId: topLd.modelData.id; kind: topLd.modelData.kind
                                 title: topLd.modelData.title; artistName: topLd.modelData.artist || ""; artistId: topLd.modelData.artist_id || ""
                                 album: topLd.modelData.album || ""; art: topLd.modelData.art || ""; year: "" + (topLd.modelData.year || ""); date: topLd.modelData.date || ""
-                                duration: topLd.modelData.duration || ""; durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; popularity: topLd.modelData.popularity || 0
+                                duration: topLd.modelData.duration || ""; durationSec: topLd.modelData.duration_sec || 0; quality: topLd.modelData.quality || ""; atmos: topLd.modelData.atmos === true; popularity: topLd.modelData.popularity || 0
                                 albumId: topLd.modelData.album_id || ""; explicit: topLd.modelData.explicit
                             }
                         }
@@ -14220,8 +15003,10 @@ ApplicationWindow {
                 // resizes the ones on screen, so it stays smooth (the browse tabs
                 // are smooth for the same reason). SHOW ALL switches to the fill
                 // grid below. The strip is a plain Row (not a virtualized
-                // ListView) so all cards instantiate and each still fires one
-                // build-veil tick; only ~12 artist cards, so that is cheap.
+                // ListView), every card holding its cell whether it is built
+                // or not, so the strip's width is the whole result set from
+                // the start; a card is built as the strip comes within a
+                // screen of it (see _searchStripReach).
                 Flickable {
                     id: artistStrip
                     visible: root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
@@ -14231,24 +15016,31 @@ ApplicationWindow {
                     flickableDirection: Flickable.HorizontalFlick
                     boundsBehavior: Flickable.StopAtBounds
                     readonly property real cardW: 200
+                    onContentXChanged: root._searchStripGrow()
+                    onWidthChanged: root._searchStripGrow()
                     Row {
                         id: artistRow
                         spacing: 12
                         Repeater {
+                            id: artistStripRep
                             model: artistsModel
                             delegate: Loader {
                                 width: artistStrip.cardW
-                                // Reserve a fixed cell (width + 142) while the async Loader is
-                                // still empty (item null) so the strip does not collapse behind
-                                // the build veil; snap to the card's exact height once loaded.
-                                height: item ? item.implicitHeight : width + 142
-                                // Live only in strip mode, so exactly one of the strip and the
-                                // grid instantiates its cards. That keeps the build veil's
-                                // one-tick-per-artist count exact (never zero, never doubled).
-                                active: root.searchArtistsStripMode
-                                asynchronous: root.searchBuilding
+                                // The card's own height until it exists (its
+                                // square cover and the 119px of name, meter and
+                                // buttons under it), so the strip keeps one
+                                // height while cards land and while the ones
+                                // past the reach wait unbuilt.
+                                height: item ? item.implicitHeight : width + 119
+                                // Built within the reach, and kept built while
+                                // a chip or the SHOW ALL grid has the strip
+                                // hidden, until the next search. A card leaving
+                                // the model reads index -1 before it dies: not
+                                // built, and never finished inline.
+                                readonly property bool shown: index >= 0 && root.searchArtistsStripMode
+                                active: index >= 0 && index < root._searchStripReach
+                                asynchronous: !shown || index < root._searchSyncFromArtists || index >= root._searchSyncArtists
                                 opacity: root.searchReveal
-                                onLoaded: root._searchBuildTick()
                                 sourceComponent: ArtistSearchCard {
                                     aArt: model.art; aName: model.name; aPop: model.popularity; aId: model.id
                                 }
@@ -14276,11 +15068,12 @@ ApplicationWindow {
                     property int cols: Math.max(1, Math.floor((width + spacing) / (190 + spacing)))
                     property real cardW: (width - (cols - 1) * spacing) / cols
                     Repeater {
+                        id: artistGridRep
                         model: artistsModel
                         delegate: Loader {
                             width: artistFlow.cardW
-                            height: item ? item.implicitHeight : width + 142
-                            // Complement of the strip: live only when NOT in strip mode,
+                            height: item ? item.implicitHeight : width + 119
+                            // Complement of the strip: shown only when NOT in strip mode,
                             // and only while this grid is the artist surface of the
                             // results. A type chip other than Artists leaves strip mode
                             // too, and used to build every card of a hidden grid on the
@@ -14288,10 +15081,14 @@ ApplicationWindow {
                             // is EFFECTIVE visibility, false whenever an artist, My Tidal,
                             // Browse or Settings page covers the results, and it tore the
                             // grid down on every navigation and rebuilt it on Back.
-                            active: !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
-                            asynchronous: root.searchBuilding
+                            readonly property bool shown: index >= 0 && !root.searchArtistsStripMode && root.sectionVisible("artists", artistsModel.count)
+                            // Once shown, kept built through SHOW LESS and the
+                            // chips until the next search, as the list rows are.
+                            active: shown || (index >= 0 && root._searchKeptArtists)
+                            // The cards on the screen the grid opens on are
+                            // built in the click, the rest in the background.
+                            asynchronous: !shown || index < root._searchSyncFromArtists || index >= root._searchSyncArtists
                             opacity: root.searchReveal
-                            onLoaded: root._searchBuildTick()
                             sourceComponent: ArtistSearchCard {
                                 aArt: model.art; aName: model.name; aPop: model.popularity; aId: model.id
                             }
@@ -14326,21 +15123,36 @@ ApplicationWindow {
                     // invisible in the model's contents.
                     id: albumsRep
                     model: albumsModel
+                    // Every section builds only the rows it shows (see the
+                    // search results build): a row past the cap is an empty,
+                    // hidden Loader until SHOW ALL or the section's own chip
+                    // shows it, and once built it stays built. The first 5
+                    // are always built (a fresh search opens on them), so a
+                    // chip hiding the section keeps them too. Of the shown
+                    // rows, those in the section's window are built inline
+                    // and the rest incubate, their height reserved either
+                    // way. A row being removed (a refill clears the model)
+                    // reads index -1 before it dies: it must read as NOT
+                    // shown, or every unbuilt row past the cap is built on
+                    // its way out, and as asynchronous, or one still
+                    // incubating is forced to finish at that moment.
                     delegate: Loader {
                         // The section filter must hide the LOADER (the Column
                         // child); an invisible item inside a sized Loader would
-                        // still occupy its row. In the mixed All view only the
-                        // first 5 show until SHOW ALL; the delegate still loads
-                        // (and fires its build-veil tick) while hidden, so the
-                        // one-tick-per-item count stays exact.
-                        visible: root.searchRowVisible("albums", albumsModel.count, index, root.searchAlbumsExpanded)
+                        // still occupy its row.
+                        readonly property bool shown: index >= 0 && root.searchRowVisible("albums", albumsModel.count, index, root.searchAlbumsExpanded)
+                        active: shown || (index >= 0 && (index < 5 || root._searchKeptAlbums))
+                        visible: shown
                         width: contentCol.width
-                        asynchronous: root.searchBuilding
+                        // The collapsed row's height until the block exists;
+                        // the block's own height from then on, so an expanded
+                        // panel still grows the row.
+                        height: item ? item.implicitHeight : 64
+                        asynchronous: !shown || index < root._searchSyncFromAlbums || index >= root._searchSyncAlbums
                         opacity: root.searchReveal
-                        onLoaded: root._searchBuildTick()
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                            art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                            art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
                             explicit: model.explicit === true
                         }
                     }
@@ -14350,16 +15162,19 @@ ApplicationWindow {
                 // TRACKS
                 SectionHeader { id: tracksHead; opacity: root.searchReveal; visible: root.sectionVisible("tracks", tracksModel.count); label: "TRACKS"; count: tracksModel.count }
                 Repeater {
+                    id: tracksRep
                     model: tracksModel
+                    // Built as the albums are (see albumsRep).
                     delegate: Loader {
-                        visible: root.searchRowVisible("tracks", tracksModel.count, index, root.searchTracksExpanded)
-                        width: contentCol.width
-                        asynchronous: root.searchBuilding
+                        readonly property bool shown: index >= 0 && root.searchRowVisible("tracks", tracksModel.count, index, root.searchTracksExpanded)
+                        active: shown || (index >= 0 && (index < 5 || root._searchKeptTracks))
+                        visible: shown
+                        width: contentCol.width; height: 62
+                        asynchronous: !shown || index < root._searchSyncFromTracks || index >= root._searchSyncTracks
                         opacity: root.searchReveal
-                        onLoaded: root._searchBuildTick()
                         sourceComponent: TrackRow {
                             tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                            album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                            album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
                             albumId: model.album_id || ""; explicit: model.explicit
                         }
                     }
@@ -14384,14 +15199,18 @@ ApplicationWindow {
                     // at two, eight at four.
                     readonly property int cap: cols * Math.ceil(5 / cols)
                     Repeater {
+                        id: videosRep
                         model: videosModel
+                        // Built as the albums are (see albumsRep), the cap
+                        // being the grid's whole rows.
                         delegate: Loader {
-                            visible: root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded, videoGrid.cap)
+                            readonly property bool shown: index >= 0 && root.searchRowVisible("videos", videosModel.count, index, root.searchVideosExpanded, videoGrid.cap)
+                            active: shown || (index >= 0 && (index < videoGrid.cap || root._searchKeptVideos))
+                            visible: shown
                             width: videoGrid.cellW
                             height: Math.round(videoGrid.cellW * 9 / 16) + 54
-                            asynchronous: root.searchBuilding
+                            asynchronous: !shown || index < root._searchSyncFromVideos || index >= root._searchSyncVideos
                             opacity: root.searchReveal
-                            onLoaded: root._searchBuildTick()
                             sourceComponent: VideoCell {
                                 width: videoGrid.cellW
                                 vid: model.id; vcTitle: model.title; vcArtist: model.artist
@@ -14409,18 +15228,21 @@ ApplicationWindow {
                 // PLAYLISTS
                 SectionHeader { id: playlistsHead; opacity: root.searchReveal; visible: root.sectionVisible("playlists", playlistsModel.count); label: "PLAYLISTS"; count: playlistsModel.count }
                 Repeater {
+                    id: playlistsRep
                     model: playlistsModel
+                    // Built as the albums are (see albumsRep).
                     delegate: Loader {
-                        visible: root.searchRowVisible("playlists", playlistsModel.count, index, root.searchPlaylistsExpanded)
+                        readonly property bool shown: index >= 0 && root.searchRowVisible("playlists", playlistsModel.count, index, root.searchPlaylistsExpanded)
+                        active: shown || (index >= 0 && (index < 5 || root._searchKeptPlaylists))
+                        visible: shown
                         width: contentCol.width
-                        asynchronous: root.searchBuilding
+                        asynchronous: !shown || index < root._searchSyncFromPlaylists || index >= root._searchSyncPlaylists
                         opacity: root.searchReveal
                         // Reserve the collapsed row's height while the async
                         // build runs (same rationale as the artist strip's
                         // fixed cell): without it the section collapses to
                         // zero and pops open as each row lands.
                         height: item ? item.implicitHeight : 64
-                        onLoaded: root._searchBuildTick()
                         sourceComponent: PlaylistBlock {
                             plId: model.id; title: model.title; creator: model.creator || ""
                             art: model.art; trackCount: model.tracks
@@ -14432,13 +15254,16 @@ ApplicationWindow {
                 // MIXES
                 SectionHeader { id: mixesHead; opacity: root.searchReveal; visible: root.sectionVisible("mixes", mixesModel.count); label: "MIXES"; count: mixesModel.count }
                 Repeater {
+                    id: mixesRep
                     model: mixesModel
+                    // Built as the albums are (see albumsRep).
                     delegate: Loader {
-                        visible: root.searchRowVisible("mixes", mixesModel.count, index, root.searchMixesExpanded)
+                        readonly property bool shown: index >= 0 && root.searchRowVisible("mixes", mixesModel.count, index, root.searchMixesExpanded)
+                        active: shown || (index >= 0 && (index < 5 || root._searchKeptMixes))
+                        visible: shown
                         width: contentCol.width; height: 66
-                        asynchronous: root.searchBuilding
+                        asynchronous: !shown || index < root._searchSyncFromMixes || index >= root._searchSyncMixes
                         opacity: root.searchReveal
-                        onLoaded: root._searchBuildTick()
                         sourceComponent: Rectangle {
                         radius: 10; color: root.surface; border.color: root.border1
                         RowLayout {
@@ -14637,18 +15462,35 @@ ApplicationWindow {
                     collapsible: true; collapsed: root.artistTracksCollapsed
                     onToggled: root.toggleArtistSection("tracks")
                 }
+                // Every section builds only the rows it shows (see the artist
+                // page build): a row past the cap is an empty, hidden Loader
+                // until SHOW ALL, and once built it stays built, so SHOW LESS
+                // then SHOW ALL again costs nothing. Of the shown rows, those
+                // under the section's budget are built inline and the rest
+                // incubate; a row's height is reserved either way, so the page
+                // has its height (and a Back restore its target) at once.
+                // A row being removed (a refill clears the model) reads index
+                // -1 before it dies: it must read as NOT shown, or every
+                // unbuilt row past the cap is built inline on its way out
+                // (measured: 300ms of a refill), and as asynchronous, or one
+                // still incubating is forced to finish at that moment.
                 Repeater {
+                    id: artistTracksRep
                     // null model while collapsed: no delegates exist at all,
                     // cheaper than count instances with visible: false.
                     model: root.artistTracksCollapsed ? null : artistTracksModel
-                    delegate: TrackRow {
-                        required property var model
-                        required property int index
-                        visible: index < 5 || root.topTracksExpanded
-                        width: artistCol.width
-                        tId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                        albumId: model.album_id || ""; explicit: model.explicit
+                    delegate: Loader {
+                        readonly property bool shown: index >= 0 && (index < 5 || root.topTracksExpanded)
+                        active: (shown || (index >= 0 && root._artistKeptTracks)) && index < root._artistReachTracks
+                        visible: shown
+                        width: artistCol.width; height: 62
+                        asynchronous: index < root._artistSyncFromTracks || index >= root._artistSyncTracks
+                        onLoaded: root._artistRowLanded("tracks")
+                        sourceComponent: TrackRow {
+                            tId: model.id; title: model.title; artistName: model.artist; artistId: ""
+                            album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
+                            albumId: model.album_id || ""; explicit: model.explicit
+                        }
                     }
                 }
                 ShowAllLabel {
@@ -14669,15 +15511,24 @@ ApplicationWindow {
                     onToggled: root.toggleArtistSection("albums")
                 }
                 Repeater {
+                    id: artistAlbumsRep
                     model: root.artistAlbumsCollapsed ? null : artistAlbumsModel
-                    delegate: AlbumBlock {
-                        required property var model
-                        required property int index
-                        visible: index < 5 || root.artistAlbumsExpanded
+                    delegate: Loader {
+                        readonly property bool shown: index >= 0 && (index < 5 || root.artistAlbumsExpanded)
+                        active: (shown || (index >= 0 && root._artistKeptAlbums)) && index < root._artistReachAlbums
+                        visible: shown
                         width: artistCol.width
-                        albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                        explicit: model.explicit === true
+                        // The collapsed row's height until the block exists;
+                        // the block's own height from then on, so an expanded
+                        // panel still grows the row.
+                        height: item ? item.implicitHeight : 64
+                        asynchronous: index < root._artistSyncFromAlbums || index >= root._artistSyncAlbums
+                        onLoaded: root._artistRowLanded("albums")
+                        sourceComponent: AlbumBlock {
+                            albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
+                            art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
+                            explicit: model.explicit === true
+                        }
                     }
                 }
                 ShowAllLabel {
@@ -14697,15 +15548,21 @@ ApplicationWindow {
                     onToggled: root.toggleArtistSection("eps")
                 }
                 Repeater {
+                    id: artistEpsRep
                     model: root.artistEpsCollapsed ? null : artistEpModel
-                    delegate: AlbumBlock {
-                        required property var model
-                        required property int index
-                        visible: index < 5 || root.artistEpsExpanded
+                    delegate: Loader {
+                        readonly property bool shown: index >= 0 && (index < 5 || root.artistEpsExpanded)
+                        active: (shown || (index >= 0 && root._artistKeptEps)) && index < root._artistReachEps
+                        visible: shown
                         width: artistCol.width
-                        albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
-                        explicit: model.explicit === true
+                        height: item ? item.implicitHeight : 64
+                        asynchronous: index < root._artistSyncFromEps || index >= root._artistSyncEps
+                        onLoaded: root._artistRowLanded("eps")
+                        sourceComponent: AlbumBlock {
+                            albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
+                            art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
+                            explicit: model.explicit === true
+                        }
                     }
                 }
                 ShowAllLabel {
@@ -14751,18 +15608,25 @@ ApplicationWindow {
                     readonly property real cellW: (width - (cols - 1) * spacing) / cols
                     readonly property int fillCount: Math.ceil(6 / cols) * cols
                     Repeater {
+                        id: artistVideosRep
                         model: root.artistVideosCollapsed ? null : artistVideosModel
-                        delegate: VideoCell {
-                            required property var model
-                            required property int index
-                            visible: index < artistVideoGrid.fillCount || root.artistVideosExpanded
+                        delegate: Loader {
+                            readonly property bool shown: index >= 0 && (index < artistVideoGrid.fillCount || root.artistVideosExpanded)
+                            active: (shown || (index >= 0 && root._artistKeptVideos)) && index < root._artistReachVideos
+                            visible: shown
                             width: artistVideoGrid.cellW
-                            vid: model.id; vcTitle: model.title; vcArtist: model.artist
-                            artUrl: model.art; artBigUrl: model.art_big || ""
-                            vcDuration: model.duration
-                            vcExplicit: model.explicit === true
-                            vcSpec: model.quality || ""
-                            vcDate: model.date
+                            height: Math.round(artistVideoGrid.cellW * 9 / 16) + 54
+                            asynchronous: index < root._artistSyncFromVideos || index >= root._artistSyncVideos
+                            onLoaded: root._artistRowLanded("videos")
+                            sourceComponent: VideoCell {
+                                width: artistVideoGrid.cellW
+                                vid: model.id; vcTitle: model.title; vcArtist: model.artist
+                                artUrl: model.art; artBigUrl: model.art_big || ""
+                                vcDuration: model.duration
+                                vcExplicit: model.explicit === true
+                                vcSpec: model.quality || ""
+                                vcDate: model.date
+                            }
                         }
                     }
                 }
@@ -15044,7 +15908,7 @@ ApplicationWindow {
                         required property var model
                         width: ListView.view.width
                         albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
-                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
                         explicit: model.explicit === true
                         libBaked: model.lib; libStamp: model.libStamp
                     }
@@ -15056,7 +15920,7 @@ ApplicationWindow {
                         required property var model
                         width: ListView.view.width
                         tId: model.id; title: model.title; artistName: model.artist; artistId: model.artist_id
-                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; popularity: model.popularity
+                        album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
                         albumId: model.album_id || ""; explicit: model.explicit
                         libBaked: model.lib; libStamp: model.libStamp
                     }
@@ -15293,7 +16157,7 @@ ApplicationWindow {
                                             tId: modelData.id; kind: modelData.kind || "track"
                                             title: modelData.title; artistName: modelData.artist || ""; artistId: modelData.artist_id || ""
                                             album: modelData.album || ""; art: modelData.art || ""; year: "" + (modelData.year || ""); date: modelData.date || ""
-                                            duration: modelData.duration || ""; durationSec: modelData.duration_sec || 0; quality: modelData.quality || ""; popularity: modelData.popularity || 0
+                                            duration: modelData.duration || ""; durationSec: modelData.duration_sec || 0; quality: modelData.quality || ""; atmos: modelData.atmos === true; popularity: modelData.popularity || 0
                                             albumId: modelData.album_id || ""; explicit: modelData.explicit
                                         }
                                     }
@@ -15816,6 +16680,10 @@ ApplicationWindow {
                                                 hoverEnabled: true
                                                 cursorShape: npArtName.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
                                                 onClicked: if (npArtName.linkable) waves.loadArtist(modelData.id)
+                                                // Resting on the name: build the page before the click.
+                                                readonly property var prefetchCard: ({ kind: "artist", id: "" + (modelData.id || "") })
+                                                onContainsMouseChanged: containsMouse && npArtName.linkable ? root.hoverPrefetch(prefetchCard)
+                                                                                                            : root.hoverPrefetchCancel(prefetchCard)
                                             }
                                         }
                                         Text {
@@ -15921,9 +16789,10 @@ ApplicationWindow {
             return arr
         }
         // inPlace: a refresh swapping rows under a page the user is already
-        // reading, where a clear+rebuild would freeze the window (see
-        // reconcileById). Every other caller, the sort control included, is a
-        // deliberate full rebuild of a small model.
+        // reading, where a clear+rebuild would rebuild them in front of the
+        // reader (see reconcileById). Every other caller is a deliberate full
+        // rebuild of a small model, and plans its inline rows around it: the
+        // fresh search after its fill, the sort control in resortSearch.
         if (inPlace) {
             root.reconcileById(albumsModel, ordered(root.albumsRaw, true), true)
             root.reconcileById(tracksModel, ordered(root.tracksRaw, true), true)
@@ -15933,6 +16802,19 @@ ApplicationWindow {
             root.fillMedia(tracksModel, ordered(root.tracksRaw, true))
             root.fillMedia(videosModel, ordered(root.videosRaw, false))
         }
+    }
+    // The sort control: the three sorted sections reordered IN PLACE (the
+    // refresh's reconcile, rows matched by id and moved), so every row keeps
+    // the block it had. Rebuilt in the new order, an album expanded above
+    // the screen came back incubating at the collapsed height and grew when
+    // it landed, a second jump after the sort's own, and the rows SHOW LESS
+    // had kept were rebuilt ahead of the ones on screen. A row the sort
+    // newly shows builds where the windows say (see the search results
+    // build).
+    function resortSearch() {
+        _searchSyncClose()
+        applySort(true)
+        _searchPlanSync(results.contentY)
     }
 
     // ====================================================================
