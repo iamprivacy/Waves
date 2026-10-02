@@ -22,6 +22,33 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.33 (2026-10-02)
+
+### ✨ Added
+
+- 🎧 A release that TIDAL offers in both Dolby Atmos and stereo now lists ATMOS in its quality menu beside the stereo qualities, so you can pick either one per album or song. With Download Dolby Atmos on, its badge shows ATMOS.
+
+### 🔧 Changed
+
+- 🔊 The Write ReplayGain tags setting now explains that players which honour the tags play loud tracks quieter ([issue #48](https://github.com/iamprivacy/Waves/issues/48)).
+- ⚡ Artist pages and Search results appear complete as soon as they open, with no fade-in pause.
+- 🎤 An artist you open for the first time loads faster.
+- 🖱️ Resting the pointer on an artist's name prepares that artist's page, as resting on an artist card already did.
+
+### 🐛 Fixed
+
+- 💤 Using Waves after the computer slept no longer crashes the app on macOS ([issue #47](https://github.com/iamprivacy/Waves/issues/47)).
+- 🔊 A song or album you download in Dolby Atmos now reads ATMOS in the download queue from the moment it is queued, and the quality menu no longer marks it as Low, AAC 96 ([issue #45](https://github.com/iamprivacy/Waves/issues/45)).
+- 🎚️ An album, playlist or mix button now judges your copies by the quality chosen on that album, playlist or mix, the same way its download does, so it no longer offers a download that fetches nothing or reads DOWNLOADED when the download would fetch everything again.
+- 🎧 Turning Download Dolby Atmos on or off now updates the download buttons right away, not only the quality badges.
+- 🧾 Clicking a stereo-only album again after toggling Download Dolby Atmos no longer adds a second identical row to the queue.
+- 🐢 Scrolling no longer stutters while a page is still filling in, on high refresh-rate displays too.
+- 📜 Browse listings keep loading as you scroll, and no longer show the same cards twice or freeze the window when more rows arrive.
+- 🧭 Opening or going Back to a Browse page no longer freezes or blanks the window while it builds.
+- 🎤 Long artist pages open without freezing and fill in from the top down.
+- 🔎 Search results no longer shift as artist cards fill in, and changing the sort no longer makes the page jump.
+- 🏠 Browse no longer rebuilds its home page when a refresh arrives.
+
 ## 🗂️ v0.1.32 (2026-09-28)
 
 ### ✨ Added
