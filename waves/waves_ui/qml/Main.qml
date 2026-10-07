@@ -2557,7 +2557,10 @@ ApplicationWindow {
     // drawer's tier column.
     function qualBg(q) { return q === "ATMOS" ? "transparent" : surface2 }
     function qualFg(q) { return (q === "HI-RES" || q === "VIDEO") ? gold : q === "LOSSLESS" ? green : q === "HIGH" ? cyan : q === "ATMOS" ? textHi : textLo }
-    function qualBorder(q) { return (q === "HI-RES" || q === "VIDEO") ? goldDim : q === "LOSSLESS" ? greenDim : q === "ATMOS" ? textDim : outline }
+    // Every ladder tier rims its pill in its own dim ink; HIGH used to fall
+    // to the neutral outline, which read as a smaller, unrimmed badge beside
+    // the gold and green ones until the pointer lit it.
+    function qualBorder(q) { return (q === "HI-RES" || q === "VIDEO") ? goldDim : q === "LOSSLESS" ? greenDim : q === "HIGH" ? cyanDim : q === "ATMOS" ? textDim : outline }
     function qualDot(q) { return q === "LOW" ? textDim : qualFg(q) }
     // Standard spec for each TIDAL quality tier (the exact hi-res sample rate
     // isn't exposed without a per-track stream lookup, so we show the tier's
@@ -9544,7 +9547,20 @@ ApplicationWindow {
                                 Check { Layout.alignment: Qt.AlignVCenter; checked: ab.sel[modelData.id] === true; onToggled: ab.setSel(modelData.id, !(ab.sel[modelData.id] === true)) }
                                 Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 16; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
                                 TrackPreview { kind: "track"; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
-                                Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text {
+                                    objectName: "trackTitle"
+                                    textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true
+                                    // The explicit mark rides inside the title's
+                                    // tail, as on TrackRow, so an inline expand
+                                    // tells a clean twin apart too.
+                                    rightPadding: modelData.explicit === true ? abExp.width + 6 : 0
+                                    ExplicitMark {
+                                        id: abExp
+                                        visible: modelData.explicit === true
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        x: Math.min(parent.contentWidth + 6, parent.width - parent.rightPadding + 6)
+                                    }
+                                }
                                 PopMeter { value: modelData.popularity }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
                                 DownIcon {
@@ -9783,7 +9799,18 @@ ApplicationWindow {
                                 Check { Layout.alignment: Qt.AlignVCenter; checked: pb.sel[index] !== undefined; onToggled: pb.setSel(index, modelData.kind, pb.sel[index] === undefined) }
                                 Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 24; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
                                 TrackPreview { kind: modelData.kind; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
-                                Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text {
+                                    objectName: "trackTitle"
+                                    textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true
+                                    // Same explicit mark as the album expand.
+                                    rightPadding: modelData.explicit === true ? pbExp.width + 6 : 0
+                                    ExplicitMark {
+                                        id: pbExp
+                                        visible: modelData.explicit === true
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        x: Math.min(parent.contentWidth + 6, parent.width - parent.rightPadding + 6)
+                                    }
+                                }
                                 Text { textFormat: Text.PlainText; text: modelData.artist; color: root.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 220 }
                                 PopMeter { value: modelData.popularity }
                                 Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
@@ -9936,11 +9963,14 @@ ApplicationWindow {
 
     // Explicit-content mark, in the app's mono data voice.
     component ExplicitMark: Rectangle {
+        objectName: "explicitMark"
         radius: 3; color: "transparent"
-        border.color: root.textDim; border.width: 1
+        // textLo, a step lighter than the dim grey: at 14px the mark sank
+        // into the row background.
+        border.color: root.textLo; border.width: 1
         implicitWidth: 14; implicitHeight: 14
         Text {
-            anchors.centerIn: parent; text: "E"; color: root.textDim
+            anchors.centerIn: parent; text: "E"; color: root.textLo
             font.family: root.mono; font.pixelSize: 9; font.bold: true
         }
     }
@@ -10183,6 +10213,7 @@ ApplicationWindow {
                     Layout.fillWidth: true; spacing: 1
                     Text {
                         id: trTitle
+                        objectName: "trackTitle"
                         textFormat: Text.PlainText; text: title
                         color: trTitleMa.containsMouse ? "#ffffff" : root.textHi
                         // A step above the 12px subtitle in both size and weight
@@ -10194,7 +10225,13 @@ ApplicationWindow {
                         // inside the full-width Text, exactly like the album
                         // row's pill: the title keeps its layout size and
                         // elides only for real overflow.
-                        rightPadding: (trPill.shown ? trPill.width + 8 : 0)
+                        // The explicit mark leads the tail, so a clean twin
+                        // listed beside its explicit release tells apart.
+                        // Read off the flag, never the mark's `visible`
+                        // (effective visibility, see LibraryTag.shown).
+                        readonly property real expRoom: trow.explicit === true ? trExp.width + 6 : 0
+                        rightPadding: expRoom
+                                      + (trPill.shown ? trPill.width + 8 : 0)
                                       + (trNew.shown ? trNew.width + (trPill.shown ? 6 : 8) : 0)
                         // Title -> the track's album page (highlighting this track);
                         // for a video row it opens the in-app video player instead.
@@ -10208,12 +10245,18 @@ ApplicationWindow {
                             onClicked: trow.kind === "video" ? root.openVideo(trow.tId, trow.title, trow.artistName)
                                                              : root.openAlbumPage(albumId, tId, trow.album, trow.art)
                         }
+                        ExplicitMark {
+                            id: trExp
+                            visible: trow.explicit === true
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: Math.min(trTitle.contentWidth + 6, trTitle.width - trTitle.rightPadding + 6)
+                        }
                         // Declared after the title's MouseArea so the pill sits
                         // on top of it and takes its own click (reveal folder).
                         TrackPresencePill {
                             id: trPill
                             anchors.verticalCenter: parent.verticalCenter
-                            x: Math.min(trTitle.contentWidth + 8,
+                            x: Math.min(trTitle.contentWidth + 8 + trTitle.expRoom,
                                         trTitle.width - width - (trNew.shown ? trNew.width + 6 : 0))
                             track: trow.kind === "video" ? null
                                    : ({ artist: trow.artistName, title: trow.title,
@@ -10230,7 +10273,7 @@ ApplicationWindow {
                             settled: trDl.st === "done"
                             anchors.verticalCenter: parent.verticalCenter
                             x: trPill.shown ? trPill.x + trPill.width + 6
-                                            : Math.min(trTitle.contentWidth + 8, trTitle.width - width)
+                                            : Math.min(trTitle.contentWidth + 8 + trTitle.expRoom, trTitle.width - width)
                         }
                     }
                     ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[tId] || []; suffix: album; albumId: trow.albumId }
