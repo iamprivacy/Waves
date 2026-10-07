@@ -294,6 +294,7 @@ jobs:
               poetry run make gui-waves-linux &&
               cd dist &&
               mv waves.dist Waves &&
+              bash ../tools/bundle_xcb_libs.sh Waves &&
               zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}.AppImage &&
               cd ..
@@ -305,6 +306,7 @@ jobs:
               poetry run make gui-waves-linux &&
               cd dist &&
               mv waves.dist Waves &&
+              bash ../tools/bundle_xcb_libs.sh Waves &&
               zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}.AppImage &&
               cd ..
@@ -343,6 +345,13 @@ jobs:
       - name: Set up the environment
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
         uses: ./.github/actions/setup-poetry-env
+      # Qt's xcb platform plugin links xcb-util libraries a stock desktop may
+      # lack (libxcb-cursor0 is not installed by default on Ubuntu 22.04), so
+      # tools/bundle_xcb_libs.sh copies them into the Linux tree. Install them
+      # here so it has something to copy.
+      - name: Install X11 helper libraries to bundle
+        if: ${{ runner.os == 'Linux' && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) }}
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends patchelf libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-util1 libxcb-xkb1 libxcb-xinerama0 libxcb-xinput0 libxcb-randr0 libxcb-render0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0
       - name: Build Waves for ${{matrix.TARGET}}
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH) }}
         run: ${{matrix.CMD_BUILD}}
@@ -365,7 +374,7 @@ jobs:
       # offscreen; this mirrors a user's desktop, it is not shipped.
       - name: Install Linux GL runtime for smoke-launch
         if: ${{ runner.os == 'Linux' && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libopengl0 libxkbcommon0 libfontconfig1 libpulse0 libasound2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libopengl0 libxkbcommon0 libfontconfig1 libpulse0 libasound2 xvfb
       - name: Smoke-launch trimmed bundle
         if: ${{ (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
         env:
@@ -404,6 +413,47 @@ jobs:
             ok=1
           fi
           [ "$ok" -eq 1 ] || { echo "::error::smoke-launch: $BIN never reached a healthy state"; exit 1; }
+      # The offscreen smoke never loads Qt's xcb platform plugin, which is the
+      # one a Linux desktop uses and the one that failed the AppImage catalog
+      # test (missing libxcb-cursor0 / libxkbcommon-x11 on a stock Ubuntu
+      # 22.04). Launch once more under a virtual X server with the loader's
+      # trace on: the app must stay up, and the xcb helper libraries it binds
+      # must be the copies tools/bundle_xcb_libs.sh put in the tree, not the
+      # build host's (which has them all installed, so a plain launch would
+      # pass even when the copies are unused).
+      - name: Smoke-launch under X11 with the bundled xcb libraries
+        if: ${{ runner.os == 'Linux' && (github.event_name != 'workflow_dispatch' || github.event.inputs.only == '' || contains(github.event.inputs.only, matrix.OS_ARCH)) && !endsWith(matrix.OS_ARCH, '-arm64') }}
+        env:
+          QT_QPA_PLATFORM: xcb
+          QT_OPENGL: software
+          LD_DEBUG: libs
+          LD_DEBUG_OUTPUT: /tmp/waves-ld
+        run: |
+          set -u
+          BIN="dist/Waves/Waves"
+          xvfb-run -a "$BIN" > /tmp/waves-xcb.log 2>&1 &
+          APP_PID=$!
+          for _ in $(seq 1 15); do
+            sleep 1
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo "::error::xcb smoke-launch: $BIN exited early"; tail -n 40 /tmp/waves-xcb.log; exit 1
+            fi
+          done
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
+          if grep -q "Could not load the Qt platform plugin" /tmp/waves-xcb.log; then
+            echo "::error::xcb smoke-launch: the xcb platform plugin did not load"; tail -n 40 /tmp/waves-xcb.log; exit 1
+          fi
+          TREE="$(cd dist/Waves && pwd -P)"
+          # The loader prints the copy through the plugin's own rpath
+          # (<tree>/PySide6/qt-plugins/platforms/../../../lib...), so match
+          # the tree prefix and the file name, not the direct path.
+          for lib in libxcb-cursor.so.0 libxkbcommon-x11.so.0; do
+            if ! grep -h "calling init: $TREE/.*/$lib\$" /tmp/waves-ld.* >/dev/null 2>&1; then
+              echo "::error::xcb smoke-launch: $lib was not loaded from the bundle"; grep -h "$lib" /tmp/waves-ld.* | head -n 5; exit 1
+            fi
+          done
+          echo "xcb smoke-launch: up for 15s, libxcb-cursor and libxkbcommon-x11 loaded from the bundle."
       # The smoke-launch above runs on the build host itself, so it can never
       # catch a bundle that demands a newer macOS than a user's machine has.
       # This step checks the version floor statically instead: every file in
