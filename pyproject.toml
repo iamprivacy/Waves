@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.33"
+version = "0.1.34"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -257,6 +257,7 @@ ignore = [
 "tests/test_progress_jump_ramp.py" = ["S603", "C901"]
 "tests/test_progress_pad_cells.py" = ["S603", "C901"]
 "tests/test_search_artists_show_all_empty.py" = ["S603", "C901"]
+"tests/test_explicit_track_mark.py" = ["S603", "C901"]
 # Drives the real release.sh (bash) and git against throwaway sandbox repos;
 # both are resolved from PATH on purpose (S603/S607, fixed argv).
 "tests/test_release_star_history.py" = ["S603", "S607"]
