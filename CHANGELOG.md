@@ -22,6 +22,17 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.1.34 (2026-10-07)
+
+### ✨ Added
+
+- 🅴 Explicit songs now wear an E beside their title in every track list, album and playlist expands included, so an explicit version and its clean twin are easy to tell apart ([issue #51](https://github.com/iamprivacy/Waves/issues/51)).
+
+### 🐛 Fixed
+
+- 🎚️ The HIGH quality badge now wears a cyan rim like the HI-RES and LOSSLESS badges wear theirs, instead of a faint grey one that only lit up under the pointer.
+- 🐧 The Linux app starts on desktops that lack Qt's X11 helper libraries, such as a fresh Ubuntu 22.04; it no longer quits with "could not load the Qt platform plugin xcb".
+
 ## 🗂️ v0.1.33 (2026-10-02)
 
 ### ✨ Added
