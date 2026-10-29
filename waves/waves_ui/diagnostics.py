@@ -712,7 +712,7 @@ def install(log_dir: str) -> Path | None:
 
 
 def set_verbose(on: bool) -> None:
-    """Flip verbose diagnostics at runtime (the Advanced Settings toggle).
+    """Flip verbose diagnostics at runtime (the Settings > Diagnostics toggle).
 
     Verbose raises the disk level to DEBUG and runs the freeze watchdog and
     perf sampler; off returns to WARNING-plus-breadcrumb-dumps. Must be called

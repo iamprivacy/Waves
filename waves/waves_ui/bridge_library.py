@@ -166,7 +166,7 @@ def _log_scan_failure(lib) -> None:
 # a runaway page must never turn into unbounded state or unbounded disk asks.
 _LIBRARY_PROBE_SPELLINGS = 3
 _LIBRARY_PROBE_QUEUE_MAX = 4000
-# Where an artist name sits in each kind of catalogue row (see
+# Where an artist name sits in each kind of catalog row (see
 # LibraryMixin._library_probe_page). Playlists and mixes are absent on
 # purpose: their titles are not artists and not folder names.
 _PAGE_ARTIST_FIELDS = (
@@ -327,6 +327,11 @@ class SqlPresenceIndex:
         self._memo: dict = {}
         self._nonempty: bool | None = None
 
+    @property
+    def cache(self):
+        """The scan cache (LibraryIndex) this index answers from."""
+        return self._lib
+
     def __bool__(self) -> bool:
         if self._nonempty is None:
             try:
@@ -390,11 +395,11 @@ class SqlArtistRollup:
         if artist_key in self._memo:
             hit = self._memo[artist_key]
             return hit if hit else default
-        # The Various-Artists test belongs on the NORMALISED key, which is what
+        # The Various-Artists test belongs on the NORMALIZED key, which is what
         # the whole-library pass this replaced did (matching.build_artist_rollup)
         # and what the raw-tag refusal in _album_keys cannot stand in for: that
         # one runs before norm_artist, so a tag reading "The Various" or
-        # "V.A.; Some DJ" walks past it and only normalises into a compilation
+        # "V.A.; Some DJ" walks past it and only normalizes into a compilation
         # afterwards. Both nets were deliberate. Without this one a compilation
         # credit earns a real artist's badge and inflates their tally.
         try:
@@ -598,6 +603,11 @@ class LibraryMixin:
         if gc.get_freeze_count():
             gc.collect()
         gc.freeze()
+        # A new scan is the library lookup's cue (a no-op unless it is on).
+        kick = getattr(self, "_mb_lookup_kick", None)
+        if kick is not None:
+            with contextlib.suppress(Exception):
+                kick()
         return True
 
     def _build_presence_indexes(self, lib) -> tuple:
@@ -1503,8 +1513,9 @@ class LibraryMixin:
     # TIDAL page is missing. The arbiter (waves.mb_arbiter) may only ever
     # UPGRADE an unproven verdict to proven; it never creates presence, never
     # downgrades, and the engine never sees it (the bulk gate calls the
-    # matcher directly, not this overlay). Lookups run on a worker behind a
-    # 1 req/s gate with definite-only caching; the badge shows the unproven
+    # matcher directly, not this overlay). Lookups run on a worker behind the
+    # shared 1 req/s pacer (ahead of the Releases check's background reads)
+    # with definite-only caching; the badge shows the unproven
     # verdict immediately and re-resolves via libraryPresenceChanged when an
     # answer lands. OFF by default: it sends artist and album-title search
     # terms to musicbrainz.org.
@@ -1598,15 +1609,107 @@ class LibraryMixin:
         self.threadpool.start(Worker(work))
 
     def _mb_arbiter_instance(self):
-        """The lazily-built arbiter, its response cache beside the settings
-        file (service data only: MusicBrainz URLs and bodies, no local paths)."""
+        """The lazily-built arbiter over the process's one MusicBrainz
+        service (shared with the Releases check: one pacer, one file of
+        service data, see backend._mb_service_instance)."""
         inst = getattr(self, "_mb_arbiter", None)
         if inst is None:
             from waves.mb_arbiter import MBArbiter
 
-            path = os.path.join(os.path.dirname(self.settings.file_path), "mbarbiter.sqlite3")
-            inst = self._mb_arbiter = MBArbiter(path)
+            inst = self._mb_arbiter = MBArbiter(service=self._mb_service_instance())
         return inst
+
+    # ---- MusicBrainz library lookup (library_mb_lookup, default off) ---------
+    # An opt-in pass that settles each library artist on a MusicBrainz artist
+    # and keeps what MusicBrainz knows of them (waves.mb_library): their
+    # aliases, genres, tags and links, and every album, EP and single with
+    # its genres and tags, in the shared MusicBrainz file. One background
+    # thread, at the shared pacer's one request a second behind any page's
+    # question; started by a published scan or the setting turning on,
+    # stopped by the setting going off, a reset or quitting (the generation
+    # moves). OFF by default: it sends the library's artist names to
+    # musicbrainz.org. The files' own MusicBrainz ids (read locally) and the
+    # Releases check's proofs settle an artist with no search at all.
+
+    def _mb_lookup_on(self) -> bool:
+        return self._waves_pref_bool("library_enabled") and self._waves_pref_bool("library_mb_lookup")
+
+    def _mb_lookup_kick(self) -> None:
+        """(any thread) Start a pass when the setting is on, a scan is
+        published and no pass is running."""
+        if not self._mb_lookup_on():
+            return
+        cache = getattr(getattr(self, "_library_index", None), "cache", None)
+        if cache is None or not hasattr(cache, "distinct_artists"):
+            return
+        lock = self.__dict__.setdefault("_mb_lookup_lock", threading.Lock())
+        with lock:
+            gen = int(getattr(self, "_mb_lookup_gen", 0))
+            running = getattr(self, "_mb_lookup_thread", None)
+            # A pass still running for this generation carries on; one left
+            # from before a stop (the setting off and on again) ends at its
+            # next request, so a new pass starts now rather than never.
+            if running is not None and running.is_alive() and getattr(self, "_mb_lookup_thread_gen", -1) == gen:
+                return
+            from waves import musicbrainz
+
+            client = musicbrainz.MusicBrainzClient(
+                service=self._mb_service_instance(),
+                alive=lambda: gen == getattr(self, "_mb_lookup_gen", 0) and self._mb_lookup_on(),
+            )
+            self._mb_lookup_gen = gen
+            self._mb_lookup_thread_gen = gen
+            thread = threading.Thread(
+                target=self._mb_lookup_run, args=(client, cache, gen), name="waves-mb-lookup", daemon=True
+            )
+            self._mb_lookup_thread = thread
+            thread.start()
+
+    def _mb_lookup_stop(self) -> None:
+        """(GUI thread) End any pass at its next request: the setting went
+        off, the library went off, a reset or a shutdown."""
+        self._mb_lookup_gen = int(getattr(self, "_mb_lookup_gen", 0)) + 1
+
+    def _mb_lookup_run(self, client, cache, gen: int) -> None:
+        """(lookup thread) One pass over the library's artists."""
+        from waves import mb_library
+
+        def alive() -> bool:
+            return gen == getattr(self, "_mb_lookup_gen", 0) and self._mb_lookup_on()
+
+        try:
+            artists = list(cache.distinct_artists())
+            albums = cache.artist_albums([a["key"] for a in artists])
+            tag_ids = cache.artist_tag_ids() if hasattr(cache, "artist_tag_ids") else {}
+            out = mb_library.run_pass(client, artists, lambda k: albums.get(k, []), tag_ids, alive)
+            logger.info(
+                "MusicBrainz library lookup: %d artist(s) looked at, %d settled, %d without a sure match%s",
+                out["looked"],
+                out["known"],
+                out["unsure"],
+                " (stopped, resumes later)" if out["stopped"] else "",
+            )
+        except Exception:
+            logger.debug("MusicBrainz library lookup failed", exc_info=True)
+
+    def _mb_tag_ids(self) -> dict:
+        """(any thread) The MusicBrainz artist id each library artist's files
+        agree on, by artist key, read from the scan cache (no file opens),
+        remembered per published scan."""
+        cache = getattr(getattr(self, "_library_index", None), "cache", None)
+        if cache is None or not hasattr(cache, "artist_tag_ids"):
+            return {}
+        stamp = int(getattr(self, "_library_stamp", 0))
+        memo = getattr(self, "_mb_tag_memo", None)
+        if memo is not None and memo[0] == stamp and memo[1] is cache:
+            return memo[2]
+        try:
+            ids = cache.artist_tag_ids()
+        except Exception:
+            logger.debug("library: the files' MusicBrainz ids could not be read", exc_info=True)
+            ids = {}
+        self._mb_tag_memo = (stamp, cache, ids)
+        return ids
 
     # ---- Bulk-download claim gate (library_bulk_skip) ------------------------
     # Bulk actions (a discography queue, a collection job's per-track fan-out)
@@ -2012,7 +2115,7 @@ class LibraryMixin:
     def _library_probe_drain(self) -> None:
         """(worker thread) Ask about everything queued, in batches, until the
         queue is empty. Draining on ONE worker is deliberate: probe_folders is
-        serialised on the cache anyway, so more workers would only produce more
+        serialized on the cache anyway, so more workers would only produce more
         None answers, and a single drainer also lets a burst of misses coalesce
         into one question instead of one per badge."""
         try:
@@ -2116,7 +2219,7 @@ class LibraryMixin:
         self._library_probe_enqueue(names)
 
     def _library_probe_page(self, payload) -> None:
-        """(any thread) Ask about every artist a page of catalogue results
+        """(any thread) Ask about every artist a page of catalog results
         names, as ONE batch.
 
         This is what makes a search answer the same as an artist page. A badge

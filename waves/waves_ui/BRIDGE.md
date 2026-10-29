@@ -93,6 +93,9 @@ included. It shares `_start_artist_build` with the click.
 | `queueTracksLoaded(qid, tracks)`                                             | Full per-track snapshot for an expanded queue row                                                                                          |
 | `queueTrackState(qid, row)`                                                  | One track's lifecycle change inside a job                                                                                                  |
 | `queueTrackPct(qid, map)`                                                    | Batched live percentages for downloading tracks                                                                                            |
+| `missingTracksChanged`                                                       | A queued track became, or stopped being, failed or unavailable (property `missingTracks`, the count MISSING REPORT reads)                  |
+| `missingTracksExported(qid, tracks, path)`                                   | A missing-tracks export finished (`qid` -1 = the whole queue); `path` `""` = nothing written (none to export, or the write failed)         |
+| `queueLedgerRowsChanged`                                                     | The `queue_ledger_rows` pref changed (`setWavesPref`): how many tracks an open queue row shows before it scrolls; Main.qml re-reads it     |
 | `pausedChanged`                                                              | Global pause/resume toggled                                                                                                                |
 | `folderRemaining(folderId, remaining, total)`                                | A playlist-folder job's member count ticks as members complete or fail; drives its badge                                                   |
 | `scanningChanged`                                                            | A discography, videos, editions or playlist scan starts or ends (property `scanning`); keeps STOP visible                                  |
@@ -217,7 +220,7 @@ non-track kinds resolve to a concrete song, reported via `previewMeta`'s
 `trackId`, which is how every surface showing that song displays live
 state instead of offering a restart (see `pvActive` in Main.qml).
 
-## FLAC signature check (Settings, Advanced)
+## FLAC signature check (Settings, FFmpeg & FLAC)
 
 The family lives in `bridge_flac.py` (`FlacCheckMixin`, mixed into
 `WavesBridge`); `waves/flac_verify.py` does the work. It walks the folders
@@ -295,7 +298,7 @@ thread: `_flacCheckEvent` (a FLAC check worker's progress and outcome),
 `_tracksQueued` (same batch marshalling for individual tracks),
 `_mediaRefetched` (re-dispatch a download whose object was evicted from the
 cache), `_queueTracksFetched` (merge a track snapshot without racing live
-events).
+events), `_missingTracksWritten` (reveal a written missing-tracks report).
 
 ## Adding a new signal
 

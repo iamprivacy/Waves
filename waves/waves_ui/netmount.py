@@ -113,7 +113,9 @@ def mount_origin(mount_point: str) -> tuple[str, str]:
 def origin_url(fstype: str, from_name: str) -> str:
     """Turn a statfs from-name into a mountable URL, or "" when it is not a
     network origin. "//user@nas/Media" (smbfs) becomes "smb://user@nas/Media",
-    with each path segment percent-encoded (share names carry spaces)."""
+    with each path segment percent-encoded (share names carry spaces).
+    macOS already stores smbfs from-names encoded ("//nas/My%20Music"), so
+    each segment is decoded first and never encoded twice."""
     if fstype not in NETWORK_FSTYPES or not from_name.startswith("//"):
         return ""
     scheme = {"smbfs": "smb", "cifs": "smb", "afpfs": "afp", "webdav": "http", "nfs": "nfs"}[fstype]
@@ -121,7 +123,7 @@ def origin_url(fstype: str, from_name: str) -> str:
     host, _, path = rest.partition("/")
     if not host:
         return ""
-    quoted = "/".join(urllib.parse.quote(seg) for seg in path.split("/"))
+    quoted = "/".join(urllib.parse.quote(urllib.parse.unquote(seg)) for seg in path.split("/"))
     return f"{scheme}://{host}/{quoted}" if quoted else f"{scheme}://{host}"
 
 

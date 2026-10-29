@@ -413,7 +413,7 @@ def _icon_usable(icon: QIcon) -> bool:
 
     The taskbar asks for ~32-48px and Qt never *upscales* a QIcon, so a 16x16-only
     icon (or the non-null-but-empty icon you get from ``addFile`` on a missing
-    path) yields a 16px pixmap that Windows rejects in favour of a generic glyph.
+    path) yields a 16px pixmap that Windows rejects in favor of a generic glyph.
     Requiring a >=32px frame refuses those degenerate icons so we can leave the
     EXE-embedded resource icon standing instead of blanking the taskbar with a
     bad ``setWindowIcon``. (A truncated single-frame ``icon.ico`` shipped once and
@@ -743,6 +743,23 @@ def _start_boot_threads() -> None:
     threading.Thread(target=_warm_tls, name="waves-tls-warm", daemon=True).start()
 
 
+def _failed_qml_load(bridge, owns_app: bool) -> int:
+    """app.exec never runs, so aboutToQuit never fires: drain the pools and
+    abort anything the bridge started (the token login, the library sweep)
+    here, and say so where a crash report can see it."""
+    logging.getLogger("waves").error("Failed to load the Waves QML UI")
+    print("Failed to load Waves QML UI", file=sys.stderr)
+    bridge.shutdown()
+    diagnostics.flush_disk_log()
+    if owns_app:
+        # The same reason the normal exit skips the C++ teardown: a worker
+        # parked in a network read hangs QThreadPool's destructor.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    return 1
+
+
 def waves_activate(tidal: Tidal | None = None) -> int:
     _tune_interpreter_for_gui()
     _install_crash_diagnostics()
@@ -825,14 +842,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     engine.load(QUrl.fromLocalFile(str(_QML_MAIN)))
     root_objects = engine.rootObjects()
     if not root_objects:
-        # app.exec never runs, so aboutToQuit never fires: drain the pools and
-        # abort anything the bridge started (the token login, the library
-        # sweep) here, and say so where a crash report can see it.
-        logging.getLogger("waves").error("Failed to load the Waves QML UI")
-        print("Failed to load Waves QML UI", file=sys.stderr)
-        bridge.shutdown()
-        diagnostics.flush_disk_log()
-        return 1
+        return _failed_qml_load(bridge, owns_app)
 
     # The macOS back-swipe filter: installed on the window's CONTENT ITEM,
     # not the window and not the application. A Python event filter costs a

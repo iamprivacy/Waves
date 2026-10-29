@@ -1,4 +1,4 @@
-"""The FLAC signature check (Settings, Advanced section).
+"""The FLAC signature check (Settings, FFmpeg & FLAC section).
 
 A FLAC file whose header carries no audio signature fails ``flac -t`` and is
 refused by strict players even though its audio is intact (see
@@ -22,7 +22,7 @@ folders is skipped by the walk. A fix acts only on the rows of the last scan,
 and only while the selection still names the folders that scan walked.
 
 A fix that stops before it finishes (the app quit or crashed, or the user
-cancelled) is remembered in the ``flac_check_resume`` pref, the scope key of
+canceled) is remembered in the ``flac_check_resume`` pref, the scope key of
 the folders it was writing in. RESUME on the card (through Main.qml's
 confirmation, like FIX) selects those folders again, scans them, and fixes
 what the scan finds: a file the earlier fix signed reads as signed, so the
@@ -57,7 +57,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import threading
@@ -66,6 +65,7 @@ import time
 from PySide6.QtCore import Signal, Slot
 
 from waves import flac_verify
+from waves.waves_ui.ffmpeg_manager import working_system_ffmpeg
 from waves.worker import Worker
 
 from . import diagnostics
@@ -85,7 +85,7 @@ REPORTS_DIR = "reports"
 
 def _idle_state() -> dict:
     return {
-        "phase": "idle",  # idle | scanning | fixing | done | cancelled | failed
+        "phase": "idle",  # idle | scanning | fixing | done | canceled | failed
         "running": False,
         "mode": "header",  # header | deep (what the last scan did)
         "last": "",  # scan | fix: which run the counts describe
@@ -300,7 +300,9 @@ class FlacCheckMixin:
         if resolve is not None:
             with contextlib.suppress(Exception):
                 resolve()
-        path = (getattr(self.settings.data, "path_binary_ffmpeg", "") or "").strip() or shutil.which("ffmpeg") or ""
+        path = (getattr(self.settings.data, "path_binary_ffmpeg", "") or "").strip() or working_system_ffmpeg(
+            retry_slow=True
+        )
         return path if path and os.path.isfile(path) else ""
 
     def _flac_check_report_dir(self) -> str:
@@ -704,7 +706,7 @@ class FlacCheckMixin:
     def _flac_check_settled(self, final: bool) -> None:
         """(GUI thread) A run ended. A fix that finished, or a scan of the
         same folders that finds nothing left to fix, drops the resume marker;
-        a cancelled or failed run keeps it, and so does a scan that could not
+        a canceled or failed run keeps it, and so does a scan that could not
         read a folder the unfinished fix could have written in (what it left
         there was never looked at) or a fix that inherited the marker over
         such a scan. A RESUME's scan goes on to the fix when it found files

@@ -3,7 +3,7 @@
 One long-lived child, spawned on the first job and kept for the session,
 runs the scan and the by-name probes so they never hold the app's
 interpreter. Jobs are sequential: the bridge's scan machinery already
-serialises them (one scan at a time, one probe drainer). Cancel is a kill:
+serializes them (one scan at a time, one probe drainer). Cancel is a kill:
 the child keeps no state between jobs, and the cache is a WAL sqlite file
 that a killed writer leaves consistent.
 

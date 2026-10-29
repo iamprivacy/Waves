@@ -52,6 +52,7 @@ import os
 import subprocess
 import sys
 import unicodedata
+import urllib.parse
 from collections.abc import Callable, Iterable
 
 from . import diagnostics, netmount
@@ -127,6 +128,29 @@ def share_url(from_name: str) -> str:
     return f"//{host_part}/{share}"
 
 
+def share_subpath(from_name: str) -> str:
+    """The folders below the share a from-name names, decoded ("" for a mount
+    of the share itself). A submount ("//nas/Media/Music") mounts at
+    "Music", and :func:`share_url` drops that part, so a fresh mount of the
+    share needs it put back in front of the subpath."""
+    if not from_name.startswith("//"):
+        return ""
+    _host, _, path = from_name[2:].partition("/")
+    segs = [s for s in path.strip("/").split("/") if s][1:]
+    return os.sep.join(urllib.parse.unquote(s) for s in segs)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this id is running (one we may not signal still is)."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def subpath_within(path: str, mount_point: str) -> str | None:
     """``path`` expressed relative to its mount point ("" when it IS the mount
     point), or None when it does not sit under that mount point at all."""
@@ -157,6 +181,9 @@ def plan_for(path: str) -> tuple[str, str]:
     sub = subpath_within(path, point)
     if not url or sub is None:
         return ("", "")
+    above = share_subpath(from_name)
+    if above:
+        sub = os.path.join(above, sub) if sub else above
     # The URL names a host and often a username, and it is about to be handed
     # to a subprocess whose argv an OSError or a timeout would carry into the
     # exception text. Registered here, at the one place it is derived, so a
@@ -278,7 +305,7 @@ def _accept(point: str, sub: str, known: Iterable[str]) -> list[str] | None:
 def _make_point(base: str) -> str:
     """An empty directory to mount on, or "" when one cannot be made. The name
     is the process id, so two Waves instances scanning at once never fight over
-    one mount point, and a leftover is recognisably ours to sweep."""
+    one mount point, and a leftover is recognizably ours to sweep."""
     try:
         os.makedirs(base, exist_ok=True)
         point = os.path.join(base, f"pid-{os.getpid()}")
@@ -319,6 +346,10 @@ def sweep_stale(config_dir: str, *, unmount: Callable[[str], bool] | None = None
     for name in leftovers:
         point = os.path.join(base, name)
         if not os.path.isdir(point):
+            continue
+        # Another running Waves owns its own pid-<n> point: leave it mounted.
+        pid = name[4:] if name.startswith("pid-") else ""
+        if pid.isdigit() and int(pid) != os.getpid() and _pid_alive(int(pid)):
             continue
         unmount(point)
         _drop_point(point)

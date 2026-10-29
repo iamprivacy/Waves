@@ -32,11 +32,11 @@ Lossless.
   never reads your clipboard on its own. Duplicate editions of a release are
   collapsed to a single best-quality row (capped at your configured maximum
   quality).
-- **Rich results**, colour-coded quality badges (HI-RES / LOSSLESS / HIGH), a
+- **Rich results**, color-coded quality badges (HI-RES / LOSSLESS / HIGH), a
   popularity meter, and per-artist links so every credited artist is clickable.
 - **Artist pages**, bio, full discography, EPs/singles, and top tracks, with a
   one-click "download discography".
-- **My Tidal**, your favourites (albums, tracks, artists, videos, playlists,
+- **My Tidal**, your favorites (albums, tracks, artists, videos, playlists,
   mixes) with virtualised infinite scroll, so large libraries stay smooth.
 - **Download queue**, grouped into **Completed**, **Failed**, **Stopped**,
   **Downloading**, and **Queued** sections. Active rows show live per-track progress on an LED
