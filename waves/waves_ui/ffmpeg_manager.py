@@ -363,7 +363,7 @@ class FfmpegManager:
 
         Atomic: a fresh binary is staged next to the target, checksum-verified,
         (on macOS) signature-verified, and smoke-tested *before* it is swapped in
-        via :func:`os.replace`. A failed/cancelled install, including a
+        via :func:`os.replace`. A failed/canceled install, including a
         checksum-valid download that won't actually run, therefore never
         corrupts the existing working copy. ``progress_cb(pct)`` and
         ``log_cb(msg)`` are optional.
@@ -439,8 +439,10 @@ class FfmpegManager:
             # 5. smoke-test the STAGED binary BEFORE swapping it in, so a
             # checksum-valid but non-runnable download (wrong arch, missing
             # loader, Gatekeeper block) leaves the existing working copy
-            # untouched. Only a binary that actually runs gets promoted.
-            ver = _probe_version(str(staged))
+            # untouched. Only a binary that actually runs gets promoted. This
+            # runs on a worker, so the probe may outwait a first-run virus
+            # scan instead of failing a good install at the short timeout.
+            ver = _probe_version(str(staged), timeout=_SMOKE_TIMEOUT)
             if not ver:
                 raise RuntimeError("FFmpeg downloaded but `ffmpeg -version` failed, keeping the existing binary")
 
@@ -624,9 +626,11 @@ class FfmpegManager:
             # Not fatal here, the smoke test still gates promotion, but record
             # that the signature could not be verified so we make no false trust
             # claim. We deliberately do NOT re-sign to make it "work".
+            # codesign's stderr names the staged path (under the home folder),
+            # so only its exit status is logged.
             logger.warning(
-                "ffmpeg-manager: could not verify code signature of downloaded binary (%s)",
-                (verify.stderr or "").strip() or "codesign returned non-zero",
+                "ffmpeg-manager: could not verify code signature of downloaded binary (codesign exit %d)",
+                verify.returncode,
             )
             return
         # Gatekeeper assessment is best-effort: `spctl` may be unavailable or
@@ -641,10 +645,28 @@ def _safe_target() -> tuple[str, str]:
         return "", ""
 
 
-def _which_ffmpeg(os_key: str) -> str:
-    import shutil
+def _which_ffmpeg(os_key: str, *, retry_slow: bool = False) -> str:
+    from waves.helper.system_ffmpeg import find_system_ffmpeg
 
-    return shutil.which(_exe_name(os_key)) or ""
+    # Only one that answers: a broken install left in a package manager's
+    # folder must not read as installed (with no version). One that was only
+    # slow (a snap cold start, a first-run virus scan) stays a candidate,
+    # but as a fallback in a second pass: a copy that may be hung must not
+    # shadow a working one further down the list.
+    name = _exe_name(os_key)
+    hit = find_system_ffmpeg(name, works=lambda p: bool(_probe_version(p)))
+    return hit or find_system_ffmpeg(name, works=_probe_retry_slow if retry_slow else _probe_was_slow)
+
+
+def working_system_ffmpeg(*, retry_slow: bool = False) -> str:
+    """The user's own FFmpeg that a download, a preview or the FLAC check runs:
+    the one status() names, so Settings never shows one system binary while
+    a job runs another (a broken first candidate is passed over by both; one
+    too slow to answer the probe is kept as a fallback). ``retry_slow`` lets
+    a worker-thread caller give a slow binary a fresh probe once its pause is
+    over, so a cold start that has warmed up gets its version back; the GUI
+    thread (status()) never re-forks on one."""
+    return _which_ffmpeg(_safe_target()[0], retry_slow=retry_slow)
 
 
 # Probing a binary means fork+exec+wait on it, which can block for the whole
@@ -654,10 +676,48 @@ def _which_ffmpeg(os_key: str) -> str:
 # status() calls (Settings open, every ffmpegStatusChanged) reuse the result and
 # never re-fork. A different binary at the same path (size/mtime change) evicts.
 _PROBE_TIMEOUT = 4
+# The install's smoke test runs on a worker and must outlast a first-run
+# virus scan of the staged binary, so it gets a far longer leash.
+_SMOKE_TIMEOUT = 60
 _probe_cache: dict[str, tuple[float, int, str]] = {}
+# A binary that did not answer within the timeout (a cold start from snap, a
+# virus scan of a large ffmpeg.exe on its first run) is not known to be
+# broken: it stays a candidate (a fallback one, see _which_ffmpeg), and a
+# worker may probe it again once its pause is over. (mtime, size, monotonic
+# deadline for the next probe.)
+_PROBE_SLOW_RETRY_S = 60.0
+_probe_slow: dict[str, tuple[float, int, float]] = {}
 
 
-def _probe_version(path: str) -> str:
+def _probe_was_slow(path: str) -> bool:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    rec = _probe_slow.get(path)
+    return rec is not None and rec[:2] == (st.st_mtime, st.st_size)
+
+
+def _probe_retry_slow(path: str) -> bool:
+    """(worker thread) A slow binary, probed again once its pause is over: a
+    cold start that warmed up answers (the cached empty version is replaced,
+    so status() shows the real one from then on), while one that keeps
+    hanging earns another pause and stays a last resort."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    rec = _probe_slow.get(path)
+    if rec is None or rec[:2] != (st.st_mtime, st.st_size):
+        return False
+    if time.monotonic() < rec[2]:
+        return True
+    _probe_cache.pop(path, None)  # the timeout's cached "" would answer instead
+    _probe_slow.pop(path, None)  # a fresh timeout below re-adds it
+    return bool(_probe_version(path)) or _probe_was_slow(path)
+
+
+def _probe_version(path: str, timeout: float = _PROBE_TIMEOUT) -> str:
     """Return the ``ffmpeg version <x>`` token, or "" if the binary won't run.
 
     Memoized per (path, mtime, size) so a repeated ``status()`` on the GUI
@@ -675,8 +735,12 @@ def _probe_version(path: str) -> str:
         return cached[2]
     try:
         out = subprocess.run(
-            [path, "-version"], capture_output=True, text=True, timeout=_PROBE_TIMEOUT, creationflags=proc.NO_WINDOW
+            [path, "-version"], capture_output=True, text=True, timeout=timeout, creationflags=proc.NO_WINDOW
         )
+    except subprocess.TimeoutExpired:
+        _probe_slow[path] = (key[0], key[1], time.monotonic() + _PROBE_SLOW_RETRY_S)
+        _probe_cache[path] = (key[0], key[1], "")
+        return ""
     except Exception:
         return ""
     if out.returncode != 0:
