@@ -20,6 +20,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from concurrent import futures
 from threading import Event, Lock
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import certifi
@@ -95,13 +96,17 @@ from waves.helper.tidal import (
 )
 from waves.http_pool import IdleDropAdapter
 from waves.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
-from waves.metadata import Metadata, MetadataUnreadable, read_item_id
+from waves.metadata import Metadata, MetadataUnreadable, carry_over_tags, join_genres, read_item_id
 from waves.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from waves.model.gui_data import ProgressBars
 from waves.poolgauge import PoolGauge
 from waves.progress import Progress, TaskID
 from waves.waves_ui.diagnostics import content as log_content
+from waves.waves_ui.ffmpeg_manager import working_system_ffmpeg
 from waves.waves_ui.manifest import overgenerated_tail_urls
+
+if TYPE_CHECKING:
+    from waves.genres import GenreLookup
 
 # Characters _stage_and_swap adds around the destination name: a leading dot,
 # a dot-separated uuid4 (36) and the ".tmp" suffix.
@@ -130,6 +135,24 @@ logger = logging.getLogger("waves.download")
 # defaults; limit() records each job's real cap when its pool is built.
 SEGMENT_GAUGE = PoolGauge(10)
 COLLECTION_GAUGE = PoolGauge(3)
+
+# Every stream byte the engine has received this process, for the header's
+# speed readout (the bridge samples bytes_received() twice a second). Segment
+# workers add from many threads, so the count is guarded.
+_bytes_lock = Lock()
+_bytes_in = 0
+
+
+def bytes_received() -> int:
+    """Stream bytes received so far this process, across every download."""
+    return _bytes_in
+
+
+def _count_bytes(n: int) -> None:
+    global _bytes_in
+    with _bytes_lock:
+        _bytes_in += n
+
 
 # TIDAL's subStatus family for "your session, not the content": 11001 user not
 # authorised, 11002 invalid token, 11003 expired token. A 401 carrying one of
@@ -506,6 +529,11 @@ class Download:
 
     _FILE_OPERATION_RETRIES: int = 5
     _FILE_OPERATION_RETRY_DELAY_SEC: float = 0.5
+    # A segment whose body read broke off (the CDN dropped the connection
+    # mid-stream) is fetched this many times in all, with these waits between
+    # attempts; see _download_segment.
+    _SEGMENT_ATTEMPTS: int = 3
+    _SEGMENT_RETRY_DELAYS_SEC: tuple[float, ...] = (0.5, 1.5)
 
     # The batch pause's shared bookkeeping, defaulted on the CLASS so a Download
     # reached without __init__ (a stand-in) reads "no pause in force" rather
@@ -513,6 +541,17 @@ class Download:
     # of them promise is written out at _rate_limit_pause.
     _pace_holds: int = 0
     _pace_until: float = 0.0
+
+    @property
+    def path_base(self) -> str:
+        return getattr(self, "_path_base", "")
+
+    @path_base.setter
+    def path_base(self, value) -> None:
+        # Resolved once here: a ".." typed into the base reached the per-part
+        # sanitizer, which rewrote it to "_" and wrote outside the chosen folder.
+        text = os.fspath(value) if value else ""
+        self._path_base = os.path.normpath(os.path.expanduser(text)) if text else ""
 
     # Process-wide keep-alive HTTP session (see the comment in __init__): all
     # Download instances share one warm connection pool so an album start does
@@ -557,6 +596,9 @@ class Download:
     tidal: "Tidal"
     session: Session
     skip_existing: bool = False
+    # The job's genre lookup (waves/genres.py), set by the bridge when the
+    # Genre setting is on; None writes no Genre tag.
+    genre_lookup: "GenreLookup | None" = None
     fn_logger: Callable
     progress_gui: ProgressBars
     progress: Progress
@@ -729,7 +771,7 @@ class Download:
         self._segment_executor_lock: Lock = Lock()
 
         if not self.settings.data.path_binary_ffmpeg:
-            self.settings.data.path_binary_ffmpeg = shutil.which("ffmpeg")
+            self.settings.data.path_binary_ffmpeg = working_system_ffmpeg(retry_slow=True) or None
 
         # True whenever ffmpeg is genuinely absent, decoupled from the two gated
         # flags: the MP4/M4A duration-repair remux also needs ffmpeg, so callers
@@ -905,7 +947,9 @@ class Download:
         dl_segment_results: list[DownloadSegmentResult] = []
 
         # One pass: download each URL exactly once. Segment-level retries are
-        # already handled inside _download_segment (requests Retry(total=5)), so
+        # already handled inside _download_segment (requests Retry(total=5) for
+        # the connect and headers, its own attempt loop for a body that breaks
+        # off), so
         # the old `while not self.progress.tasks[p_task].finished` loop that
         # re-submitted every URL added no real retry, only risk: a segment that
         # returns an empty but successful body (HTTP 200, 0 bytes) advances the
@@ -958,7 +1002,7 @@ class Download:
                     # return failed by design, that's a cancellation, not
                     # corruption, so don't scream "corrupt" once per segment.
                     if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
-                        self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
+                        self.fn_logger.error("A segment of this track could not be fetched; the track was not written.")
 
             # If app is terminated (CTRL+C) or item stopped
             if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
@@ -1174,6 +1218,86 @@ class Download:
 
         return self.event_abort.is_set() or bool(event_stop and event_stop.is_set())
 
+    @staticmethod
+    def _segment_fetch_is_transient(error: Exception) -> bool:
+        """Whether a failed segment fetch is worth another attempt.
+
+        A connection dropped or timed out mid-body, or a server-side status, can
+        pass on the next try. A 4xx is the CDN's answer about the link itself
+        (expired, forbidden, gone), and asking again changes nothing.
+        """
+        if isinstance(error, HTTPError):
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            return not (status is not None and 400 <= status < 500)
+        return isinstance(error, requests.RequestException)
+
+    def _retry_wait(self, seconds: float, event_stop: Event | None = None) -> bool:
+        """Wait between two attempts at a segment, waking at once on abort or stop.
+
+        Returns:
+            bool: True when the caller should give up (abort or stop fired).
+        """
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                return True
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        return self.event_abort.is_set() or bool(event_stop and event_stop.is_set())
+
+    def _fetch_segment_once(
+        self,
+        url: str,
+        path_segment: pathlib.Path,
+        block_size: int | None,
+        p_task: TaskID,
+        event_stop: Event | None,
+    ) -> bool:
+        """One attempt at a segment: GET it and stream the body into path_segment.
+
+        Returns:
+            bool: True when the whole body landed, False when a stop or abort cut
+            it short. A failed fetch raises (the caller decides on another try).
+        """
+        # Reuse the pooled, keep-alive session built once in __init__. Retry/backoff
+        # is configured on that shared adapter, so segments reuse connections instead
+        # of paying a TLS handshake each (the old per-segment Session was the cause of
+        # the all-core CPU spike on download).
+        #
+        # Create the request object with stream=True, so the content won't be loaded into memory at once.
+        # Context-manage the response: the shared pool blocks when full
+        # (pool_block=True), so a connection left to garbage collection on
+        # an early return would starve waiting segment workers.
+        # Steps this attempt added to the bar. A failed attempt takes them
+        # back, since the next one rewrites the segment from byte 0: without
+        # that, a single-URL track dropped at 80 percent reached 100 a fifth
+        # of the way into the retry and its row read FINISHING while most of
+        # it was still downloading. Taken back as a delta, not by restoring
+        # a saved total, because the segments of one track share the bar and
+        # finish in parallel.
+        advanced = 0
+        try:
+            with self._http.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC) as r:
+                r.raise_for_status()
+
+                # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
+                with path_segment.open("wb") as f:
+                    for data in r.iter_content(chunk_size=block_size):
+                        # Bail out promptly on abort (Stop/Cancel or app quit)
+                        # instead of streaming the whole segment first.
+                        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+                            return False
+                        f.write(data)
+                        _count_bytes(len(data))
+                        # Advance progress bar.
+                        self.progress.advance(p_task)
+                        advanced += 1
+        except Exception:
+            if advanced:
+                self.progress.advance(p_task, -advanced)
+            raise
+
+        return True
+
     def _download_segment(
         self,
         url: str,
@@ -1216,34 +1340,36 @@ class Download:
                 result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
             )
 
-        # Reuse the pooled, keep-alive session built once in __init__. Retry/backoff
-        # is configured on that shared adapter, so segments reuse connections instead
-        # of paying a TLS handshake each (the old per-segment Session was the cause of
-        # the all-core CPU spike on download).
-        try:
-            # Create the request object with stream=True, so the content won't be loaded into memory at once.
-            # Context-manage the response: the shared pool blocks when full
-            # (pool_block=True), so a connection left to garbage collection on
-            # an early return would starve waiting segment workers.
-            with self._http.get(url, stream=True, timeout=REQUESTS_TIMEOUT_SEC) as r:
-                r.raise_for_status()
-
-                # Write the content to disk. If `chunk_size` is set to `None` the whole file will be written at once.
-                with path_segment.open("wb") as f:
-                    for data in r.iter_content(chunk_size=block_size):
-                        # Bail out promptly on abort (Stop/Cancel or app quit)
-                        # instead of streaming the whole segment first.
-                        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
-                            return DownloadSegmentResult(
-                                result=False, url=url, path_segment=path_segment, id_segment=id_segment, error=error
-                            )
-                        f.write(data)
-                        # Advance progress bar.
-                        self.progress.advance(p_task)
-
-            result = True
-        except Exception:
-            self.progress.advance(p_task)
+        # The pooled session's Retry only covers the connect and the response
+        # headers. The body is streamed (stream=True), so a connection the CDN
+        # drops while the body is being read raises in _fetch_segment_once,
+        # outside urllib3's retry, and used to fail the track on the spot: one
+        # dropped keep-alive in a twenty-track album, and the album came back
+        # "2 of 20 tracks failed" with nothing wrong but a blip, which the
+        # user's manual RETRY then fixed. The fetch is attempted a few times
+        # instead, each attempt rewriting the segment file from the start so a
+        # partial body is never appended to.
+        log_error = self.fn_logger.error
+        for attempt in range(1, self._SEGMENT_ATTEMPTS + 1):
+            try:
+                result = self._fetch_segment_once(url, path_segment, block_size, p_task, event_stop)
+                break
+            except Exception as exc:
+                # The class only, never the message: a requests error prints
+                # the CDN URL. The bar is NOT advanced for a failed fetch. It
+                # used to be, as a terminator for a retry loop that no longer
+                # exists, and that pushed a failed track to 100 percent so its
+                # row read FINISHING in the instant before it went red.
+                if isinstance(exc, HTTPError):
+                    error = exc
+                stopped = self.event_abort.is_set() or bool(event_stop and event_stop.is_set())
+                if stopped or not self._segment_fetch_is_transient(exc) or attempt == self._SEGMENT_ATTEMPTS:
+                    if not stopped:
+                        log_error(f"Segment fetch failed after {attempt} attempt(s): {type(exc).__name__}")
+                    break
+                self.fn_logger.warning(f"Segment fetch broke off ({type(exc).__name__}), fetching it again")
+                if self._retry_wait(self._SEGMENT_RETRY_DELAYS_SEC[attempt - 1], event_stop):
+                    break
 
         # To send the progress to the GUI, we need to emit the percentage.
         if not progress_to_stdout:
@@ -1389,6 +1515,11 @@ class Download:
             self.fn_logger.debug(f"Download skipped, since file exists: '{log_content(path_media_dst)}'")
 
             return True, path_media_dst
+
+        # The release's genre question leaves now, in the background, so the
+        # answer is on record by the time the tag step asks for it. After the
+        # skip check, not before: a file that is already there asks nothing.
+        self._genre_prefetch(media)
 
         # Step 3: Handle quality settings
         quality_audio_old, quality_video_old = self._adjust_quality_settings(quality_audio, quality_video)
@@ -2668,7 +2799,7 @@ class Download:
             # is Atmos but was labelled wrong (TIDAL files Atmos under LOW).
             logger.warning(
                 "Asked TIDAL for Dolby Atmos and got a %s stream at %s",
-                str(getattr(media_stream, "audio_mode", "") or "unlabelled"),
+                str(getattr(media_stream, "audio_mode", "") or "unlabeled"),
                 str(getattr(media_stream, "audio_quality", "") or "no stated tier"),
             )
 
@@ -2857,6 +2988,10 @@ class Download:
                 and tmp_path_file.suffix == AudioExtensions.FLAC
             ):
                 tmp_path_file = self._downsample_audio(tmp_path_file)
+            elif isinstance(media, Track) and self.settings.data.downsample_enabled:
+                # Downsampling works on FLAC only, which needs Extract FLAC: say
+                # so rather than landing a hi-res .m4a with no word about it.
+                self.fn_logger.info("Downsample skipped: it needs Extract FLAC, which is off.")
 
             self._note_stage(media, cum["downsample"])
 
@@ -2985,6 +3120,12 @@ class Download:
 
                     return path_media_landed is not None
 
+                # Landing ON a copy (skipping off, a quality upgrade, a
+                # Redownload): the tags the user added to that copy by hand
+                # ride over to the new one first, or the replace loses them.
+                if overwrite and isinstance(media, Track) and check_file_exists(path_media_dst, extension_ignore=False):
+                    self._carry_over_user_tags(path_media_dst, tmp_path_file)
+
                 # Move final file to the configured destination directory.
                 moved: bool = self._move_file(
                     tmp_path_file,
@@ -3017,6 +3158,23 @@ class Download:
                 # on failure the name was never used and must go back to the pool.
                 if name_reserved is not None:
                     self._release_name(name_reserved)
+
+    def _carry_over_user_tags(self, path_occupied: pathlib.Path, tmp_path_file: pathlib.Path) -> None:
+        """Keep, on the fresh copy, the tags of the file it is about to replace
+        that the fresh tagging did not write (see metadata.carry_over_tags).
+        Best-effort: a copy that cannot be read carries nothing, and never
+        fails the download over it."""
+        try:
+            carried: int = carry_over_tags(path_occupied, tmp_path_file)
+        except Exception:
+            self.fn_logger.debug("Could not carry tags over from the copy being replaced", exc_info=True)
+
+            return
+
+        if carried:
+            self.fn_logger.info(
+                f"Kept {carried} tag(s) from the copy being replaced: '{log_content(path_occupied.name)}'"
+            )
 
     def _handle_metadata_and_extras(
         self,
@@ -3879,8 +4037,10 @@ class Download:
         TIDAL serves machine-transcribed lyrics for track IDs without
         human-submitted text (recent re-recordings especially), while LRCLIB
         carries community-synced lyrics, so LRCLIB wins when the preference is
-        on. A miss or outage there falls through to TIDAL's own lyrics, so the
-        worst case is exactly the historical behaviour.
+        on. TIDAL is asked whenever LRCLIB has no timed lyrics: a miss or an
+        outage falls through to TIDAL's own lyrics, and a plain-only LRCLIB hit
+        still takes TIDAL's timed ones when it has them (LRCLIB's plain text
+        stays the untimed form), so a timed .lrc is never lost to plain text.
 
         Returns:
             tuple[str, str, str]: (lyrics, synced, unsynced); lyrics is the
@@ -3900,23 +4060,69 @@ class Download:
                 duration=track.duration or 0,
                 title_bare=track.name,
             )
-            lyrics = lyrics_synced or lyrics_unsynced
 
-        if not lyrics:
+        if not lyrics_synced:
             try:
                 lyrics_obj = track.lyrics()
 
-                if lyrics_obj.text:
+                if lyrics_obj.text and not lyrics_unsynced:
                     lyrics_unsynced = lyrics_obj.text
-                    lyrics = lyrics_unsynced
                 if lyrics_obj.subtitles:
                     lyrics_synced = lyrics_obj.subtitles
-                    lyrics = lyrics_synced
             except Exception:
-                lyrics = ""
                 self.fn_logger.debug(f"Could not retrieve lyrics for `{log_content(name_builder_item(track))}`.")
 
+        lyrics = lyrics_synced or lyrics_unsynced
+
         return lyrics, lyrics_synced, lyrics_unsynced
+
+    def _genre_facts(self, media) -> tuple[str, dict[str, str]] | None:
+        """What the genre lookup is asked with for this track's release: the
+        TIDAL album id and the barcode, artist and title that find it on
+        MusicBrainz. None when there is no lookup (the setting is off) or the
+        track names no album (a playlist entry with the block missing)."""
+        if self.genre_lookup is None or not isinstance(media, Track):
+            return None
+        album = getattr(media, "album", None)
+        album_id = str(getattr(album, "id", "") or "") if album is not None else ""
+        if not album_id:
+            return None
+        try:
+            artists = get_album_artists(media)
+        except Exception:
+            artists = []
+        return album_id, {
+            "upc": str(getattr(album, "upc", "") or ""),
+            "artist": str(artists[0] if artists else getattr(getattr(album, "artist", None), "name", "") or ""),
+            "title": str(getattr(album, "name", "") or ""),
+        }
+
+    def _genre_prefetch(self, media) -> None:
+        """Start this track's release lookup in the background (see
+        GenreLookup.prefetch); a failure to even ask never touches the download."""
+        facts = self._genre_facts(media)
+        if facts is None:
+            return
+        try:
+            self.genre_lookup.prefetch(facts[0], **facts[1])
+        except Exception:
+            logger.debug("could not start the genre lookup", exc_info=True)
+
+    def _genre_text(self, track: Track) -> str:
+        """The Genre tag for this track: the release's genres joined by the
+        separator setting, "" when there is nothing to write."""
+        facts = self._genre_facts(track)
+        if facts is None:
+            return ""
+        try:
+            genres = self.genre_lookup.genres(facts[0], **facts[1])
+        except Exception:
+            logger.debug("genre lookup failed", exc_info=True)
+            return ""
+        text = join_genres(genres, getattr(self.settings.data, "metadata_delimiter_genre", None))
+        if text:
+            logger.info("Genre tag: %d genre(s) for %s", len(genres), log_content(facts[1]["title"]))
+        return text
 
     def metadata_write(
         self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream
@@ -3960,6 +4166,10 @@ class Download:
             if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type
             else ""
         )
+
+        # Asked before the lyrics and the cover, which take their own moment:
+        # the lookup left when the track started, so this mostly finds it done.
+        genre: str = self._genre_text(track)
 
         if self.settings.data.lyrics_embed or self.settings.data.lyrics_file:
             _lyrics, lyrics_synced, lyrics_unsynced = self._retrieve_lyrics(track)
@@ -4064,6 +4274,7 @@ class Download:
                 item_id=_waves_item_id(track),
                 artist_ids=_artist_ids(track),
                 album_artist_ids=get_album_artist_ids(track),
+                genre=genre,
             )
         except (MetadataUnreadable, MutagenError, OSError):
             # A truncated/unidentifiable file (e.g. a failed download) can't be tagged.
@@ -5043,7 +5254,15 @@ class Download:
 
             return path_file
 
-        os.replace(path_out, path_file)
+        def operation() -> bool:
+            os.replace(path_out, path_file)
+            return True
+
+        # A scanner's brief lock on Windows must not fail the whole track: the
+        # raw file is still there and plays, so keep it if the swap never lands.
+        if not self._retry_file_operation(operation, "replace the remuxed container"):
+            with contextlib.suppress(OSError):
+                path_out.unlink()
 
         return path_file
 

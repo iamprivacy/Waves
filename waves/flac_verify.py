@@ -100,7 +100,7 @@ SEALED = "sealed"  # the signature was unset, computed and written
 CHANGED = "changed"  # the file changed since the scan; left alone
 BUSY = "busy"  # written too recently to be trusted complete; left alone
 WRITE_FAILED = "write_failed"  # the header could not be written (permissions, a read-only share)
-CANCELLED = "cancelled"  # the run was cancelled before this file was finished
+CANCELLED = "cancelled"  # the run was canceled before this file was finished
 # Not a file's status: a report line for a folder the walk could not open or
 # list, so the files in it were never checked. Never in a scan's rows.
 FOLDER_UNREADABLE = "folder_unreadable"
@@ -119,7 +119,7 @@ STATUS_LABELS = {
     CHANGED: "changed since the scan, left alone",
     BUSY: "written less than a minute ago, left alone",
     WRITE_FAILED: "header could not be written",
-    CANCELLED: "not checked (cancelled)",
+    CANCELLED: "not checked (canceled)",
     FOLDER_UNREADABLE: "folder could not be opened, its files were not checked",
 }
 
@@ -536,7 +536,7 @@ def decode_md5(
     A watchdog thread stops the decoder on a cancel or once the time limit
     for the file's size has passed (see ``DECODE_MIN_SECONDS``), so a read
     stalled on a share that stopped answering ends the run's wait too: the
-    pipe closes, the row comes back cancelled or failed, and the thread
+    pipe closes, the row comes back canceled or failed, and the thread
     ends with the call.
     """
     pcm_fmt = _PCM_FORMATS.get(info.bits_per_sample)
@@ -910,7 +910,7 @@ def _distinct_links(
 CACHE_NAME = "flac-check.sqlite3"
 _CACHE_VERSION = 1
 # Commit the remembered verdicts at least this often, so a run that is
-# cancelled or cut short by a quit still keeps what it read.
+# canceled or cut short by a quit still keeps what it read.
 _CACHE_COMMIT_ROWS = 500
 _CACHE_COMMIT_S = 5.0
 # Deep verdicts worth keeping: each says what the audio is. A failed decode is
@@ -1280,7 +1280,7 @@ def fix_rows(
             continue
         if should_continue is not None and not should_continue():
             # Still UNSET: nothing was done to it, so a later fix picks it up.
-            row = replace(row, detail="not reached, the run was cancelled")
+            row = replace(row, detail="not reached, the run was canceled")
         else:
             try:
                 size, mtime_ns = _stat(row.path)
@@ -1293,10 +1293,10 @@ def fix_rows(
                     row = replace(row, status=BUSY)
                 else:
                     sealed = seal_file(row.path, ffmpeg, expected=row.info, should_continue=should_continue)
-                    # Cancelled mid-decode: nothing was written, so it stays
+                    # Canceled mid-decode: nothing was written, so it stays
                     # UNSET for the next fix like the rows after it.
                     if sealed.status == CANCELLED:
-                        row = replace(row, detail="not reached, the run was cancelled")
+                        row = replace(row, detail="not reached, the run was canceled")
                     else:
                         row = sealed
         out.append(row)

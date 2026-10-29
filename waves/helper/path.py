@@ -152,6 +152,17 @@ def _migrate_legacy_config(legacy: str, native: str) -> None:
         CONFIG_MIGRATION = "failed"
 
 
+def _is_unsandboxed_test_script() -> bool:
+    """Is this process a test file run directly (``python tests/test_x.py
+    --run-scenario``)? Run that way it skips pytest and conftest, so nothing
+    gave it a scratch config folder, and a scenario's fixtures (fake artists,
+    settings) would land in the real profile. Under pytest ``__main__`` is
+    pytest itself, and its scenario children get a sandbox from the test."""
+    main = sys.modules.get("__main__")
+    entry = pathlib.Path(getattr(main, "__file__", "") or "")
+    return entry.name.startswith("test_") and entry.parent.name == "tests"
+
+
 def path_config_base() -> str:
     """Get the base configuration path.
 
@@ -170,6 +181,12 @@ def path_config_base() -> str:
     path_user_custom: str = os.environ.get("XDG_CONFIG_HOME", "")
     if path_user_custom:
         return os.path.join(path_user_custom, __config_dirname__)
+    if _is_unsandboxed_test_script():
+        msg = (
+            "a test file run as a script would use the real Waves profile; "
+            "run it through pytest, or set XDG_CONFIG_HOME to a scratch folder"
+        )
+        raise RuntimeError(msg)
 
     legacy: str = os.path.join(path_home(), ".config", __config_dirname__)
     native: str = _path_config_native()
@@ -222,6 +239,31 @@ def path_file_settings() -> str:
 # present (and disappears entirely when not); format_path_media preserves
 # that one space through sanitization.
 _SELF_DRESSING_TOKENS = {"video_year_optional"}
+
+# Every token format_str_media spells, plus {folder_path} (resolved ahead of
+# it). A value that holds one of these as text (a playlist called "Best of
+# {artist_name}") must not be expanded by a later replace in the same pass, or
+# by the per-track pass a collection's baked-in folder goes through.
+_TEMPLATE_TOKENS = frozenset(
+    {
+        "album_artist", "album_artist_id", "album_artists", "album_date", "album_duration_minutes",
+        "album_duration_seconds", "album_explicit", "album_id", "album_num_tracks", "album_num_volumes",
+        "album_title", "album_track_num", "album_year", "artist_name", "artist_name_primary", "folder_path",
+        "isrc", "list_pos", "media_type", "mix_name", "playlist_duration_minutes", "playlist_duration_seconds",
+        "playlist_id", "playlist_name", "track_artist_id", "track_duration_minutes", "track_duration_seconds",
+        "track_explicit", "track_id", "track_quality", "track_title", "track_volume_num",
+        "track_volume_num_optional", "track_volume_num_optional_CD", "video_date", "video_id", "video_quality",
+        "video_year", "video_year_optional",
+    }
+)  # fmt: skip
+_TOKEN_TEXT = re.compile(r"\{(\w+)\}")
+
+
+def _neutralize_tokens(value: str) -> str:
+    """``value`` with every known ``{token}`` written as ``(token)``, the
+    spelling folders.py gives braces in a folder name. Other braces stay, so
+    folder names that never held a token keep their existing spelling."""
+    return _TOKEN_TEXT.sub(lambda m: f"({m.group(1)})" if m.group(1) in _TEMPLATE_TOKENS else m.group(0), value)
 
 
 # A replacement is decoration, not content: a couple of characters at most,
@@ -499,7 +541,9 @@ def format_path_media(
             if result_fmt == FORMAT_TEMPLATE_EXPLICIT:
                 value = FORMAT_TEMPLATE_EXPLICIT
             else:
-                value = sanitize_name_component(result_fmt, illegal_replacement, illegal_map, tidy_spacing)
+                value = _neutralize_tokens(
+                    sanitize_name_component(result_fmt, illegal_replacement, illegal_map, tidy_spacing)
+                )
             # Self-dressing tokens carry their own separator space
             # ("[2026] "); sanitize_filename trims edge whitespace, which
             # would weld the year prefix straight onto the title. Scoped to

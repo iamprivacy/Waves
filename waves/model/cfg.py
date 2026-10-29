@@ -19,6 +19,17 @@ class Settings:
     # lyrics, which are machine-transcribed for tracks nobody has submitted
     # text for yet. TIDAL remains the fallback when LRCLIB has no match.
     lyrics_prefer_lrclib: bool = True
+    # The Genre tag from MusicBrainz, for new downloads: every genre it lists
+    # for the release, the artist's when the release has none (waves/genres.py).
+    # Opt-in, off by default: it sends the release's barcode, or its title and
+    # artist, to musicbrainz.org. A file already in the library is never touched.
+    metadata_genre: bool = False
+    # A release MusicBrainz does not list yet (a single out this week) gets
+    # the artist's genres instead of none; the artist is found by name, and
+    # a name shared by several artists gets nothing rather than a guess.
+    metadata_genre_artist_fallback: bool = True
+    # Joins several genres in the one Genre tag.
+    metadata_delimiter_genre: str = "; "
     use_primary_album_artist: bool = (
         False  # When True, uses first album artist instead of track artists for folder paths
     )
@@ -165,26 +176,29 @@ class Settings:
 @dataclass
 class HelpSettings:
     skip_existing: str = (
-        "Skip a track you already have: a file already at its name, or one Waves downloaded earlier "
-        "into your download or library folder. Turn off to download every track again, "
-        "replacing a same-named file."
+        "Skips a track you already have: a file at its name, or one Waves saved in your "
+        "download or library folder. Off downloads everything again."
     )
     confirm_category_download: str = (
-        "Ask before DOWNLOAD ALL queues a whole Browse playlist category or every track in My Tidal. "
-        'Turning the dialog off with its "Don\'t ask again" box switches this off; '
-        "switch it back on here."
+        "Asks before DOWNLOAD ALL queues a whole Browse category or every track in My Tidal. "
+        'Its "Don\'t ask again" box switches this off.'
     )
     album_cover_save: str = "Save cover to album folder."
     lyrics_embed: str = "Embed lyrics in audio file, if lyrics are available."
+    metadata_genre: str = (
+        "Every genre MusicBrainz lists for the release (the artist's if none). Sends the barcode or title to musicbrainz.org."
+    )
+    metadata_genre_artist_fallback: str = (
+        "When MusicBrainz does not list the release yet, write the artist's genres instead of none."
+    )
+    metadata_delimiter_genre: str = "Joins several genres in the Genre tag. Default: '; '"
     use_primary_album_artist: str = "Use only the primary album artist for folder paths instead of track artists."
     lyrics_file: str = "Save lyrics next to the track: timed lyrics as a *.lrc file, untimed ones as *.txt."
     lyrics_file_synced_only: str = (
         "Only save a lyrics file when timed (synced) lyrics exist; untimed lyrics " "then produce no *.txt file."
     )
     lyrics_prefer_lrclib: str = (
-        "Fetch lyrics from the community LRCLIB database first (the source behind LRCGet), "
-        "falling back to TIDAL's lyrics when it has no match. TIDAL's own lyrics are "
-        "machine-transcribed for many newer track IDs and often wrong."
+        "Gets lyrics from the community LRCLIB database first, then TIDAL's, which are often machine-made and wrong."
     )
     api_key_index: str = "Set the device API KEY."
     album_info_save: str = "Save album info to track?"
@@ -208,10 +222,7 @@ class HelpSettings:
     format_mix: str = "Where to download mixes and how to name the items."
     format_track: str = "Where to download tracks and how to name the items."
     format_video: str = "Where to download videos and how to name the items."
-    video_convert_mp4: str = (
-        "Videos are downloaded as MPEG Transport Stream (TS) files. With this option each video "
-        "will be converted to MP4. FFmpeg must be installed."
-    )
+    video_convert_mp4: str = "Converts downloaded videos from TS files to MP4."
     path_binary_ffmpeg: str = (
         "Path to FFmpeg binary file (executable). Only necessary if FFmpeg is not set in $PATH. Mandatory for Windows: "
         "The directory of `ffmpeg.exe` must be set in %PATH%."
@@ -228,12 +239,7 @@ class HelpSettings:
     cover_album_file: str = "Save cover to 'cover.jpg', if an album is downloaded."
     cover_single_track_file: str = "Also save cover.jpg when downloading a single track on its own."
     extract_flac: str = "Extract FLAC audio tracks from MP4 containers and save them as `*.flac` (uses FFmpeg)."
-    downsample_enabled: str = (
-        "Downsample FLAC files toward a fixed target rate/bit-depth using ffmpeg. "
-        "Each dimension is reduced independently and never upsampled, a 24-bit/44.1 kHz "
-        "source with a 16/48 target becomes 16-bit/44.1 kHz; a 16-bit/44.1 kHz source is "
-        "left untouched. Useful for capping HI_RES_LOSSLESS downloads at a saner archive size."
-    )
+    downsample_enabled: str = "Lowers hi-res FLAC toward the downsample target, never upsampling, for smaller files."
     downsample_target: str = (
         "Downsample target when downsample_enabled is true: " "'16_48' (16 bit / 48 kHz) or '24_48' (24 bit / 48 kHz)."
     )
@@ -255,9 +261,8 @@ class HelpSettings:
     )
     playlist_create: str = "Creates a '_playlist.m3u8' file for downloaded albums, playlists and mixes."
     metadata_replay_gain: str = (
-        "Writes the loudness TIDAL measured for each track and album as ReplayGain tags. A player that honours "
-        "them (Rockbox, foobar2000, VLC, Plexamp and others) turns loud masters down, often by 8 to 12 dB, so these "
-        "tracks play quieter than files without the tags. Turn it off if you do not want that."
+        "Writes TIDAL's loudness as ReplayGain tags. Players that read them turn loud masters down, "
+        "often by 8 to 12 dB."
     )
     metadata_write_url: str = "URL of the media file will be written to metadata."
     window_x: str = "X-Coordinate of saved window location."

@@ -1,7 +1,7 @@
 """Local music-library index: answers "do I already have this album, and how
 many of its tracks" from the user's own files on disk.
 
-This is what lets the ownership badge recognise a whole library, not only what
+This is what lets the ownership badge recognize a whole library, not only what
 Waves downloaded. It walks a configured library folder, treats every directory
 that directly holds audio files as an album, reads that album's identity from
 the TAGS of one representative file (album / album-artist / date), and counts
@@ -18,7 +18,7 @@ index exists to answer "do I have this", and one file open per album folder is
 the whole cost of a scan.
 
 Identity comes from tags, never the folder name: the download path is lossily
-sanitised on write (a "?" or "/" in a title is dropped), so the folder cannot be
+sanitized on write (a "?" or "/" in a title is dropped), so the folder cannot be
 trusted to reconstruct the real album/artist strings. Tags hold the truth.
 
 Pure standard library plus mutagen for tag reads, with no Qt and no tidalapi, so
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import re
@@ -44,6 +45,7 @@ from queue import SimpleQueue
 from threading import Lock, local
 
 import waves.matching as matching
+from waves import db
 from waves.poolgauge import PoolGauge
 
 # Child of the "waves" logger so scan milestones feed the breadcrumb ring crash
@@ -54,7 +56,7 @@ logger = logging.getLogger("waves.library")
 # Audio file extensions we treat as album tracks. A superset of what Waves
 # writes (see waves.constants.AudioExtensionsValid), widened to the common
 # formats a pre-existing, ripped-or-purchased library actually contains, so an
-# album Waves did not create is still recognised.
+# album Waves did not create is still recognized.
 AUDIO_EXTS = frozenset(
     {
         ".flac",
@@ -181,6 +183,33 @@ _WALK_COMMIT_EVERY = 512
 # the healing and caps the cost.
 _UNREADABLE_RETRY_S = 24 * 3600.0
 
+# Every text tag a file carries is kept (file_tags), so a later feature can
+# answer from the cache instead of opening the file again. A tag edited in
+# place moves the FILE's size or mtime but not its folder's, which the walk
+# never sees, so each scan also re-stats the files of the folders checked
+# longest ago: at most this many folders a scan, each again after this long.
+# A network mount pays one stat per file for it, hence the bound.
+_TAG_RECHECK_S = 7 * 86400.0
+_TAG_RECHECK_FOLDERS = 2000
+# One tag value kept at most this long (a tagger that stuffed a whole
+# document into a comment is not worth the room).
+_TAG_VALUE_CAP = 4 * 1024
+# Lyrics live in the file (and its sidecar) and nothing answers from the
+# cache with them: at a few KB a file they were most of its size, so they
+# are left out, by key in every format's spelling.
+_LYRICS_TAG_KEYS = frozenset(
+    {"lyrics", "unsyncedlyrics", "unsynced lyrics", "syncedlyrics", "\xa9lyr", "wm/lyrics", "wm/lyrics_synchronised"}
+)
+# Tags that are pictures or other binary payloads spelled as text, by their
+# lowercased key: never kept.
+_BINARY_TAG_KEYS = frozenset(
+    {"metadata_block_picture", "coverart", "coverartmime", "covr", "cover art (front)", "wm/picture"}
+)
+# Tag value types that are text in a wrapper (a date, an APEv2 text item):
+# any other object a reader hands over (an ID3 frame, a binary item) is
+# never stored as its repr.
+_TEXT_WRAPPERS = frozenset({"ID3TimeStamp", "APETextValue", "APEExtValue"})
+
 # The wall-clock spread two empty-walk strikes need before an empty library is
 # believed and pruned (see _confirm_empty). Counting SCANS was not a duration:
 # the container poll runs one every five minutes, so a mount that dropped over
@@ -237,7 +266,7 @@ def root_comparison_key(root: str) -> str:
     """A library root as a filesystem would compare it: expanduser, trailing
     separators of BOTH kinds dropped (a Windows "C:/Music/" and "C:\\Music"
     name one folder), then NFC + casefold (APFS and NTFS treat two case or
-    normalisation spellings as one folder).
+    normalization spellings as one folder).
 
     The cache FILENAME hashes this key, so every comparison against a stored
     ``scan_root`` must go through the same key. Comparing raw spellings while
@@ -250,7 +279,7 @@ def root_comparison_key(root: str) -> str:
 
 
 def _name_key(name: str) -> str:
-    """One folder NAME as a case- and normalisation-folding filesystem compares
+    """One folder NAME as a case- and normalization-folding filesystem compares
     it (the same fold as waves.helper.path.name_comparison_key, kept local so
     this module stays free of that module's tidalapi import). FOR COMPARISON
     ONLY: nothing is ever written under a folded spelling."""
@@ -378,6 +407,27 @@ def _adopt_legacy_cache(legacy: str, path: str, key: str) -> None:
 _Candidate = tuple[str, str, float, int, tuple[str, ...]]
 
 
+def _artists_first(candidates: list[_Candidate]) -> list[_Candidate]:
+    """The read order of a scan: one album from every folder that holds
+    albums, then the rest, each part in path order. In the usual
+    Artist/Album layout that parent folder is the artist, so a cold scan
+    of a big library knows nearly every artist after a small share of its
+    reads (the Releases library import reads them out of the cache while
+    the scan goes on). Every candidate is still read exactly once; only the
+    order changes. A flat or deeper layout simply front-loads less."""
+    first: list[_Candidate] = []
+    rest: list[_Candidate] = []
+    seen: set[str] = set()
+    for c in sorted(candidates, key=lambda c: c[0]):
+        parent = os.path.dirname(c[0])
+        if parent in seen:
+            rest.append(c)
+        else:
+            seen.add(parent)
+            first.append(c)
+    return first + rest
+
+
 def _numbered(value: str) -> tuple[int, int]:
     """A "3/12" style tag value as ``(number, total)``, either half 0 when
     absent or unparseable. FLAC keeps the two halves in separate tags
@@ -440,6 +490,7 @@ def _flag_word(value: str) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes")
 
 
+_MBID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _FOLDER_EXPLICIT_RE = re.compile(r"[\[(]\s*(explicit|e)\s*[\])]", re.IGNORECASE)
 _FOLDER_CLEAN_RE = re.compile(r"[\[(]\s*clean\s*[\])]", re.IGNORECASE)
 
@@ -478,7 +529,7 @@ _COLLAB_SPLIT_RE = re.compile(r"\s*,\s*|\s+(?:and|x|with|vs\.?)\s+")
 
 
 def _primary_credit(credit: str) -> str:
-    """The first name of a normalised track credit, for the album-artist vote:
+    """The first name of a normalized track credit, for the album-artist vote:
     "jay-z and kanye west", "jay-z, beyonce" and "jay-z x future" are all
     Jay-Z's tracks. The whole credit when nothing precedes a separator."""
     return _COLLAB_SPLIT_RE.split(credit, maxsplit=1)[0].strip() or credit
@@ -532,6 +583,135 @@ def _flat_set_declared(pairs: list[tuple[int, int]], held: int) -> int:
     return total if held < total else 0
 
 
+def _tag_text(value) -> str | None:
+    """One tag value as text, or None when it is binary (a picture, a
+    private frame) or empty. Bytes are kept only when they decode as UTF-8
+    (an MP4 freeform atom, an ID3 UFID's id)."""
+    if isinstance(value, bytes | bytearray):
+        if type(value).__name__ == "MP4Cover":
+            return None
+        try:
+            text = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if any(ord(ch) < 32 and ch not in "\t\r\n" for ch in text):
+            return None
+    elif isinstance(value, tuple):
+        # MP4 track/disc pairs: (3, 12) reads "3/12", the way ID3 spells it.
+        text = "/".join(str(v) for v in value)
+    elif isinstance(value, str | int | float):
+        text = str(value)
+    elif type(value).__name__.startswith("ASF") and hasattr(value, "value"):
+        # An ASF (WMA) attribute: its value is the text, or bytes (a picture).
+        return _tag_text(value.value)
+    elif type(value).__name__ in _TEXT_WRAPPERS:
+        text = str(value).replace("\x00", "; ")
+    else:
+        return None
+    text = text.strip()
+    return text[:_TAG_VALUE_CAP] if text else None
+
+
+# Stamped once the cache has dropped the lyrics an older reader kept (user
+# text frames and MP4 freeform atoms named for them).
+_LYRICS_SCRUB_KEY = "lyrics_scrubbed"
+
+
+def _without_lyrics(tags: dict) -> dict:
+    """A file_tags ``tags`` value with every lyrics key taken out."""
+    return {
+        view: {k: v for k, v in keys.items() if not _is_lyrics_key(k)} if isinstance(keys, dict) else keys
+        for view, keys in tags.items()
+    }
+
+
+def _is_lyrics_key(key: str) -> bool:
+    low = str(key).strip().lower()
+    # A free-form tag names its field after a prefix: an ID3 user text frame
+    # ("TXXX:LYRICS") or an MP4 freeform atom ("----:com.apple.iTunes:LYRICS").
+    if low.startswith("txxx:"):
+        low = low[5:]
+    elif low.startswith("----:"):
+        low = low.rsplit(":", 1)[-1]
+    return low in _LYRICS_TAG_KEYS or low.startswith(("uslt", "sylt", "lyrics:", "lyrics-"))
+
+
+def _id3_frames(id3) -> dict[str, list[str]]:
+    """Every text-bearing ID3 frame: text frames by their hash key (TCON,
+    "TXXX:MusicBrainz Artist Id"), URLs and comments by key, a UFID's id.
+    Pictures, private and other binary frames are left out, and lyrics
+    (USLT, SYLT, or a user text frame named for them) stay in the file."""
+    out: dict[str, list[str]] = {}
+    for key, frame in id3.items():
+        kind = type(frame).__name__
+        if kind in ("USLT", "SYLT") or _is_lyrics_key(key):
+            continue
+        if hasattr(frame, "text"):
+            raw = frame.text if isinstance(frame.text, list) else [frame.text]
+        elif hasattr(frame, "url"):
+            raw = [frame.url]
+        elif kind == "UFID":
+            raw = [frame.data]
+        else:
+            continue
+        values = [t for t in (_tag_text(v) for v in raw) if t]
+        if values:
+            out[str(key)] = values
+    return out
+
+
+def _file_tags(m) -> dict:
+    """Every text tag the file carries, in two views: ``easy``, mutagen's
+    format-neutral names (genre, composer, isrc, musicbrainz_artistid, ...)
+    where the format has them, and ``raw``, the format's own keys (Vorbis
+    comments, ID3 frames, MP4 atoms, APEv2 and ASF items), which also hold
+    what no neutral name covers. Pictures, binary payloads and lyrics (see
+    _LYRICS_TAG_KEYS) are left out.
+    Never raises: a tag the reader cannot walk is simply not kept."""
+    easy: dict[str, list[str]] = {}
+    raw: dict[str, list[str]] = {}
+    tags = getattr(m, "tags", None)
+    if _is_bare_id3(tags):
+        # WAV and AIFF carry an ID3 tag with no easy view: their keys are
+        # the frames themselves (pictures and private frames among them), so
+        # they are read the way an MP3's frames are.
+        with contextlib.suppress(Exception):
+            raw = _id3_frames(tags)
+        return {"easy": easy, "raw": raw}
+    with contextlib.suppress(Exception):
+        names = list(m.keys())  # mutagen's own mapping, not a dict
+        for key in names:
+            if str(key).lower() in _BINARY_TAG_KEYS or _is_lyrics_key(key):
+                continue
+            got = m.get(key)
+            values = [t for t in (_tag_text(v) for v in (got if isinstance(got, list) else [got])) if t]
+            if values:
+                easy[str(key)] = values
+    # The easy views wrap the real tag store; the formats with no easy view
+    # (FLAC, Ogg, APEv2, ASF) already answered above in their own keys.
+    store = getattr(tags, "_EasyID3__id3", None) or getattr(tags, "_EasyMP4Tags__mp4", None)
+    with contextlib.suppress(Exception):
+        if store is not None and type(store).__name__ == "ID3":
+            raw = _id3_frames(store)
+        elif store is not None:
+            for key, got in store.items():
+                if str(key).lower() in _BINARY_TAG_KEYS or _is_lyrics_key(key):
+                    continue
+                values = [t for t in (_tag_text(v) for v in (got if isinstance(got, list) else [got])) if t]
+                if values:
+                    raw[str(key)] = values
+    return {"easy": easy, "raw": raw}
+
+
+def _is_bare_id3(tags) -> bool:
+    """An ID3 tag read as it is (WAV, AIFF), not through EasyID3."""
+    try:
+        from mutagen.id3 import ID3
+    except Exception:
+        return False
+    return isinstance(tags, ID3)
+
+
 def _read_album_tags(path: str) -> dict | None:
     """Album / album-artist / date from one audio file's tags, via mutagen's
     format-neutral 'easy' interface (standard frames across FLAC/MP3/MP4/OGG), so
@@ -580,6 +760,11 @@ def _read_album_tags(path: str) -> dict | None:
     disc_no, disc_total = _numbered(first("discnumber", "disc"))
     disc_total = disc_total or _numbered(first("disctotal", "totaldiscs"))[0]
     info = getattr(m, "info", None)
+    try:
+        st = os.stat(path)
+        size, mtime_ns = int(st.st_size), int(st.st_mtime_ns)
+    except OSError:
+        size, mtime_ns = 0, 0
     codec = os.path.splitext(path)[1].lower().lstrip(".")
     if codec in ("m4a", "mp4"):
         # The .m4a container holds either lossy AAC or lossless ALAC; mutagen's
@@ -622,7 +807,69 @@ def _read_album_tags(path: str) -> dict | None:
         # summed over a folder it is close to a fingerprint of the release, so
         # the matcher can prove (or refute) an otherwise undated match.
         "length": int(round(float(getattr(info, "length", 0) or 0))),
+        # Everything else the file says, kept whole (file_tags), with the
+        # file's size and mtime the read saw, so a tag edited in place is
+        # noticed (see _TAG_RECHECK_S).
+        "genre": "; ".join(_easy_list(m, "genre")),
+        "tags": _file_tags(m),
+        "size": size,
+        "mtime_ns": mtime_ns,
     }
+
+
+def _easy_list(m, key: str) -> list[str]:
+    try:
+        got = m.get(key)
+    except Exception:
+        return []
+    return [str(v).strip() for v in (got if isinstance(got, list) else [got] if got else []) if str(v).strip()]
+
+
+def _file_entry(name: str, tags: dict) -> tuple:
+    """One file's file_tags row tail: name, size, mtime, genre and every
+    text tag as JSON. A reader that never reported them (the tests' stubs)
+    stores zeros and an empty set."""
+    blob = json.dumps(tags.get("tags") or {}, ensure_ascii=False, separators=(",", ":"))
+    if not _utf8_ok(blob):
+        blob = json.dumps(tags.get("tags") or {}, separators=(",", ":"))
+    genre = str(tags.get("genre", "") or "")
+    return (
+        _storable_name(name),
+        int(tags.get("size", 0) or 0),
+        int(tags.get("mtime_ns", 0) or 0),
+        genre if _utf8_ok(genre) else genre.encode("utf-8", "replace").decode("utf-8"),
+        blob,
+    )
+
+
+# A POSIX file name is bytes, and one that is not UTF-8 reaches Python with
+# surrogate escapes, which sqlite refuses (a bound parameter must be valid
+# UTF-8). Such a name is stored as its bytes in hex behind a "/", a character
+# no file name can hold, so it never collides with a real name and the
+# re-stat (_tags_moved) can still find the file.
+_RAW_NAME = "/hex:"
+
+
+def _utf8_ok(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _storable_name(name: str) -> str:
+    return name if _utf8_ok(name) else _RAW_NAME + os.fsencode(name).hex()
+
+
+def _stored_name(stored: str) -> str:
+    """The file name a file_tags row was stored under (see _storable_name)."""
+    if not stored.startswith(_RAW_NAME):
+        return stored
+    try:
+        return os.fsdecode(bytes.fromhex(stored[len(_RAW_NAME) :]))
+    except ValueError:
+        return stored
 
 
 def _is_audio(name: str) -> bool:
@@ -768,7 +1015,7 @@ class LibraryIndex:
         self._workers_read = _READ_WORKERS
         self._lock = Lock()
         self._closed = False
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn = db.connect(self._path, kind=db.CACHE)
         # Presence lookups (see presence_facts and friends) read on a
         # connection of their own per thread: WAL lets them run beside the
         # scan's writes, and they never queue on ``_lock`` behind a walk.
@@ -783,7 +1030,6 @@ class LibraryIndex:
         # with it the moment it goes, exactly as before.
         self._reader_refs: set = set()
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS albums (
                        folder_path TEXT    NOT NULL PRIMARY KEY,
                        album       TEXT,
@@ -916,12 +1162,34 @@ class LibraryIndex:
                 with contextlib.suppress(sqlite3.OperationalError):  # column already exists
                     self._conn.execute(f"ALTER TABLE tracks ADD COLUMN {col}")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_tkey ON tracks(tkey_artist, tkey_title)")
+            # Every text tag each file carries (see _file_tags), with the
+            # size and mtime the read saw, so a later feature asks the cache
+            # rather than the file, and a tag edited in place is caught by the
+            # rolling re-stat (_tags_moved). An album row with track rows and
+            # none here is from before the capture: owed one re-read (see
+            # _unchanged_verdict), the same migration the tracks table had.
+            self._conn.execute("""CREATE TABLE IF NOT EXISTS file_tags (
+                       folder_path TEXT NOT NULL,
+                       name        TEXT NOT NULL,
+                       size        INTEGER NOT NULL DEFAULT 0,
+                       mtime_ns    INTEGER NOT NULL DEFAULT 0,
+                       genre       TEXT,
+                       tags        TEXT,
+                       PRIMARY KEY (folder_path, name)
+                   )""")
+            # When the folder's files were last re-stat'ed against file_tags
+            # (or read): NULL on a row from before the capture.
+            with contextlib.suppress(sqlite3.OperationalError):  # column already exists
+                self._conn.execute("ALTER TABLE albums ADD COLUMN tags_checked REAL")
             # Small key/value store: the scan root last walked (a change wipes the
             # tree so the new root walks fresh) and the monotonic scan generation.
             self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if self._meta_get(_LYRICS_SCRUB_KEY) != "1":
+                self._scrub_cached_lyrics()
+                self._meta_set(_LYRICS_SCRUB_KEY, "1")
             if self._meta_get(_KEY_VERSION_KEY) != matching.KEY_NORMALISER_VERSION:
                 # The stored keys were derived by another version of the
-                # normaliser (or by one that never stamped itself). Every
+                # normalizer (or by one that never stamped itself). Every
                 # TIDAL-side key is computed by the running code, so a row
                 # keyed by the old one would sit unreachable behind an
                 # unchanged mtime forever (badges dark, the bulk gate
@@ -980,6 +1248,9 @@ class LibraryIndex:
                         "DELETE FROM albums WHERE folder_path NOT IN (SELECT path FROM dirs WHERE is_album = 1)"
                     )
                     self._conn.execute("DELETE FROM tracks WHERE folder_path NOT IN (SELECT folder_path FROM albums)")
+                    self._conn.execute(
+                        "DELETE FROM file_tags WHERE folder_path NOT IN (SELECT folder_path FROM albums)"
+                    )
                     logger.info("dropped %d cached folder(s) the scan never walks", len(doomed))
                 self._meta_set(_SKIPPED_PRUNED_KEY, _SKIPPED_PRUNED_RULE)
             self._conn.commit()
@@ -993,7 +1264,7 @@ class LibraryIndex:
 
     @staticmethod
     def _probe_root(root: str) -> str:
-        """Classify a (already normalised) scan root before walking it. Returns
+        """Classify a (already normalized) scan root before walking it. Returns
         ``SCAN_OK`` to go ahead, or the SCAN_* reason a scan would find nothing.
 
         A blank root must NOT become os.sep ("/") and walk the whole disk. os.walk
@@ -1131,6 +1402,10 @@ class LibraryIndex:
         # A root switch wipes the tree so the new root walks fresh; every scan
         # gets a fresh generation stamp so vanished folders can be pruned.
         gen = self._begin_scan(root)
+        # Folders whose files moved under an unmoved folder mtime (a tag
+        # edited in place) are marked changed first, so the walk below lists
+        # and re-reads them like any other changed folder.
+        self._tags_moved(alive)
         walked = self._walk_album_dirs(root, alive, emit, gen, force_full=force_full)
         if walked is None:
             # Superseded or the root dropped offline mid-walk: leave the cache
@@ -1187,8 +1462,7 @@ class LibraryIndex:
         # "unchanged" and a Rescan still retries it. One query answers for
         # every candidate (see _unchanged_rows); a candidate with no album row
         # gets None and the verdict re-reads it, exactly as before.
-        known = self._unchanged_rows()
-        to_read = [c for c in candidates if not self._unchanged_verdict(known.get(c[0]), c[2], c[3])]
+        to_read = self._owed_reads(candidates)
         if to_read:
             # The walk is done, so the read phase's size is now known: announce it
             # up front so the UI can show "0 of N" (and an ETA once reads flow).
@@ -1256,7 +1530,7 @@ class LibraryIndex:
                 # for the generation prune instead of colliding.
                 cut = len(prev) + 1
                 self._conn.execute(
-                    "UPDATE OR IGNORE dirs SET path = ? || substr(path, ?)" " WHERE path = ? OR substr(path, 1, ?) = ?",
+                    "UPDATE OR IGNORE dirs SET path = ? || substr(path, ?) WHERE path = ? OR substr(path, 1, ?) = ?",
                     (root, cut, prev, cut, prev + os.sep),
                 )
                 self._conn.execute(
@@ -1271,6 +1545,11 @@ class LibraryIndex:
                 )
                 self._conn.execute(
                     "UPDATE OR IGNORE tracks SET folder_path = ? || substr(folder_path, ?)"
+                    " WHERE folder_path = ? OR substr(folder_path, 1, ?) = ?",
+                    (root, cut, prev, cut, prev + os.sep),
+                )
+                self._conn.execute(
+                    "UPDATE OR IGNORE file_tags SET folder_path = ? || substr(folder_path, ?)"
                     " WHERE folder_path = ? OR substr(folder_path, 1, ?) = ?",
                     (root, cut, prev, cut, prev + os.sep),
                 )
@@ -1336,6 +1615,28 @@ class LibraryIndex:
             return os.stat(root).st_dev
         except OSError:
             return None
+
+    def _scrub_cached_lyrics(self) -> None:
+        """(under the lock, schema pass) Take out the lyrics an older reader
+        kept in file_tags (see _is_lyrics_key): lyrics stay in the file."""
+        rows = self._conn.execute("SELECT folder_path, name, tags FROM file_tags WHERE tags LIKE '%lyrics%'").fetchall()
+        dropped = 0
+        for folder, name, raw in rows:
+            try:
+                tags = json.loads(raw or "{}")
+            except ValueError:
+                continue
+            if not isinstance(tags, dict):
+                continue
+            kept = _without_lyrics(tags)
+            if kept != tags:
+                dropped += 1
+                self._conn.execute(
+                    "UPDATE file_tags SET tags = ? WHERE folder_path = ? AND name = ?",
+                    (json.dumps(kept, ensure_ascii=False, separators=(",", ":")), folder, name),
+                )
+        if dropped:
+            logger.info("library index: lyrics dropped from %d cached tag row(s)", dropped)
 
     def _meta_get_locked(self, key: str) -> str | None:
         with self._lock:
@@ -1490,7 +1791,7 @@ class LibraryIndex:
         Refused (0, nothing written) unless the cache was scanned for this very
         root: a probe must never stamp rows into a tree that belongs to another
         folder, or to no scan at all. A spelling that only differs by case or
-        normalisation from a stored child is skipped, so a folder is never
+        normalization from a stored child is skipped, so a folder is never
         indexed twice under two spellings. Layouts without an artist folder
         (albums straight under the root) gain nothing here; the warning in
         Settings says so in plain words.
@@ -2043,12 +2344,14 @@ class LibraryIndex:
         with self._lock:
             rows = self._conn.execute("""SELECT folder_path, dir_mtime, codec, track_count, recorded_at,
                           (SELECT COUNT(*) FROM tracks WHERE tracks.folder_path = albums.folder_path),
-                          declared, runtime, explicit
+                          declared, runtime, explicit,
+                          (SELECT COUNT(*) FROM file_tags WHERE file_tags.folder_path = albums.folder_path)
                    FROM albums""").fetchall()
-        for path, mtime, codec, count, recorded, tracks, declared, runtime, explicit in rows:
+        for path, mtime, codec, count, recorded, tracks, declared, runtime, explicit, tagged in rows:
             resting = now - float(recorded or 0) < _UNREADABLE_RETRY_S
             fresh = codec is not None and declared is not None and runtime is not None and explicit is not None
-            out[path] = (mtime, fresh and tracks > 0 and (tracks >= count or resting))
+            # tagged < tracks: a row from before file_tags, owed one re-read.
+            out[path] = (mtime, fresh and tracks > 0 and (tracks >= count or resting) and tagged >= tracks)
         return out
 
     def _commit_dirs(self, writes: list[tuple], marks: list[str] | tuple[str, ...] = ()) -> None:
@@ -2200,6 +2503,7 @@ class LibraryIndex:
         if not tags:
             return None
         tracks = [self._track_row(dirpath, tags)]
+        files = [_file_entry(first_audio, tags)]
         want = str(tags.get("album", "") or "").strip().casefold()
         # What the folder's files SAY the release is, believed only when they
         # speak with one voice. Silence is not disagreement (the same principle
@@ -2262,6 +2566,7 @@ class LibraryIndex:
                     else:
                         artist_dissent += 1
             tracks.append(self._track_row(dirpath, other))
+            files.append(_file_entry(name, other))
         artist = str(tags.get("artist", "") or "")
         if compilation_votes * 2 > len(tracks):
             # The files themselves say this is a compilation. Filed as one, it
@@ -2341,6 +2646,7 @@ class LibraryIndex:
             raw,
             explicit,
             tuple(tracks),
+            tuple(files),
         )
 
     # --- Presence lookups: the index IS the table ------------------------
@@ -2469,6 +2775,134 @@ class LibraryIndex:
             return False
         return bool(self._read("SELECT 1 FROM albums WHERE pkey_artist = ? LIMIT 1", (artist_key,)))
 
+    def distinct_artists(self) -> list[dict]:
+        """Every artist the library holds, one row per artist key (the album
+        rows' presence artist), for the Releases library import: ``{key,
+        name, albums, tracks, folders}``, sorted by name. ``name`` is the
+        spelling most of that artist's folders are tagged with; ``tracks``
+        is how many of their files the library holds (the import's floor
+        for following); ``folders`` are up to three of its album folders,
+        where the import looks for the TIDAL artist id a Waves download
+        writes into its files. Keyless rows (Various Artists, untagged
+        files) never reach here: their artist half is empty by design."""
+        rows = self._read(
+            "SELECT pkey_artist, artist, folder_path, track_count FROM albums"
+            " WHERE pkey_artist IS NOT NULL AND pkey_artist != '' ORDER BY folder_path"
+        )
+        by_key: dict[str, dict] = {}
+        for key, artist, folder, count in rows:
+            entry = by_key.setdefault(str(key), {"spellings": {}, "albums": 0, "tracks": 0, "folders": []})
+            name = str(artist or "").strip()
+            if name:
+                entry["spellings"][name] = entry["spellings"].get(name, 0) + 1
+            entry["albums"] += 1
+            entry["tracks"] += int(count or 0)
+            if folder and len(entry["folders"]) < 3:
+                entry["folders"].append(str(folder))
+        out = []
+        for key, entry in by_key.items():
+            if not entry["spellings"]:
+                continue
+            # Most folders first, then the alphabetically first spelling, so
+            # the same library always names an artist the same way.
+            name = min(entry["spellings"].items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            if matching.is_various_artists(name):
+                continue
+            out.append(
+                {
+                    "key": key,
+                    "name": name,
+                    "albums": entry["albums"],
+                    "tracks": entry["tracks"],
+                    "folders": entry["folders"],
+                }
+            )
+        out.sort(key=lambda r: r["name"].casefold())
+        return out
+
+    def artist_tag_ids(self) -> dict[str, str]:
+        """The MusicBrainz artist id each library artist's own files carry
+        (a tagger like Picard writes it), by artist key: only when every
+        file of that artist that carries one agrees on a single id. A
+        collaboration's several ids, or files that disagree, say nothing.
+        Read from file_tags, so it costs no file open."""
+        rows = self._read(
+            "SELECT a.pkey_artist, f.tags FROM file_tags f JOIN albums a ON a.folder_path = f.folder_path"
+            " WHERE a.pkey_artist IS NOT NULL AND a.pkey_artist != '' AND f.tags LIKE '%musicbrainz_albumartistid%'"
+        )
+        seen: dict[str, set[str]] = {}
+        for key, blob in rows:
+            try:
+                ids = json.loads(blob or "{}").get("easy", {}).get("musicbrainz_albumartistid") or []
+            except (ValueError, AttributeError):
+                continue
+            # One value, one id: "a; b" or two values is a collaboration.
+            one = [i for i in ids if ";" not in i and "/" not in i]
+            seen.setdefault(str(key), set()).update(one if len(ids) == 1 and one else ["*"])
+        return {k: v.pop() for k, v in seen.items() if len(v) == 1 and "*" not in v and _MBID_RE.match(next(iter(v)))}
+
+    def artist_titles(self, key: str) -> dict:
+        """What the library holds under one artist key (a ``distinct_artists``
+        row's ``key``): ``{"albums": [title, ...], "tracks": [title, ...]}``,
+        as tagged, each title once. The import weighs namesakes on TIDAL
+        against these."""
+        key = str(key or "")
+        if not key:
+            return {"albums": [], "tracks": []}
+        albums = self._read(
+            "SELECT DISTINCT album FROM albums WHERE pkey_artist = ? AND album IS NOT NULL AND album != ''", (key,)
+        )
+        tracks = self._read(
+            "SELECT DISTINCT title FROM tracks WHERE tkey_artist = ? AND title IS NOT NULL AND title != ''", (key,)
+        )
+        return {"albums": [str(r[0]) for r in albums], "tracks": [str(r[0]) for r in tracks]}
+
+    _ARTIST_ALBUM_COLUMNS = "pkey_artist, folder_path, album, year, track_count, codec, bits, rate, bitrate, dir_mtime"
+
+    def artist_albums(self, keys: Iterable[str]) -> dict[str, list[dict]]:
+        """The album rows the library holds under each artist key (a
+        ``distinct_artists`` row's ``key``), newest year first, then by title:
+        ``{key: [{folder, title, year, tracks, codec, bits, rate, bitrate,
+        mtime}]}``. The Releases Excluded page shows them, so an artist the
+        import left out is known by what the library has of them."""
+        wanted = sorted({str(k) for k in keys if k})
+        out: dict[str, list[dict]] = {}
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i : i + 500]
+            marks = ",".join("?" * len(chunk))
+            sql = f"SELECT {self._ARTIST_ALBUM_COLUMNS} FROM albums WHERE pkey_artist IN ({marks})"  # noqa: S608 (placeholders only, the keys are bound)
+            rows = self._read(sql, tuple(chunk))
+            for key, folder, album, year, count, codec, bits, rate, bitrate, mtime in rows:
+                out.setdefault(str(key), []).append(
+                    {
+                        "folder": str(folder or ""),
+                        "title": str(album or ""),
+                        "year": str(year or "")[:4],
+                        "tracks": int(count or 0),
+                        "codec": str(codec or ""),
+                        "bits": int(bits or 0),
+                        "rate": int(rate or 0),
+                        "bitrate": int(bitrate or 0),
+                        "mtime": float(mtime or 0),
+                    }
+                )
+        for albums in out.values():
+            albums.sort(key=lambda a: a["title"].casefold())
+            albums.sort(key=lambda a: a["year"], reverse=True)
+        return out
+
+    @staticmethod
+    def first_audio_file(folder: str) -> str:
+        """The first audio file directly inside ``folder`` by name, or "" for
+        a folder that holds none or cannot be listed (a share that went
+        away). Reads the directory, never the files."""
+        try:
+            with os.scandir(folder) as it:
+                names = sorted(e.name for e in it if _is_audio(e.name) and e.is_file())
+        except OSError:
+            return ""
+        return os.path.join(folder, names[0]) if names else ""
+
     def has_presence_rows(self) -> bool:
         """Whether any album row carries a key, which is what makes the
         presence lookups able to answer at all."""
@@ -2536,7 +2970,7 @@ class LibraryIndex:
         return done
 
     def iter_albums(self) -> Iterator[dict]:
-        """Yield each indexed album as a raw dict the bridge can normalise:
+        """Yield each indexed album as a raw dict the bridge can normalize:
         ``{title, artist, year, tracks, id}`` (id is the folder path, so the
         badge can reveal it in the file manager) plus the representative file's
         quality facts ``{codec, bitrate, bits, rate}`` for the badge's quality
@@ -2591,7 +3025,7 @@ class LibraryIndex:
         """Yield each indexed track as a raw dict for the track-level presence
         index: ``{title, artist, id}`` (id is the album FOLDER path, the same
         reveal target the album pill uses) plus the file's own quality facts
-        ``{codec, bitrate, bits, rate}`` so the pill's colour reports the copy
+        ``{codec, bitrate, bits, rate}`` so the pill's color reports the copy
         the user actually holds.
 
         Also carries the HOLDING FOLDER's identity, ``{album, album_year}``,
@@ -2693,12 +3127,74 @@ class LibraryIndex:
                          OR path IN (SELECT parent FROM dirs WHERE parent IS NOT NULL))""").fetchall()
         return [r[0] for r in rows]
 
+    def _tags_moved(self, alive: Callable[[], bool]) -> int:
+        """Catch a tag edited in place: it rewrites the file (its size or
+        mtime moves) without touching the folder, so the walk alone would
+        keep the old tags forever. Re-stats the stored files of at most
+        _TAG_RECHECK_FOLDERS album folders, the ones checked longest ago and
+        not within _TAG_RECHECK_S, on the walk's pool size (a network mount
+        pays one stat per file). A folder with a file that positively moved
+        has its stored mtime voided, so the walk lists and re-reads it as a
+        changed folder; one whose files all match has its clock restarted.
+        A stat that fails proves nothing (a missing file moves the folder's
+        own mtime anyway, and an absent mount must not void the cache), so
+        it leaves the folder for the next round. Returns the folders voided."""
+        cutoff = time.time() - _TAG_RECHECK_S
+        with self._lock:
+            due = [
+                p
+                for (p,) in self._conn.execute(
+                    "SELECT folder_path FROM albums WHERE tags_checked IS NOT NULL AND tags_checked < ?"
+                    " ORDER BY tags_checked LIMIT ?",
+                    (cutoff, _TAG_RECHECK_FOLDERS),
+                ).fetchall()
+            ]
+        if not due:
+            return 0
+
+        def moved(folder: str) -> bool | None:
+            if not alive():
+                return None
+            with self._lock:
+                files = self._conn.execute(
+                    "SELECT name, size, mtime_ns FROM file_tags WHERE folder_path = ?", (folder,)
+                ).fetchall()
+            for name, size, mtime_ns in files:
+                try:
+                    st = os.stat(os.path.join(folder, _stored_name(name)))
+                except FileNotFoundError:
+                    # The folder answers but the file is gone (renamed or
+                    # replaced under an unmoved folder mtime): it moved. With
+                    # the folder gone too it proves nothing (a mount away).
+                    return True if os.path.isdir(folder) else None
+                except OSError:
+                    return None
+                if int(st.st_size) != int(size) or int(st.st_mtime_ns) != int(mtime_ns):
+                    return True
+            return False
+
+        with ThreadPoolExecutor(max_workers=self._workers_walk) as pool:
+            verdicts = list(pool.map(moved, due))
+        same = [p for p, v in zip(due, verdicts, strict=True) if v is False]
+        changed = [p for p, v in zip(due, verdicts, strict=True) if v]
+        now = time.time()
+        with self._lock:
+            self._conn.executemany("UPDATE albums SET tags_checked = ? WHERE folder_path = ?", [(now, p) for p in same])
+            # -1 is no mtime a folder has: the walk's album check and the read
+            # verdict both see a changed folder.
+            self._conn.executemany("UPDATE albums SET dir_mtime = -1 WHERE folder_path = ?", [(p,) for p in changed])
+            self._conn.commit()
+        if changed:
+            logger.info("library scan: %d folder(s) had files change in place, re-reading", len(changed))
+        return len(changed)
+
     def _unchanged(self, folder_path: str, mtime: float, count: int) -> bool:
         with self._lock:
             row = self._conn.execute(
                 """SELECT dir_mtime, track_count, codec, recorded_at,
                           (SELECT COUNT(*) FROM tracks WHERE tracks.folder_path = albums.folder_path),
-                          declared, runtime, raw_count, explicit
+                          declared, runtime, raw_count, explicit,
+                          (SELECT COUNT(*) FROM file_tags WHERE file_tags.folder_path = albums.folder_path)
                    FROM albums WHERE folder_path = ?""",
                 (folder_path,),
             ).fetchone()
@@ -2712,15 +3208,34 @@ class LibraryIndex:
         count, and the verdict itself is plain Python (_unchanged_verdict)."""
         with self._lock:
             rows = self._conn.execute("""SELECT albums.folder_path, dir_mtime, track_count, codec, recorded_at,
-                          COALESCE(tc.n, 0), declared, runtime, raw_count, explicit
+                          COALESCE(tc.n, 0), declared, runtime, raw_count, explicit, COALESCE(fc.n, 0)
                    FROM albums
                    LEFT JOIN (SELECT folder_path, COUNT(*) AS n FROM tracks
                               GROUP BY folder_path) tc
-                     ON tc.folder_path = albums.folder_path""").fetchall()
+                     ON tc.folder_path = albums.folder_path
+                   LEFT JOIN (SELECT folder_path, COUNT(*) AS n FROM file_tags
+                              GROUP BY folder_path) fc
+                     ON fc.folder_path = albums.folder_path""").fetchall()
         return {r[0]: r[1:] for r in rows}
 
+    def _owed_reads(self, candidates: list[_Candidate]) -> list[_Candidate]:
+        """The folders a scan reads, in order: the new and changed ones first
+        (each artist's first album ahead, see _artists_first), then those the
+        cache already holds whole and owes only their every-tag rows (a cache
+        from before file_tags: one re-read of the whole library, which must
+        not keep a fresh download waiting behind it)."""
+        known = self._unchanged_rows()
+        changed: list[_Candidate] = []
+        owed: list[_Candidate] = []
+        for c in candidates:
+            row = known.get(c[0])
+            if self._unchanged_verdict(row, c[2], c[3]):
+                continue
+            (owed if self._unchanged_verdict(row, c[2], c[3], tags=False) else changed).append(c)
+        return _artists_first(changed) + _artists_first(owed)
+
     @staticmethod
-    def _unchanged_verdict(row: tuple | None, mtime: float, count: int) -> bool:
+    def _unchanged_verdict(row: tuple | None, mtime: float, count: int, tags: bool = True) -> bool:
         # A NULL codec is a row from before quality capture existed, a NULL
         # declared one from before the release's own shape was read, and a row
         # short of one track row per counted file is from before per-track
@@ -2751,6 +3266,11 @@ class LibraryIndex:
             and row[8] is not None
             and row[4] > 0
             and (row[4] >= row[1] or time.time() - float(row[3] or 0) < _UNREADABLE_RETRY_S)
+            # Track rows with no every-tag rows beside them: a row from before
+            # file_tags existed, re-read once so it backfills (both are written
+            # from the same reads, so a finished folder has as many of each).
+            # ``tags`` False asks about everything but that.
+            and (not tags or len(row) < 10 or row[9] >= row[4])
         )
 
     def _upsert(self, batch: list[tuple]) -> None:
@@ -2761,34 +3281,53 @@ class LibraryIndex:
         albums = [(*row[:17], *_album_keys(row[1], row[2])) for row in batch]
         tracks = [(*t, *_track_keys(t[1], t[2])) for row in batch for t in row[17]]
         with self._lock:
-            self._conn.executemany(
-                """INSERT INTO albums
-                       (folder_path, album, artist, year, track_count, dir_mtime, recorded_at,
-                        codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, raw_count,
-                        explicit, pkey_title, pkey_artist)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(folder_path) DO UPDATE SET
-                       album=excluded.album, artist=excluded.artist, year=excluded.year,
-                       track_count=excluded.track_count, dir_mtime=excluded.dir_mtime,
-                       recorded_at=excluded.recorded_at, codec=excluded.codec,
-                       bitrate=excluded.bitrate, bits=excluded.bits, rate=excluded.rate,
-                       declared=excluded.declared, disc_no=excluded.disc_no,
-                       disc_total=excluded.disc_total, runtime=excluded.runtime,
-                       raw_count=excluded.raw_count, explicit=excluded.explicit,
-                       pkey_title=excluded.pkey_title, pkey_artist=excluded.pkey_artist""",
-                albums,
-            )
-            # Replace, not merge: the read is of the whole folder, so its track
-            # rows are the whole truth for that folder and stale rows (a renamed
-            # or re-tagged file) must not linger beside the fresh ones.
-            self._conn.executemany("DELETE FROM tracks WHERE folder_path = ?", [(row[0],) for row in batch])
-            self._conn.executemany(
-                "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length, explicit,"
-                " tkey_title, tkey_artist)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tracks,
-            )
-            self._conn.commit()
+            # One transaction per batch: a write that fails part way (a value
+            # sqlite refuses) must leave the batch's folders as they were, not
+            # half replaced and then committed by the next batch.
+            try:
+                self._conn.executemany(
+                    """INSERT INTO albums
+                           (folder_path, album, artist, year, track_count, dir_mtime, recorded_at,
+                            codec, bitrate, bits, rate, declared, disc_no, disc_total, runtime, raw_count,
+                            explicit, pkey_title, pkey_artist)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(folder_path) DO UPDATE SET
+                           album=excluded.album, artist=excluded.artist, year=excluded.year,
+                           track_count=excluded.track_count, dir_mtime=excluded.dir_mtime,
+                           recorded_at=excluded.recorded_at, codec=excluded.codec,
+                           bitrate=excluded.bitrate, bits=excluded.bits, rate=excluded.rate,
+                           declared=excluded.declared, disc_no=excluded.disc_no,
+                           disc_total=excluded.disc_total, runtime=excluded.runtime,
+                           raw_count=excluded.raw_count, explicit=excluded.explicit,
+                           pkey_title=excluded.pkey_title, pkey_artist=excluded.pkey_artist""",
+                    albums,
+                )
+                # Replace, not merge: the read is of the whole folder, so its track
+                # rows are the whole truth for that folder and stale rows (a renamed
+                # or re-tagged file) must not linger beside the fresh ones.
+                self._conn.executemany("DELETE FROM tracks WHERE folder_path = ?", [(row[0],) for row in batch])
+                self._conn.executemany(
+                    "INSERT INTO tracks (folder_path, title, artist, codec, bitrate, bits, rate, length, explicit,"
+                    " tkey_title, tkey_artist)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tracks,
+                )
+                # The folder's every-tag rows, replaced whole like its tracks, and
+                # its re-stat clock started over: the read just saw every file.
+                self._conn.executemany("DELETE FROM file_tags WHERE folder_path = ?", [(row[0],) for row in batch])
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO file_tags (folder_path, name, size, mtime_ns, genre, tags)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    [(row[0], *f) for row in batch if len(row) > 18 for f in row[18]],
+                )
+                now = time.time()
+                self._conn.executemany(
+                    "UPDATE albums SET tags_checked = ? WHERE folder_path = ?", [(now, row[0]) for row in batch]
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def _prune_by_gen(self, gen: int, condemned: list[str] | None = None) -> None:
         """After a completed walk, drop the ``condemned`` subtrees (folders a
@@ -2821,6 +3360,7 @@ class LibraryIndex:
             self._conn.execute("DELETE FROM dirs WHERE seen_gen < ?", (gen - 1,))
             self._conn.execute("DELETE FROM albums WHERE folder_path NOT IN (SELECT path FROM dirs WHERE is_album = 1)")
             self._conn.execute("DELETE FROM tracks WHERE folder_path NOT IN (SELECT folder_path FROM albums)")
+            self._conn.execute("DELETE FROM file_tags WHERE folder_path NOT IN (SELECT folder_path FROM albums)")
             self._conn.commit()
 
     def _count(self) -> int:

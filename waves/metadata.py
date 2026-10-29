@@ -1,6 +1,7 @@
 import pathlib
 
 import mutagen
+import mutagen.mp3  # not pulled in by the package: the mp3 arm below relies on it
 from mutagen import flac, id3, mp4
 from mutagen.id3 import (
     APIC,
@@ -8,6 +9,7 @@ from mutagen.id3 import (
     TALB,
     TBPM,
     TCOM,
+    TCON,
     TCOP,
     TDRC,
     TIT2,
@@ -132,6 +134,126 @@ def read_item_id(path_file: str | pathlib.Path) -> str:
     return ids[0] if ids else ""
 
 
+# The Genre tag's default separator, also what an emptied setting falls back
+# to: what Plex splits a Genre on, and what Picard and Mp3tag write.
+DEFAULT_GENRE_DELIMITER = "; "
+
+# How MusicBrainz's lowercase names read in a tag: words capitalized, these
+# small words left alone after the first, and these spelled as initials.
+_SMALL_WORDS = frozenset({"and", "of", "the", "in", "de", "y"})
+_INITIALS = frozenset({"edm", "idm", "ebm", "uk", "us", "dj", "r&b"})
+
+
+def genre_label(name: str) -> str:
+    """A MusicBrainz genre name as it reads in a tag: "hip hop" becomes
+    "Hip Hop", "drum and bass" "Drum and Bass", "uk garage" "UK Garage"."""
+    words: list[str] = []
+    for index, word in enumerate(str(name or "").split()):
+        lowered = word.lower()
+        if lowered in _INITIALS:
+            words.append(lowered.upper())
+        elif index and lowered in _SMALL_WORDS:
+            words.append(lowered)
+        else:
+            words.append(lowered.title())
+    return " ".join(words)
+
+
+def join_genres(genres, delimiter: str | None) -> str:
+    """The Genre tag's text: every genre, labeled, joined by the setting's
+    separator (the default when it is empty), duplicates dropped."""
+    labels: list[str] = []
+    for genre in genres or []:
+        label = genre_label(genre)
+        if label and label not in labels:
+            labels.append(label)
+    return (delimiter or DEFAULT_GENRE_DELIMITER).join(labels)
+
+
+# Tags that describe the OLD audio, not the song: never carried onto a
+# replacement copy (matched as a lowercase substring of the tag key). The
+# iTunes ones by name: "com.apple.iTunes" is in every MP4 freeform key, and
+# those (a Mood, Picard's MusicBrainz ids) are the user's.
+_TAGS_NOT_CARRIED = (
+    "replaygain",
+    "encoder",
+    "encodedby",
+    "encoded by",
+    "\xa9too",
+    "encoding params",
+    "itunnorm",
+    "itunsmpb",
+    "itunpgap",
+)
+# The Genre, in each container's spelling: the old copy's wins over the fresh
+# one. A genre typed by hand or written by a tagger outranks the one a
+# download looked up on MusicBrainz.
+_TAGS_OLD_WINS = frozenset({"genre", "\xa9gen", "tcon"})
+
+
+def carry_over_tags(path_old: str | pathlib.Path, path_new: str | pathlib.Path) -> int:
+    """Copy onto the fresh file at ``path_new`` every tag the copy it is about
+    to replace (``path_old``) carries that the fresh tagging did not write.
+
+    Waves writes the tags it knows and leaves the rest alone, so a Genre, a
+    Comment, a rating or a mood the user typed into the old file has no
+    counterpart in the new one, and replacing the file in place threw it away
+    (issue #55: a bulk download upgraded hand-tagged tracks and every Genre
+    was gone). Only tags the new file LACKS are carried: a field Waves writes
+    (title, artists, the item id) keeps the fresh value, which is what a
+    re-tag is for. The Genre is the one exception: the old copy's is the
+    user's own (or their tagger's), so it replaces a looked-up one. Tags that describe the old audio itself (ReplayGain, the
+    encoder) stay behind, they would lie about the new bytes.
+
+    Args:
+        path_old (str | pathlib.Path): The file being replaced.
+        path_new (str | pathlib.Path): The freshly tagged file about to take
+            its place. Saved when anything was carried.
+
+    Returns:
+        int: How many tags were carried; 0 when either file cannot be read or
+            the two are different containers (their tag keys do not match).
+    """
+    try:
+        old = mutagen.File(path_old)
+        new = mutagen.File(path_new)
+    except Exception:
+        return 0
+
+    if old is None or new is None or old.tags is None:
+        return 0
+
+    if new.tags is None:
+        new.add_tags()
+
+    if not isinstance(new.tags, type(old.tags)):
+        return 0
+
+    carried: int = 0
+
+    for key in list(old.tags.keys()):
+        lowered = str(key).lower()
+
+        if any(mark in lowered for mark in _TAGS_NOT_CARRIED):
+            continue
+
+        if key in new.tags and lowered not in _TAGS_OLD_WINS:
+            continue
+
+        value = old.tags[key]
+
+        if Metadata._is_empty_tag(value) or (key in new.tags and new.tags[key] == value):
+            continue
+
+        new.tags[key] = value
+        carried += 1
+
+    if carried:
+        new.save()
+
+    return carried
+
+
 class Metadata:
     path_file: str | pathlib.Path
     title: str
@@ -196,6 +318,7 @@ class Metadata:
         release_type: str = "",
         is_video: bool = False,
         item_id: str = "",
+        genre: str = "",
         artist_ids: [str] = None,
         album_artist_ids: [str] = None,
     ):
@@ -230,6 +353,7 @@ class Metadata:
         self.release_type = release_type
         self.is_video = is_video
         self.item_id = item_id
+        self.genre = genre
         self.artist_ids = artist_ids or []
         self.album_artist_ids = album_artist_ids or []
 
@@ -340,6 +464,9 @@ class Metadata:
         self.m.tags["BPM"] = str(self.bpm if self.bpm > 0 else "")
         self.m.tags["INITIALKEY"] = self.initial_key
         self.m.tags["RELEASETYPE"] = self.release_type
+        # Every genre MusicBrainz lists, joined by the Genre separator setting
+        # (waves/genres.py); empty when the setting is off or nothing matched.
+        self.m.tags["GENRE"] = self.genre
         # The Vorbis spelling of the explicit flag (Picard, MusicBee and
         # foobar read it), so a FLAC says what the same track's M4A says
         # through rtng.
@@ -378,6 +505,10 @@ class Metadata:
         self.m.tags.add(TBPM(encoding=3, text=str(self.bpm if self.bpm > 0 else "")))
         self.m.tags.add(TKEY(encoding=3, text=self.initial_key))
         self.m.tags.add(TXXX(encoding=3, desc="MusicBrainz Album Type", text=self.release_type))
+        # Only when there is one: an ID3 frame is not a value cleanup_tags can
+        # read as empty, so an unset genre would land as a blank TCON.
+        if self.genre:
+            self.m.tags.add(TCON(encoding=3, text=self.genre))
         self.m.tags.add(TXXX(encoding=3, desc="ITUNESADVISORY", text="1" if self.explicit else "0"))
         if self.item_id:
             self.m.tags.add(TXXX(encoding=3, desc=ITEM_ID_TAG, text=self.item_id))
@@ -398,7 +529,7 @@ class Metadata:
         self.m.tags["cprt"] = self.copy_right
         self.m.tags["trkn"] = [[self.tracknumber, self.totaltrack]]
         self.m.tags["disk"] = [[self.discnumber, self.totaldisc]]
-        # self.m.tags['\xa9gen'] = self.genre
+        self.m.tags["\xa9gen"] = self.genre
         self.m.tags["\xa9day"] = self.date
         self.m.tags["\xa9wrt"] = self.composer
         self.m.tags["\xa9lyr"] = self._primary_lyrics()

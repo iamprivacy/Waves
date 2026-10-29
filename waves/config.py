@@ -377,9 +377,15 @@ def _quality_or_default(value) -> tidalapi.Quality:
         return tidalapi.Quality(ModelSettings().quality_audio)
 
 
+_BOOL_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
+
+
 def _field_unusable(hint, value) -> bool:
-    """A null, or a value that is not a member of the enum the field holds."""
+    """A null, a string in a bool field that names no bool, or a value that is
+    not a member of the enum the field holds."""
     if value is None:
+        return True
+    if hint is bool and isinstance(value, str):
         return True
     if isinstance(hint, type) and issubclass(hint, enum.Enum):
         try:
@@ -410,9 +416,17 @@ def _drop_unusable_fields(settings_json: str, cls_model) -> str:
         hints = typing.get_type_hints(cls_model)
     except Exception:
         return settings_json
+    # dataclasses_json reads a bool field with bool(value), so a hand-edited
+    # "false" loaded as True and was written back as true. Canonical spellings
+    # become the bool they name; any other string is unusable below.
+    coerced = False
+    for key, value in raw.items():
+        if hints.get(key) is bool and isinstance(value, str) and value.strip().lower() in _BOOL_WORDS:
+            raw[key] = _BOOL_WORDS[value.strip().lower()]
+            coerced = True
     dropped = [key for key, value in raw.items() if key in hints and _field_unusable(hints[key], value)]
     if not dropped:
-        return settings_json
+        return json.dumps(raw) if coerced else settings_json
     for key in dropped:
         del raw[key]
     logger.warning("Config: %d unusable field(s) reset to default", len(dropped))

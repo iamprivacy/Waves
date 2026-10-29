@@ -54,7 +54,7 @@ logger = logging.getLogger("waves.library.worker")
 
 
 class _EventWriter:
-    """Serialised JSON lines on the protocol stream."""
+    """Serialized JSON lines on the protocol stream."""
 
     def __init__(self, stream) -> None:
         self._stream = stream
@@ -267,9 +267,9 @@ def main(argv=None) -> int:
     sys.stdout = sys.stderr
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     code = serve(sys.stdin.buffer, out)
-    # Leave WITHOUT finalising the interpreter. The stdin pump is a daemon
+    # Leave WITHOUT finalizing the interpreter. The stdin pump is a daemon
     # thread parked inside a buffered read, so it holds that reader's lock,
-    # and finalisation trying to close the reader aborts the process:
+    # and finalization trying to close the reader aborts the process:
     #   Fatal Python error: _enter_buffered_busy: could not acquire lock
     # Every polite quit ended that way, which the parent now reads on the
     # child's stderr and files in the crash trail of an ordinary app exit.

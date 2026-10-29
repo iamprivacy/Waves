@@ -108,18 +108,15 @@ def name_builder_item(media: Track | Video) -> str:
 
 def get_tidal_media_id(url_or_id_media: str) -> str:
 
-    id_dirty = url_or_id_media.rsplit("/", 1)[-1]
-    id_media = id_dirty.rsplit("?", 1)[0]
-
-    return id_media
+    return url_ending_clean(url_or_id_media).rsplit("/", 1)[-1]
 
 
 def get_tidal_media_type(url_media: str) -> MediaType | bool:
     result: MediaType | bool = False
-    url_split = url_media.split("/")[-2]
+    url_split = url_ending_clean(url_media).split("/")
 
     if len(url_split) > 1:
-        media_name = url_media.split("/")[-2]
+        media_name = url_split[-2]
 
         if media_name == "track":
             result = MediaType.TRACK
@@ -138,15 +135,22 @@ def get_tidal_media_type(url_media: str) -> MediaType | bool:
 
 
 def url_ending_clean(url: str) -> str:
-    """Checks if a link ends with "/u" or "?u" and removes that part.
+    """Strip what a share link carries after the media id.
+
+    Drops a fragment, a query, trailing slashes and the trailing ``u``
+    segment TIDAL's share sheet appends (``.../track/123/u``), so the id
+    is the last path segment and the kind the one before it.
 
     Args:
-        url (str): The URL to clean.
+        url (str): The URL (or bare id) to clean.
 
     Returns:
         str: The cleaned URL.
     """
-    return url[:-2] if url.endswith("/u") or url.endswith("?u") else url
+    url = url.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if url.endswith("/u"):
+        url = url[:-2].rstrip("/")
+    return url
 
 
 def search_results_all(

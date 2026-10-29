@@ -2,7 +2,7 @@
 
 Every "do I already have this?" question is answered here, and only here: the
 library badge compares a TIDAL album against the folders scanned out of the
-user's own music library, and both sides are reduced to the same normalised
+user's own music library, and both sides are reduced to the same normalized
 strings before anything is compared.
 
 The rule this module lives by: it matches STRINGS and plain dicts, never a
@@ -22,7 +22,7 @@ Two biases run through the whole module, and both are deliberate:
 * **Canonicalise, never guess.** Cross-catalog comparison folds punctuation the
   two catalogs tag differently for the same release, symmetrically on both
   sides, so it can only ever fix a spurious mismatch. There is no fuzzy
-  distance anywhere: a match is exact on normalised text.
+  distance anywhere: a match is exact on normalized text.
 * **When unsure, keep both.** A missed match costs a badge. A wrong match tells
   the user they own a record they do not. So every decision here fails towards
   the harmless side, and towards showing nothing.
@@ -60,7 +60,7 @@ def is_various_artists(name: str) -> bool:
     """True when an artist name is a 'Various Artists' placeholder in any of the
     languages TIDAL serves it in, or in the abbreviated forms local taggers use.
     Presence matching uses this to refuse to match compilations at all: the
-    normalised "various artists" key collides across completely unrelated
+    normalized "various artists" key collides across completely unrelated
     compilations, so a match there means nothing.
 
     Testing the streaming side alone is sufficient: a candidate only reaches the
@@ -103,7 +103,7 @@ _GUEST_SPLIT_RE = re.compile(r"\s*(?:,|;|/|&|\+|\band\b)\s*", re.IGNORECASE)
 
 
 def feat_guests(title: str, artist: str) -> frozenset:
-    """The guest names a featuring credit carries, normalised, from wherever
+    """The guest names a featuring credit carries, normalized, from wherever
     the catalog wrote them (the artist's tail, the title's parenthetical), as
     evidence for the track matcher: stripping the credit from the KEY is what
     lets "Song" find "Song (feat. B)", and comparing the guests is what stops
@@ -245,7 +245,7 @@ def _fold_diacritics(s: str) -> str:
     """Strip accents from LATIN letters only: Bjork finds Björk, Motorhead
     finds Motörhead, because the two catalogs routinely disagree on whether a
     name wears its marks. The Latin guard is load-bearing, not an
-    optimisation: Japanese voicing marks (dakuten) are combining marks too,
+    optimization: Japanese voicing marks (dakuten) are combining marks too,
     and a global strip would fold バ into ハ, colliding genuinely different
     kana titles and breaking the Various-Artists marker family. A mark on a
     non-Latin base is left exactly where it was."""
@@ -296,7 +296,7 @@ def strip_edition_quals_ext(title: str) -> str:
 # --- Keys ----------------------------------------------------------------------
 
 
-# The version of the key normaliser (presence_key and track_key and everything
+# The version of the key normalizer (presence_key and track_key and everything
 # they fold through: canon, norm_title, norm_artist, strip_edition_quals_ext,
 # the edition and diacritic tables). The library cache stores the keys on its
 # rows and stamps this value beside them; a cache stamped with another value
@@ -307,7 +307,7 @@ KEY_NORMALISER_VERSION = "1"
 
 
 def presence_key(title: str, artist: str) -> tuple[str, str]:
-    """The cross-catalog album key: (base title, normalised artist), each canon'd
+    """The cross-catalog album key: (base title, normalized artist), each canon'd
     first. BOTH components must be equal for a match.
 
     Collapse-class qualifiers (deluxe, expanded, ...) are peeled so an edition
@@ -317,7 +317,7 @@ def presence_key(title: str, artist: str) -> tuple[str, str]:
     and "(Remastered)" must all file under one bucket or no gate downstream
     ever gets to compare them (the year, and any finer edition difference, is
     the gate's job, not the key's). A tail the edition vocabulary does not
-    recognise keeps today's behaviour: peeled from the key by the qualifier
+    recognize keeps today's behavior: peeled from the key by the qualifier
     strip, verbatim in the gate."""
     text = strip_edition_quals_ext(norm_title(canon(title)))
     base, tags, _years = edition_key(text)
@@ -666,7 +666,7 @@ def gate_title(title: str) -> str:
 # and "Untitled (Rise)" apart: recognition can only fold spellings of the same
 # thing, never two different things.
 
-# One canonical tag per recognised edition word. Plurals and hyphen variants
+# One canonical tag per recognized edition word. Plurals and hyphen variants
 # map to the same tag; "super" is its own tag so a super deluxe stays a
 # different set from a deluxe.
 _EDITION_TAG_WORDS = {
@@ -739,7 +739,7 @@ _EDITION_TAIL_DASH_RE = re.compile(r"\s+-\s+([^-]+)$")
 
 def _parse_edition_tail(tail: str) -> tuple[frozenset, frozenset] | None:
     """One trailing group as ``(tags, years)``, or None when any word in it is
-    not recognised edition vocabulary (the tail is then part of the title).
+    not recognized edition vocabulary (the tail is then part of the title).
     Segments ("Deluxe Edition/Remastered") merge into one set: the qualifier
     describes one release however it punctuates."""
     tags: set = set()
@@ -766,7 +766,7 @@ def _parse_edition_tail(tail: str) -> tuple[frozenset, frozenset] | None:
 
 
 def edition_key(title: str) -> tuple[str, frozenset, frozenset]:
-    """``(base, tags, years)`` for a gate-normalised title: every trailing
+    """``(base, tags, years)`` for a gate-normalized title: every trailing
     group that parses as edition vocabulary is folded into the tag set, and
     the first one that does not stops the peel and stays in the base."""
     text = gate_title(title)
@@ -995,7 +995,7 @@ def decide_presence(title, artist, year, tracks, index, duration=0, explicit=Non
     the bulk skip gate). Whatever the matcher cannot prove reports partial, so
     the caller keeps a live button.
 
-    Refused outright: Various-Artists albums (the normalised "various artists"
+    Refused outright: Various-Artists albums (the normalized "various artists"
     key collides across unrelated comps) and albums credited to nobody (a
     title-only match means nothing).
     """
@@ -1011,7 +1011,7 @@ def decide_presence(title, artist, year, tracks, index, duration=0, explicit=Non
     # local folder that happens to share the title.
     if not norm_artist(canon(artist)):
         return hidden
-    # A title that normalises to nothing ("-", "...", a lone explicit marker)
+    # A title that normalizes to nothing ("-", "...", a lone explicit marker)
     # makes it an artist-only key: every such album of the artist shares it,
     # and gate_title is empty too, so same_edition would wave two DIFFERENT
     # punctuation-only titles through each other. The track side refuses the
@@ -1160,11 +1160,11 @@ def decide_presence(title, artist, year, tracks, index, duration=0, explicit=Non
     }
 
 
-# --- Track presence (per-file rows, exact on normalised text) -------------------
+# --- Track presence (per-file rows, exact on normalized text) -------------------
 
 
 def track_key(title: str, artist: str) -> tuple[str, str]:
-    """The cross-catalog TRACK key: (normalised title, normalised artist), each
+    """The cross-catalog TRACK key: (normalized title, normalized artist), each
     canon'd first. Unlike the album key the title keeps its edition qualifiers:
     "Song (Acoustic)" and "Song" are different recordings, and a track pill that
     lit for the wrong one would claim a copy the user does not have. Only the
@@ -1314,7 +1314,7 @@ def decide_track_presence(title, artist, index, album="", album_year="", duratio
 
 
 def build_artist_rollup(album_index: dict) -> dict:
-    """Roll the album-presence index up per artist: normalised-artist ->
+    """Roll the album-presence index up per artist: normalized-artist ->
     ``{"present": True, "albums": <distinct albums>, "tracks": <summed>,
     "lossless": <any lossless copy>}``. Groups on the artist half of the
     presence_key, counts each album key once (dedups editions, best track

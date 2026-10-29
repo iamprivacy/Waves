@@ -30,7 +30,7 @@ class Worker(QtCore.QRunnable):
     @QtCore.Slot()  # QtCore.Slot
     def run(self):
         """
-        Initialise the runner function with passed args, kwargs.
+        Initialize the runner function with passed args, kwargs.
         """
         # Never let an exception escape into Qt's C++ QThreadPool: depending on
         # the PySide/Qt build that boundary can abort the whole process, and even

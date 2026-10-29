@@ -20,80 +20,67 @@ when given, total length within the same tolerance when given). Nothing
 looser: a lookup that cannot pin BOTH sides to one MusicBrainz release proves
 nothing.
 
-Politeness and privacy follow the genre resolver that shipped on the harbor
-branch: a process-wide one-request-per-second gate, a descriptive User-Agent
-(MusicBrainz blocks anonymous clients), definite-only caching in a local
-sqlite file (a transient network error is never cached, so a blip cannot
-poison an album forever), and a short negative TTL for definitive not-founds.
-Requests carry artist and release-title search terms, service data and
-user-chosen text, never an account id, token or local path; log lines carry
-outcomes and counts only.
+Politeness and privacy live in ``waves.mb_service``, shared with the
+Releases check: one process-wide request a second (an arbitration is a
+foreground request, so it goes ahead of a discography read in progress), a
+descriptive User-Agent, and definite-only caching (a transient network
+error is never cached, so a blip cannot poison an album forever; a
+definitive not-found expires after a day). Every answer is also put on
+record there, so a release whose length any earlier answer told is not
+read again. Requests carry artist and release-title search terms, service
+data and user-chosen text, never an account id, token or local path; log
+lines carry outcomes and counts only.
 
-Pure standard library (urllib, json, sqlite3), no Qt and no tidalapi, so it
-unit tests without the GUI stack. The HTTP layer is one injectable ``fetch``
-callable returning ``(status, body)`` tuples, so tests drive the whole
-arbiter with canned responses and never touch the network or sleep.
+No Qt and no tidalapi, so it unit tests without the GUI stack. The HTTP
+layer is one injectable ``fetch`` callable returning ``(status, body)``
+tuples, so tests drive the whole arbiter with canned responses and never
+touch the network or sleep.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import sqlite3
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
-from threading import Lock
 
 from waves.matching import _album_duration_tol, same_edition, to_year_int
+from waves.mb_service import (
+    DEFINITE_TTL_SEC,
+    MB_BASE,
+    MIN_INTERVAL_SEC,
+    NEGATIVE_TTL_SEC,
+    MBService,
+    Pacer,
+    quote,
+    summed_length_sec,
+)
 
 logger = logging.getLogger("waves.mbarbiter")
 
-MB_BASE = "https://musicbrainz.org/ws/2"
-# MusicBrainz allows one request per second to the public web service.
-MIN_INTERVAL_SEC = 1.0
-# Arbitration is best-effort enrichment on a background worker; a flaky link
-# must not hold the (serialised) request gate for long.
-LOOKUP_TIMEOUT_SEC = 10
 # One search plus at most this many per-release reads per arbitration, so an
 # album with dozens of editions cannot turn into a crawl at 1 req/s.
 MAX_RELEASE_READS = 3
-# A definitive not-found is a real answer worth remembering, but MusicBrainz
-# does occasionally gain it, so a day, not forever. This covers BOTH shapes a
-# not-found arrives in: the negative HTTP statuses below, and the search
-# endpoint's polite one, HTTP 200 with an empty releases array (a release
-# whose recordings carry no lengths is the same kind of answer: nothing to
-# vouch with today, but MusicBrainz routinely gains it).
-NEGATIVE_TTL_SEC = 24 * 3600
-_NEGATIVE_STATUSES = frozenset({400, 404, 410})
-
-
-def _default_user_agent() -> str:
-    """The descriptive User-Agent MusicBrainz requires. Version via the app's
-    own metadata (pyproject-first, like lyrics.py) so it stays current on
-    source runs and frozen builds alike, never pinned to a distribution name.
-    Must never raise: one construction site sits on the GUI thread."""
-    try:
-        from waves import version_app
-
-        v = version_app()
-    except Exception:
-        v = "dev"
-    return f"Waves/{v} ( https://github.com/iamprivacy/Waves )"
+# The release read asks for everything it can carry in the same single
+# request (groups, credits, ISRCs, and the service's extras: labels,
+# genres, tags, links), so later questions find it on record.
+_RELEASE_INC = "recordings+release-groups+artist-credits+isrcs"
+__all__ = ["MAX_RELEASE_READS", "NEGATIVE_TTL_SEC", "MBArbiter"]
 
 
 class MBArbiter:
     """Ask MusicBrainz whether an unproven library match is the release on
-    screen. Thread-safe: lookups run on a background worker; the sqlite cache
-    is opened check_same_thread=False under an instance lock, and a second
-    lock serialises the outbound request rate."""
+    screen. Thread-safe: lookups run on a background worker; the shared
+    service serializes the requests and guards its file.
+
+    Production hands in the process's one ``service``; without one (tests)
+    the arbiter builds its own over ``db_path`` with the given clock."""
 
     def __init__(
         self,
-        db_path: str,
+        db_path: str | None = None,
         *,
+        service: MBService | None = None,
         user_agent: str | None = None,
         fetch: Callable[[str], tuple[int, str]] | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -101,21 +88,14 @@ class MBArbiter:
         now: Callable[[], float] = time.time,
         min_interval: float = MIN_INTERVAL_SEC,
     ) -> None:
-        self._path = str(db_path)
-        self._ua = user_agent or _default_user_agent()
-        self._fetch = fetch or self._http_fetch
-        self._sleep = sleep
-        self._monotonic = monotonic
-        self._now = now
-        self._min_interval = float(min_interval)
-        self._rate_lock = Lock()
-        self._last_request: float | None = None
-        self._db_lock = Lock()
-        self._conn: sqlite3.Connection | None = None
-        # close() is final: a straggler arbitration still holding this
-        # instance must not lazily reopen the cache (a settings wipe deletes
-        # the file, and a reopen would resurrect it).
-        self._closed = False
+        self._owns = service is None
+        self._svc = service or MBService(
+            db_path,
+            fetch=fetch,
+            pacer=Pacer(min_interval, sleep=sleep, monotonic=monotonic),
+            user_agent=user_agent,
+            now=now,
+        )
 
     # ---- public ---------------------------------------------------------
 
@@ -192,12 +172,12 @@ class MBArbiter:
     def _search_releases(self, artist: str, title: str) -> list[dict] | None:
         """All releases MusicBrainz files under this artist and title:
         ``[{id, title, track_count, year}]``. None on a transient failure."""
-        lucene = f'release:"{_quote(title)}" AND artist:"{_quote(artist)}"'
+        lucene = f'release:"{quote(title)}" AND artist:"{quote(artist)}"'
         q = urllib.parse.urlencode({"query": lucene, "fmt": "json", "limit": 25})
         # An empty releases array is the search endpoint's not-found: a real
         # answer, but one MusicBrainz gains, so it must expire (see
         # NEGATIVE_TTL_SEC), never sit in the file forever.
-        body = self._cached_get(f"{MB_BASE}/release/?{q}", unanswered=lambda b: not _as_list(b.get("releases")))
+        body = self._get(f"{MB_BASE}/release/?{q}", unanswered=lambda b: not _as_list(b.get("releases")))
         if body is None:
             return None
         out = []
@@ -220,166 +200,49 @@ class MBArbiter:
         None on a transient failure or a junk id."""
         if not mbid:
             return None
-        q = urllib.parse.urlencode({"inc": "recordings", "fmt": "json"})
+        # Already on record with every length (from any earlier answer,
+        # whichever feature asked): no request.
+        # Only while that answer is recent: an edit to a length is noticed.
+        known = self._svc.release_facts(mbid, max_age=DEFINITE_TTL_SEC)
+        if known and known["length"] > 0:
+            return {"length": known["length"], "year": known["date"][:4]}
+        base = f"{MB_BASE}/release/{urllib.parse.quote(mbid)}?"
+        plain = base + urllib.parse.urlencode({"inc": _RELEASE_INC, "fmt": "json"})
+        extra = self._svc.extras("release")
+        full = base + urllib.parse.urlencode({"inc": f"{_RELEASE_INC}+{extra}", "fmt": "json"}) if extra else plain
         # A release whose recordings carry no lengths cannot vouch for anyone
         # TODAY, but contributors add lengths: cache it like a not-found, so
         # the day they land the badge can still upgrade.
-        body = self._cached_get(
-            f"{MB_BASE}/release/{urllib.parse.quote(mbid)}?{q}",
-            unanswered=lambda b: _summed_length_sec(b) <= 0,
-        )
+        body = self._get(full, unanswered=lambda b: summed_length_sec(b) <= 0, plain_url=plain)
         if body is None:
             return None
         return {
-            "length": _summed_length_sec(body),
+            "length": summed_length_sec(body),
             "year": str(body.get("date", "") or "")[:4],
         }
 
-    # ---- HTTP + cache ------------------------------------------------------
+    # ---- the service -------------------------------------------------------
 
-    def _cached_get(self, url: str, *, unanswered: Callable[[dict], bool] | None = None) -> dict | None:
-        """GET with definite-only caching: a parsed 200 body and definitive
-        not-founds (under a short TTL) are stored forever/briefly; transient
-        failures are returned as None and never cached. ``unanswered`` lets
-        the caller classify a 200 body that holds NO definite positive answer
-        (the search endpoint says not-found as 200 with an empty releases
-        array): those cache under NEGATIVE_TTL_SEC like the negative statuses,
-        never forever, or an album MusicBrainz catalogues next month could
-        never upgrade its badge for the life of the cache file. A closed
-        arbiter answers None outright: close() is the settings wipe's word
-        that no request should go out and no file should reappear."""
-        with self._db_lock:
-            if self._closed:
-                return None
-        cached = self._cache_read(url)
-        if cached is not None:
-            return cached
-        fetched = self._rate_gated_fetch(url)
-        if fetched is None:
-            return None
-        status, text = fetched
-        if status == 200:
-            try:
-                body = json.loads(text)
-            except ValueError:
-                logger.info("MusicBrainz lookup returned unparseable JSON")
-                return None
-            if isinstance(body, dict):
-                ttl = NEGATIVE_TTL_SEC if unanswered is not None and unanswered(body) else None
-                self._cache_write(url, text, ttl=ttl)
-                return body
-            return None
-        if status in _NEGATIVE_STATUSES:
-            # A real answer: remember it briefly so re-browsing the same album
-            # does not repeat the round-trip behind the 1 req/s gate.
-            self._cache_write(url, "{}", ttl=NEGATIVE_TTL_SEC)
-            return {}
-        logger.info("MusicBrainz lookup HTTP %s (transient)", int(status))
-        return None
-
-    def _rate_gated_fetch(self, url: str) -> tuple[int, str] | None:
-        """One outbound request behind the serialised 1 req/s gate, or None on
-        a transient failure (never cached) or a closed arbiter. The closed
-        flag is re-checked after any rate wait and immediately before the
-        request: a close() landing between _cached_get's entry check and this
-        point (it has a whole rate-gate sleep to land in) must not see one
-        last request depart after it returned."""
-        with self._rate_lock:
-            if self._last_request is not None:
-                wait = self._min_interval - (self._monotonic() - self._last_request)
-                if wait > 0:
-                    self._sleep(wait)
-            self._last_request = self._monotonic()
-            with self._db_lock:
-                if self._closed:
-                    return None
-            try:
-                return self._fetch(url)
-            except Exception:
-                logger.info("MusicBrainz lookup failed (transient)")
-                return None
-
-    def _http_fetch(self, url: str) -> tuple[int, str]:
-        req = urllib.request.Request(  # noqa: S310 (https only: every URL is built on MB_BASE)
-            url, headers={"User-Agent": self._ua, "Accept": "application/json"}
+    def _get(self, url: str, *, unanswered: Callable[[dict], bool], plain_url: str | None = None) -> dict | None:
+        """A foreground read: a pill on screen waits for it. A definite
+        answer is kept DEFINITE_TTL_SEC (then asked again, so an edit on
+        MusicBrainz reaches the cache), a not-found or an answer with nothing
+        in it yet for a day (see waves.mb_service.get)."""
+        return self._svc.get(
+            url,
+            ttl=DEFINITE_TTL_SEC,
+            unanswered=unanswered,
+            foreground=True,
+            not_found_answers=True,
+            plain_url=plain_url,
+            extras_kind="release",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=LOOKUP_TIMEOUT_SEC) as resp:  # noqa: S310 (https, fixed host)
-                return int(resp.status), resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            return int(e.code), ""
-
-    def _db(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self._path, check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("CREATE TABLE IF NOT EXISTS responses (url TEXT PRIMARY KEY, body TEXT, expires REAL)")
-            self._conn.commit()
-        return self._conn
-
-    def _cache_read(self, url: str) -> dict | None:
-        with self._db_lock:
-            if self._closed:
-                return None
-            row = self._db().execute("SELECT body, expires FROM responses WHERE url = ?", (url,)).fetchone()
-        if not row:
-            return None
-        body, expires = row
-        if expires is not None and self._now() > float(expires):
-            return None
-        try:
-            parsed = json.loads(body)
-        except ValueError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    def _cache_write(self, url: str, body: str, *, ttl: float | None) -> None:
-        expires = (self._now() + ttl) if ttl is not None else None
-        with self._db_lock:
-            if self._closed:
-                return
-            self._db().execute(
-                "INSERT INTO responses (url, body, expires) VALUES (?, ?, ?) "
-                "ON CONFLICT(url) DO UPDATE SET body=excluded.body, expires=excluded.expires",
-                (url, body, expires),
-            )
-            self._db().commit()
 
     def close(self) -> None:
-        with self._db_lock:
-            self._closed = True
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-
-
-def _summed_length_sec(body: dict) -> int:
-    """The release's recording seconds summed across its media, 0 unless
-    EVERY track reported one: a sum missing any track's length would refute
-    true matches, the same all-or-nothing honesty the scanner applies to
-    runtime."""
-    total_ms = 0
-    complete = True
-    for medium in _as_list(body.get("media")):
-        if not isinstance(medium, dict):
-            continue
-        for track in _as_list(medium.get("tracks")):
-            if not isinstance(track, dict):
-                continue
-            ms = track.get("length")
-            if not ms:
-                complete = False
-                continue
-            try:
-                total_ms += int(ms)
-            except (TypeError, ValueError):
-                complete = False
-    return total_ms // 1000 if complete and total_ms > 0 else 0
-
-
-def _quote(term: str) -> str:
-    """Escape a term for embedding in a quoted Lucene phrase."""
-    return str(term or "").replace("\\", " ").replace('"', " ").strip()
+        """Final for an arbiter that built its own service; the shared one
+        is closed by its owner."""
+        if self._owns:
+            self._svc.close()
 
 
 def _as_list(value) -> list:

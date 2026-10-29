@@ -26,7 +26,10 @@ import sqlite3
 import sys
 import time
 import unicodedata
+from pathlib import Path
 from threading import Lock, local
+
+from waves import db
 
 # Delivered-quality tiers, lowest to highest, keyed by the TIDAL tier string
 # (tidalapi Quality values: LOW < HIGH < LOSSLESS < HI_RES_LOSSLESS). A caller
@@ -178,7 +181,7 @@ class OwnershipStore:
         if parent:
             os.makedirs(parent, exist_ok=True)
         self._lock = Lock()
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn = db.connect(self._path, kind=db.STATE)
         # Readers never queue behind a writer, or behind each other: each
         # thread that reads gets its own connection (WAL lets any number of
         # them read while one writes). Before this every read went through
@@ -190,10 +193,13 @@ class OwnershipStore:
         # across connections, so that one case keeps the shared connection.
         self._readers = local()
         self._closed = False
+        # Set once a thread's own reader has failed (see _read): every read
+        # from then on goes through the shared connection.
+        self._shared_reads = False
+        self._members_failed = False
         # The folders ownership answers are confined to (see set_roots).
         self._roots = None
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS downloads (
                        track_id     TEXT    NOT NULL,
                        path         TEXT    NOT NULL,
@@ -262,15 +268,38 @@ class OwnershipStore:
         """Run a read on this thread's own connection (see __init__). Falls
         back to the shared connection, under the lock, for an in-memory
         store or once the store is closed (so a late reader gets sqlite's
-        own "closed" error rather than a fresh connection to nothing)."""
-        if self._path == ":memory:" or self._closed:
+        own "closed" error rather than a fresh connection to nothing).
+
+        A reader opens the file read-write but never creates it, and only
+        the constructor lays down the schema. So if the file is removed or
+        replaced while the app runs (a sync client, a restore, the user
+        clearing the config folder), a thread whose first read comes after
+        that would otherwise open a brand new empty database and fail every
+        query with "no such table", forever, out of a Slot. The shared
+        connection still holds the file the store was opened on, the one
+        every write goes to, so a failing reader hands over to it, and so
+        does every read after that."""
+        if self._path == ":memory:" or self._closed or self._shared_reads:
             with self._lock:
                 return self._conn.execute(sql, params).fetchall()
         conn = getattr(self._readers, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self._path)
-            self._readers.conn = conn
-        return conn.execute(sql, params).fetchall()
+        try:
+            if conn is None:
+                uri = Path(os.path.abspath(self._path)).as_uri() + "?mode=rw"
+                conn = sqlite3.connect(uri, uri=True)
+                self._readers.conn = conn
+            return conn.execute(sql, params).fetchall()
+        except sqlite3.Error as e:
+            if not self._shared_reads:
+                logger.warning(
+                    "ownership: a reader could not use the store file (%s); reading through the shared connection", e
+                )
+            self._shared_reads = True
+            if conn is not None:
+                self._readers.conn = None
+                conn.close()
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
 
     def record(
         self,
@@ -359,21 +388,50 @@ class OwnershipStore:
             ).fetchone()
         return int(got[0]) if got else 0
 
-    def adopt(self, track_id: str, path: str) -> bool:
+    def adopt(
+        self,
+        track_id: str,
+        path: str,
+        quality_tier: str | None = None,
+        *,
+        audio_mode: str | None = None,
+        bit_depth: int | None = None,
+        sample_rate: int | None = None,
+        codecs: str | None = None,
+    ) -> bool:
         """Record a file the engine found already on disk (no stream was
-        fetched, so no tier is known), only where no row for (track_id, path)
-        exists yet. A row already there describes a measured copy, often the
-        very file a twin occurrence of this track wrote moments ago, and an
-        unknown tier must never overwrite it.
+        fetched), only where no row for (track_id, path) exists yet. A row
+        already there describes a copy a fetch measured, often the very file
+        a twin occurrence of this track wrote moments ago, and must stay.
+
+        The tier is what the caller read off the file itself (see the
+        bridge's _measure_file_quality), None when the file could not be
+        read. A tier-less row reads as current, so the file is never
+        replaced on a guess; a measured one takes part in upgrades like any
+        other copy.
 
         Returns:
             bool: Whether a row was added.
         """
+        tier = (quality_tier or "").upper() or None
         with self._lock:
             cur = self._conn.execute(
-                """INSERT INTO downloads (track_id, path, recorded_at) VALUES (?, ?, ?)
+                """INSERT INTO downloads
+                       (track_id, path, quality_tier, quality_rank, audio_mode,
+                        bit_depth, sample_rate, codecs, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(track_id, path) DO NOTHING""",
-                (str(track_id), str(path), int(time.time())),
+                (
+                    str(track_id),
+                    str(path),
+                    tier,
+                    quality_rank(tier),
+                    audio_mode,
+                    bit_depth,
+                    sample_rate,
+                    codecs,
+                    int(time.time()),
+                ),
             )
             self._conn.commit()
             return int(cur.rowcount or 0) > 0
@@ -480,11 +538,22 @@ class OwnershipStore:
         user's music folder: unlike ownership_of, there is no live filesystem
         stat here, so this never risks hanging on a dropped network mount and
         is safe to call directly.
+
+        A store that cannot answer (its file broken under the shared
+        connection too) also reads as None: the cards call this from a Slot,
+        and "unknown" is a state they already show, where an exception is
+        not.
         """
-        rows = self._read(
-            "SELECT track_id FROM collection_members WHERE collection_id = ?",
-            (str(collection_id),),
-        )
+        try:
+            rows = self._read(
+                "SELECT track_id FROM collection_members WHERE collection_id = ?",
+                (str(collection_id),),
+            )
+        except sqlite3.OperationalError as e:
+            if not self._members_failed:
+                self._members_failed = True
+                logger.warning("ownership: members_of could not read the store (%s)", e)
+            return None
         if not rows:
             return None
         return [r[0] for r in rows]
