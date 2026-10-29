@@ -41,24 +41,32 @@
   <url type="bugtracker">https://github.com/iamprivacy/Waves/issues</url>
   <screenshots>
     <screenshot type="default">
-      <caption>Browse, the home screen: TIDAL's shelves, new tracks and new albums</caption>
-      <image>https://getwaves.dev/assets/appstream/browse.png</image>
+      <caption>New singles, albums and videos from the artists you follow, a dot on each cover marking its quality</caption>
+      <image>https://getwaves.dev/assets/appstream/releases.png</image>
     </screenshot>
     <screenshot>
-      <caption>Search across artists, albums, tracks and videos, each release wearing its best quality</caption>
+      <caption>Every artist you follow on one timeline, from their first release to now</caption>
+      <image>https://getwaves.dev/assets/appstream/artists.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Search results with an album unfolded in place, its tracks ready to pick</caption>
       <image>https://getwaves.dev/assets/appstream/search.png</image>
     </screenshot>
     <screenshot>
-      <caption>An artist page: biography, top tracks and the full discography</caption>
+      <caption>An album page with a preview, the quality and a save button on every track</caption>
+      <image>https://getwaves.dev/assets/appstream/album.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An artist page with the whole discography and Follow right by the name</caption>
       <image>https://getwaves.dev/assets/appstream/artist.png</image>
     </screenshot>
     <screenshot>
-      <caption>The download queue saving albums track by track</caption>
+      <caption>The download queue, grouped into completed, downloading and queued</caption>
       <image>https://getwaves.dev/assets/appstream/queue.png</image>
     </screenshot>
     <screenshot>
-      <caption>Search results remember what is already on your drive, album by album</caption>
-      <image>https://getwaves.dev/assets/appstream/library.png</image>
+      <caption>Settings as a rail of short sections under Music, Files and App</caption>
+      <image>https://getwaves.dev/assets/appstream/settings.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>

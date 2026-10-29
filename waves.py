@@ -61,6 +61,11 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # nuitka-project: --include-qt-plugins=qml,multimedia
 # The library scanner process re-executes this binary with --library-worker.
 # nuitka-project: --include-module=waves.library_worker
+# waves_ui.notify builds the notifier inside a function, so Nuitka never sees
+# the import; without these two lines the bundle ships without banners. The
+# data line carries resources/python.png, which common.py names at import.
+# nuitka-project: --include-package=desktop_notifier
+# nuitka-project: --include-package-data=desktop_notifier
 # Qt 6.11 added a Qt.labs.assetdownloader QML module that ships ONLY as a
 # static library, which Nuitka cannot process. It arrives through the qml
 # plugin scan rather than the DLL list, so --noinclude-dlls does not reach
@@ -136,7 +141,7 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # nuitka-project-if: {OS} in ("Windows"):
 #    nuitka-project: --include-data-files={MAIN_DIRECTORY}/waves/ui/icon.ico=ui/icon.ico
 # nuitka-project: --include-data-files=./pyproject.toml=pyproject.toml
-# AGPL-3.0 requires the licence text to travel with the binary; ship it inside
+# AGPL-3.0 requires the license text to travel with the binary; ship it inside
 # the bundle next to the Phosphor (qml/) and JetBrains Mono (fonts/) notices.
 # nuitka-project: --include-data-files=./LICENSE=LICENSE
 # nuitka-project: --company-name=Waves
