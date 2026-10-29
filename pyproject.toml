@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.1.35"
+version = "0.2.0"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -28,8 +28,8 @@ documentation = "https://getwaves.dev"
 packages = [{ include = "waves" }]
 
 [tool.poetry.dependencies]
-requests = "~2.32.5"
-mutagen = "^1.47.0"
+requests = "~2.34.2"
+mutagen = "^1.48.1"
 dataclasses-json = "^0.6.7"
 pathvalidate = "^3.3.1"
 m3u8 = "^6.0.0"
@@ -44,14 +44,17 @@ m3u8 = "^6.0.0"
 # macOS version floor" step enforces each flavor's floor on every macOS build;
 # when a PySide6 release honors its wheel tags again the legacy legs can go.
 pyside6 = { version = "6.11.1", optional = true }
+# Optional on purpose: waves_ui.notify degrades to "no banner" without it, and
+# Settings shows the notification switch only when it is importable.
+desktop-notifier = { version = "^6.2.0", optional = true }
 tidalapi = "^0.8.10"
 python-ffmpeg = "^2.0.12"
 pycryptodome = "^3.23.0"
-certifi = ">=2026.4.22"
-urllib3 = "^2.7.0"
+certifi = ">=2026.7.22"
+urllib3 = "^2.8.0"
 
 [project.optional-dependencies]
-gui = ["pyside6"]
+gui = ["pyside6", "desktop-notifier"]
 
 [tool.poetry.group.dev]
 optional = true
@@ -137,9 +140,23 @@ ignore = [
 # Qt boot (S603, fixed argv), and its boot -> drive -> assert scenario is one
 # deliberately linear function (C901).
 "tests/test_browse_back_scroll.py" = ["S603", "C901"]
+# The Settings fit scenario re-runs itself in a subprocess the same way
+# (S603, fixed argv), and its scenario is one linear function too (C901).
+"tests/test_settings_fit.py" = ["S603", "C901"]
+"tests/test_settings_unsaved_marks.py" = ["S603", "C901"]
+"tests/test_releases_search_restore.py" = ["S603"]
+"tests/test_releases_feed_reveal.py" = ["S603"]
+"tests/test_waves_scrollbar.py" = ["S603", "C901"]
+"tests/test_queue_row_bar_follows_drag.py" = ["S603", "C901"]
+"tests/test_queue_button_echo.py" = ["S603", "C901"]
+"tests/test_releases_badge_flare.py" = ["S603", "C901"]
+"tests/test_queue_button_finishing.py" = ["S603", "C901"]
 # Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
 # helper for real on macOS (S603, fixed argv).
 "tests/test_apple_double_cleanup.py" = ["S603"]
+# Runs a throwaway test file in a fresh interpreter to prove the profile guard
+# refuses it (S603, fixed argv: this interpreter and a file it just wrote).
+"tests/test_profile_guard.py" = ["S603"]
 # Runs the README's own verification commands through bash against a manifest
 # signed with a throwaway key (S603, S607: the commands are the README's text).
 "tests/test_release_verify_notes.py" = ["S603", "S607"]
@@ -157,6 +174,12 @@ ignore = [
 "tests/test_quality_pick_qml.py" = ["S603"]
 # The ATMOS badge scenario, likewise (S603, fixed argv).
 "tests/test_atmos_badge_qml.py" = ["S603"]
+# The Releases pane scenario, likewise (S603, fixed argv).
+"tests/test_releases_pane_buckets.py" = ["S603"]
+"tests/test_releases_pane_search.py" = ["S603"]
+"tests/test_releases_pane_scroll.py" = ["S603"]
+"tests/test_momentum_guard.py" = ["S603"]
+"tests/test_momentum_guard_cursor.py" = ["S603"]
 # The My Tidal list-top scenario re-runs itself in a subprocess to isolate the
 # Qt boot (S603, fixed argv).
 "tests/test_my_tidal_list_top_scenario.py" = ["S603"]
@@ -232,6 +255,8 @@ ignore = [
 "tests/test_browse_row_window.py" = ["S603", "C901"]
 "tests/test_video_grid_hover_dwell.py" = ["S603", "C901"]
 "tests/test_hover_prefetch_scenario.py" = ["S603", "C901"]
+"tests/test_releases_auto_kinds_qml.py" = ["S603", "C901"]
+"tests/test_releases_quality_badge.py" = ["S603", "C901"]
 "tests/test_offscreen_qt_is_usable.py" = ["S603"]
 # Runs the bundle size report for real, on a root wide enough to fill the pipe
 # buffer, through the shell it is written for (S603/S607, fixed argv).
@@ -249,7 +274,7 @@ ignore = [
 "tests/test_queue_single_row_has_nothing_to_expand.py" = ["S603", "C901"]
 "tests/test_queue_expected_tier.py" = ["S603", "C901"]
 "tests/test_queue_in_library_row.py" = ["S603", "C901"]
-"tests/test_queue_ledger_cap.py" = ["S603", "C901"]
+"tests/test_queue_ledger_scroll.py" = ["S603", "C901"]
 "tests/test_queue_section_pulse.py" = ["S603", "C901"]
 "tests/test_new_release_mark.py" = ["S603", "C901"]
 "tests/test_queue_repeated_track_state.py" = ["S603", "C901"]
