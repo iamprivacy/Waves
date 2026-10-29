@@ -68,7 +68,7 @@ def sign(message: bytes, private_key_pem: str) -> str:
     """Sign ``message`` with a PEM Ed25519 private key; return the base64 signature.
 
     Producer side (CI). The detached signature is over the *exact* bytes of the
-    ``SHA256SUMS`` manifest, callers must not re-encode or normalise newlines.
+    ``SHA256SUMS`` manifest, callers must not re-encode or normalize newlines.
     """
     key = ECC.import_key(private_key_pem)
     sig = eddsa.new(key, "rfc8032").sign(message)

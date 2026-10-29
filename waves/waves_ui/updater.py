@@ -270,7 +270,7 @@ def managed_channel() -> str:
     """Which external package manager owns this install; "" when none does.
 
     Containerized formats announce themselves through the environment, Scoop
-    is recognisable from the install path, and everything path-undetectable
+    is recognizable from the install path, and everything path-undetectable
     (chiefly Homebrew Cask, which moves the .app to /Applications) is covered
     by an ``install_channel`` sentinel file the installer drops in the config
     folder (content = channel id, e.g. ``homebrew-cask``). The sentinel lives
@@ -665,7 +665,7 @@ class AppUpdater:
 
     # ----- configuration / locations ------------------------------------- #
     def is_configured(self) -> bool:
-        """True once a release repo is set and the platform is recognised."""
+        """True once a release repo is set and the platform is recognized."""
         return bool(self.repo) and bool(self.os_key)
 
     def releases_url(self) -> str:
@@ -926,7 +926,7 @@ class AppUpdater:
             applied_clean = True
         finally:
             payload.unlink(missing_ok=True)
-            # A failed (or cancelled) apply can leave a full extracted app
+            # A failed (or canceled) apply can leave a full extracted app
             # copy under staged/; without this it sits in the config dir until
             # the next update attempt happens to overwrite it. Only our own
             # staging tree is touched, and only on failure: on success the
@@ -1371,7 +1371,7 @@ class AppUpdater:
         """Fetch the raw SHA256SUMS bytes (returns ``None`` on any failure → abort).
 
         The exact bytes matter: they are what the signature is verified against, so
-        this never decodes, strips, or normalises them.
+        this never decodes, strips, or normalizes them.
         """
         if not url:
             return None
@@ -1465,7 +1465,7 @@ class AppUpdater:
     # running executable; Windows defers the swap to a helper because a running
     # .exe can't overwrite itself.
     def _apply(self, payload: Path, release: Release, log, abort: Event | None = None) -> Path:
-        # The last chance to honour Cancel: extraction is the slow half of the
+        # The last chance to honor Cancel: extraction is the slow half of the
         # apply, so check right after it, before the platform swap touches the
         # install (aborting MID-swap would be worse than finishing it, so the
         # swap itself stays uninterruptible, like _managed_upgrade's runner).
@@ -1556,7 +1556,7 @@ class AppUpdater:
         Plain :meth:`zipfile.ZipFile.extractall` flattens symlink members into
         regular files, which breaks a macOS ``.app`` whose frameworks rely on
         ``Versions/Current`` symlinks, so we recreate symlinks ourselves and
-        carry over the executable bit. The escape checks are defence-in-depth: the
+        carry over the executable bit. The escape checks are defense-in-depth: the
         payload is already signature-verified, but extraction must never write or
         point outside the staging directory regardless.
         """
