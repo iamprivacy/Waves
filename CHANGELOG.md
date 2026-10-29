@@ -22,6 +22,72 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.0 (2026-10-28)
+
+Waves v0.2 is here, and with it come a lot of changes I have been quietly working on since v0.1 launched a few months ago. This is by far the largest update to Waves, which is why I am bumping the version number. As always, I did my best to test everything before release, but I still expect there to be bugs. The best way you can help me is by reporting them in the [issues](https://github.com/iamprivacy/Waves/issues) with as much detail as possible.
+
+Financially, I'm struggling right now, and Waves has taken up all of my free time outside of working hours. If you enjoy using Waves, please make a donation (recurring donations help the most) using the Buy Me a Coffee button on the project page or the one at the foot of the app's Settings sidebar.
+
+Thank you for all the love and support! I hope you enjoy using Waves v0.2 as much as I enjoyed developing it!
+
+### ✨ Added
+
+- 🔔 A new Releases tab lists new albums, EPs and singles from the artists you follow, grouped by date (Today, This week, This month, then each earlier month), with upcoming releases under their own filter. Releases another artist leads can be hidden (Featured releases, Settings, Releases), and then never download automatically.
+- 🎨 Artists, on the Releases tab, shows the artists you follow three ways: Roster (cards), Shelves (each artist's releases in a row) or Ledger (a timeline of each one's releases), and Excluded lists the library artists left out so you can follow them.
+- ➕ Follow an artist from their page or from the Releases tab. Your TIDAL favorites are followed automatically, and Waves changes your TIDAL favorites only if you ask it to.
+- 📚 Import library follows the artists in your music library in one go, after you review the list; artists who share a name are matched by the albums and songs you have.
+- 🔢 Follow artists with at least (Settings, Library, 5 tracks by default) keeps the import from following artists you only have a song or two by.
+- 🔁 Follow your artists (Settings, Library, on by default) follows your library's artists as the scan finds them, when the match is exact.
+- ⬇️ New releases from the artists you follow can download automatically on release day (off by default), and you pick which kinds: albums, EPs, singles or guest tracks (the songs they appear on in other artists' releases).
+- 🔔 A desktop notification announces new releases from the artists you follow as Waves finds them (Notify me about new releases, Settings, Notifications).
+- 📣 A new Notifications section in Settings, off until you flip its master switch: turning it on sends a test notification (so your system can ask for permission right away), and you pick what Waves announces: finished downloads (one notification when the queue finishes by default, or one per download, or never), failed downloads, new releases, and new Waves versions found by the update check.
+- ⚡ New releases show up sooner: Waves checks first the artists named in TIDAL's new-releases feed and ListenBrainz's public list (Spot new releases faster, Settings, Releases).
+- 🧭 Also check MusicBrainz (Settings, Releases, off by default) marks releases TIDAL does not carry on the Artists timeline.
+- 🏷️ Genre from MusicBrainz (Settings, Tags & Artwork, off by default) writes every genre MusicBrainz lists for the release into the files a download creates, joined by the Genre separator setting ("; " by default); for a release with none or not listed yet, Artist genres for unlisted releases (on by default) uses the artist's, taken from Look up your artists on MusicBrainz when it already knows the artist. Files already in your library are never retagged.
+- 🧭 Look up your artists on MusicBrainz (Settings, Library, off by default) keeps your library artists' genres and albums and helps tell same-name artists apart.
+- 🔎 Every Releases page has a search box (Cmd+F, or Ctrl+F on Windows and Linux).
+- 🎬 Music videos from the artists you follow show on the Releases tab (Music videos setting to hide them), and CHECK NOW checks every artist again at once.
+- 🏷️ Covers on the Releases tab, on Browse and at the top of an album carry two small corner dots: one says the album is in your library, the other its quality (the best it offers up to your audio quality setting, or ATMOS); pointing at the cover opens them into words.
+- 📄 The download queue can export the tracks that did not download as a CSV (REPORT on a row, MISSING REPORT for everything), and an open row can list only its missing tracks ([issue #54](https://github.com/iamprivacy/Waves/issues/54)).
+- 📏 How many tracks an open queue row shows before it scrolls is a setting (Appearance, 12 by default).
+- ☕ A Buy Me a Coffee button sits at the foot of the Settings sidebar, above the credit.
+- ⬇️ The QUEUE button in the header now shows how your downloads are going: it becomes a little speed chart with the percent done and the download speed, the count rolls as items arrive and finish, and the count flashes red and shakes when one fails.
+- ✨ When a download lands, the QUEUE button's count bumps and throws off a ring of sparks; when the last one lands, the count shatters into pieces that fall back together as a check.
+- 💧 While a download finishes its last steps, the chart in the QUEUE button settles into one level and fills to the brim as each step lands, then shows DONE.
+
+### 🔧 Changed
+
+- 📅 Release dates show month, day and year in full (09-04-2026) everywhere.
+- 📚 A first library scan reads one album from every artist before the rest, so Import library finds your artists much sooner.
+- 🏷️ The library index now keeps each file's tags, so the first scan after updating reads every file once more in the background.
+- 🧭 Settings is a sidebar of sections in three groups (Music, Files, App) with one section shown at a time, and it reopens on the section you last used; Up and Down step through the sections once the sidebar is clicked.
+- 🧩 The Advanced section is gone and its settings moved: motion and hover effects to Appearance, download speed and pauses to Speed & Pacing (joined by Concurrent track downloads and the download delay from Downloads), tag options to Tags & Artwork, downsampling and the FLAC signatures check to FFmpeg & FLAC, and the two resets to the end of Diagnostics.
+- 🎛️ Every choice shows its options side by side instead of in a drop-down, the download delay and the pause between batches each sit on one row, and switches sit in even rows with shorter names (Clean Album Artist is now "Primary album artist in tags", under Tags & Artwork).
+- 🏷️ Three sections have new names: File organization is now Files & Naming, Metadata & artwork is now Tags & Artwork, and Processing (FFmpeg) is now FFmpeg & FLAC. "Show every edition on artist pages" is now "All editions on artist pages", beside "Most-complete edition only" in Discography & Editions, and in Library "Bulk downloads skip what you have" is now "Skip what you already have" and "Confirm uncertain matches with MusicBrainz" is now "Ask MusicBrainz when unsure".
+- 📜 Every page has a new scrollbar, and dragging it on the Releases feed shows the month you are at.
+- 🖼️ A cover that is still loading shows a grid of dots, and one that could not load shows a red x.
+- 📦 Waves now uses newer versions of requests (2.34.2), urllib3 (2.8.0), mutagen (1.48.1) and certifi (2026.7.22).
+- 🔔 The new releases count on the Releases tab now glows in and counts up as releases arrive, then counts back down and shrinks away when you open Releases, instead of popping in and out.
+
+### 🐛 Fixed
+
+- 📶 A track whose connection dropped partway through is fetched again before it counts as failed, and a track that does fail no longer shows FINISHING first.
+- 🐧 On Linux, the controls on a Browse card fit again: DOWNLOADED no longer touches the edge of the cover, and a console card shows PREVIEW instead of just its icon.
+- 🖐️ A fast trackpad swipe no longer throws a page back to where it began on macOS.
+- 📜 An open queue row now scrolls through every track of a long playlist instead of hiding the rest past 500 tracks, with a slim scrollbar beside the rows ([issue #54](https://github.com/iamprivacy/Waves/issues/54)).
+- 🎬 Waves finds an FFmpeg installed with Homebrew, MacPorts or Linuxbrew when opened from the Finder, the Dock or a desktop launcher, and passes over a broken one left behind instead of downloading with it or showing it as installed.
+- 🧭 Ask MusicBrainz when unsure (Settings, Library) now reaches MusicBrainz on a Mac without Homebrew's OpenSSL; before, every request failed quietly there.
+- 🔗 A TIDAL share link that ends in /u, a slash or a query opens again instead of reading "Could not open that link".
+- 💾 After macOS ejects a network share, Waves mounts it back by itself again when the share's name has a space or when the folder you use was mounted from inside a share.
+- 🛑 A mix queued after you stopped another download no longer fails straight away.
+- 📁 A playlist, mix, album or song whose name holds a template token such as {artist_name} now stays in one folder instead of being split per artist.
+- 📂 A download folder typed with .. in it now saves into that folder, and a file briefly locked on Windows after conversion no longer fails the track.
+- 🎤 When LRCLIB has only plain lyrics for a song, Waves now uses TIDAL's timed lyrics if it has them, so you get a .lrc file instead of a .txt.
+- ⚙️ A switch set to "false" by editing the settings file by hand now loads as off instead of turning itself back on.
+- 🗂️ A bulk download no longer replaces files you already have: a copy Waves finds in the folder is checked for its quality, and one that does need an upgrade keeps the tags you added (Genre, Comment, Mood and the like) ([issue #55](https://github.com/iamprivacy/Waves/issues/55)).
+- 🏷️ If the ownership file in the Waves settings folder is removed or replaced while the app is open, Browse cards still show which albums and playlists you already have.
+- 📏 A downloading row's progress bar in the queue now resizes while you drag the queue edge instead of after you let go.
+
 ## 🗂️ v0.1.35 (2026-10-12)
 
 ### ✨ Added
@@ -47,7 +113,7 @@ issue. A test enforces it.
 
 ### 🐛 Fixed
 
-- 🎚️ The HIGH quality badge now wears a cyan rim like the HI-RES and LOSSLESS badges wear theirs, instead of a faint grey one that only lit up under the pointer.
+- 🎚️ The HIGH quality badge now wears a cyan rim like the HI-RES and LOSSLESS badges wear theirs, instead of a faint gray one that only lit up under the pointer.
 - 🐧 The Linux app starts on desktops that lack Qt's X11 helper libraries, such as a fresh Ubuntu 22.04; it no longer quits with "could not load the Qt platform plugin xcb".
 
 ## 🗂️ v0.1.33 (2026-10-02)
@@ -58,7 +124,7 @@ issue. A test enforces it.
 
 ### 🔧 Changed
 
-- 🔊 The Write ReplayGain tags setting now explains that players which honour the tags play loud tracks quieter ([issue #48](https://github.com/iamprivacy/Waves/issues/48)).
+- 🔊 The Write ReplayGain tags setting now explains that players which honor the tags play loud tracks quieter ([issue #48](https://github.com/iamprivacy/Waves/issues/48)).
 - ⚡ Artist pages and Search results appear complete as soon as they open, with no fade-in pause.
 - 🎤 An artist you open for the first time loads faster.
 - 🖱️ Resting the pointer on an artist's name prepares that artist's page, as resting on an artist card already did.
@@ -143,7 +209,7 @@ issue. A test enforces it.
 - 🏷️ Opening a My Tidal category while the library is still being read no longer draws the page bare and then lights every IN LIBRARY badge a moment later.
 - 🔗 Turning "symlink to track" off no longer makes albums downloaded while it was on read as not downloaded when your download or library folder is reached through a link.
 - 🎚️ A Best of Both download for an album given its own quality choice is now planned at that choice, not at the Settings quality, and the choice follows the download when it is queued under another edition.
-- 🔐 Signing out while My Tidal is still reading your playlists or favourites no longer lets the next account see the previous account's playlists, folders or favourites.
+- 🔐 Signing out while My Tidal is still reading your playlists or favorites no longer lets the next account see the previous account's playlists, folders or favorites.
 - 🔁 RETRY after switching accounts now fetches the item again under the account that is signed in, instead of downloading through the previous one.
 - 📂 The Videos fold and the SHOW ALL state of every artist-page section are remembered across launches like the other sections.
 - 🧹 Reset application also removes the saved recent searches.
@@ -183,7 +249,7 @@ issue. A test enforces it.
 - 📋 Expanding a queued album that TIDAL listed short now shows every track, including the ones that failed, and a borrowed track predicts the tier it will really land at.
 - 🔞 "Most-complete edition only" no longer swaps a clean album for a fuller explicit one, or the reverse, in a discography or on the artist page.
 - 🎤 Two different guest tracks with the same title are no longer merged into one in a discography download.
-- 🔊 An album offered only in Dolby Atmos that you download from now on no longer reads DOWNLOAD afterwards when Atmos is off and the quality is Lossless or Max.
+- 🔊 An album offered only in Dolby Atmos that you download from now on no longer reads DOWNLOAD afterward when Atmos is off and the quality is Lossless or Max.
 - 💽 A track already on disk that Waves has no record of (after a reset, or written by another computer) is recorded when a download finds it, so its button settles instead of reading DOWNLOAD forever.
 - 🔢 A complete album with music videos no longer shows as partly in your library.
 - ⚙️ A settings file that cannot be written no longer stops Waves from starting during its one-time video setting migration.
@@ -608,7 +674,7 @@ issue. A test enforces it.
 - 🔎 A new search now always starts at the top of the results page. It used to keep the previous search's scroll position, so the fresh results could open already scrolled deep into the albums or tracks. Returning to Search from another tab still restores your exact spot.
 - 👀 The download queue's hover peek (and an expanded album's track list) no longer jitters while that album is downloading; live progress ticks were rebuilding the visible track rows twice a second.
 - 📅 On video results, a long artist credit line no longer pushes the release date underneath the download button; the date keeps its place and the artist list trims to the room that is left.
-- 🌊 Switching to another app, or back, no longer disturbs the moving water, the pulsing download dots or any other ambient animation. Two separate faults were at work: the animations paused the instant the window lost focus and lurched back to life on return, and the switch itself froze the whole window for a third of a second in each direction. Animations now keep flowing while the window is visible and pause only when it is hidden or minimised, a window that was covered or minimised wakes on the exact frame it went away on instead of jumping ahead, and clicking the search box while Waves is in the background selects the whole term again so the next keystroke replaces it.
+- 🌊 Switching to another app, or back, no longer disturbs the moving water, the pulsing download dots or any other ambient animation. Two separate faults were at work: the animations paused the instant the window lost focus and lurched back to life on return, and the switch itself froze the whole window for a third of a second in each direction. Animations now keep flowing while the window is visible and pause only when it is hidden or minimized, a window that was covered or minimized wakes on the exact frame it went away on instead of jumping ahead, and clicking the search box while Waves is in the background selects the whole term again so the next keystroke replaces it.
 - ⏱️ Moving the mouse across a playing disc to pause it no longer flashes the seek-time readout in passing. The readout and its ring marker now appear once the pointer rests over the ring for a moment, both fade in and out gently, and the play/pause glyph over the art eases in and out instead of popping.
 - ⏯️ When a preview finishes buffering, the mini player in the bottom bar no longer shifts sideways as the buffering label collapses; the label now simply gives way to the play glyph and the title, artist and artwork stay put.
 - 🔄 An artist's download button no longer spins forever when one member of the discography could not be re-fetched for its download; the failure is now counted and the button settles, showing that something failed instead of running without end.
