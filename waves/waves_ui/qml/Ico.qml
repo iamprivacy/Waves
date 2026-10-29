@@ -3,7 +3,7 @@ import QtQuick.Shapes
 
 // Phosphor icon rendered as a tintable, scalable vector. One filled path per
 // glyph (Phosphor uses a 256x256 box); `name` selects it, `color` tints it,
-// `size` is the box in px, and `bold` adds an equal-colour outline stroke (in
+// `size` is the box in px, and `bold` adds an equal-color outline stroke (in
 // 256-space units) to thicken any glyph. Drawn as a Shape so there is no font
 // dependency and it renders identically on every OS.
 //
@@ -29,12 +29,14 @@ Item {
         "search": "M232.49 215.51L185 168a92.12 92.12 0 1 0-17 17l47.53 47.54a12 12 0 0 0 17-17ZM44 112a68 68 0 1 1 68 68a68.07 68.07 0 0 1-68-68",
         "heart": "M240 102c0 70-103.79 126.66-108.21 129a8 8 0 0 1-7.58 0C119.79 228.66 16 172 16 102a62.07 62.07 0 0 1 62-62c20.65 0 38.73 8.88 50 23.89C139.27 48.88 157.35 40 178 40a62.07 62.07 0 0 1 62 62",
         "plus": "M228 128a12 12 0 0 1-12 12h-76v76a12 12 0 0 1-24 0v-76H40a12 12 0 0 1 0-24h76V40a12 12 0 0 1 24 0v76h76a12 12 0 0 1 12 12",
-        "minus": "M228 128a12 12 0 0 1-12 12H40a12 12 0 0 1 0-24h176a12 12 0 0 1 12 12"
+        "minus": "M228 128a12 12 0 0 1-12 12H40a12 12 0 0 1 0-24h176a12 12 0 0 1 12 12",
+        // Phosphor "export" (bold): an arrow rising out of an open tray.
+        "export": "M220 112v96a20 20 0 0 1-20 20H56a20 20 0 0 1-20-20v-96a20 20 0 0 1 20-20h20a12 12 0 0 1 0 24H60v88h136v-88h-16a12 12 0 0 1 0-24h20a20 20 0 0 1 20 20M96.49 72.49L116 53v83a12 12 0 0 0 24 0V53l19.51 19.52a12 12 0 0 0 17-17l-40-40a12 12 0 0 0-17 0l-40 40a12 12 0 0 0 17 17"
     })
 
     Shape {
         anchors.centerIn: parent
-        width: ico.size; height: ico.size   // icon stays centred if the item is wider
+        width: ico.size; height: ico.size   // icon stays centered if the item is wider
         antialiasing: true
         preferredRendererType: Shape.CurveRenderer
         transform: Scale { xScale: ico.size / 256; yScale: ico.size / 256 }

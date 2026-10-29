@@ -5,7 +5,7 @@ import QtQuick.Shapes
 // between a closed and an open angle. Self-contained and resizable so it can be
 // reused anywhere something opens, settings sections, the download queue, and
 // the dropdown menus. The motion is the Material "standard" curve, kept short
-// and gentle. Colours default to the Waves accent but are overridable.
+// and gentle. Colors default to the Waves accent but are overridable.
 //
 // Every use shares one motion so all chevrons in the app spin the same way:
 // closed ▸ (-90°) → open ▾ (0°), a clockwise quarter-turn (the default angles).

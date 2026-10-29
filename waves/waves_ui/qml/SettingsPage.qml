@@ -11,19 +11,21 @@ import "HeartGib.js" as HeartGib
 Item {
     id: page
     property bool active: false
+    // The page's scroller, for the host's trackpad guard (MomentumGuard).
+    readonly property Flickable scroller: settingsFlick
     // Nothing on the page leaves it any more (CANCEL discards edits in place),
     // but the host still listens: kept for a programmatic close.
     signal closed()
-    // Advanced-section reset actions. The page only asks; Main.qml shows the
+    // Diagnostics-section reset actions. The page only asks; Main.qml shows the
     // confirmation dialog and calls the backend, then (for the settings
     // reset) tells the page to re-read the freshly-defaulted schema.
     signal resetSettingsRequested()
     signal factoryResetRequested()
-    // The FLAC check's fix (Advanced section). Same shape as the resets: the
+    // The FLAC check's fix (FFmpeg & FLAC section). Same shape as the resets: the
     // page asks, Main.qml confirms with the count and calls the backend.
     signal flacFixRequested(int count, string where)
     signal flacResumeRequested(string where)
-    function externalReset() { editMap = ({}); dirty = false; refreshSchema(); syncLibraryMirrors(); flacRefresh() }
+    function externalReset() { editMap = ({}); unsaved = ({}); dirty = false; refreshSchema(); syncLibraryMirrors(); flacRefresh() }
 
     // Waves palette (kept local so this file is self-contained)
     readonly property color accent:       "#3dff6e"
@@ -54,13 +56,23 @@ Item {
     readonly property string mono:        monoFont
     // Console button spec (Button Lab verdict, 2026-07-02), mirrors Main.qml.
     readonly property string uiFont:   uiFontFamily
-    readonly property real   btnTrack: 0
-    readonly property int    btnRad:   8
-    readonly property int    btnPadH:  12
-    readonly property int    btnPadV:  7
+    readonly property real   btnTrack: 0.3
+    readonly property int    btnRad:   7
+    readonly property int    btnPadH:  10
+    readonly property int    btnPadV:  5
 
     property var groups: []
     property var editMap: ({})
+    // The keys staged since the last SAVE or CANCEL: what the unsaved marks
+    // read. editMap outlives a save (it keeps the controls on the saved
+    // values) and holds the live diagnostics switches, so it cannot say
+    // what is still unsaved.
+    property var unsaved: ({})
+    // What the last SAVE wrote, until the schema is pulled again: the schema's
+    // own values are only refreshed on the next open, so anything that asks
+    // "is this saved yet" (the Notifications arm note) reads this first.
+    property var savedVals: ({})
+    function saved(f) { return savedVals[f.key] !== undefined ? savedVals[f.key] : f.value }
     property bool dirty: false
     property bool savedFlash: false
     Timer { id: flashTimer; interval: 2200; onTriggered: page.savedFlash = false }
@@ -78,12 +90,6 @@ Item {
     // Injected from Main as the single app-wide FfmpegManager instance (the same
     // one the first-run setup step uses), so install state lives in one place.
     property var ff: null
-    // Latches true once FFmpeg has been seen missing while the page is open, so
-    // the Processing section's auto-open survives a successful install (which
-    // flips the live state missing → managed). Synced on open and on any change.
-    property bool ffEverMissing: false
-    function ffSyncEverMissing() { if (page.ff && page.ff.stateKey === "missing") page.ffEverMissing = true }
-    Connections { target: page.ff; function onStateKeyChanged() { page.ffSyncEverMissing() } }
 
     // ---- Ownership-badge scan status ----
     // Mirrored from the bridge so the "Music library" card can explain a blank
@@ -112,6 +118,13 @@ Item {
     property bool libraryEnabledLive: waves.wavesPref("library_enabled") === true
     property bool libraryBulkSkipLive: waves.wavesPref("library_bulk_skip") !== false
     property bool libraryMbArbiterLive: waves.wavesPref("library_mb_arbiter") === true
+    property bool libraryMbLookupLive: waves.wavesPref("library_mb_lookup") === true
+    property bool libraryFollowLive: waves.wavesPref("releases_auto_import") === true
+    property int libraryMinTracksLive: Number(waves.wavesPref("releases_import_min_tracks")) || 5
+    // Library follows the saved floor would leave out today (the card
+    // offers to unfollow them); re-read with the mirrors and on
+    // followFloorChanged.
+    property int libraryFloorExcess: 0
     property string librarySourceLive: waves.librarySource()
     property string libraryFolderLive: waves.wavesPref("library_folder") || ""
     property string downloadFolderLive: waves.libraryDownloadFolder()
@@ -128,6 +141,10 @@ Item {
         libraryEnabledLive = waves.wavesPref("library_enabled") === true
         libraryBulkSkipLive = waves.wavesPref("library_bulk_skip") !== false
         libraryMbArbiterLive = waves.wavesPref("library_mb_arbiter") === true
+        libraryMbLookupLive = waves.wavesPref("library_mb_lookup") === true
+        libraryFollowLive = waves.wavesPref("releases_auto_import") === true
+        libraryMinTracksLive = Number(waves.wavesPref("releases_import_min_tracks")) || 5
+        libraryFloorExcess = waves.followsUnderFloor()
         librarySourceLive = waves.librarySource()
         libraryFolderLive = waves.wavesPref("library_folder") || ""
         downloadFolderLive = waves.libraryDownloadFolder()
@@ -150,9 +167,17 @@ Item {
             page.libraryEnabledLive = waves.wavesPref("library_enabled") === true
             page.libraryBulkSkipLive = waves.wavesPref("library_bulk_skip") !== false
             page.libraryMbArbiterLive = waves.wavesPref("library_mb_arbiter") === true
+            page.libraryMbLookupLive = waves.wavesPref("library_mb_lookup") === true
+            page.libraryFollowLive = waves.wavesPref("releases_auto_import") === true
+            page.libraryMinTracksLive = Number(waves.wavesPref("releases_import_min_tracks")) || 5
+            page.libraryFloorExcess = waves.followsUnderFloor()
             page.librarySourceLive = waves.librarySource()
             page.libraryFolderLive = waves.wavesPref("library_folder") || ""
             page.flacRefresh()
+        }
+        function onFollowFloorChanged() {
+            page.libraryMinTracksLive = Number(waves.wavesPref("releases_import_min_tracks")) || 5
+            page.libraryFloorExcess = waves.followsUnderFloor()
         }
     }
     // The scanning note's text: real progress, not a bare spinner. During the
@@ -181,7 +206,7 @@ Item {
     // Whether the truncation is worth a word at all. A listing the recovery
     // has already made good (every folder the fresh mount named is indexed)
     // needs nothing from the user, and anything on the card in the warning
-    // colour reads as an error whatever it says, so it shows nothing. The
+    // color reads as an error whatever it says, so it shows nothing. The
     // moment a recovery leaves a folder out, the warning is back.
     readonly property bool libTruncationShown: libraryScanPartial && !libraryListingReconciled
                                                && libraryScanStatus === "ok"
@@ -209,7 +234,7 @@ Item {
 
     // ---- In-app updater state ----
     property var appUp: ({})             // last waves.appUpdateStatus()
-    property string auState: ""          // install lifecycle: "" | downloading | done | failed | cancelled
+    property string auState: ""          // install lifecycle: "" | downloading | done | failed | canceled
     property string auMsg: ""
     property real auPct: 0
     property bool auUpdate: false        // a newer release is available
@@ -232,7 +257,7 @@ Item {
         }
     }
 
-    // ---- FLAC signature check state (Advanced card) ----
+    // ---- FLAC signature check state (FFmpeg & FLAC card) ----
     // A plain copy of waves.flacCheckState(); re-read on open and on every
     // flacCheckChanged. Nothing on this page writes to it.
     property var flacState: waves.flacCheckState()
@@ -261,7 +286,7 @@ Item {
     // A count with the locale's thousands separator (a library can hold tens of thousands).
     function flacNum(n) { return Number(n || 0).toLocaleString(Qt.locale(), "f", 0) }
     // A fix stopped before it finished (the app quit or crashed, or it was
-    // cancelled) and the backend remembers its folders: RESUME LAST FIX is
+    // canceled) and the backend remembers its folders: RESUME LAST FIX is
     // offered, unless FIX already offers the same files from this session's scan.
     function flacResumable() {
         var st = page.flacState
@@ -343,15 +368,15 @@ Item {
     // with every section starting collapsed, a deep link to a shut card
     // would otherwise land on a bare header.
     function jumpToCard(cardId) {
-        // The FLAC signatures card sits inside Advanced: open that section,
+        // The FLAC signatures card sits inside FFmpeg & FLAC: open that section,
         // then land on the card itself. The section grows over its 220ms open
         // animation, so the spot rides pendingY until it is reachable.
         if (cardId === "flac") {
-            jumpToCard("advanced")
+            jumpToCard("processing")
             if (!page.flacCardItem) return
             page.pendingY = Math.max(0, page.flacCardItem.mapToItem(settingsFlick.contentItem, 0, 0).y - 16)
             page._restoreScroll()
-            // Advanced is the last section, so the card's top can lie past the
+            // The card sits near its section's end, so its top can lie past the
             // furthest reachable scroll and the restore would stay armed for
             // good, snapping back on a later re-measure (a SCAN's progress
             // row). Once the open animation has settled, settle for the
@@ -367,9 +392,13 @@ Item {
             if (it && (it.modelData.card === cardId || it.modelData.id === cardId)) {
                 // An explicit destination outranks the remembered spot, which
                 // would otherwise be re-applied on the same open and fight it.
+                // Cleared here, not in showSection: that returns early when
+                // the section is already the one shown, and a link can land
+                // while the page has no height (keptY is re-armed on open).
                 page.pendingY = -1
-                page.setSectionOpen(it.modelData.id, true)
-                settingsFlick.contentY = Math.max(0, Math.min(it.y, settingsFlick.contentHeight - settingsFlick.height))
+                page.keptY = 0
+                page.showSection(it.modelData.id)
+                settingsFlick.contentY = 0
                 return
             }
         }
@@ -406,32 +435,6 @@ Item {
     // True while _restoreScroll itself writes contentY, so that write is not
     // taken for the user scrolling.
     property bool restoringScroll: false
-    // Which sections the user opened or shut by hand. Kept on the page, not
-    // on the cards: `groups` is reassigned on every schema refresh (saving a
-    // setting triggers one), and that destroys and rebuilds every delegate,
-    // taking their open state with it. Only a real click (or a deep link)
-    // writes here, so the auto-open rules below still decide anything the
-    // user never touched. Persisted as a waves pref so the page reopens the
-    // way it was left, across visits and across launches.
-    property var openSections: ({})
-    function loadOpenSections() {
-        var v = waves.wavesPref("settings_open_sections")
-        if (!v) return
-        try {
-            var m = JSON.parse(v)
-            if (m && typeof m === "object") openSections = m
-        } catch (e) { /* a corrupt pref just means default (collapsed) */ }
-    }
-    function sectionOpen(id, dflt) {
-        var v = openSections[id]
-        return v === undefined ? dflt : v
-    }
-    function setSectionOpen(id, on) {
-        var m = Object.assign({}, openSections)
-        m[id] = on
-        openSections = m
-        waves.setWavesPref("settings_open_sections", JSON.stringify(m))
-    }
     function _restoreScroll() {
         if (pendingY < 0 || settingsFlick.height <= 0) return
         var most = Math.max(0, settingsFlick.contentHeight - settingsFlick.height)
@@ -454,7 +457,23 @@ Item {
     function val2(f) { return editMap[f.file_key] !== undefined ? editMap[f.file_key] : f.file_value }
     // Child toggle value for the cover_scope composite, under its own child_key.
     function valChild(f) { return editMap[f.child_key] !== undefined ? editMap[f.child_key] : f.child_value }
-    function setv(key, v) { var e = Object.assign({}, editMap); e[key] = v; editMap = e; dirty = true }
+    function setv(key, v) {
+        var e = Object.assign({}, editMap); e[key] = v; editMap = e
+        var u = Object.assign({}, unsaved); u[key] = true; unsaved = u
+        dirty = true
+    }
+    // A "kinds" field holds a comma-joined pick from its options (the
+    // Releases auto-download's albums, EPs, singles, featured); a tick
+    // re-joins it in the options' own order.
+    function kindOn(f, v) { return String(val(f)).split(",").indexOf(v) >= 0 }
+    function kindToggle(f, v) {
+        var on = !kindOn(f, v), out = []
+        for (var i = 0; i < f.options.length; i++) {
+            var o = f.options[i].value
+            if (o === v ? on : kindOn(f, o)) out.push(o)
+        }
+        setv(f.key, out.join(","))
+    }
     // A value applied LIVE (the diagnostics toggles push their pref straight
     // to the backend): shown from the edit map like any other, but never an
     // unsaved change, so SAVE and CANCEL stay inert for it. Marking it dirty
@@ -536,7 +555,7 @@ Item {
         return f ? String(val(f)) : ""
     }
     // Any red box blocks SAVE CHANGES. Rewriting the value on save instead
-    // would flash "changes saved" over a silent correction; greying the button
+    // would flash "changes saved" over a silent correction; graying the button
     // leaves the bad character on screen, red, for the user to fix.
     // Judges the value on screen, not just what was typed this visit: a config
     // edited by hand outside the app shows red too, and a red box with a live
@@ -548,9 +567,21 @@ Item {
         return false
     }
     // Within a section, on/off switches render as a tile grid and everything
-    // else as labelled rows.
-    function boolFields(fields) { return fields.filter(function(f){ return f.type === "bool" && f.embedded !== true }) }
-    function rowFields(fields)  { return fields.filter(function(f){ return f.type !== "bool" && f.embedded !== true && f.third !== true && f.type !== "char_map" }) }
+    // else as labeled rows. A `master` switch is neither: it rides beside the
+    // section title (masterField below).
+    function boolFields(fields) { return fields.filter(function(f){ return f.type === "bool" && f.embedded !== true && f.rowToggle !== true && f.master !== true }) }
+    function rowFields(fields)  { return fields.filter(function(f){ return (f.type !== "bool" || f.rowToggle === true) && f.embedded !== true && f.third !== true && f.type !== "char_map" && f.master !== true }) }
+    function masterField(fields) {
+        for (var i = 0; i < fields.length; i++) if (fields[i].master === true) return fields[i]
+        return null
+    }
+    // The line under a master section's blurb. Off: what off means. Staged
+    // on: what SAVE will do. Saved on: nothing to say.
+    function masterNote(f) {
+        if (val(f) !== true) return f.off_note || ""
+        if (saved(f) !== true) return f.arm_note || ""
+        return ""
+    }
     // The per-character stand-in table renders under the short-value row it
     // extends, so it is pulled out of the ordinary rows above them.
     function mapFields(fields)  { return fields.filter(function(f){ return f.type === "char_map" }) }
@@ -621,7 +652,112 @@ Item {
         var cut = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"))
         return cut > 0 ? pathUrl(s.substring(0, cut)) : ""
     }
-    function refreshSchema() { groups = waves.settingsSchema(); needsRefresh = false }
+    function refreshSchema() { groups = waves.settingsSchema(); savedVals = ({}); needsRefresh = false }
+    // A switch tile narrower than this puts its switch beside the label
+    // instead of beside the words, so the help keeps a readable width.
+    readonly property real tileCompactW: 288
+    // Every switch tile puts its switch in one place: the top right corner,
+    // tilePadT from the top, with the first line of the title level with
+    // it (tileTitleNudge). The words start there whatever their length, so
+    // a short help leaves its room at the bottom instead of floating the
+    // title and switch down.
+    readonly property real switchW: 54
+    readonly property real switchH: 26
+    readonly property real tilePadT: 12
+    readonly property real tilePadB: 12
+    // A tile's sub-option strip: flush along its bottom edge, in room every
+    // tile in the row keeps, so turning the parent on never grows the row
+    // (notes/pocket_anim_lab, C2d).
+    readonly property real tileStripH: 34
+    // One clock for a switch and everything it opens, one for a key: every
+    // layer reads the same eased value, so nothing starts or ends alone.
+    readonly property int openMs: 260
+    readonly property int keyMs: 160
+    function mix(a, b, k) { return Qt.rgba(a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k, a.a + (b.a - a.a) * k) }
+    FontMetrics { id: tileTitleFm; font.pixelSize: 14; font.weight: Font.Medium }
+    FontMetrics { id: tileHelpFm; font.pixelSize: 12 }
+    readonly property real tileTitleLineH: Math.ceil(tileTitleFm.height)
+    readonly property real tileHelpLineH: tileHelpFm.height * 1.15
+    readonly property real tileTitleNudge: Math.max(0, Math.round((switchH - tileTitleLineH) / 2))
+    // A switch tile's height and help lines. `third`: three across (the
+    // narrower tile, one more help line); `compact`: the help runs under
+    // the switch (one more again, and a head at least the switch's height);
+    // `lines`: the most lines a label in the row wraps to; `help`: the most
+    // a help in the row takes (at most tileHelpLines), so a wide window,
+    // where every help is short, does not keep the narrow window's room.
+    function tileHelpLines(third, compact) { return (third ? 4 : 3) + (compact ? 1 : 0) }
+    function tileHeight(third, compact, lines, help) {
+        var title = tileTitleNudge + lines * tileTitleLineH
+        var head = compact ? Math.max(switchH, title) : title
+        var n = help === undefined ? tileHelpLines(third, compact) : Math.max(1, help)
+        return Math.ceil(tilePadT + head + 3 + n * tileHelpLineH + tilePadB)
+    }
+    // The least a value row's label and help keep beside its control; a
+    // control that would leave less moves under them.
+    readonly property real rowWordsMinW: 260
+
+    // ---- Section rail state ---------------------------------------------
+    // One section shows at a time, picked from the rail. The rail groups the
+    // backend's sections (settingsSchema) under three heads; every section id
+    // the backend sends must be listed here, or it can never be opened (a
+    // test holds the two lists together).
+    readonly property var railGroups: [
+        { head: "MUSIC", ids: ["downloads", "library", "releases", "discography"] },
+        { head: "FILES", ids: ["files", "metadata", "processing"] },
+        { head: "APP",   ids: ["appearance", "notifications", "pacing", "updates", "diagnostics"] }
+    ]
+    // The section on show. Persisted as a waves pref, so Settings reopens on
+    // the section you left it on, across visits and across launches.
+    property string curSec: "downloads"
+    // A rail id is a section only while the schema sends its group: one the
+    // backend leaves out (Notifications without banner support) is hidden on
+    // the rail and must not be reachable by arrow keys or a remembered pick.
+    function railHas(id) {
+        for (var i = 0; i < railGroups.length; i++)
+            if (railGroups[i].ids.indexOf(id) >= 0) return groupById(id) !== null
+        return false
+    }
+    function loadSection() {
+        var v = String(waves.wavesPref("settings_section") || "")
+        // A section that no longer exists (renamed or merged by an update)
+        // falls back to the first one rather than an empty pane.
+        if (railHas(v)) curSec = v
+    }
+    function showSection(id) {
+        if (!railHas(id) || id === curSec) return
+        curSec = id; pendingY = -1; settingsFlick.contentY = 0
+        waves.setWavesPref("settings_section", id)
+    }
+    // The rail's head over a section, as the small crumb above its title
+    // ("MUSIC" reads "Music").
+    function railCrumb(id) {
+        for (var i = 0; i < railGroups.length; i++)
+            if (railGroups[i].ids.indexOf(id) >= 0) {
+                var h = railGroups[i].head
+                return h.charAt(0) + h.slice(1).toLowerCase()
+            }
+        return ""
+    }
+    // Arrow keys on the rail step through its sections in order.
+    function stepSection(by) {
+        var all = []
+        for (var i = 0; i < railGroups.length; i++)
+            for (var j = 0; j < railGroups[i].ids.length; j++)
+                if (railHas(railGroups[i].ids[j])) all.push(railGroups[i].ids[j])
+        var k = all.indexOf(curSec) + by
+        if (k >= 0 && k < all.length) showSection(all[k])
+    }
+    // The rail's own scroller, for the heart burst, which bounces off the
+    // rail's edges (gibOverlay).
+    property Flickable railScroller: null
+    function groupById(id) { for (var i = 0; i < groups.length; i++) if (groups[i].id === id) return groups[i]; return null }
+    // Does this section hold an unsaved edit? (the rail's green dot)
+    function secDirty(id) {
+        var g = groupById(id)
+        if (!g) return false
+        for (var i = 0; i < g.fields.length; i++) if (fieldDirty(g.fields[i])) return true
+        return false
+    }
 
     // CANCEL throws away what you typed and leaves you on the page, at the
     // spot you were reading. It does NOT leave Settings: the nav does that.
@@ -634,6 +770,7 @@ Item {
     function discardEdits() {
         pendingY = settingsFlick.contentY
         editMap = ({})
+        unsaved = ({})
         dirty = false
         refreshSchema()
         _restoreScroll()
@@ -649,10 +786,18 @@ Item {
         case "metadata":    return "M8.6 2.6H3.1V8L9 13.9L14.4 8.5Z M5.7 4.9A0.55 0.55 0 1 1 4.6 4.9A0.55 0.55 0 1 1 5.7 4.9Z"
         case "processing":  return "M5.2 5.2H10.8V10.8H5.2Z M6.7 5.2V3.6 M9.3 5.2V3.6 M6.7 10.8V12.4 M9.3 10.8V12.4 M5.2 6.7H3.6 M5.2 9.3H3.6 M10.8 6.7H12.4 M10.8 9.3H12.4"
         case "discography": return "M2.6 8A5.4 5.4 0 1 0 13.4 8A5.4 5.4 0 1 0 2.6 8Z M6.9 8A1.1 1.1 0 1 0 9.1 8A1.1 1.1 0 1 0 6.9 8Z"
-        // Book spines on a shelf, one leaning: the section never had its own
-        // glyph and fell through to the generic sliders.
-        case "library":     return "M2.8 12.6H13.2 M4.4 4V12.6 M7 4V12.6 M9.4 4.6L11.8 12.6"
+        // Book spines on a shelf: the section never had its own glyph and
+        // fell through to the generic sliders.
+        case "library":     return "M2.6 12.6H13.4 M4.4 5V12.6 M6.8 4.2V12.6 M9.2 3.4V12.6 M11.6 5.6V12.6"
+        // A bell: what rings when an artist you follow releases something.
+        case "releases":    return "M4.6 11H11.4L10.4 9.6V7A2.4 2.4 0 0 0 5.6 7V9.6Z M7 12.6H9 M8 4.6V3.4"
+        // A phone with buzz marks at its sides: the alert this section
+        // controls, kept apart from the Releases bell.
+        case "notifications": return "M6.2 2.4H9.8A1.2 1.2 0 0 1 11 3.6V12.4A1.2 1.2 0 0 1 9.8 13.6H6.2A1.2 1.2 0 0 1 5 12.4V3.6A1.2 1.2 0 0 1 6.2 2.4Z M7.5 11.6H8.5 M2.8 6.2V9.8 M13.2 6.2V9.8"
         case "updates":     return "M8 3V12.4 M4.6 6.4L8 3L11.4 6.4"
+        case "coffee":      return "M2.8 6.4H11V10.2A3.2 3.2 0 0 1 7.8 13.4H6A3.2 3.2 0 0 1 2.8 10.2Z M11 7.4H12A1.9 1.9 0 0 1 12 11.2H11 M5.6 2.4V4.4 M8.2 2.4V4.4"
+        case "pacing":      return "M2.8 11.6A5.4 5.4 0 1 1 13.2 11.6 M8 9.2L10.6 5.8 M7.2 9.2A0.8 0.8 0 1 0 8.8 9.2A0.8 0.8 0 1 0 7.2 9.2Z"
+        case "appearance":  return "M1.8 8C3.6 4.9 5.6 3.8 8 3.8C10.4 3.8 12.4 4.9 14.2 8C12.4 11.1 10.4 12.2 8 12.2C5.6 12.2 3.6 11.1 1.8 8Z M6.3 8A1.7 1.7 0 1 0 9.7 8A1.7 1.7 0 1 0 6.3 8Z"
         // Pulse/heartbeat trace: diagnostics watch the app's vitals.
         case "diagnostics": return "M2.6 8H5.4L6.8 4.6L9.2 11.4L10.6 8H13.4"
         default:            return "M3 5.4H13 M3 10.6H13 M5.4 5.4A1.5 1.5 0 1 0 8.4 5.4A1.5 1.5 0 1 0 5.4 5.4Z M7.6 10.6A1.5 1.5 0 1 0 10.6 10.6A1.5 1.5 0 1 0 7.6 10.6Z"
@@ -662,7 +807,7 @@ Item {
     // Front-load the build at startup (behind the login overlay) so every
     // open of the page is instant. The startup update check is opt-in and
     // throttled in the backend, it no-ops unless the user enabled it.
-    Component.onCompleted: { loadOpenSections(); refreshSchema(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
+    Component.onCompleted: { refreshSchema(); loadSection(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
 
     onActiveChanged: {
         if (active) {
@@ -671,12 +816,12 @@ Item {
             pendingY = keptY
             _restoreScroll()
             editMap = ({})
+            unsaved = ({})
             dirty = false
             if (needsRefresh) refreshSchema()
             // Refresh local status only (no network). Update checks are
             // user-initiated via the "Check for updates" button.
             if (page.ff) page.ff.refresh()
-            ffSyncEverMissing()
             auRefresh()
             // Re-sync the library card's live mirrors (its state applies
             // outside the Save flow, so nothing else refreshes them on open).
@@ -730,258 +875,306 @@ Item {
         function onFlacCheckChanged() { page.flacRefresh() }
     }
 
+
+    // ---- Control helpers ------------------------------------------------
+    // "Lossless (16-bit)" -> main "Lossless", sub "16-bit".
+    function optMain(l) { var m = /^(.*?)\s*\((.*)\)\s*$/.exec(String(l)); return m ? m[1] : String(l) }
+    function optSub(l)  { var m = /^(.*?)\s*\((.*)\)\s*$/.exec(String(l)); return m ? m[2] : "" }
+    // Options that climb (quality, months, sizes) draw a level mark.
+    function isLadder(key) {
+        return ["quality_audio", "quality_video", "releases_window_months", "metadata_cover_dimension"].indexOf(key) >= 0
+    }
+    // Does this row hold an unsaved edit?
+    // The library card's switches ride their own sub-keys, so those count too.
+    readonly property var dirtyKeys: ["key", "file_key", "child_key", "enabled_key", "bulk_key", "mb_key", "lookup_key", "follow_key", "min_tracks_key"]
+    function fieldDirty(f) {
+        if (!f) return false
+        for (var i = 0; i < dirtyKeys.length; i++) {
+            var k = f[dirtyKeys[i]]
+            if (k && unsaved[k]) return true
+        }
+        return (f.lo !== undefined && unsaved[f.lo.key] === true) || (f.hi !== undefined && unsaved[f.hi.key] === true)
+    }
+
     // ---- Controls -------------------------------------------------------
-    // Pure visual, the whole flag tile is the click target (see below).
-    // Material pill switch (track + sliding knob). Pure-visual; the enclosing
-    // flag tile's MouseArea drives `checked` via page.val/page.setv.
+
+    // A key switch: the cap slides over engraved ON / OFF legends and its
+    // LED lights. Pure visual: the enclosing tile's (or row's) MouseArea
+    // drives `checked` via page.val/page.setv.
     component SToggle: Rectangle {
+        id: tg
         property bool checked: false
-        width: 46; height: 26; radius: 13
-        color: checked ? page.accentCont : page.surface3
-        border.color: checked ? page.accent : page.outline; border.width: 2
-        // Animate the track too, so when ffmpeg lands and a gated toggle flips
-        // on, the whole pill (track + border + knob) eases on rather than snaps.
-        Behavior on color { ColorAnimation { duration: 160 } }
-        Behavior on border.color { ColorAnimation { duration: 160 } }
+        implicitWidth: 54; implicitHeight: 26
+        width: implicitWidth; height: implicitHeight
+        radius: 7; color: page.surface0
+        border.color: checked ? page.accentDim : page.outline
+        Behavior on border.color { ColorAnimation { duration: page.openMs } }
+        Text {
+            x: 8; anchors.verticalCenter: parent.verticalCenter
+            text: "ON"; color: page.accent; font.family: page.mono; font.pixelSize: 8; font.bold: true; font.letterSpacing: 1
+            opacity: tg.checked ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: page.openMs } }
+        }
+        Text {
+            anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
+            text: "OFF"; color: page.textDim; font.family: page.mono; font.pixelSize: 8; font.bold: true; font.letterSpacing: 1
+            opacity: tg.checked ? 0 : 1
+            Behavior on opacity { NumberAnimation { duration: page.openMs } }
+        }
         Rectangle {
-            width: parent.checked ? 16 : 12; height: width; radius: width / 2
-            anchors.verticalCenter: parent.verticalCenter
-            // Target the ON knob's FINAL width (16), not the live `width`. Otherwise
-            // the slide-on chases the simultaneously-animating width and lags; the
-            // slide-off already targeted a constant (5), which is why it stayed smooth.
-            x: parent.checked ? parent.width - 16 - 4 : 5
-            color: parent.checked ? page.accent : page.textDim
-            Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-            Behavior on width { NumberAnimation { duration: 140 } }
-            Behavior on color { ColorAnimation { duration: 160 } }
+            y: 3; width: 24; height: parent.height - 6; radius: 5
+            x: tg.checked ? tg.width - width - 3 : 3
+            Behavior on x { NumberAnimation { duration: page.openMs; easing.type: Easing.OutBack; easing.overshoot: 1.3 } }
+            gradient: Gradient {
+                GradientStop { position: 0; color: page.surfaceHi }
+                GradientStop { position: 1; color: page.surface3 }
+            }
+            border.color: page.outline
+            Rectangle {
+                anchors.centerIn: parent; width: 18; height: 11; radius: 5.5
+                color: page.accent; opacity: tg.checked ? 0.2 : 0
+                Behavior on opacity { NumberAnimation { duration: page.openMs } }
+            }
+            Rectangle {
+                anchors.centerIn: parent; width: 10; height: 4; radius: 2
+                color: tg.checked ? page.accent : page.outline
+                Behavior on color { ColorAnimation { duration: page.openMs } }
+            }
         }
     }
 
-    // The flag grid's bordered on/off tile, factored out so a composite card
-    // can carry switches of its own that look like every other switch on the
-    // page (the Library card's two options). Same box, same hover, same whole
-    // tile click target; `keyName` stages into the edit map, so it commits with
-    // SAVE CHANGES like the grid's tiles do. Disabling an ancestor greys and
-    // deadens it, since `enabled` propagates to the MouseArea.
-    component FlagTile: Rectangle {
-        id: ftile
-        property string keyName: ""
-        property string label: ""
+    // The inside of a switch tile: title, help and switch, placed the same
+    // way in every tile (see tilePadT). `compact` (a narrow tile) lets the
+    // help run under the switch, so it keeps a readable width. Rows a tile
+    // adds (a hint, a nested key) go under the help.
+    component TileBody: Item {
+        id: tb
+        property string title: ""
         property string help: ""
+        property bool helpShown: help !== ""
         property bool checked: false
-        height: 92
-        radius: 10; border.color: page.border1
-        color: (ftMouse.containsMouse && ftile.enabled) ? page.surface2 : page.surface
-        MouseArea {
-            id: ftMouse
-            anchors.fill: parent; hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: page.setv(ftile.keyName, !ftile.checked)
+        property bool compact: false
+        property int helpLines: 3
+        property real padL: 16
+        property real padR: 14
+        // The switch takes its own click (on a tile that is no click target).
+        property bool switchClickable: false
+        signal switchClicked()
+        readonly property int titleLines: tbTitle.lineCount
+        // The lines the help takes at its full room (`helpCap`), measured
+        // apart from what shows: a nested key or a missing prerequisite
+        // changes what shows but never the row's height.
+        property int helpCap: helpLines
+        readonly property int helpNatural: help === "" ? 0 : tbMeasure.lineCount
+        default property alias extras: tbCol.data
+        objectName: "tileBody"
+        anchors.fill: parent
+        ColumnLayout {
+            id: tbCol
+            anchors.left: parent.left; anchors.leftMargin: tb.padL
+            anchors.right: parent.right; anchors.rightMargin: tb.compact ? tb.padR : tb.padR + page.switchW + 14
+            anchors.top: parent.top; anchors.topMargin: page.tilePadT
+            spacing: 3
+            Text {
+                id: tbTitle
+                textFormat: Text.PlainText; text: tb.title; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium
+                wrapMode: Text.WordWrap; maximumLineCount: tb.compact ? 3 : 2; elide: Text.ElideRight
+                Layout.fillWidth: true
+                Layout.topMargin: page.tileTitleNudge
+                Layout.rightMargin: tb.compact ? page.switchW + 10 : 0
+                // Narrow: the help starts under the switch, never beside it.
+                Layout.preferredHeight: tb.compact ? Math.max(page.switchH - page.tileTitleNudge, implicitHeight) : implicitHeight
+            }
+            Text {
+                visible: tb.helpShown
+                textFormat: Text.PlainText
+                text: tb.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                wrapMode: Text.WordWrap; maximumLineCount: Math.max(1, tb.helpLines)
+                elide: Text.ElideRight; Layout.fillWidth: true
+            }
         }
-        RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
-            SToggle { Layout.alignment: Qt.AlignVCenter; checked: ftile.checked }
-            ColumnLayout {
-                Layout.fillWidth: true; spacing: 3
-                Text {
-                    textFormat: Text.PlainText
-                    text: ftile.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium
-                    elide: Text.ElideRight; Layout.fillWidth: true
-                }
-                Text {
-                    visible: ftile.help !== ""
-                    textFormat: Text.PlainText
-                    text: ftile.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                    wrapMode: Text.WordWrap; maximumLineCount: 3
-                    elide: Text.ElideRight; Layout.fillWidth: true
-                }
+        Text {
+            id: tbMeasure
+            visible: false; width: tbCol.width
+            textFormat: Text.PlainText; text: tb.help; font.pixelSize: 12; lineHeight: 1.15
+            wrapMode: Text.WordWrap; maximumLineCount: Math.max(1, tb.helpCap)
+        }
+        SToggle {
+            objectName: "tileSwitch"
+            anchors.right: parent.right; anchors.rightMargin: tb.padR
+            y: page.tilePadT
+            checked: tb.checked
+            MouseArea {
+                anchors.fill: parent; enabled: tb.switchClickable; visible: enabled
+                cursorShape: Qt.PointingHandCursor
+                onClicked: tb.switchClicked()
             }
         }
     }
 
-    // Segmented cadence control with a spring-slid thumb; shared by the
-    // Updates and FFmpeg auto-check tiles (AutoCheckTile below) so the two
-    // controls stay identical. `field` is the embedded enum descriptor.
-    component CadenceSeg: Rectangle {
-        id: seg
-        property var field: null
-        readonly property var opts: field ? field.options : []
-        readonly property string cad: field ? String(page.val(field)) : "daily"
-        readonly property bool onSecond: opts.length > 1 && cad === opts[1].value
-        readonly property real pad: 2
-        readonly property real seg1W: segT1.implicitWidth + 16
-        readonly property real seg2W: segT2.implicitWidth + 16
-        radius: 6; implicitHeight: 26
-        implicitWidth: seg1W + seg2W + pad * 2
-        color: page.surface3; border.color: page.outline
+    // The round check (notes/check_lab, look C). `k` runs 0 to 1 as it
+    // picks; fill, ring and mark all read it, so they move as one.
+    component RoundCheck: Rectangle {
+        id: rck
+        property real k: 0
+        width: 13; height: 13; radius: 6.5
+        color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, k)
+        border.width: 1; border.color: page.mix(page.textLo, page.accent, k)
+        Ico { anchors.centerIn: parent; opacity: rck.k; scale: 0.6 + 0.4 * rck.k; name: "check"; color: page.accentText; size: 9; bold: 14 }
+    }
+
+    // A channel key: a small lit key with an LED, for multi-picks.
+    component SCheck: Item {
+        id: ck
+        property bool on: false
+        property string label: ""
+        property real k: ck.on ? 1 : 0
+        Behavior on k { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+        // Circle 13 + gap 7 + label + 14 of padding (from the label's own width,
+        // not the row's, so a layout narrowing the key cannot loop back).
+        implicitWidth: ckTxt.implicitWidth + 34; implicitHeight: 26
         Rectangle {
-            y: seg.pad
-            height: parent.height - seg.pad * 2
-            radius: 5
+            anchors.fill: parent; radius: 7
+            color: page.mix(page.surface0, page.accentCont, ck.k)
+            border.color: page.mix(page.outline, page.accentDim, ck.k)
+        }
+        Row {
+            id: ckRow
+            anchors.centerIn: parent; spacing: 7
+            // A small round check, so the key reads as a pick (a bare dot
+            // read as a status light).
+            RoundCheck { anchors.verticalCenter: parent.verticalCenter; k: ck.k }
+            Text {
+                id: ckTxt
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText; text: ck.label
+                // Hugs its label, but elides when a layout gives it less.
+                width: Math.min(implicitWidth, Math.max(0, ck.width - 34))
+                elide: Text.ElideRight
+                color: page.mix(page.textLo, page.accentContTx, ck.k)
+                font.pixelSize: 12; font.weight: Font.Medium
+            }
+        }
+    }
+
+    // Segmented selector: every option on show, a sprung thumb under the
+    // pick. "Lossless (16-bit)" splits into a name and a mono subline; climbing
+    // options carry a four-step level mark. Like the pull-down it replaced, it
+    // takes Tab focus, and Left / Right (or Up / Down) step the pick.
+    // `currentIndex` is a binding on page.val(...): it is never assigned here,
+    // `picked` routes through page.setv and the binding follows, so a canceled
+    // edit cannot leave a stale pick on screen.
+    component SChoice: Rectangle {
+        id: ch
+        property var options: []
+        property int currentIndex: 0
+        property bool ladder: false
+        signal picked(int index)
+        activeFocusOnTab: true
+        function stepPick(by) {
+            var k = Math.max(0, Math.min(options.length - 1, currentIndex + by))
+            if (k !== currentIndex && enabled) picked(k)
+        }
+        Keys.onLeftPressed: stepPick(-1)
+        Keys.onRightPressed: stepPick(1)
+        Keys.onUpPressed: stepPick(-1)
+        Keys.onDownPressed: stepPick(1)
+        readonly property bool twoLine: {
+            for (var i = 0; i < options.length; i++) if (page.optSub(options[i].label) !== "") return true
+            return false
+        }
+        readonly property Item curItem: chRep.count > 0 && currentIndex >= 0 && currentIndex < chRep.count ? chRep.itemAt(currentIndex) : null
+        implicitWidth: chRow.implicitWidth + 4
+        implicitHeight: twoLine ? 42 : 30
+        radius: 8; color: page.surface0
+        border.color: activeFocus ? page.accentDim : page.outline
+        Rectangle {
+            visible: ch.curItem !== null
+            y: 2; height: parent.height - 4; radius: 6
+            x: ch.curItem ? ch.curItem.x + 2 : 2
+            width: ch.curItem ? ch.curItem.width : 0
             color: page.accentCont; border.color: page.accentDim
-            x: seg.onSecond ? seg.pad + seg.seg1W : seg.pad
-            width: seg.onSecond ? seg.seg2W : seg.seg1W
-            Behavior on x { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 1.6 } }
-            Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+            Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutBack; easing.overshoot: 1.1 } }
+            Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
         }
-        RowLayout {
-            anchors.fill: parent; anchors.margins: seg.pad; spacing: 0
-            Item {
-                Layout.fillHeight: true; implicitWidth: seg.seg1W
-                Text {
-                    textFormat: Text.PlainText
-                    id: segT1; anchors.centerIn: parent
-                    text: seg.opts.length > 0 ? String(seg.opts[0].label).toUpperCase() : ""
-                    font.family: page.uiFont; font.bold: true; font.pixelSize: 10
-                    color: !seg.onSecond ? page.accent : page.textLo
-                    Behavior on color { ColorAnimation { duration: 160 } }
-                }
-                MouseArea {
-                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: if (seg.field && seg.opts.length > 0) page.setv(seg.field.key, seg.opts[0].value)
-                }
-            }
-            Item {
-                Layout.fillHeight: true; implicitWidth: seg.seg2W
-                Text {
-                    textFormat: Text.PlainText
-                    id: segT2; anchors.centerIn: parent
-                    text: seg.opts.length > 1 ? String(seg.opts[1].label).toUpperCase() : ""
-                    font.family: page.uiFont; font.bold: true; font.pixelSize: 10
-                    color: seg.onSecond ? page.accent : page.textLo
-                    Behavior on color { ColorAnimation { duration: 160 } }
-                }
-                MouseArea {
-                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: if (seg.field && seg.opts.length > 1) page.setv(seg.field.key, seg.opts[1].value)
+        Row {
+            id: chRow
+            x: 2; y: 2; height: parent.height - 4
+            Repeater {
+                id: chRep
+                model: ch.options
+                delegate: Item {
+                    id: chSeg
+                    required property var modelData
+                    required property int index
+                    readonly property bool sel: index === ch.currentIndex
+                    readonly property int lit: Math.max(1, Math.round((index + 1) / Math.max(1, ch.options.length) * 4))
+                    width: chCol.width + (ch.ladder ? 42 : 24); height: parent.height
+                    Row {
+                        visible: ch.ladder
+                        x: 11; anchors.verticalCenter: parent.verticalCenter; spacing: 2
+                        height: 13
+                        Repeater {
+                            model: 4
+                            delegate: Rectangle {
+                                required property int index
+                                anchors.bottom: parent.bottom
+                                width: 2; height: 4 + index * 3; radius: 1
+                                color: index < chSeg.lit ? (chSeg.sel ? page.accent : page.textDim) : page.divider
+                                Behavior on color { ColorAnimation { duration: 200 } }
+                            }
+                        }
+                    }
+                    Column {
+                        id: chCol
+                        x: ch.ladder ? 31 : 12; anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+                        Text {
+                            textFormat: Text.PlainText; text: page.optMain(chSeg.modelData.label)
+                            color: chSeg.sel ? page.accent : chMa.containsMouse ? page.textHi : page.textLo
+                            font.pixelSize: 12; font.weight: Font.DemiBold
+                            Behavior on color { ColorAnimation { duration: 160 } }
+                        }
+                        Text {
+                            visible: text !== ""
+                            textFormat: Text.PlainText; text: page.optSub(chSeg.modelData.label)
+                            color: chSeg.sel ? page.accentDim : page.textDim
+                            font.family: page.mono; font.pixelSize: 9; font.letterSpacing: 0.4
+                        }
+                    }
+                    MouseArea {
+                        id: chMa
+                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: ch.picked(chSeg.index)
+                    }
                 }
             }
         }
     }
 
-    // Right-hand auto-check tile (pill toggle + cadence segment), shared by
-    // the Updates and FFmpeg cards so the toggle and segment are identical by
-    // construction. `autoField`/`cadField` are the card's embedded schema
-    // descriptors; background/border colors are overridable at the use site.
-    component AutoCheckTile: Rectangle {
-        id: act
-        property var autoField: null
-        property var cadField: null
-        readonly property bool autoOn: autoField ? page.val(autoField) === true : false
-        // For the host card's implicitHeight formula (the tile itself is
-        // anchored top/bottom, so its own implicitHeight is not used).
-        readonly property real rowImplicitHeight: actRow.implicitHeight
-        radius: 10; color: page.surface; border.color: page.border1
-        RowLayout {
-            id: actRow
-            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
-            SToggle {
-                Layout.alignment: Qt.AlignVCenter
-                checked: act.autoOn
-                MouseArea {
-                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: if (act.autoField) page.setv(act.autoField.key, !act.autoOn)
-                }
-            }
-            ColumnLayout {
-                Layout.fillWidth: true; spacing: 3
-                Text { textFormat: Text.PlainText; text: act.autoField ? act.autoField.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                Text {
-                    text: "Notifies only; nothing downloads until you click Update. The check sends none of your data."
-                    color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
-                }
-            }
-            ColumnLayout {
-                Layout.alignment: Qt.AlignVCenter
-                visible: act.autoOn
-                spacing: 4
-                Text { text: "CADENCE"; color: page.textDim; font.family: page.mono; font.pixelSize: 9; font.letterSpacing: 1.2; Layout.alignment: Qt.AlignHCenter }
-                CadenceSeg { field: act.cadField }
-            }
-        }
-    }
-
-    // Numeric stepper. Integer by default; set `step`/`decimals` for decimals
-    // (e.g. step 0.5 / decimals 1 for the second-scale Advanced delays).
-    component SStepper: Row {
-        property real value: 0
-        property real minimum: 1
-        property real maximum: 9999
-        property real step: 1
-        property int decimals: 0
-        signal changed(real v)
-        spacing: 6
-        // Clamp/round and emit ONLY, never assign `value` here. `value` is a
-        // declarative binding to page.val(modelData); the parent's onChanged
-        // routes through page.setv, which updates editMap and re-evaluates that
-        // binding, so the display follows. Assigning `value` would break the
-        // binding, and since delegates are kept alive across close/reopen a
-        // cancelled edit would then persist visually with Save disabled.
-        function apply(v) {
-            var r = Math.pow(10, decimals)
-            changed(Math.round(Math.max(minimum, Math.min(maximum, v)) * r) / r)
-        }
-        Rectangle {
-            width: 32; height: 32; radius: 8; color: page.surface2; border.color: page.outline
-            Ico { anchors.centerIn: parent; name: "minus"; color: page.accent; size: 17 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: parent.parent.apply(parent.parent.value - parent.parent.step) }
-        }
-        Rectangle {
-            width: 52; height: 32; radius: 8; color: page.surface2; border.color: page.outline
-            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: parent.parent.value.toFixed(parent.parent.decimals); color: page.textHi; font.family: page.mono; font.pixelSize: 16; font.bold: true }
-        }
-        Rectangle {
-            width: 32; height: 32; radius: 8; color: page.surface2; border.color: page.outline
-            Ico { anchors.centerIn: parent; name: "plus"; color: page.accent; size: 16 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: parent.parent.apply(parent.parent.value + parent.parent.step) }
-        }
-    }
-
-    component SCombo: ComboBox {
-        id: cb
-        implicitHeight: 44
-        implicitWidth: 240
-        textRole: "label"   // model items are {value, label}; store value, show label
-        background: Rectangle { radius: 8; color: page.surface2; border.color: cb.pressed || cb.popup.visible ? page.accent : page.outline }
-        contentItem: Text { textFormat: Text.PlainText; text: cb.displayText; color: page.textHi; font.pixelSize: 14; leftPadding: 12; rightPadding: 26; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-        indicator: ExpandChevron {
-            x: cb.width - 24; y: (cb.height - 16) / 2; tile: 16; glyph: 12
-            showTile: false; closedAngle: -90; openAngle: 0
-            stroke: page.accent; open: cb.popup.visible
-        }
-        delegate: ItemDelegate {
-            width: cb.width
-            contentItem: Text { textFormat: Text.PlainText; text: (modelData && modelData.label !== undefined) ? modelData.label : modelData; color: page.textHi; font.pixelSize: 14; verticalAlignment: Text.AlignVCenter }
-            background: Rectangle { color: highlighted ? page.surface3 : page.surface2 }
-            highlighted: cb.highlightedIndex === index
-        }
-        popup: Popup {
-            y: cb.height + 4; width: cb.width; implicitHeight: Math.min(contentItem.implicitHeight + 8, 280); padding: 4
-            background: Rectangle { radius: 8; color: page.surface2; border.color: page.outline }
-            contentItem: ListView {
-                clip: true; implicitHeight: contentHeight
-                model: cb.popup.visible ? cb.delegateModel : null
-                ScrollBar.vertical: ScrollBar {}
-            }
-        }
-    }
-
+    // An inset field; a green caret bar rises on its left edge while typing.
     component SText: Rectangle {
         property alias text: tf.text
-        // What an empty box stands for, greyed (the per-character stand-ins
+        // What an empty box stands for, grayed (the per-character stand-ins
         // show the value the character falls back to).
         property alias placeholderText: tf.placeholderText
         property bool focused: tf.activeFocus
         // Red outline while the value carries something the field cannot keep.
         property bool invalid: false
-        radius: 8; color: invalid ? page.redCont : page.surface2
-        border.color: invalid ? page.red : tf.activeFocus ? page.accent : page.outline
-        implicitHeight: 36
+        radius: 7; color: invalid ? page.redCont : page.surface0
+        border.color: invalid ? page.red : tf.activeFocus ? page.accentDim : page.outline
+        Behavior on border.color { ColorAnimation { duration: 160 } }
+        implicitHeight: 34
         property var onEdited: (function(t){})
+        Rectangle {
+            x: 4; width: 3; radius: 1.5; anchors.verticalCenter: parent.verticalCenter
+            height: tf.activeFocus ? parent.height - 14 : 0
+            color: page.accent
+            Behavior on height { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+        }
         TextField {
             id: tf
-            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 12
             verticalAlignment: TextInput.AlignVCenter
             color: page.textHi; font.family: page.mono; font.pixelSize: 13
             placeholderTextColor: page.textDim
@@ -994,6 +1187,170 @@ Item {
             onTextChanged: if (!activeFocus) cursorPosition = 0
             onActiveFocusChanged: if (!activeFocus) cursorPosition = 0
         }
+    }
+
+    // Numeric stepper: an LED readout between minus and plus keys. Integer by
+    // default; set `step`/`decimals` for decimals (step 0.5 / decimals 1 for
+    // the second-scale delays). Drag the readout sideways to scrub; each
+    // change ticks the digits.
+    component SStepper: Rectangle {
+        id: st
+        property real value: 0
+        property real minimum: 1
+        property real maximum: 9999
+        property real step: 1
+        property int decimals: 0
+        signal changed(real v)
+        // Clamp/round and emit ONLY, never assign `value` here. `value` is a
+        // declarative binding to page.val(modelData); the parent's onChanged
+        // routes through page.setv, which updates editMap and re-evaluates that
+        // binding, so the display follows. Assigning `value` would break the
+        // binding, and since delegates are kept alive across close/reopen a
+        // canceled edit would then persist visually with Save disabled.
+        function apply(v) {
+            var r = Math.pow(10, decimals)
+            changed(Math.round(Math.max(minimum, Math.min(maximum, v)) * r) / r)
+        }
+        implicitWidth: 126; implicitHeight: 32
+        width: implicitWidth; height: implicitHeight
+        radius: 8; color: page.surface0
+        border.color: stScrub.pressed ? page.accentDim : page.outline
+        onValueChanged: stTick.restart()
+        Item {
+            width: 32; height: parent.height
+            Ico { anchors.centerIn: parent; name: "minus"; size: 15; color: st.value > st.minimum ? page.accent : page.textDim }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: st.apply(st.value - st.step) }
+        }
+        Rectangle { x: 32; y: 7; width: 1; height: parent.height - 14; color: page.divider }
+        Item {
+            x: 33; width: parent.width - 66; height: parent.height
+            Text {
+                id: stTxt
+                anchors.centerIn: parent
+                textFormat: Text.PlainText; text: st.value.toFixed(st.decimals)
+                color: page.accent; font.family: page.mono; font.pixelSize: 16; font.bold: true
+            }
+            SequentialAnimation {
+                id: stTick
+                NumberAnimation { target: stTxt; property: "scale"; to: 1.16; duration: 60 }
+                NumberAnimation { target: stTxt; property: "scale"; to: 1; duration: 200; easing.type: Easing.OutBack }
+            }
+            MouseArea {
+                id: stScrub
+                anchors.fill: parent; cursorShape: Qt.SizeHorCursor; preventStealing: true
+                property real x0: 0
+                property real v0: 0
+                onPressed: function(m) { x0 = m.x; v0 = st.value }
+                onPositionChanged: function(m) { if (pressed) st.apply(v0 + Math.round((m.x - x0) / 12) * st.step) }
+            }
+        }
+        Rectangle { x: parent.width - 33; y: 7; width: 1; height: parent.height - 14; color: page.divider }
+        Item {
+            x: parent.width - 32; width: 32; height: parent.height
+            Ico { anchors.centerIn: parent; name: "plus"; size: 14; color: st.value < st.maximum ? page.accent : page.textDim }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: st.apply(st.value + st.step) }
+        }
+    }
+
+    // The flag grid's on/off tile (words on the left, the key switch on the
+    // right), factored out so a composite card can carry switches of its own
+    // that look like every other switch on the page (the Library card's two
+    // options). Same box, same hover, same whole-tile click target; `keyName`
+    // stages into the edit map, so it commits with SAVE CHANGES like the
+    // grid's tiles do. Disabling an ancestor grays and deadens it, since
+    // `enabled` propagates to the MouseArea.
+    component FlagTile: Rectangle {
+        id: ftile
+        property string keyName: ""
+        property string label: ""
+        property string help: ""
+        property bool checked: false
+        // A third of the row is narrower, so the help gets one more line
+        // (the same 100 / 4 the flag grid's three-across rows use).
+        property int helpLines: 3
+        // Narrow: the switch sits beside the label, as in the flag grid. These
+        // tiles sit inside a padded card (the Library card), so they go
+        // compact a little sooner than the grid's.
+        readonly property bool compact: width < page.tileCompactW + 72
+        // This tile's label lines, and the most any tile beside it has (the
+        // host sets it), so a row of tiles keeps one height.
+        readonly property int labelLines: ftBody.titleLines
+        property int rowLabelLines: 1
+        // The same for the help: its lines, and the most beside it.
+        readonly property int helpNatural: ftBody.helpNatural
+        property int rowHelpLines: 1
+        height: page.tileHeight(helpLines > 3, compact, Math.max(labelLines, rowLabelLines), Math.max(helpNatural, rowHelpLines))
+        radius: 10; color: page.surface0
+        border.color: (ftMouse.containsMouse && ftile.enabled) ? page.outline : page.border1
+        Behavior on border.color { ColorAnimation { duration: 120 } }
+        MouseArea {
+            id: ftMouse
+            anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: page.setv(ftile.keyName, !ftile.checked)
+        }
+        TileBody {
+            id: ftBody
+            title: ftile.label; help: ftile.help; checked: ftile.checked
+            compact: ftile.compact
+            helpLines: page.tileHelpLines(ftile.helpLines > 3, ftile.compact)
+        }
+    }
+
+    // The auto-check strip (words with the cadence under them, key switch),
+    // shared by the
+    // Updates and FFmpeg cards so the two are identical by construction.
+    // `autoField`/`cadField` are the card's embedded schema descriptors.
+    component AutoCheckTile: Rectangle {
+        id: act
+        property var autoField: null
+        property var cadField: null
+        readonly property bool autoOn: autoField ? page.val(autoField) === true : false
+        // For the host card's implicitHeight formula (the tile itself is
+        // anchored top/bottom, so its own implicitHeight is not used).
+        readonly property real rowImplicitHeight: actRow.implicitHeight
+        radius: 10; color: page.surface0; border.color: page.border1
+        RowLayout {
+            id: actRow
+            // From the top like every switch tile (see tilePadT).
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            anchors.leftMargin: 16; anchors.rightMargin: 14; anchors.topMargin: page.tilePadT; spacing: 14
+            ColumnLayout {
+                Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: 3
+                Text { textFormat: Text.PlainText; text: act.autoField ? act.autoField.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true; Layout.topMargin: page.tileTitleNudge }
+                Text {
+                    text: "Notifies only; nothing downloads until you click Update. The check sends none of your data."
+                    color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
+                }
+                // Under the words rather than beside them: the strip is half a
+                // card wide, and the words need that width more.
+                CadenceSeg {
+                    Layout.topMargin: 6
+                    field: act.cadField
+                    opacity: act.autoOn ? 1 : 0.35; enabled: act.autoOn
+                    Behavior on opacity { NumberAnimation { duration: 180 } }
+                }
+            }
+            SToggle {
+                objectName: "tileSwitch"
+                Layout.alignment: Qt.AlignTop
+                checked: act.autoOn
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: if (act.autoField) page.setv(act.autoField.key, !act.autoOn)
+                }
+            }
+        }
+    }
+
+    // The cadence pick (daily / weekly) for the auto-check strip. `field` is
+    // the embedded enum descriptor.
+    component CadenceSeg: SChoice {
+        property var field: null
+        options: field ? field.options : []
+        currentIndex: field ? page.enumIndex(field.options, page.val(field)) : 0
+        onPicked: function(i) { if (field) page.setv(field.key, field.options[i].value) }
     }
 
     // Clipboard write helper (copy only, never read): a hidden TextEdit is the
@@ -1038,8 +1395,133 @@ Item {
     // so it can be reused across the app, settings sections, the download
     // queue, album blocks, etc.
 
-    // Per-section line-art icon (see `iconPath`). Stroke-only, accent-coloured,
+    // Per-section line-art icon (see `iconPath`). Stroke-only, accent-colored,
     // drawn in a 16-unit box and scalable via `px`.
+    component RailGlyph: Canvas {
+        id: rg
+        property string glyph: ""
+        property color stroke: page.accent
+        property bool live: false
+        property real t: 0
+        width: 16; height: 16
+        onStrokeChanged: requestPaint()
+        onLiveChanged: { t = 0; requestPaint() }
+        onGlyphChanged: requestPaint()
+        FrameAnimation { running: rg.live && rg.visible && page.active
+            onTriggered: { rg.t += frameTime; rg.requestPaint() } }
+        function ease(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2 }
+        onPaint: {
+            var c = getContext("2d"); c.reset()
+            c.scale(width / 16, height / 16)
+            c.strokeStyle = stroke; c.fillStyle = stroke
+            c.lineWidth = 1.5; c.lineCap = "round"; c.lineJoin = "round"
+            var t = rg.t, g = glyph, P = Math.PI
+            if (!live) { c.path = page.iconPath(g); c.stroke(); return }
+            if (g === "downloads" || g === "updates") {
+                // The arrow keeps dropping into the tray (or lifting off it).
+                var p = (t * 0.85) % 1, up = g === "updates"
+                var dy = up ? (1 - p) * 3.4 - 1.7 : p * 3.4 - 1.7
+                c.globalAlpha = Math.sin(p * P)
+                c.save(); c.translate(0, dy)
+                c.path = up ? "M8 4V11 M4.9 7.1L8 4L11.1 7.1" : "M8 3.2V9.3 M5.2 6.6 L8 9.4 L10.8 6.6"
+                c.stroke(); c.restore(); c.globalAlpha = 1
+                if (!up) { c.path = "M3.4 12.6H12.6"; c.stroke() }
+                else { c.beginPath(); c.moveTo(5, 13.2); c.lineTo(11, 13.2); c.globalAlpha = 0.5; c.stroke(); c.globalAlpha = 1 }
+            } else if (g === "library") {
+                // A bright head sweeps the shelf, lighting each spine as it
+                // passes; the shelf dims again before the next pass.
+                var xs = [4.4, 6.8, 9.2, 11.6], tops = [5, 4.2, 3.4, 5.6]
+                var cyc = t % 2.2, hx = 2.6 + (cyc / 1.4) * 11.6
+                var fade = cyc < 1.4 ? 1 : Math.max(0, 1 - (cyc - 1.4) / 0.6)
+                c.path = "M2.6 12.6H13.4"; c.stroke()
+                for (var i = 0; i < 4; i++) {
+                    var lit = hx >= xs[i] ? fade : 0
+                    c.globalAlpha = 0.32 + 0.68 * lit
+                    c.beginPath(); c.moveTo(xs[i], tops[i]); c.lineTo(xs[i], 12.6); c.stroke()
+                }
+                if (cyc < 1.4) {
+                    c.globalAlpha = 0.9; c.lineWidth = 1
+                    c.beginPath(); c.moveTo(hx, 2.4); c.lineTo(hx, 14); c.stroke()
+                }
+                c.globalAlpha = 1
+            } else if (g === "releases") {
+                // The bell rings in short bursts.
+                var q = (t % 1.8), env = q < 0.9 ? Math.sin(q / 0.9 * P) : 0
+                var a = Math.sin(q * 26) * 0.32 * env
+                c.save(); c.translate(8, 3.6); c.rotate(a); c.translate(-8, -3.6)
+                c.path = "M4.6 11H11.4L10.4 9.6V7A2.4 2.4 0 0 0 5.6 7V9.6Z M8 4.6V3.4"; c.stroke(); c.restore()
+                c.save(); c.translate(-a * 3.2, 0); c.path = "M7 12.6H9"; c.stroke(); c.restore()
+            } else if (g === "discography") {
+                // The disc spins, a groove glint going round.
+                c.path = "M2.6 8A5.4 5.4 0 1 0 13.4 8A5.4 5.4 0 1 0 2.6 8Z M6.9 8A1.1 1.1 0 1 0 9.1 8A1.1 1.1 0 1 0 6.9 8Z"; c.stroke()
+                var r0 = t * 4.2
+                c.lineWidth = 1.1
+                c.beginPath(); c.arc(8, 8, 3.4, r0, r0 + 1.1); c.stroke()
+                c.globalAlpha = 0.5; c.beginPath(); c.arc(8, 8, 3.4, r0 + P, r0 + P + 0.7); c.stroke(); c.globalAlpha = 1
+            } else if (g === "files") {
+                // A page rises out of the folder and settles back in.
+                var lift = 1.0 + 1.8 * ease(0.5 - 0.5 * Math.cos(t * 2.6))
+                c.lineWidth = 1.2; c.globalAlpha = 0.85
+                c.beginPath(); c.moveTo(5.2, 6.7); c.lineTo(5.2, 6.7 - lift); c.lineTo(10.8, 6.7 - lift); c.lineTo(10.8, 6.7); c.stroke()
+                c.globalAlpha = 1; c.lineWidth = 1.5
+                c.path = "M2.6 5.4H6.2L7.4 6.7H13.4V11.9H2.6Z"; c.stroke()
+            } else if (g === "metadata") {
+                // The tag swings on its hole.
+                c.save(); c.translate(5.15, 4.9); c.rotate(Math.sin(t * 3.2) * 0.2); c.translate(-5.15, -4.9)
+                c.path = page.iconPath(g); c.stroke(); c.restore()
+            } else if (g === "processing") {
+                // A pulse runs round the chip's pins.
+                c.path = "M5.2 5.2H10.8V10.8H5.2Z"; c.stroke()
+                var pins = [[6.7, 5.2, 6.7, 3.6], [9.3, 5.2, 9.3, 3.6], [10.8, 6.7, 12.4, 6.7], [10.8, 9.3, 12.4, 9.3],
+                            [9.3, 10.8, 9.3, 12.4], [6.7, 10.8, 6.7, 12.4], [5.2, 9.3, 3.6, 9.3], [5.2, 6.7, 3.6, 6.7]]
+                var head = (t * 7) % 8
+                for (var i = 0; i < 8; i++) {
+                    var dd = (head - i + 8) % 8
+                    c.globalAlpha = 0.3 + 0.7 * Math.max(0, 1 - dd / 3)
+                    c.beginPath(); c.moveTo(pins[i][0], pins[i][1]); c.lineTo(pins[i][2], pins[i][3]); c.stroke()
+                }
+                c.globalAlpha = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 5))
+                c.beginPath(); c.arc(8, 8, 0.9, 0, 2 * P); c.fill(); c.globalAlpha = 1
+            } else if (g === "appearance") {
+                // The eye glances side to side and blinks.
+                var b = t % 3.2, sy = b > 2.9 ? Math.abs(Math.cos((b - 2.9) / 0.3 * P)) : 1
+                sy = Math.max(0.08, sy)
+                c.save(); c.translate(8, 8); c.scale(1, sy); c.translate(-8, -8)
+                c.path = "M1.8 8C3.6 4.9 5.6 3.8 8 3.8C10.4 3.8 12.4 4.9 14.2 8C12.4 11.1 10.4 12.2 8 12.2C5.6 12.2 3.6 11.1 1.8 8Z"; c.stroke()
+                var lx = Math.max(-1, Math.min(1, Math.sin(t * 1.3) * 1.6)) * 1.8
+                c.beginPath(); c.arc(8 + lx, 8, 1.7, 0, 2 * P); c.stroke(); c.restore()
+            } else if (g === "notifications") {
+                // Two short buzzes, marks flaring at the sides.
+                var w2 = t % 2.2, env2 = 0
+                if (w2 < 0.42) env2 = Math.sin(w2 / 0.42 * P)
+                else if (w2 > 0.58 && w2 < 1.0) env2 = Math.sin((w2 - 0.58) / 0.42 * P)
+                var dx = Math.sin(t * 70) * 0.55 * env2
+                c.save(); c.translate(8 + dx, 8); c.rotate(dx * 0.06); c.translate(-8, -8)
+                c.path = "M6.2 2.4H9.8A1.2 1.2 0 0 1 11 3.6V12.4A1.2 1.2 0 0 1 9.8 13.6H6.2A1.2 1.2 0 0 1 5 12.4V3.6A1.2 1.2 0 0 1 6.2 2.4Z M7.5 11.6H8.5"
+                c.stroke(); c.restore()
+                var o = env2 * 0.5
+                c.globalAlpha = 0.25 + 0.75 * env2
+                c.beginPath(); c.moveTo(2.8 - o, 6.2); c.lineTo(2.8 - o, 9.8); c.moveTo(13.2 + o, 6.2); c.lineTo(13.2 + o, 9.8); c.stroke()
+                c.globalAlpha = env2 * 0.7
+                c.beginPath(); c.moveTo(1.2 - o, 7); c.lineTo(1.2 - o, 9); c.moveTo(14.8 + o, 7); c.lineTo(14.8 + o, 9); c.stroke()
+                c.globalAlpha = 1
+            } else if (g === "pacing") {
+                // The needle revs up and drops back.
+                c.path = "M2.8 11.6A5.4 5.4 0 1 1 13.2 11.6"; c.stroke()
+                var s = ease(0.5 - 0.5 * Math.cos(t * 2.4))
+                var ang = -P * 0.86 + s * P * 0.72
+                c.beginPath(); c.moveTo(8, 9.2); c.lineTo(8 + Math.cos(ang) * 4.2, 9.2 + Math.sin(ang) * 4.2); c.stroke()
+                c.beginPath(); c.arc(8, 9.2, 0.8, 0, 2 * P); c.stroke()
+            } else if (g === "diagnostics") {
+                // The trace scrolls by like a monitor, a bright head drawing it.
+                c.globalAlpha = 0.28; c.path = page.iconPath(g); c.stroke(); c.globalAlpha = 1
+                var hx = 2 + ((t * 9) % 14)
+                c.save(); c.beginPath(); c.rect(hx - 4.5, 0, 4.5, 16); c.clip()
+                c.path = page.iconPath(g); c.stroke(); c.restore()
+                c.beginPath(); c.arc(Math.min(hx, 13.4), 8, 0.01, 0, 2 * P); c.stroke()
+            } else { c.path = page.iconPath(g); c.stroke() }
+        }
+    }
     component SectionIcon: Shape {
         id: si
         property string glyph: ""
@@ -1062,7 +1544,7 @@ Item {
     // the field: it updates editMap, and the SText's `text: page.val(modelData)`
     // binding re-evaluates to show it. We deliberately do NOT write the SText's
     // `text` alias directly, that imperative write would destroy the binding,
-    // and because delegates are kept alive across close/reopen a cancelled Browse
+    // and because delegates are kept alive across close/reopen a canceled Browse
     // would then persist visually with Save disabled.
     FolderDialog {
         id: folderDlg
@@ -1073,6 +1555,411 @@ Item {
         id: fileDlg
         property string targetKey: ""
         onAccepted: page.setv(targetKey, page.urlToPath(selectedFile))
+    }
+
+    // ---- Section rail ---------------------------------------------------
+    // Left of the pane, under the sticky header. Click a section to show it;
+    // once the rail has focus (any click on it), Up / Down step through them.
+    Rectangle {
+        id: rail
+        x: 22; y: 62; width: 224; height: page.height - y - 14
+        radius: 12; color: page.surface; border.color: page.border1
+        z: 2
+        // Where the selection plate sits, in the rail list's coordinates.
+        property real selY: 0
+        Component.onCompleted: page.railScroller = railFlick
+        Keys.onUpPressed: page.stepSection(-1)
+        Keys.onDownPressed: page.stepSection(1)
+        // Keep the picked row in view when the rail scrolls (a short window,
+        // a deep link, or the arrow keys landing past the edge).
+        function reveal() {
+            var top = selY - 8, bottom = selY + 34 + 8
+            if (top < railFlick.contentY) railFlick.contentY = Math.max(0, top)
+            else if (bottom > railFlick.contentY + railFlick.height)
+                railFlick.contentY = Math.min(railFlick.contentHeight - railFlick.height, bottom - railFlick.height)
+        }
+        // The list scrolls when the window is too short to hold it.
+        Flickable {
+            id: railFlick
+            anchors.fill: parent
+            anchors.bottomMargin: 2
+            contentHeight: railFoot.y + railFoot.height
+            clip: true; boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+        // The selection plate: it glides between rows (the one motion on a
+        // section switch; the pane itself changes instantly).
+        Rectangle {
+            x: 8; width: parent.width - 16; height: 34; radius: 8
+            y: rail.selY
+            color: page.accentCont; border.color: page.accentDim
+            Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutBack; easing.overshoot: 0.8 } }
+            Rectangle { x: -1; width: 3; height: 16; radius: 1.5; anchors.verticalCenter: parent.verticalCenter; color: page.accent }
+        }
+        Column {
+            id: railList
+            x: 8; y: 10; width: parent.width - 16; spacing: 2
+            Repeater {
+                model: page.railGroups
+                delegate: Column {
+                    id: railGroup
+                    required property var modelData
+                    required property int index
+                    width: parent.width; spacing: 2
+                    Item { width: 1; height: railGroup.index === 0 ? 2 : 12 }
+                    Text {
+                        textFormat: Text.PlainText
+                        x: 10; text: railGroup.modelData.head; color: page.textDim
+                        font.family: page.mono; font.pixelSize: 10; font.letterSpacing: 1.4
+                        bottomPadding: 4
+                    }
+                    Repeater {
+                        model: railGroup.modelData.ids
+                        delegate: Rectangle {
+                            id: railItem
+                            required property string modelData
+                            objectName: "railItem_" + modelData
+                            readonly property var g: page.groupById(modelData)
+                            readonly property bool sel: page.curSec === modelData
+                            visible: g !== null
+                            width: parent.width; height: 34; radius: 8
+                            color: "transparent"
+                            // Hover is a fixed-color layer that fades its opacity: a
+                            // color fade from "transparent" runs through transparent
+                            // black and dips darker than the rail before it lightens.
+                            Rectangle {
+                                anchors.fill: parent; radius: 8; color: page.surface2
+                                opacity: !railItem.sel && railMa.containsMouse ? 1 : 0
+                                Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+                            }
+                            function place() {
+                                if (!sel) return
+                                rail.selY = mapToItem(railFlick.contentItem, 0, 0).y
+                                if (railFlick.interactive) rail.reveal()
+                            }
+                            onSelChanged: place()
+                            onYChanged: place()
+                            Connections { target: railGroup; function onYChanged() { railItem.place() } }
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                            // The FFmpeg / Updates status lights, and an unsaved-edit dot.
+                            readonly property color statusColor:
+                                  railItem.modelData === "updates" && page.auUpdate ? page.gold
+                                : railItem.modelData === "processing" && page.ff && page.ff.stateKey === "missing" ? page.red
+                                : railItem.modelData === "processing" && page.ff && page.ff.stateKey === "path" ? page.gold
+                                : "transparent"
+                            Row {
+                                x: 10; anchors.verticalCenter: parent.verticalCenter; spacing: 10
+                                // The picked section's icon loops a small motion of its own.
+                                RailGlyph {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    glyph: railItem.modelData
+                                    live: railItem.sel
+                                    objectName: "railGlyph_" + railItem.modelData
+                                    stroke: railItem.sel ? page.accent : page.textLo
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    textFormat: Text.PlainText
+                                    text: railItem.g ? railItem.g.group : ""
+                                    color: railItem.sel ? page.accent : page.textHi
+                                    font.pixelSize: 13; font.weight: railItem.sel ? Font.DemiBold : Font.Normal
+                                    // A wide font (DejaVu on Linux) set bold for the pick
+                                    // can outgrow the rail: shrink a point or two first,
+                                    // elide only past that.
+                                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 11
+                                    width: rail.width - 72; elide: Text.ElideRight
+                                }
+                            }
+                            Rectangle {
+                                anchors.right: parent.right; anchors.rightMargin: 10
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 7; height: 7; radius: 3.5
+                                color: page.secDirty(railItem.modelData) ? page.accent : railItem.statusColor
+                            }
+                            MouseArea {
+                                id: railMa
+                                anchors.fill: parent; anchors.topMargin: -1; anchors.bottomMargin: -1
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { rail.forceActiveFocus(); page.showSection(railItem.modelData) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The credit and the coffee button end the rail: pinned to its foot
+        // while the list leaves room, scrolling up with it when it does not.
+        Item {
+            id: railFoot
+            width: railFlick.width
+            height: footer.height + coffee.height + 14
+            y: Math.max(railList.y + railList.height + 12, railFlick.height - height)
+        // ── footer credit (easter egg), "made with [♥] by iamprivacy".
+        // Types itself out while Settings shows it (the rail scrolled far
+        // enough on a short window), backspaces away when it goes; the heart
+        // lub-dubs on hover and bursts into color pixels when clicked (the
+        // burst sim is the page-root `gibOverlay`, boxed into the rail).
+        Item {
+            id: footer
+            objectName: "settingsCredit"
+            width: parent.width; height: 44; y: coffee.height + 10
+            // In view: the rail is scrolled far enough to show it.
+            readonly property bool fits: railFoot.y + footer.y + 20 < railFlick.contentY + railFlick.height
+
+            readonly property int total: 25   // "made with "10 + heart 1 + " by "4 + "iamprivacy"10
+            property int n: 0
+            property bool inView: false
+            property bool cursorPresent: false
+            property bool heartGibbed: false
+            property real beat: 1.0
+
+            readonly property var  heartModel: HeartGib.build()
+            readonly property int  heartPx: 2
+            readonly property real heartW: HeartGib.pxW(heartModel, heartPx)
+            readonly property real heartH: HeartGib.pxH(heartModel, heartPx)
+            // After the heart bursts, "[love]" takes its place; the slot grows
+            // from the heart's width to the word's width so the line reflows.
+            readonly property real lovedW: fLovedMeas.implicitWidth
+            readonly property real slotW:  heartGibbed ? lovedW : heartW
+            readonly property bool heartShown: visFor(10, 1) > 0 && !heartGibbed
+            readonly property bool heartLive:  footer.n >= footer.total && !heartGibbed
+
+            function visFor(off, len) { return Math.max(0, Math.min(footer.n - off, len)) }
+            function gibHeart() {
+                if (footer.heartGibbed) return
+                beatAnim.stop(); beatReset.stop(); footer.beat = 1.0
+                var p = heartCv.mapToItem(page, 0, 0)
+                gibOverlay.explode(p.x, p.y, footer.heartModel, footer.heartPx)
+                footer.heartGibbed = true
+            }
+            // Put the credit back the way a fresh visit would: type it out
+            // again from nothing, with a whole heart. The burst calls this
+            // when the last of the mess is gone; a credit out of view just
+            // resets, and types itself the next time it shows.
+            function rearmCredit() {
+                footer.heartGibbed = false
+                footer.n = 0
+                footer.cursorPresent = false
+                if (!footer.inView) return
+                footer.cursorPresent = true
+                fTypeFwd.from = 0
+                fTypeFwd.duration = footer.total * 52
+                fTypeFwd.restart()
+            }
+            function recomputeInView() {
+                var nowIn = page.active && footer.fits
+                if (nowIn !== footer.inView) footer.inView = nowIn
+            }
+            Component.onCompleted: Qt.callLater(footer.recomputeInView)
+            onFitsChanged: footer.recomputeInView()
+            Connections { target: page
+                function onActiveChanged() { footer.recomputeInView() }
+            }
+            onInViewChanged: {
+                if (footer.inView) {
+                    fFarewell.stop(); fTypeBack.stop()
+                    footer.cursorPresent = true
+                    fTypeFwd.from = footer.n
+                    fTypeFwd.duration = Math.max(1, footer.total - footer.n) * 52
+                    fTypeFwd.restart()
+                } else {
+                    fTypeFwd.stop()
+                    beatAnim.stop(); footer.beat = 1.0
+                    if (footer.heartGibbed) {
+                        // Leaving mid-burst: the mess clears now instead of
+                        // waiting out its time, and the credit resets.
+                        fTypeBack.stop()
+                        gibOverlay.release()
+                    } else {
+                        fTypeBack.from = footer.n
+                        fTypeBack.duration = Math.max(1, footer.n) * 34
+                        fTypeBack.restart()
+                    }
+                }
+            }
+            NumberAnimation { id: fTypeFwd;  target: footer; property: "n"; to: footer.total; easing.type: Easing.Linear }
+            NumberAnimation { id: fTypeBack; target: footer; property: "n"; to: 0; easing.type: Easing.Linear
+                              onStopped: if (footer.n === 0) fFarewell.restart() }
+            Timer { id: fBlink; interval: 460; repeat: true; running: footer.cursorPresent
+                    property bool on: true
+                    onTriggered: on = !on
+                    onRunningChanged: if (running) on = true }
+            Timer { id: fFarewell; interval: 1300; repeat: false
+                    onTriggered: if (!footer.inView && footer.n === 0) footer.cursorPresent = false }
+            SequentialAnimation { id: beatAnim; loops: Animation.Infinite
+                NumberAnimation { target: footer; property: "beat"; from: 1.00; to: 1.18; duration: 130; easing.type: Easing.OutQuad }
+                NumberAnimation { target: footer; property: "beat"; from: 1.18; to: 0.97; duration: 150; easing.type: Easing.InQuad }
+                NumberAnimation { target: footer; property: "beat"; from: 0.97; to: 1.09; duration: 110; easing.type: Easing.OutQuad }
+                NumberAnimation { target: footer; property: "beat"; from: 1.09; to: 1.00; duration: 170; easing.type: Easing.OutCubic }
+                PauseAnimation { duration: 460 }
+            }
+            NumberAnimation { id: beatReset; target: footer; property: "beat"; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+
+            Item {
+                id: fCredit
+                anchors.centerIn: parent
+                width: fMeas.implicitWidth + 9
+                height: fMeas.implicitHeight
+                // hidden width probe for the "[love]" replacement
+                Text { id: fLovedMeas; visible: false; text: "[love]"; font.family: page.mono; font.pixelSize: 11 }
+                Row { id: fMeas; visible: false
+                    Text { text: "made with "; font.family: page.mono; font.pixelSize: 11 }
+                    Item { width: footer.slotW; height: footer.heartH }
+                    Text { text: " by ";       font.family: page.mono; font.pixelSize: 11 }
+                    Text { text: "iamprivacy"; font.family: page.mono; font.pixelSize: 11 }
+                }
+                Row {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 0
+                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                           text: "made with ".substring(0, footer.visFor(0, 10)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
+                    Item { width: footer.slotW; height: footer.heartH; anchors.verticalCenter: parent.verticalCenter
+                        Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                        Canvas {
+                            id: heartCv
+                            width: footer.heartW; height: footer.heartH
+                            anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                            smooth: false; antialiasing: false
+                            visible: footer.heartShown
+                            opacity: footer.heartShown ? 1 : 0
+                            Behavior on opacity { NumberAnimation { duration: 120 } }
+                            transformOrigin: Item.Center
+                            scale: footer.beat
+                            Component.onCompleted: requestPaint()
+                            onPaint: { var ctx = getContext('2d'); ctx.reset(); ctx.clearRect(0, 0, width, height)
+                                       HeartGib.draw(ctx, footer.heartModel, 0, 0, footer.heartPx) }
+                        }
+                        // after the heart bursts, "[love]" fades in where it was and
+                        // stays until the mess is gone and the credit retypes
+                        Text {
+                            anchors.centerIn: parent
+                            text: "[love]"; color: page.accent
+                            font.family: page.mono; font.pixelSize: 11
+                            opacity: footer.heartGibbed ? 1 : 0
+                            Behavior on opacity { NumberAnimation { duration: 280 } }
+                        }
+                        MouseArea { anchors.fill: parent; anchors.margins: -4
+                            hoverEnabled: true
+                            enabled: footer.heartLive
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onEntered: { beatReset.stop(); beatAnim.start() }
+                            onExited:  { beatAnim.stop(); beatReset.start() }
+                            onClicked: footer.gibHeart() }
+                    }
+                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                           text: " by ".substring(0, footer.visFor(11, 4)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
+                    Item { implicitWidth: fGh.implicitWidth; implicitHeight: fGh.implicitHeight; anchors.verticalCenter: parent.verticalCenter
+                        Text { id: fGh; textFormat: Text.PlainText; text: "iamprivacy".substring(0, footer.visFor(15, 10))
+                               color: fGhMA.containsMouse ? page.textHi : page.gold
+                               font.family: page.mono; font.pixelSize: 11
+                               font.underline: fGhMA.containsMouse }
+                        MouseArea { id: fGhMA; anchors.fill: parent; hoverEnabled: true
+                            enabled: footer.visFor(15, 10) === 10
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: Qt.openUrlExternally("https://github.com/iamprivacy") }
+                    }
+                    Rectangle { anchors.verticalCenter: parent.verticalCenter
+                        width: 7; height: 13; radius: 1; color: page.gold
+                        visible: footer.cursorPresent
+                        opacity: fBlink.on ? 0.9 : 0.0 }
+                }
+            }
+        }
+
+        // Buy Me a Coffee, above the credit; opens the page in the browser.
+        // No box: a white ceramic mug with the coffee showing through an
+        // open rim, and the label in Buy Me a Coffee's own yellow. The mug
+        // steams all the time, and the steam climbs higher and quicker
+        // while hovered. The mug's body sits on the middle of the label's
+        // capitals, not on the canvas middle (the steam headroom would push
+        // it low).
+        Item {
+            id: coffee
+            objectName: "settingsCoffee"
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 4
+            readonly property color yellow:    "#ffdd00"
+            readonly property color yellowHot: "#ffe94d"
+            readonly property color ceramic:   "#f6f1e8"   // lip, outline and handle
+            readonly property color glaze:     "#ece4d6"   // body
+            readonly property color brew:      "#6b4024"
+            readonly property color steam:     "#d9d4cc"
+            readonly property real  ms: 1.1                // mug scale over its 22-unit drawing
+            width: mug.width + 7 + coffeeTxt.implicitWidth
+            height: Math.max(coffeeTxt.implicitHeight + page.btnPadV * 2 + 2, 30)
+            // 0 at rest, 1 hovered; eases so the steam speeds up smoothly.
+            property real h: coffeeMa.containsMouse ? 1 : 0
+            Behavior on h { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            // Steam clock, in seconds; runs only while Settings shows.
+            property real t: 0
+            FrameAnimation {
+                running: coffee.visible && page.active
+                onTriggered: { coffee.t += frameTime * (0.6 + 0.75 * coffee.h); mug.requestPaint() }
+            }
+            scale: coffeeMa.pressed ? 0.97 : 1
+            Behavior on scale { NumberAnimation { duration: 90 } }
+
+            FontMetrics { id: coffeeFm; font: coffeeTxt.font }
+            Canvas {
+                id: mug
+                width: 22 * coffee.ms; height: 22 * coffee.ms
+                // The body's middle (y 15 in mug units) on the capitals' middle.
+                y: coffeeTxt.y + coffeeTxt.baselineOffset + coffeeFm.tightBoundingRect("B").y
+                   + coffeeFm.tightBoundingRect("B").height / 2 - 15 * coffee.ms
+                function body(c) {
+                    c.beginPath(); c.moveTo(4, 10); c.lineTo(4, 16.5); c.arcTo(4, 20, 7.5, 20, 3.5)
+                    c.lineTo(11.5, 20); c.arcTo(15, 20, 15, 16.5, 3.5); c.lineTo(15, 10); c.closePath()
+                }
+                function handle(c) { c.beginPath(); c.moveTo(15, 11.6); c.bezierCurveTo(19.4, 11.6, 19.4, 17.4, 15, 17.4); c.stroke() }
+                // One curl of steam from the rim (y 8.6) up to `top`, fading as it rises.
+                function wisp(c, x0, ph, amp, top, a) {
+                    var g = coffee.steam, gr = c.createLinearGradient(0, 8.6, 0, top)
+                    gr.addColorStop(0, Qt.rgba(g.r, g.g, g.b, a)); gr.addColorStop(1, Qt.rgba(g.r, g.g, g.b, 0))
+                    c.strokeStyle = gr; c.lineWidth = 1.4; c.beginPath()
+                    for (var y = 8.6; y >= top; y -= 0.4) {
+                        var k = (8.6 - y) / (8.6 - top)
+                        var x = x0 + Math.sin((8.6 - y) * 0.85 - ph * 6.283) * amp * (0.3 + k)
+                        if (y === 8.6) c.moveTo(x, y); else c.lineTo(x, y)
+                    }
+                    c.stroke()
+                }
+                onPaint: {
+                    var c = getContext("2d"); c.reset()
+                    c.scale(coffee.ms, coffee.ms)
+                    var t = coffee.t, h = coffee.h
+                    c.lineCap = "round"; c.lineJoin = "round"; c.lineWidth = 1.6
+                    // Handle first so the body's fill covers its root.
+                    c.strokeStyle = coffee.ceramic; handle(c)
+                    c.fillStyle = coffee.glaze; body(c); c.fill(); c.stroke()
+                    // The open rim: the lip, then the coffee inside it.
+                    c.fillStyle = coffee.ceramic
+                    c.beginPath(); c.ellipse(3.2, 7.1, 12.6, 5.8); c.fill()
+                    c.fillStyle = coffee.brew
+                    c.beginPath(); c.ellipse(4.6, 8.1, 9.8, 3.8); c.fill()
+                    wisp(c, 7.2, t * 0.9, 1.15 + 0.25 * h, 2.6 - 1.6 * h, 1)
+                    wisp(c, 11.4, t * 0.9 + 0.45, 1.15 + 0.25 * h, 3.0 - 1.6 * h, 1)
+                    // A third wisp joins while hovered.
+                    if (h > 0.02) wisp(c, 9.3, t * 1.1 + 0.2, 1.1, 2.2, 0.6 * h)
+                }
+            }
+            Text {
+                id: coffeeTxt
+                x: mug.width + 7
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "Buy me a coffee"
+                color: Qt.tint(coffee.yellow, Qt.rgba(coffee.yellowHot.r, coffee.yellowHot.g, coffee.yellowHot.b, coffee.h))
+                font.family: page.uiFont; font.pixelSize: 14; font.bold: true
+            }
+            MouseArea {
+                id: coffeeMa
+                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: Qt.openUrlExternally("https://www.buymeacoffee.com/iamprivacy")
+            }
+        }
+        }
+        }
     }
 
     // ---- Layout ---------------------------------------------------------
@@ -1109,7 +1996,7 @@ Item {
                     }
                 }
                 Rectangle {
-                    id: saveBtn
+                    id: saveBtn; objectName: "settingsSave"
                     // A red field holds the whole save, so nothing the engine
                     // would refuse can reach the config in the first place.
                     readonly property bool canSave: page.dirty && !page.hasInvalidEdits()
@@ -1127,7 +2014,7 @@ Item {
                         // flacRefresh: a saved download folder moves the FLAC
                         // card's "Waves library", so its last scan may no
                         // longer describe what it shows.
-                        onClicked: { waves.applySettings(page.editMap); page.dirty = false; page.needsRefresh = true; page.savedFlash = true; flashTimer.restart(); page.flacRefresh() }
+                        onClicked: { waves.applySettings(page.editMap); page.savedVals = Object.assign({}, page.savedVals, page.editMap); page.syncLibraryMirrors(); page.unsaved = ({}); page.dirty = false; page.needsRefresh = true; page.savedFlash = true; flashTimer.restart(); page.flacRefresh() }
                     }
                 }
             }
@@ -1135,13 +2022,16 @@ Item {
 
         Flickable {
             id: settingsFlick
+            objectName: "settingsPane"
             Layout.fillWidth: true; Layout.fillHeight: true
+            // Room for the section rail on the left.
+            Layout.leftMargin: 246
             clip: true
             contentWidth: width
             contentHeight: col.height + 28
             // Dragging the bar (or clicking its track) never emits
             // movementStarted, so it disarms a pending restore itself.
-            ScrollBar.vertical: ScrollBar { onPressedChanged: if (pressed) page.pendingY = -1 }
+            ScrollBar.vertical: WavesScrollBar { onPressedChanged: if (pressed) page.pendingY = -1 }
             boundsBehavior: Flickable.StopAtBounds
             // Only a real scroll is worth remembering: while the page is
             // hidden the height is 0 and every write here is the clamp.
@@ -1568,7 +2458,7 @@ Item {
                                     textFormat: Text.PlainText
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                     // A pending update is the one state worth shouting about:
-                                    // gold and full-size, not the dim caption grey.
+                                    // gold and full-size, not the dim caption gray.
                                     color: page.auUpdate ? page.gold : page.textDim
                                     font.pixelSize: page.auUpdate ? 14 : 12
                                     font.weight: page.auUpdate ? Font.DemiBold : Font.Normal
@@ -1723,7 +2613,7 @@ Item {
                     }
                 }
 
-                // FLAC signature check (Advanced section, above the reset row).
+                // FLAC signature check (FFmpeg & FLAC section, at its end).
                 // The folder row picks what SCAN walks: the Waves library (the
                 // download and library folders) or a folder chosen with
                 // Browse, remembered by the backend. SCAN reads every FLAC
@@ -2014,7 +2904,7 @@ Item {
                     }
                 }
 
-                // Reset row (Advanced section footer): explainer on the left,
+                // Reset row (Diagnostics section footer): explainer on the left,
                 // the two reset actions inline on the right. The buttons only
                 // raise page signals; Main.qml owns the confirmation dialogs
                 // and the backend calls, so nothing here is destructive.
@@ -2133,7 +3023,7 @@ Item {
                                             // Do NOT re-push the two prefs here. Both toggles below
                                             // apply live via setWavesPref, so the backend already
                                             // holds the truth and there is no unsaved change to
-                                            // honour. Pushing vbOn/rdOn instead sent whatever the
+                                            // honor. Pushing vbOn/rdOn instead sent whatever the
                                             // card was rendering, and after a close-and-reopen that
                                             // is the STALE baked-in schema value (onActiveChanged
                                             // clears editMap but only rebuilds `groups` when
@@ -2168,7 +3058,8 @@ Item {
                         }
                     }
 
-                    // ---- Right tile: verbose + redact-content toggles -------
+                    // ---- Right tile: verbose + redact-content switches (words
+                    // left, switch right, as everywhere on the page) ----------
                     Rectangle {
                         anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
                         width: (parent.width - 10) / 2
@@ -2179,8 +3070,17 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 13
+                                ColumnLayout {
+                                    Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: 3
+                                    Text { textFormat: Text.PlainText; text: dgCard.dfVerbose ? dgCard.dfVerbose.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true; Layout.topMargin: page.tileTitleNudge }
+                                    Text {
+                                        text: "Logs detailed activity to help diagnose slowdowns, freezes and crashes. Turn on, reproduce the problem, then export."
+                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                                        wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; Layout.fillWidth: true
+                                    }
+                                }
                                 SToggle {
-                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.alignment: Qt.AlignTop
                                     checked: dgCard.vbOn
                                     MouseArea {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -2197,20 +3097,20 @@ Item {
                                         }
                                     }
                                 }
-                                ColumnLayout {
-                                    Layout.fillWidth: true; spacing: 3
-                                    Text { textFormat: Text.PlainText; text: dgCard.dfVerbose ? dgCard.dfVerbose.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                                    Text {
-                                        text: "Logs detailed activity to help diagnose slowdowns, freezes and crashes. Turn on, reproduce the problem, then export."
-                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                                        wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
-                                    }
-                                }
                             }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 13
+                                ColumnLayout {
+                                    Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: 3
+                                    Text { textFormat: Text.PlainText; text: dgCard.dfRedact ? dgCard.dfRedact.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true; Layout.topMargin: page.tileTitleNudge }
+                                    Text {
+                                        text: "Exports always remove usernames, paths, addresses and tokens. This also hides searches and titles, which can make bugs harder to reproduce."
+                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
+                                        wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; Layout.fillWidth: true
+                                    }
+                                }
                                 SToggle {
-                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.alignment: Qt.AlignTop
                                     checked: dgCard.rdOn
                                     MouseArea {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -2222,58 +3122,45 @@ Item {
                                         }
                                     }
                                 }
-                                ColumnLayout {
-                                    Layout.fillWidth: true; spacing: 3
-                                    Text { textFormat: Text.PlainText; text: dgCard.dfRedact ? dgCard.dfRedact.label : ""; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                                    Text {
-                                        text: "Exports always remove usernames, paths, addresses and tokens. This also hides searches and titles, which can make bugs harder to reproduce."
-                                        color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                                        wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true
-                                    }
-                                }
                             }
                         }
                     }
                     }
                 }
 
-                // Settings sections, schema-driven, collapsible
+                // Settings sections, schema-driven. Only the one picked on
+                // the rail shows (no transition: the switch is instant); the
+                // rest stay built, so a deep link to a card inside one (the
+                // FLAC check) can measure it the moment its section shows.
             Repeater {
                 id: secRep
                 model: page.groups
                 delegate: Rectangle {
                     id: card
                     required property var modelData
+                    visible: card.modelData.id === page.curSec
                     width: col.width
                     radius: 12; clip: true
-                    color: page.surface
-                    border.width: 1
-                    border.color: card.open ? "#30343c" : page.border1
+                    color: "transparent"
                     implicitHeight: hd.implicitHeight + bodyWrap.height
-                    Behavior on border.color { ColorAnimation { duration: 200 } }
-                    // Every section starts collapsed and then stays the way
-                    // the user last left it (persisted). Two auto-open rules
-                    // outrank a never-touched default: Processing opens when
-                    // FFmpeg is missing so the install button is visible, and
-                    // Updates opens while an update is available. The
-                    // Processing trigger latches on `ffEverMissing` (not the
-                    // live state) so a successful install, which flips the
-                    // state missing to managed, doesn't snap the card shut.
-                    property bool open: page.sectionOpen(card.modelData.id,
-                           (modelData.card === "ffmpeg" && page.ffEverMissing)
-                        || (modelData.card === "updates" && page.auUpdate))
+                    // The section on show is always open (the old accordion is
+                    // gone); kept as a property because the body's fades read it.
+                    readonly property bool open: true
+                    // A section with a master switch (Notifications) sleeps
+                    // while it is off: the body fades and takes no clicks.
+                    readonly property var masterF: page.masterField(card.modelData.fields)
+                    readonly property bool masterOff: card.masterF !== null && page.val(card.masterF) !== true
 
-                    // Card header, icon + title + count chip + rotating chevron.
-                    // The whole row is the click target.
+                    // Section header: icon, the rail group as a crumb, title, blurb.
                     Item {
                         id: hd
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                        implicitHeight: Math.max(30, hdRow.implicitHeight) + 28
+                        implicitHeight: Math.max(30, hdRow.implicitHeight) + 8
                         RowLayout {
                             id: hdRow
                             anchors.left: parent.left; anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: 15; anchors.rightMargin: 15
+                            anchors.leftMargin: 0; anchors.rightMargin: 0
                             spacing: 12
                             Rectangle {
                                 id: glyphTile
@@ -2296,7 +3183,7 @@ Item {
                                     : page.red
                                 // No status ring: it made the FFmpeg (and Updates) tile the
                                 // only outlined section, which looked out of place. The status
-                                // still reads from the glyph colour (red/gold/green) below.
+                                // still reads from the glyph color (red/gold/green) below.
                                 border.width: 0
                                 SectionIcon {
                                     anchors.centerIn: parent
@@ -2309,9 +3196,32 @@ Item {
                                 Layout.fillWidth: true; spacing: 2
                                 Text {
                                     textFormat: Text.PlainText
-                                    text: card.modelData.group; color: page.textHi
-                                    font.pixelSize: 15; font.weight: Font.DemiBold
-                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                    text: page.railCrumb(card.modelData.id) + "  \u203a"
+                                    color: page.textDim; font.family: page.uiFont; font.pixelSize: 12; font.weight: Font.Medium
+                                    Layout.bottomMargin: -1
+                                }
+                                // The master switch rides right after the title:
+                                // it names what the whole section is, so it reads
+                                // as the section's own on/off, not one more option.
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 12
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        text: card.modelData.group; color: page.textHi
+                                        font.pixelSize: 20; font.weight: Font.DemiBold
+                                        Layout.fillWidth: card.masterF === null; elide: Text.ElideRight
+                                    }
+                                    SToggle {
+                                        objectName: "sectionMaster"
+                                        visible: card.masterF !== null
+                                        Layout.alignment: Qt.AlignVCenter
+                                        checked: !card.masterOff
+                                        MouseArea {
+                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: page.setv(card.masterF.key, card.masterOff)
+                                        }
+                                    }
+                                    Item { visible: card.masterF !== null; Layout.fillWidth: true }
                                 }
                                 Text {
                                     textFormat: Text.PlainText
@@ -2320,39 +3230,30 @@ Item {
                                     color: page.textDim; font.pixelSize: 12
                                     wrapMode: Text.WordWrap; Layout.fillWidth: true
                                 }
-                            }
-                            Rectangle {
-                                radius: 4; color: "transparent"; border.color: page.border1
-                                Layout.preferredHeight: 18; Layout.preferredWidth: cntT.implicitWidth + 16
-                                Layout.alignment: Qt.AlignVCenter
-                                Text { id: cntT; textFormat: Text.PlainText; anchors.centerIn: parent; text: card.modelData.fields.length; color: page.textDim; font.family: page.mono; font.pixelSize: 11 }
-                            }
-                            ExpandChevron { open: card.open; hovered: hdHover.containsMouse; Layout.alignment: Qt.AlignVCenter }
-                        }
-                        MouseArea {
-                            id: hdHover
-                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            // Only the page record is written: `open` above
-                            // stays a binding on it, so a deep link
-                            // (jumpToCard) can still open this card after a
-                            // hand toggle, and the next schema refresh
-                            // rebuilds it the way it was left. Assigning
-                            // card.open here would sever that binding.
-                            onClicked: {
-                                // Toggling re-measures the page; a still-armed
-                                // restore must not ride that and jump the view.
-                                page.pendingY = -1
-                                page.setSectionOpen(card.modelData.id, !card.open)
+                                Text {
+                                    objectName: "sectionMasterNote"
+                                    textFormat: Text.PlainText
+                                    visible: text !== ""
+                                    text: card.masterF !== null ? page.masterNote(card.masterF) : ""
+                                    color: card.masterOff ? page.textLo : page.accent; font.pixelSize: 12
+                                    wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                }
                             }
                         }
                     }
 
-                    // Collapsible body. Driving a real (animated) height keeps the
-                    // Flickable's contentHeight binding re-measuring as it opens/closes.
+                    // The body. Driving a real (animated) height keeps the
+                    // Flickable's contentHeight binding re-measuring as rows
+                    // inside it show and hide.
                     Item {
                         id: bodyWrap
+                        objectName: "sectionBody"
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: hd.bottom
                         clip: true
+                        // Asleep under an off master: the Library card's 0.4.
+                        enabled: !card.masterOff
+                        opacity: card.masterOff ? 0.4 : 1
+                        Behavior on opacity { NumberAnimation { duration: page.openMs } }
                         height: card.open ? inner.implicitHeight + 26 : 0
                         Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
@@ -2360,7 +3261,7 @@ Item {
 
                         Column {
                             id: inner
-                            x: 15; y: 12; width: parent.width - 30; spacing: 10
+                            x: 1; y: 14; width: parent.width - 2; spacing: 10
                             // Fade in quickly on open; on close, outlast the height
                             // collapse (220ms) so content doesn't vanish early.
                             // States, not a Behavior: a Behavior whose duration
@@ -2410,7 +3311,7 @@ Item {
 
                             // The per-character stand-in table: one box for each
                             // character a file name cannot hold. A box left empty
-                            // follows the general stand-in (shown greyed inside
+                            // follows the general stand-in (shown grayed inside
                             // it), so the table costs nothing until a character
                             // is actually given something of its own. Folded away
                             // unless it holds an override, since almost nobody
@@ -2562,7 +3463,7 @@ Item {
                                                     topPadding: 2; spacing: 8
                                                     // Staged, not saved: the values land in the boxes
                                                     // below and SAVE CHANGES lights up, so the table can
-                                                    // still be tweaked (or cancelled) before it is real.
+                                                    // still be tweaked (or canceled) before it is real.
                                                     Rectangle {
                                                         implicitWidth: offUseTxt.implicitWidth + page.btnPadH * 2
                                                         implicitHeight: offUseTxt.implicitHeight + page.btnPadV * 2
@@ -2738,28 +3639,106 @@ Item {
                             }
 
                             // Value-bearing settings (str / enum / int / float) as
-                            // labelled rows. One shared delegate feeds two Repeaters:
-                            // the File organization card renders its path-template
+                            // labeled rows. One shared delegate feeds two Repeaters:
+                            // the Files & Naming card renders its path-template
                             // rows first, the token reference right under them, then
                             // its remaining value rows; every other card renders all
                             // of its rows in the first Repeater.
                             Component {
                                 id: rowFieldComp
                                 Rectangle {
+                                    id: fieldRow
                                     required property var modelData
                                     visible: page.depOK(modelData)
                                     // Third fields sit three-up in the Flow below.
                                     width: modelData.third === true ? (inner.width - 20) / 3 : inner.width
-                                    radius: 10; color: page.surface; border.color: page.border1
+                                    radius: 10; color: "transparent"; border.color: "transparent"
                                     // Three-up cards hold a common height whatever their
                                     // help runs to, so a row of them reads as one band
                                     // instead of three ragged blocks; their content
-                                    // centres in it rather than hugging the top.
-                                    implicitHeight: modelData.third === true ? 96 : body.implicitHeight + 20
+                                    // centers in it rather than hugging the top.
+                                    readonly property real cardH: modelData.third === true ? (inlineRow.stack ? 124 : 96) : body.implicitHeight + 20
+                                    // A switch row with a sub-option (child_key) carries it in
+                                    // a band tucked behind the card, sliding out while the
+                                    // switch is on; as it opens the card's bottom corners
+                                    // square off so the sides run straight and only the band
+                                    // rounds the bottom (notes/footer_lab, H5).
+                                    readonly property bool hasBand: modelData.rowToggle === true && modelData.child_key !== undefined
+                                    readonly property bool bandOn: hasBand && page.val(modelData) === true
+                                    readonly property bool bandVal: hasBand && page.valChild(modelData) === true
+                                    property real bandOpen: bandOn ? 1 : 0
+                                    Behavior on bandOpen { NumberAnimation { duration: page.openMs; easing.type: Easing.OutCubic } }
+                                    property real bandK: bandVal ? 1 : 0
+                                    Behavior on bandK { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+                                    readonly property real bandBody: hasBand ? (bandCol.implicitHeight + 22) * bandOpen : 0
+                                    implicitHeight: cardH + bandBody
+                                    Rectangle {
+                                        id: rowBand
+                                        visible: fieldRow.hasBand && fieldRow.bandOpen > 0
+                                        y: fieldRow.cardH - 10
+                                        width: parent.width; height: 10 + fieldRow.bandBody
+                                        radius: 10; clip: true
+                                        color: page.mix(page.surface0, page.accentCont, fieldRow.bandK)
+                                        // The card's soft shade on the band, right under its edge.
+                                        Rectangle {
+                                            y: 10; width: parent.width; height: 9
+                                            opacity: 0.9 * fieldRow.bandOpen
+                                            gradient: Gradient {
+                                                GradientStop { position: 0; color: "#80000000" }
+                                                GradientStop { position: 1; color: "#00000000" }
+                                            }
+                                        }
+                                        Item {
+                                            x: 14; y: 10 + 11; width: parent.width - 28; height: bandCol.implicitHeight
+                                            opacity: fieldRow.bandOpen
+                                            // The shipped round check.
+                                            RoundCheck { id: bandCheck; y: 2; k: fieldRow.bandK }
+                                            Column {
+                                                id: bandCol
+                                                x: bandCheck.width + 10; width: parent.width - x; spacing: 2
+                                                Text {
+                                                    textFormat: Text.PlainText; width: parent.width; elide: Text.ElideRight
+                                                    text: fieldRow.modelData.child_label !== undefined ? fieldRow.modelData.child_label : ""
+                                                    color: page.mix(page.textHi, page.accentContTx, fieldRow.bandK)
+                                                    font.pixelSize: 13
+                                                }
+                                                Text {
+                                                    textFormat: Text.PlainText; width: parent.width; wrapMode: Text.WordWrap
+                                                    visible: text !== ""
+                                                    text: fieldRow.modelData.child_help !== undefined ? fieldRow.modelData.child_help : ""
+                                                    color: page.textDim; font.pixelSize: 12
+                                                }
+                                            }
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent; anchors.topMargin: 10
+                                            enabled: fieldRow.bandOn
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: page.setv(fieldRow.modelData.child_key, !fieldRow.bandVal)
+                                        }
+                                    }
+                                    // The card itself, over the band.
+                                    Rectangle {
+                                        width: parent.width; height: fieldRow.cardH
+                                        radius: 10; color: page.surface
+                                        // Squares the bottom corners as the band opens.
+                                        Rectangle {
+                                            visible: fieldRow.hasBand
+                                            y: parent.height - 10; width: parent.width; height: 10
+                                            color: page.surface; opacity: fieldRow.bandOpen
+                                        }
+                                    }
+                                    Rectangle {
+                                        x: 0; width: 3; radius: 1.5
+                                        height: page.fieldDirty(fieldRow.modelData) ? Math.max(0, fieldRow.cardH - 28) : 0
+                                        y: (fieldRow.cardH - height) / 2
+                                        color: page.accent
+                                        Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                                    }
                                     Item {
                                         id: body
                                         x: 14; width: parent.width - 28
-                                        y: modelData.third === true ? Math.max(10, (parent.height - implicitHeight) / 2) : 10
+                                        y: modelData.third === true ? Math.max(10, (fieldRow.cardH - implicitHeight) / 2) : 10
                                         implicitHeight: modelData.type === "str" && modelData.inline !== true ? strCol.implicitHeight
                                                       : modelData.type === "cover_sizes" ? coverCol.implicitHeight
                                                       : modelData.type === "library" ? libraryLoader.implicitHeight
@@ -2769,15 +3748,30 @@ Item {
                                         // the left, control on the right. A str field
                                         // flagged "inline" holds a value of a character or
                                         // two, so it gets a small box here instead of a
-                                        // full-width one under the help.
-                                        RowLayout {
+                                        // full-width one under the help. When the control
+                                        // would leave the words too little room (a long
+                                        // choice, or a narrow window) it moves under them
+                                        // instead, every option still on show.
+                                        GridLayout {
                                             id: inlineRow
                                             visible: (modelData.type !== "str" || modelData.inline === true)
                                                      && modelData.type !== "cover_sizes" && modelData.type !== "library"
-                                            width: parent.width; spacing: 14
+                                            width: parent.width; columnSpacing: 14; rowSpacing: 10
+                                            readonly property real ctrlW: modelData.type === "enum" ? inlineChoice.implicitWidth
+                                                                        : modelData.type === "kinds" ? kindsRow.implicitWidth
+                                                                        : modelData.type === "range" ? rangeRow.implicitWidth
+                                                                        : 0
+                                            // Third-width boxes stack as a band, all three at once,
+                                            // so the row keeps one height.
+                                            readonly property bool stack: modelData.third === true ? width < 272
+                                                                        : ctrlW > 0 && width - ctrlW - 14 < page.rowWordsMinW
+                                            columns: stack ? 1 : 2
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 2
-                                                Row {
+                                                // A Flow, so the default link drops under a label that
+                                                // fills a narrow box.
+                                                Flow {
+                                                    Layout.fillWidth: true
                                                     spacing: 10
                                                     Text { id: inlineLabel; textFormat: Text.PlainText; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
                                                     // Same per-field Restore default link as the
@@ -2787,7 +3781,7 @@ Item {
                                                         readonly property bool changed: modelData.default_value !== undefined
                                                                                         && String(page.val(modelData)) !== String(modelData.default_value)
                                                         visible: modelData.inline === true && modelData.default_value !== undefined
-                                                        anchors.verticalCenter: inlineLabel.verticalCenter
+                                                        height: inlineLabel.height; verticalAlignment: Text.AlignVCenter
                                                         textFormat: Text.PlainText
                                                         text: changed ? "Restore default" : "Default"
                                                         color: !changed ? page.textDim
@@ -2811,11 +3805,42 @@ Item {
                                                 }
                                                 Text { textFormat: Text.PlainText; visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                             }
-                                            SCombo {
+                                            // A pick of several: one checkbox per option,
+                                            // each hugging its label (the tiles' nested
+                                            // checkbox look).
+                                            Row {
+                                                id: kindsRow
+                                                readonly property var field: modelData
+                                                visible: modelData.type === "kinds"; Layout.alignment: Qt.AlignVCenter
+                                                spacing: 6
+                                                Repeater {
+                                                    model: kindsRow.field.type === "kinds" ? kindsRow.field.options : []
+                                                    delegate: Item {
+                                                        id: kindBox
+                                                        required property var modelData
+                                                        objectName: "settingsKind_" + modelData.value
+                                                        readonly property bool on: page.kindOn(kindsRow.field, modelData.value)
+                                                        width: kindLine.implicitWidth; height: kindLine.implicitHeight
+                                                        MouseArea {
+                                                            anchors.fill: parent; anchors.margins: -4
+                                                            cursorShape: Qt.PointingHandCursor
+                                                            onClicked: page.kindToggle(kindsRow.field, kindBox.modelData.value)
+                                                        }
+                                                        SCheck {
+                                                            id: kindLine
+                                                            on: kindBox.on
+                                                            label: kindBox.modelData.label
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            SChoice {
+                                                id: inlineChoice
                                                 visible: modelData.type === "enum"; Layout.alignment: Qt.AlignVCenter
-                                                model: modelData.type === "enum" ? modelData.options : []
+                                                options: modelData.type === "enum" ? modelData.options : []
                                                 currentIndex: modelData.type === "enum" ? page.enumIndex(modelData.options, page.val(modelData)) : 0
-                                                onActivated: page.setv(modelData.key, modelData.options[currentIndex].value)
+                                                ladder: page.isLadder(modelData.key)
+                                                onPicked: function(i) { page.setv(modelData.key, modelData.options[i].value) }
                                             }
                                             SText {
                                                 id: inlineStr
@@ -2828,6 +3853,49 @@ Item {
                                                 invalid: page.sanitizeDirty(modelData)
                                                 Component.onCompleted: if (modelData.sanitize === true) page.sanitizeKeys[modelData.key] = modelData
                                                 onEdited: function(t){ page.setv(modelData.key, t) }
+                                            }
+                                            SToggle {
+                                                visible: modelData.rowToggle === true; Layout.alignment: Qt.AlignVCenter
+                                                checked: modelData.rowToggle === true && page.val(modelData) === true
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv(modelData.key, !(page.val(modelData) === true)) }
+                                            }
+                                            // A pair of steppers on one row (a delay range, a
+                                            // batch and its pause), under an optional switch.
+                                            Row {
+                                                id: rangeRow
+                                                visible: modelData.type === "range"; Layout.alignment: Qt.AlignVCenter
+                                                spacing: 8
+                                                readonly property bool on: modelData.type !== "range" || modelData.toggle !== true || page.val(modelData) === true
+                                                SToggle {
+                                                    visible: modelData.toggle === true; anchors.verticalCenter: parent.verticalCenter
+                                                    checked: modelData.type === "range" && page.val(modelData) === true
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv(modelData.key, !(page.val(modelData) === true)) }
+                                                }
+                                                Item { visible: modelData.toggle === true; width: 4; height: 1 }
+                                                SStepper {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    opacity: rangeRow.on ? 1 : 0.4; enabled: rangeRow.on
+                                                    value: modelData.lo ? page.val(modelData.lo) : 0
+                                                    minimum: modelData.lo && modelData.lo.minimum !== undefined ? modelData.lo.minimum : 0
+                                                    maximum: modelData.lo && modelData.lo.maximum !== undefined ? modelData.lo.maximum : 9999
+                                                    step: modelData.lo && modelData.lo.step !== undefined ? modelData.lo.step : 1
+                                                    decimals: modelData.lo && modelData.lo.decimals !== undefined ? modelData.lo.decimals : 0
+                                                    onChanged: function(v){ page.setv(modelData.lo.key, v) }
+                                                }
+                                                Text {
+                                                    anchors.verticalCenter: parent.verticalCenter; opacity: rangeRow.on ? 1 : 0.4
+                                                    textFormat: Text.PlainText; text: modelData.mid || ""; color: page.textLo; font.pixelSize: 12
+                                                }
+                                                SStepper {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    opacity: rangeRow.on ? 1 : 0.4; enabled: rangeRow.on
+                                                    value: modelData.hi ? page.val(modelData.hi) : 0
+                                                    minimum: modelData.hi && modelData.hi.minimum !== undefined ? modelData.hi.minimum : 0
+                                                    maximum: modelData.hi && modelData.hi.maximum !== undefined ? modelData.hi.maximum : 9999
+                                                    step: modelData.hi && modelData.hi.step !== undefined ? modelData.hi.step : 1
+                                                    decimals: modelData.hi && modelData.hi.decimals !== undefined ? modelData.hi.decimals : 0
+                                                    onChanged: function(v){ page.setv(modelData.hi.key, v) }
+                                                }
                                             }
                                             SStepper {
                                                 visible: modelData.type === "int" || modelData.type === "float"; Layout.alignment: Qt.AlignVCenter
@@ -2849,18 +3917,23 @@ Item {
                                             visible: modelData.type === "cover_sizes"
                                             width: parent.width; spacing: 10
                                             property bool expanded: page.val2(modelData) !== "follow"
-                                            RowLayout {
-                                                width: parent.width; spacing: 14
+                                            // Each size row stacks its choice under the words when
+                                            // the choice would crowd them (as the rows above do).
+                                            GridLayout {
+                                                width: parent.width; columnSpacing: 14; rowSpacing: 10
+                                                columns: width - coverChoice.implicitWidth - 14 < page.rowWordsMinW ? 1 : 2
                                                 ColumnLayout {
                                                     Layout.fillWidth: true; spacing: 2
                                                     Text { textFormat: Text.PlainText; text: modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
                                                     Text { textFormat: Text.PlainText; visible: modelData.help !== ""; text: modelData.help; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                                 }
-                                                SCombo {
+                                                SChoice {
+                                                    id: coverChoice
                                                     Layout.alignment: Qt.AlignVCenter
-                                                    model: modelData.options ? modelData.options : []
+                                                    options: modelData.options ? modelData.options : []
                                                     currentIndex: page.enumIndex(modelData.options, page.val(modelData))
-                                                    onActivated: page.setv(modelData.key, modelData.options[currentIndex].value)
+                                                    ladder: true
+                                                    onPicked: function(i) { page.setv(modelData.key, modelData.options[i].value) }
                                                 }
                                             }
                                             Text {
@@ -2869,25 +3942,27 @@ Item {
                                                 color: page.accent; font.pixelSize: 12
                                                 MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: coverCol.expanded = !coverCol.expanded }
                                             }
-                                            RowLayout {
+                                            GridLayout {
                                                 visible: coverCol.expanded
-                                                width: parent.width; spacing: 14
+                                                width: parent.width; columnSpacing: 14; rowSpacing: 10
+                                                columns: width - coverFileChoice.implicitWidth - 14 < page.rowWordsMinW ? 1 : 2
                                                 ColumnLayout {
                                                     Layout.fillWidth: true; spacing: 2
                                                     Text { textFormat: Text.PlainText; text: modelData.file_label ? modelData.file_label : "Separate cover.jpg size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
                                                     Text { text: "Size of the saved cover.jpg. \"Same as embedded\" matches the size above."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                                 }
-                                                SCombo {
+                                                SChoice {
+                                                    id: coverFileChoice
                                                     Layout.alignment: Qt.AlignVCenter
-                                                    model: modelData.file_options ? modelData.file_options : []
+                                                    options: modelData.file_options ? modelData.file_options : []
                                                     currentIndex: page.enumIndex(modelData.file_options, page.val2(modelData))
-                                                    onActivated: page.setv(modelData.file_key, modelData.file_options[currentIndex].value)
+                                                    onPicked: function(i) { page.setv(modelData.file_key, modelData.file_options[i].value) }
                                                 }
                                             }
                                         }
 
                                         // Music library: the ownership-badge scan's composite card. A
-                                        // master switch (off by default) heads it and greys the rest out;
+                                        // master switch (off by default) heads it and grays the rest out;
                                         // switch, source and folder all stage into editMap like every
                                         // other field, and SAVE CHANGES commits them together AND starts
                                         // the first scan (applySettings). Only Rescan acts immediately,
@@ -2919,6 +3994,12 @@ Item {
                                             readonly property bool enabledE: page.editMap["library_enabled"] !== undefined ? page.editMap["library_enabled"] : page.libraryEnabledLive
                                             readonly property bool bulkE: page.editMap["library_bulk_skip"] !== undefined ? page.editMap["library_bulk_skip"] : page.libraryBulkSkipLive
                                             readonly property bool mbE: page.editMap["library_mb_arbiter"] !== undefined ? page.editMap["library_mb_arbiter"] : page.libraryMbArbiterLive
+                                            // Not part of libDirty either: the lookup is not scan configuration.
+                                            readonly property bool lookupE: page.editMap["library_mb_lookup"] !== undefined ? page.editMap["library_mb_lookup"] : page.libraryMbLookupLive
+                                            // Not part of libDirty: following is not scan
+                                            // configuration, so Rescan stays usable while it waits.
+                                            readonly property bool followE: page.editMap["releases_auto_import"] !== undefined ? page.editMap["releases_auto_import"] : page.libraryFollowLive
+                                            readonly property int minTracksE: page.editMap["releases_import_min_tracks"] !== undefined ? page.editMap["releases_import_min_tracks"] : page.libraryMinTracksLive
                                             readonly property string sourceE: page.editMap["library_source"] !== undefined ? page.editMap["library_source"] : page.librarySourceLive
                                             readonly property string folderE: page.editMap["library_folder"] !== undefined ? page.editMap["library_folder"] : page.libraryFolderLive
                                             readonly property bool separate: sourceE !== "download"
@@ -2943,7 +4024,7 @@ Item {
                                             // here says broken, gold says be aware.
                                             //
                                             // The switch is the card's only always-active control: off
-                                            // (the default) greys everything below it out and, once
+                                            // (the default) grays everything below it out and, once
                                             // saved, no folder resolves and nothing is ever scanned.
                                             // Deliberately NOT a bordered tile like the flag grid's:
                                             // those tile up in a multi-column flow and need their own
@@ -3031,38 +4112,61 @@ Item {
                                             // One dense row: source toggle + (separate) folder field + Browse +
                                             // Rescan. In download mode the field and Browse drop out and a
                                             // spacer keeps Rescan hard right, so that mode is a single row
-                                            // with no empty gap. Greyed and inert while the master switch is
+                                            // with no empty gap. Grayed and inert while the master switch is
                                             // (staged) off: `enabled: false` on the row disables every child
-                                            // MouseArea and the field in one place.
-                                            RowLayout {
-                                                width: parent.width; spacing: 8
+                                            // MouseArea and the field in one place. When the row is too
+                                            // tight for a usable field (a wide font at the minimum window),
+                                            // the field and Browse take a line of their own below.
+                                            GridLayout {
+                                                id: libFolderRow
+                                                width: parent.width; columnSpacing: 8; rowSpacing: 8
+                                                readonly property real buttonsW: segDl.implicitWidth + segSep.implicitWidth + brwTxt.implicitWidth + startTxt.implicitWidth + page.btnPadH * 8 + columnSpacing * 4
+                                                readonly property bool roomy: width - buttonsW >= 200
                                                 enabled: libraryCol.enabledE
                                                 opacity: libraryCol.enabledE ? 1 : 0.4
                                                 Behavior on opacity { NumberAnimation { duration: 160 } }
+                                                // The picked choice is filled green. The other is an
+                                                // outline with bright words, so it reads as one click
+                                                // away, never as disabled (the gray fill and dim words
+                                                // it had looked like the grayed RESCAN); pointing at it
+                                                // turns it green.
                                                 Rectangle {
-                                                    Layout.preferredHeight: 36; implicitWidth: segDl.width + 26; radius: 8
-                                                    color: !libraryCol.separate ? page.accentCont : page.surface2
-                                                    border.color: !libraryCol.separate ? page.accent : page.border1
-                                                    Text { id: segDl; anchors.centerIn: parent; text: "My download folder"; color: !libraryCol.separate ? page.accent : page.textLo; font.pixelSize: 13; font.weight: !libraryCol.separate ? Font.DemiBold : Font.Normal }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "download") }
+                                                    // The page's button recipe (SAVE CHANGES, BROWSE on the
+                                                    // other folder fields): caps, hugging the label.
+                                                    implicitWidth: segDl.implicitWidth + page.btnPadH * 2; implicitHeight: segDl.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                                    color: !libraryCol.separate ? page.accentCont : "transparent"
+                                                    border.color: !libraryCol.separate ? page.accent : (segDlMouse.containsMouse ? page.accentDim : page.outline)
+                                                    Layout.row: 0; Layout.column: 0
+                                                    Text { id: segDl; anchors.centerIn: parent; textFormat: Text.PlainText; text: "MY DOWNLOAD FOLDER"; color: !libraryCol.separate || segDlMouse.containsMouse ? page.accent : page.textHi; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                                    MouseArea { id: segDlMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "download") }
                                                 }
                                                 Rectangle {
-                                                    Layout.preferredHeight: 36; implicitWidth: segSep.width + 26; radius: 8
-                                                    color: libraryCol.separate ? page.accentCont : page.surface2
-                                                    border.color: libraryCol.separate ? page.accent : page.border1
-                                                    Text { id: segSep; anchors.centerIn: parent; text: "A separate folder"; color: libraryCol.separate ? page.accent : page.textLo; font.pixelSize: 13; font.weight: libraryCol.separate ? Font.DemiBold : Font.Normal }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "separate") }
+                                                    implicitWidth: segSep.implicitWidth + page.btnPadH * 2; implicitHeight: segSep.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                                    color: libraryCol.separate ? page.accentCont : "transparent"
+                                                    border.color: libraryCol.separate ? page.accent : (segSepMouse.containsMouse ? page.accentDim : page.outline)
+                                                    Layout.row: 0; Layout.column: 1
+                                                    Text { id: segSep; anchors.centerIn: parent; textFormat: Text.PlainText; text: "A SEPARATE FOLDER"; color: libraryCol.separate || segSepMouse.containsMouse ? page.accent : page.textHi; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
+                                                    MouseArea { id: segSepMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: page.setv("library_source", "separate") }
                                                 }
                                                 SText {
+                                                    objectName: "libFolderField"
                                                     visible: libraryCol.separate
                                                     Layout.fillWidth: true
+                                                    Layout.row: libFolderRow.roomy ? 0 : 1; Layout.column: libFolderRow.roomy ? 2 : 0
+                                                    Layout.columnSpan: libFolderRow.roomy ? 1 : 3
                                                     text: libraryCol.folderE
                                                     onEdited: function(t){ page.setv("library_folder", t) }
                                                 }
                                                 Rectangle {
                                                     visible: libraryCol.separate
-                                                    Layout.preferredHeight: 36; implicitWidth: brwTxt.width + 28; radius: 8; color: page.surface2; border.color: page.border1
-                                                    Text { id: brwTxt; anchors.centerIn: parent; text: "Browse…"; color: page.textLo; font.pixelSize: 13 }
+                                                    // Green so it reads as the next step; once a folder is
+                                                    // chosen it calms down but stays green (still clickable).
+                                                    implicitWidth: brwTxt.implicitWidth + page.btnPadH * 2; implicitHeight: brwTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                                    color: page.accentCont; border.color: page.accent
+                                                    opacity: libraryCol.folderE !== "" ? 0.6 : 1
+                                                    Behavior on opacity { NumberAnimation { duration: 160 } }
+                                                    Layout.row: libFolderRow.roomy ? 0 : 1; Layout.column: 3
+                                                    Text { id: brwTxt; anchors.centerIn: parent; textFormat: Text.PlainText; text: "BROWSE"; color: page.accent; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack }
                                                     MouseArea {
                                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                         onClicked: {
@@ -3072,19 +4176,52 @@ Item {
                                                         }
                                                     }
                                                 }
-                                                // Download mode has no field/Browse: this spacer keeps Rescan
-                                                // pinned right instead of leaving a gap.
-                                                Item { visible: !libraryCol.separate; Layout.fillWidth: true }
+                                                // Download mode has no field/Browse (and a tight row puts
+                                                // them below): this spacer keeps Rescan pinned right
+                                                // instead of leaving a gap.
+                                                Item {
+                                                    visible: !libraryCol.separate || !libFolderRow.roomy; Layout.fillWidth: true
+                                                    Layout.row: 0; Layout.column: libFolderRow.roomy ? 4 : 2
+                                                }
                                                 Rectangle {
-                                                    Layout.preferredHeight: 36; implicitWidth: startTxt.width + 28; radius: 8
-                                                    color: libraryCol.scannable ? page.accentCont : page.surface2
-                                                    border.color: libraryCol.scannable ? page.accent : page.border1
-                                                    opacity: libraryCol.scannable ? 1 : 0.55
+                                                    id: scanBtn
+                                                    Layout.row: 0; Layout.column: libFolderRow.roomy ? 5 : 3
+                                                    // Green while it can act and while a scan runs (a scan in
+                                                    // progress is the button at work, not a button that is off);
+                                                    // gray only while it waits on SAVE CHANGES or a folder.
+                                                    readonly property bool lit: libraryCol.scannable || libraryCol.scanning
+                                                    implicitWidth: startTxt.implicitWidth + page.btnPadH * 2; implicitHeight: startTxt.implicitHeight + page.btnPadV * 2; radius: page.btnRad
+                                                    color: lit ? page.accentCont : page.surface2
+                                                    border.color: lit ? page.accent : page.border1
+                                                    opacity: lit ? 1 : 0.55
+                                                    clip: true
+                                                    // While scanning, a soft band of light crosses the button
+                                                    // every 1.6 s (0.7 of it moving, then a rest). Only while
+                                                    // Settings is on screen: a scan can run for most of an hour.
+                                                    property real sweepT: 0
+                                                    SequentialAnimation on sweepT {
+                                                        running: libraryCol.scanning && page.active && scanBtn.visible
+                                                        loops: Animation.Infinite
+                                                        NumberAnimation { from: 0; to: 1; duration: 1120 }
+                                                        PauseAnimation { duration: 480 }
+                                                    }
+                                                    Rectangle {
+                                                        visible: libraryCol.scanning
+                                                        width: scanBtn.width * 0.45; height: scanBtn.height * 2; rotation: 18
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        x: -width + (scanBtn.width + width * 2) * scanBtn.sweepT
+                                                        gradient: Gradient {
+                                                            orientation: Gradient.Horizontal
+                                                            GradientStop { position: 0.0; color: "transparent" }
+                                                            GradientStop { position: 0.5; color: Qt.rgba(0.24, 1, 0.43, 0.22) }
+                                                            GradientStop { position: 1.0; color: "transparent" }
+                                                        }
+                                                    }
                                                     Text {
                                                         textFormat: Text.PlainText
                                                         id: startTxt; anchors.centerIn: parent
-                                                        text: libraryCol.scanning ? "Scanning…" : "Rescan"
-                                                        color: libraryCol.scannable ? page.accent : page.textLo; font.pixelSize: 13; font.weight: Font.DemiBold
+                                                        text: libraryCol.scanning ? "SCANNING" : "RESCAN"
+                                                        color: scanBtn.lit ? page.accent : page.textLo; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
                                                     }
                                                     MouseArea {
                                                         anchors.fill: parent
@@ -3099,9 +4236,9 @@ Item {
                                                 }
                                             }
 
-                                            // Greyed-button hint while Rescan cannot act: staged edits wait
+                                            // Grayed-button hint while Rescan cannot act: staged edits wait
                                             // for SAVE CHANGES (which also starts their scan); otherwise a
-                                            // folder is still missing. Hidden with the switch off, the grey
+                                            // folder is still missing. Hidden with the switch off, the gray
                                             // row already says the feature is off.
                                             Text {
                                                 textFormat: Text.PlainText
@@ -3110,7 +4247,7 @@ Item {
                                                 text: libraryCol.libDirty && libraryCol.root !== ""
                                                       ? "SAVE CHANGES applies this and starts the scan."
                                                       : (libraryCol.separate ? "Choose a folder, then SAVE CHANGES." : "Set a download folder in Downloads, then SAVE CHANGES.")
-                                                // Near-white, not the dim grey the card's static help uses:
+                                                // Near-white, not the dim gray the card's static help uses:
                                                 // this line is the one telling you the card is waiting on
                                                 // YOU, so it has to out-read the prose above it.
                                                 color: page.textHi; font.pixelSize: 12
@@ -3140,7 +4277,7 @@ Item {
                                                       : page.libraryScanStatus === "missing"
                                                       ? "This folder isn't available right now. If it lives on an external drive or NAS, connect it and reopen Settings."
                                                       : page.libraryScanStatus === "error"
-                                                      ? "The last scan did not finish. Try Rescan again; if it keeps failing, export diagnostics from Advanced."
+                                                      ? "The last scan did not finish. Try Rescan again; if it keeps failing, export diagnostics from the Diagnostics section."
                                                       : page.libTruncationNote()
                                             }
                                             // The download buttons' dot matrix in the download buttons'
@@ -3149,7 +4286,7 @@ Item {
                                             // the matrix filling it and the percentage pinned right.
                                             // Not a button, just dressed like one. Centered with a width
                                             // cap so resizing the window (an ultrawide) widens the card,
-                                            // not the bar; the notes above and below centre with it.
+                                            // not the bar; the notes above and below center with it.
                                             Column {
                                                 visible: page.libScanReading
                                                 anchors.horizontalCenter: parent.horizontalCenter
@@ -3210,36 +4347,135 @@ Item {
                                                 }
                                             }
 
-                                            // The card's two options, as the same bordered tiles the flag
+                                            // The card's options, as the same bordered tiles the flag
                                             // grid uses everywhere else on this page (they were loose
                                             // switches stacked under the folder row, which read as
-                                            // leftovers rather than as settings). Two across, one row.
+                                            // leftovers rather than as settings). Two across in an even
+                                            // grid, all the same width: never one stretched over the row.
                                             // Left: the bulk claim gate, on by default, so a discography
                                             // or an album leaves out what the scan already claims.
                                             // Right: MusicBrainz arbitration, off by default, and its
                                             // help says exactly what leaves the machine when it is on.
-                                            // Both grey and go inert with the master switch, since
-                                            // neither means anything while no library is scanned, and
-                                            // both stage into editMap and commit on SAVE CHANGES.
+                                            // Third: the MusicBrainz library lookup, off by default,
+                                            // its help saying what leaves the machine when it is on.
+                                            // Fourth: the Releases auto-follow, on by default, here
+                                            // because this is where the scan it feeds on is set up.
+                                            // All gray and go inert with the master switch, since
+                                            // none means anything while no library is scanned, and
+                                            // all stage into editMap and commit on SAVE CHANGES.
                                             Flow {
                                                 id: libFlagFlow
                                                 width: parent.width; spacing: 10
+                                                // The most lines any tile's label wraps to (see FlagTile).
+                                                readonly property int labelLines: {
+                                                    var m = 1
+                                                    for (var i = 0; i < children.length; i++)
+                                                        if (children[i].labelLines !== undefined) m = Math.max(m, children[i].labelLines)
+                                                    return m
+                                                }
+                                                readonly property int helpLines: {
+                                                    var m = 1
+                                                    for (var i = 0; i < children.length; i++)
+                                                        if (children[i].helpNatural !== undefined) m = Math.max(m, children[i].helpNatural)
+                                                    return m
+                                                }
                                                 enabled: libraryCol.enabledE
                                                 opacity: libraryCol.enabledE ? 1 : 0.4
                                                 Behavior on opacity { NumberAnimation { duration: 160 } }
                                                 FlagTile {
                                                     width: (libFlagFlow.width - 10) / 2
+                                                    helpLines: 3
+                                                    rowLabelLines: libFlagFlow.labelLines
+                                                    rowHelpLines: libFlagFlow.helpLines
                                                     keyName: "library_bulk_skip"
                                                     checked: libraryCol.bulkE
-                                                    label: "Bulk downloads skip what you have"
+                                                    label: "Skip what you already have"
                                                     help: "Discographies, albums and playlists leave out the copies the scan matched."
                                                 }
                                                 FlagTile {
                                                     width: (libFlagFlow.width - 10) / 2
+                                                    helpLines: 3
+                                                    rowLabelLines: libFlagFlow.labelLines
+                                                    rowHelpLines: libFlagFlow.helpLines
                                                     keyName: "library_mb_arbiter"
                                                     checked: libraryCol.mbE
-                                                    label: "Confirm uncertain matches with MusicBrainz"
+                                                    label: "Ask MusicBrainz when unsure"
                                                     help: "Sends artist and album titles to musicbrainz.org for matches the scan cannot prove on its own."
+                                                }
+                                                FlagTile {
+                                                    width: (libFlagFlow.width - 10) / 2
+                                                    helpLines: 3
+                                                    rowLabelLines: libFlagFlow.labelLines
+                                                    rowHelpLines: libFlagFlow.helpLines
+                                                    keyName: "library_mb_lookup"
+                                                    checked: libraryCol.lookupE
+                                                    label: "Look up your artists on MusicBrainz"
+                                                    help: "Sends your library's artist names to musicbrainz.org and keeps their genres, tags and albums."
+                                                }
+                                                FlagTile {
+                                                    width: (libFlagFlow.width - 10) / 2
+                                                    helpLines: 3
+                                                    rowLabelLines: libFlagFlow.labelLines
+                                                    rowHelpLines: libFlagFlow.helpLines
+                                                    keyName: "releases_auto_import"
+                                                    checked: libraryCol.followE
+                                                    label: "Follow your artists"
+                                                    help: "Follows your library's artists in Releases as the scan finds them on TIDAL. Close names wait on the Releases tab."
+                                                }
+                                            }
+                                            // The follow floor, under the tiles: the fewest tracks an
+                                            // artist needs in the library before an import follows it,
+                                            // so a stray single or a guest spot follows nobody. Grays
+                                            // with the master switch like the tiles and stages into
+                                            // editMap; not part of libDirty (no scan configuration).
+                                            RowLayout {
+                                                id: libFloorRow
+                                                width: parent.width; spacing: 14
+                                                enabled: libraryCol.enabledE
+                                                opacity: libraryCol.enabledE ? 1 : 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 160 } }
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true; spacing: 2
+                                                    Text { textFormat: Text.PlainText; text: "Follow artists with at least " + libraryCol.minTracksE + (libraryCol.minTracksE === 1 ? " track" : " tracks"); color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium }
+                                                    Text { textFormat: Text.PlainText; text: "Artists with fewer tracks in your library are left out of the import. You can still follow them by hand."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                }
+                                                SStepper {
+                                                    objectName: "libFloorStepper"
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    value: libraryCol.minTracksE
+                                                    minimum: 1; maximum: 999; step: 1; decimals: 0
+                                                    onChanged: function(v){ page.setv("releases_import_min_tracks", v) }
+                                                }
+                                                Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignVCenter; text: "tracks"; color: page.textLo; font.pixelSize: 13 }
+                                            }
+                                            // Follows from earlier imports that the saved floor would
+                                            // leave out today: offered for unfollowing in one go, so a
+                                            // floor raised after a big import can still take effect.
+                                            RowLayout {
+                                                id: libFloorExcessRow
+                                                visible: page.libraryFloorExcess > 0 && libraryCol.enabledE
+                                                width: parent.width; spacing: 14
+                                                Text {
+                                                    Layout.fillWidth: true; textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                                                    text: page.libraryFloorExcess + (page.libraryFloorExcess === 1 ? " artist" : " artists")
+                                                          + " followed from your library " + (page.libraryFloorExcess === 1 ? "has" : "have")
+                                                          + " fewer than " + page.libraryMinTracksLive + " tracks."
+                                                    color: page.textLo; font.pixelSize: 12
+                                                }
+                                                // The Browse… button's clothes: this page has no SpecBtn.
+                                                Rectangle {
+                                                    objectName: "libFloorUnfollow"
+                                                    Layout.preferredHeight: 32; implicitWidth: libFloorTxt.width + 24; radius: 8
+                                                    color: page.surface2; border.color: page.border1
+                                                    Text {
+                                                        id: libFloorTxt; anchors.centerIn: parent; textFormat: Text.PlainText
+                                                        text: "UNFOLLOW " + (page.libraryFloorExcess === 1 ? "IT" : "THEM")
+                                                        color: page.textLo; font.family: page.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                        onClicked: waves.unfollowUnderFloor()
+                                                    }
                                                 }
                                             }
                                             }
@@ -3368,7 +4604,7 @@ Item {
                                 delegate: rowFieldComp
                             }
 
-                            // Template-token reference, File organization card
+                            // Template-token reference, Files & Naming card
                             // only: a progressive-disclosure table of every
                             // {token}, grouped by category, each with a copy
                             // button and a sample value from the real formatter.
@@ -3403,7 +4639,7 @@ Item {
                                             width: parent.width
                                             Item { visible: tokGroup.index > 0; width: 1; height: 10 }
                                             // Category band; the column labels ride on
-                                            // every band so the columns stay labelled
+                                            // every band so the columns stay labeled
                                             // wherever the user has scrolled.
                                             Rectangle {
                                                 width: parent.width; height: 24; radius: 6
@@ -3512,7 +4748,7 @@ Item {
                                 }
                             }
 
-                            // The File organization card's non-template value rows
+                            // The Files & Naming card's non-template value rows
                             // (padding, delimiters) continue under the reference.
                             Repeater {
                                 model: card.modelData.id === "files"
@@ -3546,119 +4782,175 @@ Item {
                                 // trio of switches earns one line, not one and a
                                 // half), otherwise the usual two.
                                 readonly property int cols: flagCount % 3 === 0 ? 3 : 2
+                                // The most lines any tile's label wraps to. Every tile
+                                // makes room for it, so a two-line label adds height
+                                // instead of taking a line from its help, and the tiles
+                                // of a row keep one height.
+                                readonly property int labelLines: {
+                                    var m = 1
+                                    for (var i = 0; i < flagRep.count; i++) {
+                                        var t = flagRep.itemAt(i)
+                                        if (t) m = Math.max(m, t.labelLines)
+                                    }
+                                    return m
+                                }
+                                // The most lines any tile's help takes (at most the
+                                // tile's room), so a wide window's short helps get
+                                // short tiles, every tile still one height.
+                                readonly property int helpLines: {
+                                    var m = 1
+                                    for (var i = 0; i < flagRep.count; i++) {
+                                        var t = flagRep.itemAt(i)
+                                        if (t) m = Math.max(m, t.helpNatural)
+                                    }
+                                    return m
+                                }
+                                // A tile with a sub-option shows it in a strip along its
+                                // bottom edge. Every tile keeps the strip's room whether
+                                // it shows or not, so turning the parent on never grows
+                                // the row, and the help keeps all its lines.
+                                readonly property real childExtra: {
+                                    for (var i = 0; i < flagRep.count; i++) {
+                                        var t = flagRep.itemAt(i)
+                                        if (t && t.hasChild) return page.tileStripH
+                                    }
+                                    return 0
+                                }
                                 visible: flagCount > 0
                                 width: parent.width; spacing: 10
                                 Repeater {
+                                    id: flagRep
                                     model: page.boolFields(card.modelData.fields)
                                     delegate: Rectangle {
                                         id: flagTile
                                         required property var modelData
                                         required property int index
-                                        // Flags that need FFmpeg are greyed and inert while it's missing.
+                                        // Flags that need FFmpeg are grayed and inert while it's missing.
                                         readonly property bool ffBlocked: modelData.requires_ffmpeg === true && page.ff.stateKey === "missing"
-                                        // Flags that only matter while another flag is on (e.g. the
-                                        // lyrics-source preference needs a lyrics switch) grey out
-                                        // live: requires_any maps each prerequisite key to its saved
-                                        // value, and unsaved toggles in editMap override it.
                                         readonly property bool depBlocked: modelData.requires_any !== undefined && !Object.keys(modelData.requires_any).some(function(k) {
                                             return (page.editMap[k] !== undefined ? page.editMap[k] : modelData.requires_any[k]) === true
                                         })
                                         readonly property bool blocked: ffBlocked || depBlocked
-                                        // A tile may carry a nested child (e.g. Save cover.jpg ->
-                                        // "Also save for single tracks"): a compact checkbox that appears
-                                        // UNDER the description while the parent flag is on. The box keeps
-                                        // its fixed size; the column just re-centres to make room, so the
-                                        // tile never grows or shifts its neighbours.
+                                        // A tile may carry a sub-option (e.g. Save cover.jpg ->
+                                        // "Also save for single tracks"): a strip that fades up into
+                                        // the room along the tile's bottom edge while the parent flag
+                                        // is on, so the tile never grows or shifts its neighbors.
                                         readonly property bool hasChild: modelData.child_key !== undefined
-                                        readonly property bool childOn: flagTile.hasChild && !flagTile.blocked && (page.val(flagTile.modelData) === true)
-                                        // A leftover tile would end the grid beside a
-                                        // hole, so the last one takes the whole row.
-                                        width: (flagFlow.flagCount % flagFlow.cols === 1 && flagTile.index === flagFlow.flagCount - 1)
-                                               ? inner.width
-                                               : (inner.width - 10 * (flagFlow.cols - 1)) / flagFlow.cols
-                                        // A third of the row is narrower, so the same
-                                        // help needs one more line to avoid eliding.
-                                        height: flagFlow.cols === 3 ? 108 : 92
-                                        radius: 10; border.color: page.border1
+                                        // While a prerequisite is missing (ffmpeg, or a required flag)
+                                        // the feature can't run, so the switch reads OFF (grayed)
+                                        // regardless of the saved value; it animates back to the real
+                                        // preference once the prerequisite arrives.
+                                        readonly property bool on: page.val(modelData) === true && !blocked
+                                        readonly property bool childOn: hasChild && on
+                                        readonly property bool childVal: page.valChild(modelData) === true
+                                        readonly property string hint: ffBlocked ? "Requires FFmpeg"
+                                            : depBlocked ? (modelData.requires_hint !== undefined ? modelData.requires_hint : "Requires another option") : ""
+                                        readonly property bool dirtyHere: page.fieldDirty(modelData)
+                                        function flip() { page.setv(modelData.key, !(page.val(modelData) === true)) }
+                                        function flipChild() { page.setv(modelData.child_key, !childVal) }
+                                        // The strip's two clocks: `stripOpen` on the switch's,
+                                        // `stripK` on the key's.
+                                        property real stripOpen: childOn ? 1 : 0
+                                        Behavior on stripOpen { NumberAnimation { duration: page.openMs; easing.type: Easing.OutCubic } }
+                                        property real stripK: childVal ? 1 : 0
+                                        Behavior on stripK { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+                                        // Every tile the same width, never one stretched
+                                        // over a row of its own: each section's switch
+                                        // count divides into full rows (a test checks).
+                                        width: (inner.width - flagFlow.spacing * (flagFlow.cols - 1)) / flagFlow.cols
                                         opacity: blocked ? 0.45 : 1
                                         // Ease the tile back to full strength when ffmpeg
-                                        // arrives, in step with the toggle animating on.
+                                        // arrives, in step with the switch animating on.
                                         Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-                                        color: (tileMouse.containsMouse && !blocked) ? page.surface2 : page.surface
-
-                                        // Whole-tile click toggles the parent flag; the child checkbox
+                                        // Too narrow for words beside the switch (three across
+                                        // on a small window): the switch moves up beside the
+                                        // label and the help takes the tile's full width.
+                                        readonly property bool compact: width < page.tileCompactW
+                                        // A third of the row is narrower, so the same
+                                        // help needs one more line to avoid eliding.
+                                        readonly property int labelLines: flBody.titleLines
+                                        readonly property int helpNatural: flBody.helpNatural
+                                        readonly property int helpCap: flBody.helpCap
+                                        // A third of the row is narrower, so the same help needs
+                                        // one more line to avoid eliding. Compact tiles take one
+                                        // more again (the words are narrower still), and a taller
+                                        // head row for the switch beside the label.
+                                        // Room for a nested key too (flagFlow.childExtra), so
+                                        // showing it never grows the tile.
+                                        height: page.tileHeight(flagFlow.cols === 3, compact, flagFlow.labelLines, flagFlow.helpLines) + flagFlow.childExtra
+                                        radius: 10
+                                        color: page.surface
+                                        border.color: (tileMouse.containsMouse && !blocked) ? page.outline : page.surface
+                                        Behavior on border.color { ColorAnimation { duration: 120 } }
+                                        // An unsaved edit grows a green strip on the tile's left edge.
+                                        Rectangle {
+                                            x: 0; z: 2; width: 3; radius: 1.5; anchors.verticalCenter: parent.verticalCenter
+                                            height: flagTile.dirtyHere ? parent.height - 28 : 0
+                                            color: page.accent
+                                            Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                                        }
+                                        // Whole-tile click toggles the parent flag; the child key
                                         // sits above this and swallows its own clicks.
                                         MouseArea {
                                             id: tileMouse
                                             anchors.fill: parent; hoverEnabled: true
                                             enabled: !flagTile.blocked
                                             cursorShape: flagTile.blocked ? Qt.ArrowCursor : Qt.PointingHandCursor
-                                            onClicked: page.setv(flagTile.modelData.key, !page.val(flagTile.modelData))
+                                            onClicked: flagTile.flip()
                                         }
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 13
-                                            SToggle {
-                                                Layout.alignment: Qt.AlignVCenter
-                                                // While a prerequisite is missing (ffmpeg, or a required
-                                                // flag) the feature can't run, so the toggle reads OFF
-                                                // (greyed) regardless of the saved value; it animates back
-                                                // to the real preference once the prerequisite arrives.
-                                                checked: page.val(flagTile.modelData) && !flagTile.blocked
+                                        TileBody {
+                                            id: flBody
+                                            padL: flagTile.compact ? 14 : 16; padR: flagTile.compact ? 12 : 14
+                                            title: flagTile.modelData.label; checked: flagTile.on
+                                            compact: flagTile.compact
+                                            help: flagTile.modelData.help
+                                            helpShown: flagTile.modelData.help !== "" && !flagTile.blocked
+                                            helpLines: page.tileHelpLines(flagFlow.cols === 3, flagTile.compact)
+                                            Text { visible: flagTile.hint !== ""; textFormat: Text.PlainText; text: flagTile.hint; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true }
+                                        }
+                                        // The sub-option strip, flush along the bottom edge inside
+                                        // the tile's outline: it fades in and settles 8 px, the
+                                        // card's shade with it, all on the switch's clock.
+                                        Item {
+                                            objectName: "tileStrip"
+                                            visible: flagTile.hasChild && flagTile.stripOpen > 0.001
+                                            x: 1; width: parent.width - 2
+                                            y: parent.height - 1 - page.tileStripH; height: page.tileStripH
+                                            opacity: flagTile.stripOpen
+                                            Rectangle {
+                                                id: stripFace
+                                                width: parent.width; height: parent.height; radius: 9
+                                                y: 8 * (1 - flagTile.stripOpen)
+                                                color: page.mix(page.surface0, page.accentCont, flagTile.stripK)
+                                                // Square top corners: the strip runs into the card.
+                                                Rectangle { width: parent.width; height: 9; color: parent.color }
+                                                Row {
+                                                    x: flagTile.compact ? 13 : 15; spacing: 8
+                                                    anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: 1
+                                                    RoundCheck { anchors.verticalCenter: parent.verticalCenter; k: flagTile.stripK }
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: stripFace.width - (flagTile.compact ? 26 : 30) - 21
+                                                        textFormat: Text.PlainText; elide: Text.ElideRight
+                                                        text: flagTile.modelData.child_label !== undefined ? flagTile.modelData.child_label : ""
+                                                        color: page.mix(page.textLo, page.accentContTx, flagTile.stripK)
+                                                        font.pixelSize: 12; font.weight: Font.Medium
+                                                    }
+                                                }
                                             }
-                                            ColumnLayout {
-                                                Layout.fillWidth: true; spacing: 3
-                                                Text { textFormat: Text.PlainText; text: flagTile.modelData.label; color: page.textHi; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                Text {
-                                                    textFormat: Text.PlainText
-                                                    visible: flagTile.modelData.help !== "" && !flagTile.blocked
-                                                    text: flagTile.modelData.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
-                                                    // Trim the helper to two lines while the child checkbox is
-                                                    // showing, so both fit the fixed box.
-                                                    wrapMode: Text.WordWrap
-                                                    maximumLineCount: flagTile.childOn ? 2 : (flagFlow.cols === 3 ? 4 : 3)
-                                                    elide: Text.ElideRight; Layout.fillWidth: true
+                                            // The card's soft shade on the strip, right under its edge.
+                                            Rectangle {
+                                                width: parent.width; height: 8
+                                                gradient: Gradient {
+                                                    GradientStop { position: 0; color: "#80000000" }
+                                                    GradientStop { position: 1; color: "#00000000" }
                                                 }
-                                                Text {
-                                                    visible: flagTile.ffBlocked
-                                                    text: "Requires FFmpeg"; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
-                                                }
-                                                Text {
-                                                    textFormat: Text.PlainText
-                                                    visible: flagTile.depBlocked && !flagTile.ffBlocked
-                                                    text: flagTile.modelData.requires_hint !== undefined ? flagTile.modelData.requires_hint : "Requires another option"
-                                                    color: page.gold; font.pixelSize: 11; Layout.fillWidth: true
-                                                }
-                                                // Nested child: a compact checkbox + label, shown only while
-                                                // the parent flag is on (layouts skip it when hidden, so other
-                                                // tiles are unchanged).
-                                                Item {
-                                                    visible: flagTile.childOn
-                                                    Layout.fillWidth: true; implicitHeight: childRowL.implicitHeight
-                                                    MouseArea {
-                                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: page.setv(flagTile.modelData.child_key, !(page.valChild(flagTile.modelData) === true))
-                                                    }
-                                                    RowLayout {
-                                                        id: childRowL
-                                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                                        spacing: 8
-                                                        Rectangle {
-                                                            Layout.alignment: Qt.AlignVCenter
-                                                            width: 18; height: 18; radius: 5
-                                                            readonly property bool on: page.valChild(flagTile.modelData) === true
-                                                            color: on ? page.accentCont : page.surface3
-                                                            border.color: on ? page.accent : page.outline; border.width: 2
-                                                            Behavior on color { ColorAnimation { duration: 140 } }
-                                                            Behavior on border.color { ColorAnimation { duration: 140 } }
-                                                            Ico { anchors.centerIn: parent; visible: parent.on; name: "check"; color: page.accent; size: 12 }
-                                                        }
-                                                        Text {
-                                                            textFormat: Text.PlainText
-                                                            text: flagTile.modelData.child_label !== undefined ? flagTile.modelData.child_label : ""
-                                                            color: page.textLo; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true
-                                                        }
-                                                    }
-                                                }
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                enabled: flagTile.childOn
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: flagTile.flipChild()
                                             }
                                         }
                                     }
@@ -3670,9 +4962,9 @@ Item {
                                 // row now just stops.
                             }
 
-                            // FLAC signature check, Advanced section only.
+                            // FLAC signature check, FFmpeg & FLAC section only.
                             Loader {
-                                active: card.modelData.id === "advanced"
+                                active: card.modelData.id === "processing"
                                 visible: active
                                 width: inner.width
                                 height: (active && item) ? item.implicitHeight : 0
@@ -3680,12 +4972,12 @@ Item {
                                 onItemChanged: if (item) page.flacCardItem = item
                             }
 
-                            // Reset actions, Advanced section only, at the very
+                            // Reset actions, Diagnostics section only, at the very
                             // bottom: put settings back to factory defaults, or
                             // wipe the whole app state. Both confirm first (the
                             // dialogs live in Main.qml, full-window overlays).
                             Loader {
-                                active: card.modelData.id === "advanced"
+                                active: card.modelData.id === "diagnostics"
                                 visible: active
                                 width: inner.width
                                 height: (active && item) ? item.implicitHeight : 0
@@ -3696,212 +4988,6 @@ Item {
                 }
             }
 
-            // ── footer credit (easter egg), "made with [♥] by iamprivacy".
-            // Types itself out when scrolled into view, backspaces away when
-            // scrolled off; the heart lub-dubs on hover and bursts into colour
-            // pixels when clicked (the burst sim is the page-root `gibOverlay`).
-            Item {
-                id: footer
-                width: col.width; height: 72
-
-                readonly property int total: 25   // "made with "10 + heart 1 + " by "4 + "iamprivacy"10
-                property int n: 0
-                property bool inView: false
-                property bool cursorPresent: false
-                property bool heartGibbed: false
-                property bool creditHidden: false
-                property real beat: 1.0
-
-                readonly property var  heartModel: HeartGib.build()
-                readonly property int  heartPx: 2
-                readonly property real heartW: HeartGib.pxW(heartModel, heartPx)
-                readonly property real heartH: HeartGib.pxH(heartModel, heartPx)
-                // After the heart bursts, "[love]" takes its place; the slot grows
-                // from the heart's width to the word's width so the line reflows.
-                readonly property real lovedW: fLovedMeas.implicitWidth
-                readonly property real slotW:  heartGibbed ? lovedW : heartW
-                readonly property bool heartShown: visFor(10, 1) > 0 && !heartGibbed
-                readonly property bool heartLive:  footer.n >= footer.total && !heartGibbed
-
-                function visFor(off, len) { return Math.max(0, Math.min(footer.n - off, len)) }
-                function gibHeart() {
-                    if (footer.heartGibbed) return
-                    beatAnim.stop(); beatReset.stop(); footer.beat = 1.0
-                    var p = heartCv.mapToItem(page, 0, 0)
-                    gibOverlay.explode(p.x, p.y, footer.heartModel, footer.heartPx)
-                    footer.heartGibbed = true
-                    gibRetire.restart()
-                }
-                // Put the credit back the way a fresh scroll into view would: type
-                // it out again from nothing. Called when the falling copy has left
-                // the bottom of the viewport. The scroll-away path got its retype
-                // for free (inView flipped false and back), but a credit that
-                // retires while still on screen never changes inView, so without
-                // this the line would come back empty and stay empty.
-                function rearmCredit() {
-                    footer.n = 0
-                    footer.cursorPresent = false
-                    if (!footer.inView) return
-                    footer.cursorPresent = true
-                    fTypeFwd.from = 0
-                    fTypeFwd.duration = footer.total * 52
-                    fTypeFwd.restart()
-                }
-                function recomputeInView() {
-                    var p = footer.mapToItem(settingsFlick, 0, footer.height / 2)
-                    var nowIn = (p.y < settingsFlick.height - 6) && (p.y > -footer.height)
-                    if (nowIn !== footer.inView) footer.inView = nowIn
-                }
-                function checkGibMeet() {
-                    if (!footer.heartGibbed || footer.creditHidden) return
-                    var tb = fCredit.mapToItem(page, 0, fCredit.height / 2 + 6).y
-                    if (tb >= gibOverlay.groundY) {
-                        gibRetire.stop()
-                        footer.heartGibbed = false
-                        gibOverlay.releaseWithText(fCredit)
-                    }
-                }
-                // The burst's own lifetime. Clearing the mess used to be the
-                // user's job: scroll the credit down into the splats, or scroll
-                // the footer out of view. A window too short to do either (the
-                // page bottoms out before the footer leaves) could never clear
-                // it, so the heart stayed "[love]" for the rest of the session.
-                // It now retires on the same schedule the drip sim already winds
-                // down on (see gibOverlay.step's bleedTime cutoff): the credit
-                // drops off the bottom exactly as scrolling away sends it, and
-                // types itself back in with a whole heart.
-                Timer {
-                    id: gibRetire
-                    // 15s, not 9: the burst is worth watching, and the credit
-                    // typing itself back in cut the mess short. Kept in step
-                    // with the sim's own bleedTime cutoff below.
-                    interval: 15000; repeat: false
-                    onTriggered: {
-                        if (!footer.heartGibbed || footer.creditHidden) return
-                        footer.heartGibbed = false
-                        gibOverlay.releaseWithText(fCredit)
-                    }
-                }
-                Component.onCompleted: Qt.callLater(footer.recomputeInView)
-                Connections { target: settingsFlick
-                    function onContentYChanged() { footer.recomputeInView(); footer.checkGibMeet() }
-                    function onContentHeightChanged() { footer.recomputeInView() }
-                    function onHeightChanged() { footer.recomputeInView() }
-                }
-                onInViewChanged: {
-                    if (footer.inView) {
-                        fFarewell.stop(); fTypeBack.stop()
-                        footer.cursorPresent = true
-                        fTypeFwd.from = footer.n
-                        fTypeFwd.duration = Math.max(1, footer.total - footer.n) * 52
-                        fTypeFwd.restart()
-                    } else {
-                        fTypeFwd.stop()
-                        beatAnim.stop(); footer.beat = 1.0
-                        if (footer.creditHidden) {
-                            // already handed off to the falling overlay, leave it
-                        } else if (footer.heartGibbed) {
-                            fTypeBack.stop()
-                            gibRetire.stop()
-                            footer.heartGibbed = false
-                            gibOverlay.releaseWithText(fCredit)
-                        } else {
-                            fTypeBack.from = footer.n
-                            fTypeBack.duration = Math.max(1, footer.n) * 34
-                            fTypeBack.restart()
-                        }
-                    }
-                }
-                NumberAnimation { id: fTypeFwd;  target: footer; property: "n"; to: footer.total; easing.type: Easing.Linear }
-                NumberAnimation { id: fTypeBack; target: footer; property: "n"; to: 0; easing.type: Easing.Linear
-                                  onStopped: if (footer.n === 0) fFarewell.restart() }
-                Timer { id: fBlink; interval: 460; repeat: true; running: footer.cursorPresent
-                        property bool on: true
-                        onTriggered: on = !on
-                        onRunningChanged: if (running) on = true }
-                Timer { id: fFarewell; interval: 1300; repeat: false
-                        onTriggered: if (!footer.inView && footer.n === 0) footer.cursorPresent = false }
-                SequentialAnimation { id: beatAnim; loops: Animation.Infinite
-                    NumberAnimation { target: footer; property: "beat"; from: 1.00; to: 1.18; duration: 130; easing.type: Easing.OutQuad }
-                    NumberAnimation { target: footer; property: "beat"; from: 1.18; to: 0.97; duration: 150; easing.type: Easing.InQuad }
-                    NumberAnimation { target: footer; property: "beat"; from: 0.97; to: 1.09; duration: 110; easing.type: Easing.OutQuad }
-                    NumberAnimation { target: footer; property: "beat"; from: 1.09; to: 1.00; duration: 170; easing.type: Easing.OutCubic }
-                    PauseAnimation { duration: 460 }
-                }
-                NumberAnimation { id: beatReset; target: footer; property: "beat"; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
-
-                Item {
-                    id: fCredit
-                    anchors.centerIn: parent
-                    width: fMeas.implicitWidth + 9
-                    height: fMeas.implicitHeight
-                    opacity: footer.creditHidden ? 0 : 1
-                    // hidden width probe for the "[love]" replacement
-                    Text { id: fLovedMeas; visible: false; text: "[love]"; font.family: page.mono; font.pixelSize: 11 }
-                    Row { id: fMeas; visible: false
-                        Text { text: "made with "; font.family: page.mono; font.pixelSize: 11 }
-                        Item { width: footer.slotW; height: footer.heartH }
-                        Text { text: " by ";       font.family: page.mono; font.pixelSize: 11 }
-                        Text { text: "iamprivacy"; font.family: page.mono; font.pixelSize: 11 }
-                    }
-                    Row {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 0
-                        Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
-                               text: "made with ".substring(0, footer.visFor(0, 10)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
-                        Item { width: footer.slotW; height: footer.heartH; anchors.verticalCenter: parent.verticalCenter
-                            Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-                            Canvas {
-                                id: heartCv
-                                width: footer.heartW; height: footer.heartH
-                                anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                smooth: false; antialiasing: false
-                                visible: footer.heartShown
-                                opacity: footer.heartShown ? 1 : 0
-                                Behavior on opacity { NumberAnimation { duration: 120 } }
-                                transformOrigin: Item.Center
-                                scale: footer.beat
-                                Component.onCompleted: requestPaint()
-                                onPaint: { var ctx = getContext('2d'); ctx.reset(); ctx.clearRect(0, 0, width, height)
-                                           HeartGib.draw(ctx, footer.heartModel, 0, 0, footer.heartPx) }
-                            }
-                            // after the heart bursts, "[love]" fades in where it was and
-                            // stays until the credit is released on scroll-away
-                            Text {
-                                anchors.centerIn: parent
-                                text: "[love]"; color: page.accent
-                                font.family: page.mono; font.pixelSize: 11
-                                opacity: footer.heartGibbed ? 1 : 0
-                                Behavior on opacity { NumberAnimation { duration: 280 } }
-                            }
-                            MouseArea { anchors.fill: parent; anchors.margins: -4
-                                hoverEnabled: true
-                                enabled: footer.heartLive
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onEntered: { beatReset.stop(); beatAnim.start() }
-                                onExited:  { beatAnim.stop(); beatReset.start() }
-                                onClicked: footer.gibHeart() }
-                        }
-                        Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
-                               text: " by ".substring(0, footer.visFor(11, 4)); color: page.accent; font.family: page.mono; font.pixelSize: 11 }
-                        Item { implicitWidth: fGh.implicitWidth; implicitHeight: fGh.implicitHeight; anchors.verticalCenter: parent.verticalCenter
-                            Text { id: fGh; textFormat: Text.PlainText; text: "iamprivacy".substring(0, footer.visFor(15, 10))
-                                   color: fGhMA.containsMouse ? page.textHi : page.gold
-                                   font.family: page.mono; font.pixelSize: 11
-                                   font.underline: fGhMA.containsMouse }
-                            MouseArea { id: fGhMA; anchors.fill: parent; hoverEnabled: true
-                                enabled: footer.visFor(15, 10) === 10
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: Qt.openUrlExternally("https://github.com/iamprivacy") }
-                        }
-                        Rectangle { anchors.verticalCenter: parent.verticalCenter
-                            width: 7; height: 13; radius: 1; color: page.gold
-                            visible: footer.cursorPresent
-                            opacity: fBlink.on ? 0.9 : 0.0 }
-                    }
-                }
-            }
         }
     }
     }
@@ -3924,142 +5010,115 @@ Item {
         }
     }
 
-    // ── heart-gib overlay (easter egg), viewport-fixed Canvas the footer heart
-    // bursts into. Lives at the page root so the gibs + drips fall down the whole
-    // settings view rather than being clipped in the scroll. Transparent and
-    // non-interactive (no MouseArea) so it never blocks the UI.
+    // ── heart-gib overlay (easter egg), the Canvas the footer heart bursts
+    // into. It covers the page, but every gib is boxed into the rail: they
+    // fly out, bounce off the rail's edges, and most splat where they hit a
+    // wall, creeping down it and dripping; the rest land on the rail's floor.
+    // After a few seconds the mess fades away where it lies, and the credit
+    // types itself back in with a whole heart. Transparent and
+    // non-interactive (no MouseArea), so it never blocks the UI.
     Canvas {
         id: gibOverlay
+        objectName: "settingsGibs"
         anchors.fill: parent
         z: 2000
+        // Each gib: x, y, velocity, size, color, st (0 flying, 1 landed,
+        // 2 stuck to a wall), a (alpha), wall (-1 left, 1 right), fade (its
+        // delay once the clean-up starts).
         property var gibs: []
-        property var splats: []
         property var drips: []
-        property real groundY: 0
-        property real bleedTime: 0
-        property real dripAccum: 0
         property bool running: false
-        property bool releasing: false   // when true the ledge is gone → everything falls off-screen
+        // The box, the rail's viewport in this Canvas's coordinates, taken
+        // when the heart bursts.
+        property real bx0: 0
+        property real by0: 0
+        property real bx1: 0
+        property real by1: 0
+        property real bleedTime: 0     // seconds since the burst
+        property real drainT: -1       // seconds since the clean-up began (-1: not yet)
+        readonly property real settleAt: 3.5
 
         function explode(ox, oy, model, hpx) {
+            var r = page.railScroller
+            var o = r.mapToItem(gibOverlay, 0, 0)
+            bx0 = o.x + 1; by0 = o.y + 1; bx1 = o.x + r.width - 1; by1 = o.y + r.height - 1
             var cs = HeartGib.cells(model, ox, oy, hpx)
             var hw = HeartGib.pxW(model, hpx), hh = HeartGib.pxH(model, hpx)
             var ccx = ox + hw / 2, ccy = oy + hh / 2
             var g = []
             for (var i = 0; i < cs.length; i++) {
                 var pc = cs[i]; var dx = pc.x - ccx, dy = pc.y - ccy
-                var d = Math.max(6, Math.sqrt(dx * dx + dy * dy)); var sp = 120 + Math.random() * 220
-                g.push({ x: pc.x, y: pc.y, vx: dx / d * sp + (Math.random() - 0.5) * 130,
-                         vy: dy / d * sp - (130 + Math.random() * 170),
-                         size: hpx + Math.floor(Math.random() * 2), color: pc.color })
+                var d = Math.max(6, Math.sqrt(dx * dx + dy * dy)); var sp = 160 + Math.random() * 320
+                g.push({ x: pc.x, y: pc.y, vx: dx / d * sp + (Math.random() - 0.5) * 220,
+                         vy: dy / d * sp - (260 + Math.random() * 380),
+                         size: hpx + Math.floor(Math.random() * 2), color: pc.color,
+                         st: 0, a: 1, wall: 0, fade: Math.random() * 1.2 })
             }
-            gibs = g; splats = []; drips = []
-            groundY = oy + hh + 14; bleedTime = 0; dripAccum = 0; releasing = false; running = true
+            gibs = g; drips = []
+            bleedTime = 0; drainT = -1; running = true
             requestPaint()
         }
-        // scroll-away: drop every settled splat into a falling gib and dissolve the
-        // ledge, so the giblets slide off the bottom as the page scrolls.
-        function release() {
-            var g = gibs.slice()
-            for (var i = 0; i < splats.length; i++) {
-                var s = splats[i]
-                g.push({ x: s.x, y: groundY - s.size, vx: (Math.random() - 0.5) * 40,
-                         vy: 30 + Math.random() * 70, size: s.size, color: s.color })
-            }
-            gibs = g; splats = []
-            releasing = true; running = true
-            requestPaint()
-        }
-        // release() the giblets AND hand off the credit text, snapshot its viewport
-        // position so a matching falling copy drops with the giblets while the real
-        // (content-space) credit hides, then re-arms.
-        function releaseWithText(creditItem) {
-            release()
-            var p = creditItem.mapToItem(gibOverlay, 0, 0)
-            fallText.x = p.x; fallText.y = p.y
-            fallText.vy = 8; fallText.active = true; fallText.visible = true
-            footer.creditHidden = true
-            running = true
-        }
-        function reset() { gibs = []; splats = []; drips = []; running = false; releasing = false
-                           fallText.active = false; fallText.visible = false; requestPaint() }
-
-        // the falling credit copy (viewport space). Mirrors the footer layout
-        // (heart-width gap where the gibbed heart was) so the hand-off is seamless.
-        Item {
-            id: fallText
-            visible: false
-            property bool active: false
-            property real vy: 0
-            Row {
-                spacing: 0
-                Text { text: "made with "; color: page.accent; font.family: page.mono; font.pixelSize: 11 }
-                Item { width: footer.lovedW; height: footer.heartH
-                    Text { anchors.centerIn: parent; text: "[love]"; color: page.accent; font.family: page.mono; font.pixelSize: 11 } }
-                Text { text: " by ";       color: page.accent; font.family: page.mono; font.pixelSize: 11 }
-                Text { text: "iamprivacy";  color: page.gold; font.family: page.mono; font.pixelSize: 11 }
-            }
+        // Start the clean-up now (Settings closing, or the credit leaving view).
+        function release() { if (running && drainT < 0) drainT = 0 }
+        // The last of the mess is gone: hand the credit back.
+        function finish() {
+            gibs = []; drips = []; running = false; drainT = -1; requestPaint()
+            footer.rearmCredit()
         }
 
         FrameAnimation { running: gibOverlay.running
             onTriggered: { gibOverlay.step(Math.min(frameTime, 0.032)); gibOverlay.requestPaint() } }
 
         function step(dt) {
-            var g = 2400, W = width, H = height
+            var grav = 2000, bounce = 0.45
             bleedTime += dt
+            if (drainT >= 0) drainT += dt
+            else if (bleedTime > settleAt) drainT = 0
             var live = []
             for (var i = 0; i < gibs.length; i++) {
                 var p = gibs[i]
-                p.vy += g * dt; p.x += p.vx * dt; p.y += p.vy * dt
-                if (p.x < 0) { p.x = 0; p.vx = -p.vx * 0.4 } else if (p.x > W) { p.x = W; p.vx = -p.vx * 0.4 }
-                if (!releasing && p.y >= groundY && p.vy > 0) {       // ledge only holds while not releasing
-                    if (Math.abs(p.vy) < 65) { splats.push({ x: p.x, size: p.size, color: p.color }); continue }
-                    p.y = groundY; p.vy = -p.vy * 0.32; p.vx *= 0.6
+                if (p.st === 0) {                                // flying
+                    p.vy += grav * dt; p.x += p.vx * dt; p.y += p.vy * dt
+                    var hit = false
+                    if (p.x < bx0) { p.x = bx0; p.vx = -p.vx * bounce; hit = true; p.wall = -1 }
+                    else if (p.x + p.size > bx1) { p.x = bx1 - p.size; p.vx = -p.vx * bounce; hit = true; p.wall = 1 }
+                    if (p.y < by0) { p.y = by0; p.vy = -p.vy * bounce; hit = true }
+                    if (hit && Math.random() < 0.7) { p.st = 2; p.vx = 0; p.vy = 0 }      // splat on the wall
+                    else if (p.y + p.size >= by1 && p.vy > 0) { p.y = by1 - p.size; p.st = 1; p.vx = 0; p.vy = 0 }
+                } else if (p.st === 2 && drainT < 0) {          // stuck: creeps down, dripping
+                    p.y = Math.min(by1 - p.size, p.y + 6 * dt)
+                    if (Math.random() < dt * 0.6)
+                        drips.push({ x: p.x + (p.wall < 0 ? 1 : 0), y: p.y + p.size, vy: 20, color: p.color })
                 }
-                if (p.y > H) continue
+                // Clean-up: each settled gib fades (and sinks a little) after
+                // its own short delay; one still flying lands first.
+                if (drainT >= 0 && p.st !== 0 && drainT > p.fade) { p.a -= dt * 2.2; p.y += 40 * dt }
+                if (p.a <= 0) continue
                 live.push(p)
             }
             gibs = live
-            if (!releasing && splats.length > 0) {
-                var rate = 40 * Math.exp(-bleedTime / 7.0)
-                dripAccum += dt * rate
-                while (dripAccum >= 1) {
-                    dripAccum -= 1
-                    var s = splats[Math.floor(Math.random() * splats.length)]
-                    drips.push({ x: s.x, y: groundY, vy: 30 + Math.random() * 50, color: s.color })
-                }
-            }
             var dl = []
             for (i = 0; i < drips.length; i++) {
-                var d = drips[i]; d.vy += g * 0.25 * dt; d.y += d.vy * dt
-                if (d.y >= H) continue
-                dl.push(d)
+                var dd = drips[i]; dd.vy += 300 * dt; dd.y += dd.vy * dt
+                if (dd.y >= by1) continue
+                dl.push(dd)
             }
             drips = dl
-            if (fallText.active) {
-                fallText.vy += g * 0.7 * dt
-                fallText.y += fallText.vy * dt
-                if (fallText.y > H) {
-                    fallText.active = false; fallText.visible = false
-                    footer.creditHidden = false
-                    // Retypes when the footer is still on screen (the retire
-                    // timer's case); otherwise it just resets and the next
-                    // scroll into view types it, as it always did.
-                    footer.rearmCredit()
-                }
-            }
-            // 15s matches gibRetire: the sim must still be bleeding when the
-            // credit is sent back down, or the last seconds sit there dry.
-            if (gibs.length === 0 && drips.length === 0 && !fallText.active && (releasing || bleedTime > 15)) running = false
+            // Done once everything is gone, and at the latest 6 s into the clean-up.
+            if (drainT > 0.2 && gibs.length === 0 && drips.length === 0) finish()
+            else if (drainT > 6) finish()
         }
         onPaint: {
             var ctx = getContext('2d'); ctx.clearRect(0, 0, width, height)
-            for (var i = 0; i < splats.length; i++) { var s = splats[i]
-                ctx.fillStyle = s.color; ctx.fillRect(Math.round(s.x), Math.round(groundY - s.size), s.size, s.size) }
-            for (i = 0; i < gibs.length; i++) { var p = gibs[i]
+            if (!running) return
+            ctx.save(); ctx.beginPath(); ctx.rect(bx0, by0, bx1 - bx0, by1 - by0); ctx.clip()
+            for (var i = 0; i < gibs.length; i++) { var p = gibs[i]
+                ctx.globalAlpha = Math.max(0, p.a)
                 ctx.fillStyle = p.color; ctx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size) }
+            ctx.globalAlpha = 1
             for (i = 0; i < drips.length; i++) { var d = drips[i]
                 ctx.fillStyle = d.color; ctx.fillRect(Math.round(d.x), Math.round(d.y), 2, 4) }
+            ctx.restore()
         }
     }
 }

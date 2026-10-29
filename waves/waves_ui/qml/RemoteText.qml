@@ -11,9 +11,9 @@ import QtQuick
 // opened this item" to an attacker who controls the metadata. Any plain Text bound
 // to a remote string is therefore a latent beacon.
 //
-// QML has no way to change a built-in type's default globally, so the defence is:
+// QML has no way to change a built-in type's default globally, so the defense is:
 // bind remote strings to THIS component instead of a bare Text. It is a drop-in
-// Text whose ONLY behavioural difference is that textFormat is pinned to
+// Text whose ONLY behavioral difference is that textFormat is pinned to
 // PlainText, HTML is shown as literal characters, never parsed, never fetched.
 //
 // USAGE

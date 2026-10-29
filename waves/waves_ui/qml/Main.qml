@@ -1,4 +1,5 @@
 import QtQuick
+import QtQml
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import QtQuick.Effects
@@ -37,11 +38,11 @@ ApplicationWindow {
     // Variant: none | tilt | tilt_gloss | tilt_shadow. Tilt is BGT's value.
     // Lift is BGT's 1.04 swell cut by a fifth (0.04 -> 0.032): the cover read
     // as jumping toward you too eagerly at BGT's number.
-    // Settings > Advanced > "Cover art tilts on hover". "none" is the same
+    // Settings > Appearance > "Cover art tilts on hover". "none" is the same
     // switch the variants already had, so one binding turns the effect off
     // everywhere it reaches (Art, the track discs, the Browse hero cards).
     property bool artHoverTilt: waves.wavesPref("art_hover_tilt") !== false
-    // Settings > Advanced > "Videos preview on hover". Off gates peekOpen, so
+    // Settings > Appearance > "Videos preview on hover". Off gates peekOpen, so
     // pointing at a thumbnail no longer grows the sound-on preview card; a
     // click still plays the video in full. An open peek closes on the flip.
     property bool videoHoverPeek: waves.wavesPref("video_hover_peek") !== false
@@ -76,9 +77,9 @@ ApplicationWindow {
         return inh !== undefined && inh !== "" ? "" + inh : ""
     }
     // The ground a chosen tier's badge sits on: the tier's own container
-    // colour, so a badge stating what YOU asked for reads apart from one
+    // color, so a badge stating what YOU asked for reads apart from one
     // stating what the catalog offers (plain surface2). ATMOS wears no
-    // ladder colour (see qualBg), so a chosen ATMOS fills its outline grey:
+    // ladder color (see qualBg), so a chosen ATMOS fills its outline gray:
     // filled where the catalog's own ATMOS pill is outline only.
     function qualTint(q) {
         return (q === "HI-RES" || q === "VIDEO") ? goldCont : q === "LOSSLESS" ? greenCont
@@ -100,6 +101,9 @@ ApplicationWindow {
             root.videoHoverPeek = waves.wavesPref("video_hover_peek") !== false
             if (!root.videoHoverPeek && root.peekNow) root.peekClose()
         }
+        function onQueueLedgerRowsChanged() {
+            root.queueLedgerMaxRows = waves.wavesPref("queue_ledger_rows") || 12
+        }
     }
     property string artFxVariant: root.artHoverTilt ? "tilt" : "none"
     property real artFxTilt: 8
@@ -113,7 +117,7 @@ ApplicationWindow {
     // Every cover that answers the pointer casts a shadow while it is
     // hovered, and artwork whose own preview is running stops answering the
     // pointer and settles slightly raised over that same shadow, so "what is
-    // playing" reads from across the page without a badge or a colour
+    // playing" reads from across the page without a badge or a color
     // change. One shadow language for both states: a cover that starts
     // playing under the pointer deepens what is already there instead of
     // growing one out of nothing.
@@ -157,6 +161,8 @@ ApplicationWindow {
     readonly property color goldDim:      "#b07d18"
     readonly property color goldCont:     "#2a2008"
     readonly property color goldContTx:   "#ffd27a"
+    readonly property color yellow:       "#ffd83d"   // queue PAUSE (gold reads orange beside it)
+    readonly property color yellowCont:   "#272206"
     readonly property color green:        "#3ef08a"   // LOSSLESS tier + done state
     readonly property color greenDim:     "#2aa862"
     readonly property color greenCont:    "#08230f"
@@ -181,16 +187,16 @@ ApplicationWindow {
     // UPPERCASE (nav tabs sentence case), lit-cell primaries; mono stays the
     // "data voice" (badges, numbers, ASCII art).
     readonly property string uiFont:   uiFontFamily   // native system sans (see app.py)
-    readonly property real   btnTrack: 0              // label letter-spacing
-    readonly property int    btnRad:   8              // button corner radius
+    readonly property real   btnTrack: 0.3            // label letter-spacing
+    readonly property int    btnRad:   7              // button corner radius
     // Outline weight for the download/preview controls (and the divider inside
     // the hover strip). A hair over 1px so the controls hold their edge against
     // busy artwork without reading as a heavy frame.
     readonly property real   btnBorderW: 1.5
-    readonly property int    btnPadH:  12             // label padding, left/right
-    readonly property int    btnPadV:  7              // label padding, top/bottom
+    readonly property int    btnPadH:  10             // label padding, left/right
+    readonly property int    btnPadV:  5              // label padding, top/bottom
     readonly property color accentSoft:   "#9dffbe"   // CRT flash / phosphor highlight
-    // Nav-tab idle ("dimmed phosphor display"): a grey label on a faint green
+    // Nav-tab idle ("dimmed phosphor display"): a gray label on a faint green
     // panel that warms to green as the tab powers on (see NavTab).
     readonly property color navIdleBg:       "#0b140f"
     readonly property color navIdleBorder:   "#1f3d2a"
@@ -482,6 +488,12 @@ ApplicationWindow {
         readonly property real fX: live ? (btt.width, flick.width, flick.mapToItem(btt, 0, 0).x) : 0
         readonly property real fW: live ? flick.width : 0
         readonly property real fBottom: live ? fTop + flick.height : 0
+        // A scrollbar inside the list's own width keeps its column clear of
+        // the fades (one moved out beside the list is past them already).
+        readonly property real barGutter: {
+            var b = live ? flick.ScrollBar.vertical : null
+            return b && b.visible && !b.outside ? b.width : 0
+        }
 
         // ---- LIP edge fades ------------------------------------------------
         // Scroll-gated: a fade exists to soften rows being cut off by the
@@ -493,7 +505,7 @@ ApplicationWindow {
         // page arrives, and a page too short to scroll shows no fades at all.
         readonly property real fadeH: 34
         Rectangle {
-            x: btt.fX; y: btt.fTop; width: btt.fW; height: btt.fadeH
+            x: btt.fX; y: btt.fTop; width: btt.fW - btt.barGutter; height: btt.fadeH
             visible: btt.live && opacity > 0
             opacity: btt.live ? Math.min(1, Math.max(0, btt.flick.contentY) / btt.fadeH) : 0
             gradient: Gradient {
@@ -504,7 +516,7 @@ ApplicationWindow {
             }
         }
         Rectangle {
-            x: btt.fX; y: btt.fBottom - btt.fadeH; width: btt.fW; height: btt.fadeH
+            x: btt.fX; y: btt.fBottom - btt.fadeH; width: btt.fW - btt.barGutter; height: btt.fadeH
             visible: btt.live && opacity > 0
             opacity: btt.live ? Math.min(1, Math.max(0,
                          btt.flick.contentHeight - btt.flick.height - btt.flick.contentY) / btt.fadeH) : 0
@@ -671,10 +683,10 @@ ApplicationWindow {
     // downloadFolderMissing / downloadFolderDefault signals.
     property bool folderGateBlocking: false
     property bool folderNudge: false
-    // Advanced-settings reset confirmations. Both actions are destructive, so
+    // The reset confirmations (Settings > Diagnostics). Both actions are destructive, so
     // nothing happens until the user confirms in these dialogs.
     property bool confirmSettingsReset: false
-    // The FLAC check's fix (Advanced settings): confirmed with the count of
+    // The FLAC check's fix (Settings > FFmpeg & FLAC): confirmed with the count of
     // files it will write a signature into, before the backend is asked.
     property bool confirmFlacFix: false
     property int flacFixCount: 0
@@ -896,9 +908,13 @@ ApplicationWindow {
     // "kind:id" of the preview whose resolve just failed, flashes the button red
     // briefly (previewErrorTimer clears it), so a failed preview isn't silent.
     property string previewError: ""
-    // Count of items still waiting/downloading (excludes done/failed/cancelled),
+    // Count of items still waiting/downloading (excludes done/failed/canceled),
     // drives the header badge.
     property int activeQueueCount: 0
+    // A row just left the active count: "done", "failed", "cancelled", or
+    // "removed" when it left the queue outright. Fired after the count moved,
+    // so the header button reads the count it lands on.
+    signal queueRowSettled(string status)
 
     // ---- Download-queue grouping (Completed / Failed / Stopped / Downloading / Queued)
     // A finished row lingers 5s with its ✓ DONE chip, then slides up into the
@@ -912,6 +928,9 @@ ApplicationWindow {
     // the user saw was DOWNLOADING bouncing as its count fell.
     property string pulseSection: ""
     property int pulseTick: 0
+    // When the tick fired, so a header handed the pulsing section just after
+    // it can still play the pulse (see secArm in the section header).
+    property double pulseAt: 0
     property bool completedCollapsed: true
     property int completedCount: 0
     // Failed rows get their own section (between Completed and Downloading)
@@ -931,13 +950,36 @@ ApplicationWindow {
     // streamed live from the bridge while the album downloads.
     property var queueExpanded: ({})
     property var queueTracks: ({})
-    // How many ledger rows an expanded queue row builds, and how many the
-    // hover peek builds. Both are ceilings, not page sizes: the whole list is
-    // already in queueTracks and every row's live state keeps arriving, these
-    // only bound how many delegates exist. 500 covers any album and all but
-    // the largest playlists in full; the peek only ever shows its top sliver.
-    readonly property int queueLedgerMax: 500
+    // The expanded ledger is a scrolling list (it used to stop building rows
+    // at 500, which hid the end of a long playlist, failures included: issue
+    // #54), so only the rows on screen exist however long the collection is.
+    // Its rows are one fixed height so the list can size itself exactly, and
+    // the hover peek still builds only the few its sliver can show.
+    readonly property int queueLedgerRowH: 15
+    readonly property int queueLedgerGap: 3
     readonly property int queueLedgerPeek: 3
+    // How tall an open ledger grows before it stops and scrolls inside its
+    // own box, in rows: a long playlist is a window onto the list, never a
+    // card that swallows the drawer. Settings > Appearance > "Tracks shown in
+    // an open queue row" (the bridge holds it within its range).
+    property int queueLedgerMaxRows: waves.wavesPref("queue_ledger_rows") || 12
+    // The scroll fades at the box's top and bottom, the pages' own lip curve
+    // at the ledger's scale.
+    readonly property int queueLedgerFadeH: 24
+    // Rows whose ledger shows only the tracks that did not land (MISSING),
+    // keyed by qid like queueExpanded so it survives delegate recycling.
+    property var queueLedgerMissing: ({})
+    // What the last missing-tracks export said, on the button that asked for
+    // it (qid, -1 = the drawer's own), for a moment.
+    property int queueExportQid: -2
+    property string queueExportWord: ""
+    Timer { id: queueExportWordTimer; interval: 2200; onTriggered: root.queueExportQid = -2 }
+    function queueExportLabel(qid, idle) {
+        return root.queueExportQid === qid && root.queueExportWord !== "" ? root.queueExportWord : idle
+    }
+    // One mono digit at the ledger's number size, so the number column fits a
+    // four-digit playlist position instead of a fixed two-digit width.
+    TextMetrics { id: ledgerDigit; font.family: root.mono; font.pixelSize: 10; text: "0" }
     // Queue drawer width, dragged by the handle on its own edge, and remembered
     // across launches the way the window frame is (0 is the never-saved
     // sentinel). 420 is the floor as well as the default: below it the quality
@@ -953,10 +995,6 @@ ApplicationWindow {
     // frame above. Restoring fires this too; the bridge drops a no-op save.
     Timer { id: queueWidthSaveTimer; interval: 600; onTriggered: waves.queueSaveWidth(Math.round(root.queueWidth)) }
     onQueueWidthChanged: queueWidthSaveTimer.restart()
-    // True while the drawer's resize edge is held. DotMatrix reads it to hold
-    // its column rebuild until the hand has let go AND the release animation
-    // has finished, so the one rebuild per gesture lands on a static screen.
-    property bool queueEdgeHeld: false
 
     // ---- Browse (TIDAL editorial pages) --------------------------------
     // The landing payload (content rows + the genre/mood/decade chip sets)
@@ -1136,7 +1174,7 @@ ApplicationWindow {
         interval: 5 * 60 * 1000    // max-age: editorial rows move a few times a day
         repeat: true
         running: root.signedIn && root.windowUp && root.browseOpen && root.browsePageKey === ""
-                 && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
+                 && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && !root.artistOpen
         onTriggered: waves.refreshBrowse()   // silent, throttled; repaints only on change
     }
     // A drilled Browse page (a playlist, mix or album) and an artist page
@@ -1150,7 +1188,7 @@ ApplicationWindow {
         repeat: true
         running: root.signedIn && root.windowUp && root.browseOpen && root.browsePageKey !== ""
                  && !root.browsePageLoading
-                 && !root.settingsOpen && !root.libraryOpen && !root.artistOpen
+                 && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && !root.artistOpen
         onTriggered: {
             var parts = root.browsePageKey.split(":")
             if (parts.length < 3 || parts[0] !== "item") return
@@ -1168,7 +1206,7 @@ ApplicationWindow {
     }
     // My Tidal has the same need: Home and every category pane revalidated
     // only from loadLib (a tab or category switch), so a user parked on one
-    // for days never saw the favourites they added from their phone. Same
+    // for days never saw the favorites they added from their phone. Same
     // max-age, same quiet path (the backend repaints only on change and the
     // refill pins the scroll spot), only while that pane is the view.
     Timer {
@@ -1189,7 +1227,16 @@ ApplicationWindow {
             }
         }
     }
-    // The four max-age timers stop while the window is hidden or minimized
+    // The Releases feed reads only the local store, so its timer is cheap: it
+    // catches a library or ownership change the cards' own listeners missed.
+    Timer {
+        id: releasesFreshTimer
+        interval: 5 * 60 * 1000
+        repeat: true
+        running: root.signedIn && root.windowUp && root.releasesOpen && !root.settingsOpen && !root.artistOpen
+        onTriggered: root.releasesLoad()
+    }
+    // The five max-age timers stop while the window is hidden or minimized
     // and restart from zero on re-show, so a window restored after a night
     // away served the old page for up to another interval. A re-show after
     // at least one interval down fires each timer that is running once, a
@@ -1202,9 +1249,13 @@ ApplicationWindow {
             if (!root.windowUp) { root.freshDownAt = Date.now(); return }
             var away = root.freshDownAt > 0 ? Date.now() - root.freshDownAt : 0
             root.freshDownAt = 0
+            // Back onto the open Releases pane: what arrived while away is
+            // seen now (the badge clears), however short the absence.
+            if (root.releasesOpen) releasesRefetch.restart()
             if (away < browseLandingFreshTimer.interval) return
             Qt.callLater(function () {
-                var timers = [browseLandingFreshTimer, browseItemFreshTimer, artistFreshTimer, libraryFreshTimer]
+                var timers = [browseLandingFreshTimer, browseItemFreshTimer, artistFreshTimer, libraryFreshTimer,
+                              releasesFreshTimer]
                 for (var i = 0; i < timers.length; ++i) if (timers[i].running) timers[i].triggered()
             })
         }
@@ -1228,6 +1279,9 @@ ApplicationWindow {
     // that has already landed somewhere. Both "YYYY-MM-DD".
     property string newCutoff: ""
     property string newHorizon: ""
+    // Today, "YYYY-MM-DD": the Releases feed buckets against it. Set by the
+    // same clock, so a midnight rollover re-buckets the feed with the marks.
+    property string todayIso: ""
     function _isoDay(d) {
         return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2)
     }
@@ -1239,6 +1293,8 @@ ApplicationWindow {
         var hor = root._isoDay(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1))
         if (cut !== root.newCutoff) root.newCutoff = cut
         if (hor !== root.newHorizon) root.newHorizon = hor
+        var td = root._isoDay(t)
+        if (td !== root.todayIso) root.todayIso = td
     }
     function isNewRelease(date) {
         var s = ("" + (date || "")).slice(0, 10)
@@ -1364,10 +1420,10 @@ ApplicationWindow {
             heads.artists = y; block(36)
             if (searchArtistsStripMode) {
                 secs.strip = { y: y }
-                block(artistStrip.cardW + 119)
+                block(artistStrip.cardW + 115)
             } else {
                 var gc = Math.max(1, Math.floor((w + 12) / (190 + 12)))
-                rows("artists", na, (w - (gc - 1) * 12) / gc + 119, 12, gc)
+                rows("artists", na, (w - (gc - 1) * 12) / gc + 115, 12, gc)
             }
             if (all && (searchArtistsExpanded || na * pitch - artistRow.spacing > w + 1)) block(15)
         }
@@ -1396,7 +1452,7 @@ ApplicationWindow {
         var s = win(secs.artists)
         if (secs.strip) {
             var cx = artistStrip.contentX
-            var onScreen = secs.strip.y < bottom && secs.strip.y + artistStrip.cardW + 119 > top
+            var onScreen = secs.strip.y < bottom && secs.strip.y + artistStrip.cardW + 115 > top
             s = onScreen ? [Math.min(na, Math.floor(cx / pitch)), Math.min(na, Math.ceil((cx + w) / pitch))] : [0, 0]
         }
         _searchSyncFromArtists = s[0]; _searchSyncArtists = s[1]
@@ -1725,13 +1781,13 @@ ApplicationWindow {
     // row. Keep the page hidden (but laid out) until that scroll has been applied,
     // so the reader lands already on the track instead of watching it jump down,
     // matching every other navigation that drops you in place. The highlighted row
-    // raises this as it lays out and lowers it once centred; the guard clears it if
+    // raises this as it lays out and lowers it once centered; the guard clears it if
     // the track never appears, so a page can never stay hidden.
     property bool browseHighlightPending: false
     onBrowseHighlightPendingChanged: if (browseHighlightPending) hiRevealGuard.restart()
     Timer { id: hiRevealGuard; interval: 500; onTriggered: root.browseHighlightPending = false }
     // Presentation: "art" = artwork-first (hero shelf, unframed covers, hover
-    // download, genre/mood/decade colour tiles at the bottom, the streaming-
+    // download, genre/mood/decade color tiles at the bottom, the streaming-
     // service look); "console" = chip sets up top + framed cards. Persisted.
     property string browseStyle: ("" + (waves.wavesPref("browse_style") || "art"))
     // Cover mosaics for the genre/mood/decade tiles: api path -> [urls],
@@ -1785,12 +1841,12 @@ ApplicationWindow {
     // 720p) sits behind every page under a heavy scrim so the Console palette
     // and text contrast survive. z:-1 keeps it below all content; playback
     // pauses via presentStalled (see onPresentStalledChanged below) once
-    // frames stop reaching the glass, which covers hidden/minimised too.
+    // frames stop reaching the glass, which covers hidden/minimized too.
     Video {
         id: bgWave
         anchors.fill: parent
         z: -1
-        // Settings > Advanced > "Motion background". An empty source (off)
+        // Settings > Appearance > "Motion background". An empty source (off)
         // tears down the whole decode pipeline, so disabled means zero cost.
         property bool motionOn: waves.wavesPref("motion_background") !== false
         visible: motionOn
@@ -1843,7 +1899,7 @@ ApplicationWindow {
         }
         Connections {
             target: root
-            // One mechanism for every "nobody can see us" case: minimised,
+            // One mechanism for every "nobody can see us" case: minimized,
             // hidden AND fully occluded (the old visibility branch missed
             // occlusion, so the loop played on under the covering window and
             // re-expose jumped to a different frame). The clock has already
@@ -1888,7 +1944,7 @@ ApplicationWindow {
     // beneath keeps its pointing hand and every other button.
     // It sits in the window's own content, so a modal popup's overlay is above
     // it and the side buttons do nothing while a dialog is open. That is the
-    // wanted behaviour, not a gap: navigating the page underneath a modal
+    // wanted behavior, not a gap: navigating the page underneath a modal
     // question is how you answer it by accident. Reviewed and deliberately
     // left alone.
     Item {
@@ -1925,14 +1981,8 @@ ApplicationWindow {
     // the beginning. Same one-write-per-tick discipline as ledPulse; when
     // nothing is queued nothing binds it.
     property int marchTick: 0
-    // The blinking terminal cursor, shared. A whole page of track discs can be
-    // loading at once (the row window keeps ~70 alive), and one blink animation
-    // per disc is the per-vsync repaint trap above. One derived value off
-    // marchTick gives every mark the same 500ms on / 500ms off as the cover
-    // box's own cursor, evaluated once per tick instead of once per disc.
-    readonly property real termBlink: (marchTick % 20) < 10 ? 1 : 0
     // Presentation stall detector. When the window is fully covered (or
-    // minimised/hidden), macOS stops asking it to render: frameSwapped goes
+    // minimized/hidden), macOS stops asking it to render: frameSwapped goes
     // quiet while the media clock and every Timer keep running, so on
     // re-expose the water video and the ASCII clocks snapped to "now", a
     // visible jump to a completely different frame (livetest, confirmed by
@@ -1965,11 +2015,11 @@ ApplicationWindow {
         interval: 400; repeat: true; running: true
         // 1.1s: comfortably past the ~0.6s presentation hiccup macOS causes
         // on every app-switch transaction, so only a genuinely covered or
-        // minimised window trips the pause; the switch hiccup must ride
+        // minimized window trips the pause; the switch hiccup must ride
         // through undisturbed.
         onTriggered: if (Date.now() - root._lastSwap > 1100) root.presentStalled = true
     }
-    // On screen = not hidden or minimised, and actually being presented.
+    // On screen = not hidden or minimized, and actually being presented.
     // Decorative clocks (this one, the WaveMark water, the browse ticker,
     // the login phrases) pause on THIS, never on window focus: an unfocused
     // window usually stays fully visible next to whatever stole focus, and
@@ -1981,6 +2031,15 @@ ApplicationWindow {
     // window is hidden or minimized (not on a presentation stall, which an
     // app switch trips); guarded so a partial bridge (the QML labs) is fine.
     onWindowUpChanged: if (waves && waves.windowShown) waves.windowShown(windowUp)
+    // The user is looking at the window: up AND focused. What auto-marks
+    // releases seen reads this, never windowUp alone (a window parked on
+    // the Releases pane behind another app's would eat the badge all day).
+    // A property, not an inline read, so a scenario can stand in for focus.
+    property bool looking: windowUp && active
+    // Focus coming back to a window already on the Releases pane is the
+    // user looking again: what the badge counted while they were away is
+    // seen now (the refetch timer runs the acknowledge, under this gate).
+    onLookingChanged: if (looking && releasesOpen) releasesRefetch.restart()
     Timer {
         running: root.onScreen
         interval: 50; repeat: true
@@ -2018,14 +2077,20 @@ ApplicationWindow {
     }
     // Card captions render in two tones: the artist reads as a link (green),
     // the year / track-count metadata in white. Kinds with neither fall back
-    // to the plain grey cardSubtitle.
+    // to the plain gray cardSubtitle.
     function cardSubLead(card) {
         var kind = card.kind || ""
         return kind === "album" || kind === "track" ? (card.artist || "") : ""
     }
+    // A release date as shown anywhere: "09-04-2026" (MM-DD-YYYY). Anything
+    // that is not a full day (a bare year) is shown as it is.
+    function dateText(d) {
+        d = "" + (d || "")
+        return /^\d{4}-\d{2}-\d{2}/.test(d) ? d.slice(5, 7) + "-" + d.slice(8, 10) + "-" + d.slice(0, 4) : d
+    }
     function cardSubMeta(card) {
         var kind = card.kind || ""
-        return kind === "album" ? (card.listed || card.date || card.year || "") + ""
+        return kind === "album" ? root.dateText(card.listed || card.date || card.year || "")
              : kind === "playlist" ? (card.tracks > 0 ? card.tracks + " tracks" : (card.creator || "Playlist"))
              : ""
     }
@@ -2045,8 +2110,10 @@ ApplicationWindow {
         property color metaColor: root.textHi
         // The card says you have it (see NewTag.settled).
         property bool settled: false
+        // The Releases feed shows the date as its own chip.
+        property bool hideDate: false
         readonly property string lead: root.cardSubLead(card)
-        readonly property string meta: root.cardSubMeta(card)
+        readonly property string meta: hideDate ? "" : root.cardSubMeta(card)
         readonly property string fallback: lead === "" && meta === "" ? root.cardSubtitle(card) : ""
         // Albums test the date their caption shows; a track card shows none,
         // so the mark is its only recency cue.
@@ -2401,7 +2468,7 @@ ApplicationWindow {
     property bool peekReady: false       // first frames are on the surface
     property bool peekThumbHover: false  // pointer is over the source thumb
     function peekOpen(anchor, id, title, artist, art) {
-        if (!videoHoverPeek) return   // Settings > Advanced switched previews off
+        if (!videoHoverPeek) return   // Settings > Appearance switched previews off
         if (!id || videoNow) return
         if (peekNow && peekNow.id === ("" + id)) return
         peekPlayer.stop(); peekPlayer.source = ""
@@ -2556,7 +2623,7 @@ ApplicationWindow {
     // ATMOS is a KIND of file, not a rung on the gold/green/cyan ladder, and it
     // must not read as one: a Dolby Atmos copy is delivered at one fixed tier
     // the audio quality setting cannot raise, so there is no better Atmos to
-    // want. It therefore wears none of the ladder's colours and none of its
+    // want. It therefore wears none of the ladder's colors and none of its
     // ground. Outline only, plain ink, the same filled dot every tier pill
     // draws, and SPATIAL where a tier states its spec. Same word, same ink, on
     // every surface that shows a quality, from the search row to the queue
@@ -2612,12 +2679,13 @@ ApplicationWindow {
     function navSnapshot() {
         if (settingsOpen) return { v: "settings", label: "Settings" }
         if (libraryOpen) return { v: "library", cat: libraryCategory, label: "My Tidal" }
+        if (releasesOpen) return { v: "releases", view: releasesView, label: "Releases" }
         if (artistOpen) return { v: "artist", id: artistData ? "" + artistData.id : "",
                                  label: artistData ? (artistData.name || "Artist") : "Artist",
                                  // Which of the artist's TWO pages this is. My
                                  // Tidal opens a library-scoped one through the
                                  // same signal, with the same id, holding only
-                                 // the favourites; without this the restore
+                                 // the favorites; without this the restore
                                  // below reads them as one page and a Back off
                                  // the scoped page is a dead press that eats
                                  // its history entry. Same collision openSearch
@@ -2651,7 +2719,7 @@ ApplicationWindow {
         // _navSeq and make an in-flight search's results get discarded, and
         // recording a forward entry would cost one dead Forward press per
         // over-press. navForward() already returns before its markNav.
-        if (levelUp && !settingsOpen && !libraryOpen && !artistOpen && !browseOpen) return
+        if (levelUp && !settingsOpen && !libraryOpen && !releasesOpen && !artistOpen && !browseOpen) return
         markNav("back")
         saveSearchView()   // leaving Search via Back must also keep its drill-in restorable
         var fwd = navSnapshot()
@@ -2661,6 +2729,7 @@ ApplicationWindow {
             // Nothing recorded (fresh session view): the old level-up fallback.
             if (settingsOpen) settingsOpen = false
             else if (libraryOpen) libraryOpen = false
+            else if (releasesOpen) releasesOpen = false
             else if (artistOpen) artistOpen = false
             else if (browseOpen && browsePageKey !== "") browseBack()
             else if (browseOpen) browseOpen = false
@@ -2686,19 +2755,24 @@ ApplicationWindow {
         // Restore the snapshot's lit tab; older snapshots without one fall back
         // to the section the snapshot itself shows.
         navOrigin = s.o || (s.v === "library" ? "library" : s.v === "browse" ? "browse"
+                          : s.v === "releases" ? "releases"
                           : s.v === "search" ? "search" : navOrigin)
         _navRestoring = true
-        if (s.v === "settings") { settingsOpen = true; artistOpen = false; libraryOpen = false }
+        if (s.v === "settings") { settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false }
         else if (s.v === "library") {
-            libraryOpen = true; settingsOpen = false; artistOpen = false
+            libraryOpen = true; releasesOpen = false; settingsOpen = false; artistOpen = false
             // Unconditional: a category that already has rows revalidates
             // quietly inside loadLib (repaint only on change), so Back into
             // the category you left still tracks TIDAL instead of freezing.
             loadLib(s.cat)
+        } else if (s.v === "releases") {
+            releasesOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
+            releasesView = s.view || "feed"
+            releasesEnter()
         } else if (s.v === "artist") {
             if (artistData && ("" + artistData.id) === s.id
                     && !!artistData.libraryScoped === !!s.scoped) {
-                artistOpen = true; settingsOpen = false; libraryOpen = false
+                artistOpen = true; settingsOpen = false; libraryOpen = false; releasesOpen = false
                 // The page's content is still loaded; put back the state other
                 // tabs may have clobbered (loadLib clears expandedAlbums), and
                 // land on the saved spot same-frame, pre-paint (the pane only
@@ -2725,7 +2799,7 @@ ApplicationWindow {
                 return   // flag cleared in onArtistLoaded
             }
         } else if (s.v === "browse") {
-            browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
+            browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
             browseStack = s.stack || []
             browseHighlightId = s.hi || ""
             var bkey = s.key || ""
@@ -2770,7 +2844,7 @@ ApplicationWindow {
                 waves.refreshBrowse()   // silent, throttled; repaints only on change
             }
         } else {   // search
-            settingsOpen = false; artistOpen = false; libraryOpen = false; browseOpen = false
+            settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
         }
         _navRestoring = false
         _navRestored = true   // survives the 0ms crumb-trim debounce (see crumbTrimTimer)
@@ -2786,6 +2860,7 @@ ApplicationWindow {
     // the real name when the payload arrives (reported from livetesting).
     readonly property string currentNavLabel: settingsOpen ? "Settings"
         : libraryOpen ? "My Tidal"
+        : releasesOpen ? "Releases"
         : artistOpen ? (artistData ? (artistData.name || "Artist") : "Artist")
         : browseOpen ? (browsePageKey === "" ? "Browse"
                         : browsePage ? (browsePage.title || "Browse")
@@ -2801,7 +2876,7 @@ ApplicationWindow {
     // arrives (indefinitely, if the load errors).
     readonly property bool crumbTailPending: currentNavLabel === ""
     function currentNavSig() {
-        var v = settingsOpen ? "settings" : libraryOpen ? "library"
+        var v = settingsOpen ? "settings" : libraryOpen ? "library" : releasesOpen ? "releases"
               : artistOpen ? "artist" : browseOpen ? "browse" : "search"
         return v + "|" + (v === "browse" ? browsePageKey : "")
                  + "|" + (v === "artist" ? (artistData ? "" + artistData.id : "") : "")
@@ -2834,13 +2909,14 @@ ApplicationWindow {
     // that a pure flip). It is display-only: history is untouched until it
     // is clicked, which records the drilled page like any navigation.
     readonly property bool crumbSynth: {
-        var drilled = artistOpen || (browseOpen && !settingsOpen && !libraryOpen && browsePageKey !== "")
+        var drilled = artistOpen || (browseOpen && !settingsOpen && !libraryOpen && !releasesOpen && browsePageKey !== "")
         if (!drilled || settingsOpen) return false
         if (crumbBase >= navHistory.length) return true
         return !navIsRoot(navHistory[crumbBase])
     }
     readonly property string crumbSynthLabel:
-        navOrigin === "library" ? "My Tidal" : navOrigin === "browse" ? "Browse" : "Search"
+        navOrigin === "library" ? "My Tidal" : navOrigin === "releases" ? "Releases"
+        : navOrigin === "browse" ? "Browse" : "Search"
     function crumbSynthGo() {
         navPush()
         markNav("crumb root")
@@ -2854,14 +2930,18 @@ ApplicationWindow {
             browseArtHint = ""
             browsePageLoading = false; browsePageError = false
             browsePageKey = ""
-            artistOpen = false; settingsOpen = false; libraryOpen = false
+            artistOpen = false; settingsOpen = false; libraryOpen = false; releasesOpen = false
             browseOpen = true
         } else if (navOrigin === "library") {
             artistOpen = false; settingsOpen = false; browseOpen = false
-            libraryOpen = true
+            libraryOpen = true; releasesOpen = false
+        } else if (navOrigin === "releases") {
+            releasesOpen = true
+            artistOpen = false; settingsOpen = false; browseOpen = false; libraryOpen = false
+            releasesEnter()
         } else {
             // Search: uncover the results pane exactly as it stands.
-            artistOpen = false; settingsOpen = false; libraryOpen = false
+            artistOpen = false; settingsOpen = false; libraryOpen = false; releasesOpen = false
             browseOpen = false
         }
     }
@@ -2901,7 +2981,7 @@ ApplicationWindow {
     // A section root: a tab's own landing, nothing drilled into. Only these
     // are disposable (see crumbTrimRevisit).
     function navIsRoot(s) {
-        return s.v === "search" || s.v === "library" || s.v === "settings"
+        return s.v === "search" || s.v === "library" || s.v === "settings" || s.v === "releases"
             || (s.v === "browse" && (s.key || "") === "")
     }
     function crumbTrimRevisit() {
@@ -2942,11 +3022,940 @@ ApplicationWindow {
         var alreadyActive = libraryOpen && !artistOpen && !settingsOpen && navOrigin === "library"
         if (alreadyActive) { navPush(); markNav("library home"); loadLib("home"); return }
         navPush(); markNav("library"); navOrigin = "library"
-        libraryOpen = true; settingsOpen = false; artistOpen = false
+        libraryOpen = true; releasesOpen = false; settingsOpen = false; artistOpen = false
         // RETURN to the category the user left, not always Home. loadLib is
         // keep-alive: a category whose rows are already on screen keeps them
         // (and its scroll) untouched and only revalidates quietly.
         loadLib(libraryCategory)
+    }
+
+    // ---- Releases ---------------------------------------------------------
+    // New releases from the artists you follow, in one continuous scroll:
+    // today, this week, this month, then one section per earlier month.
+    // Upcoming ones (soonest first) have a chip of their own, apart from
+    // every kind, All included. The bridge keeps the feed current on its own
+    // paced sweep; this side only buckets, against root.todayIso (kept by the
+    // same clock as the NEW mark), so a day rollover re-buckets the rows it
+    // already holds with no bridge call.
+    property bool releasesOpen: false
+    property string releasesView: "feed"      // "feed" | "manage"
+    property string releasesFilter: "all"     // all | album | ep | single | video | upcoming
+    // The Music videos setting: hidden, the Videos chip goes and no video
+    // row comes from the bridge (re-read whenever the releases change).
+    property bool releasesVideosOn: waves.wavesPref("releases_videos") !== "hide"
+    property int releasesUnseen: 0            // the nav tab's badge
+    property int releasesFollowed: 0
+    property int releasesUnchecked: 0         // followed, not checked yet
+    // Check now may run (an hour after the last, see releasesCheckNowReady).
+    property bool releasesCheckReady: false
+    Timer {
+        // Nothing else re-asks while every follow rests after a Check now.
+        interval: 60000; repeat: true
+        running: root.releasesOpen && root.signedIn && !root.releasesCheckReady
+        onTriggered: root.releasesCheckReady = waves.releasesCheckNowReady()
+    }
+    // The library line on the tab: {kind: "" | "more" | "look", n}.
+    property var releasesImportNotice: ({ kind: "", n: 0 })
+    property bool releasesHaveFeed: false     // a feed payload has arrived
+    property var releasesRows: []             // the last feed payload
+    // The feed pages back a few months at a time, like the other endless
+    // lists: it reads the last releasesMonths months and grows by a page as
+    // the list nears its end while older releases wait (releasesHasMore).
+    readonly property int releasesPageMonths: 3
+    property int releasesMonths: releasesPageMonths
+    property bool releasesHasMore: false
+    property bool releasesLoadingMore: false
+    // A page of months can hold hundreds of releases, so the list shows
+    // them a page of cards at a time too, from the rows already here, and
+    // reaches for the next months only once every one of them is shown.
+    readonly property int releasesFeedPage: 48
+    property int releasesFeedLimit: releasesFeedPage
+    property var _relBuilt: ({ items: [], cards: {} })   // the last releasesItemsOf
+    property bool _relFeedMore: false         // _relBuilt holds cards not shown yet
+    property bool _relRevealWait: false       // a reveal is not laid out yet
+    property int releasesShown: 0             // rows left after the filter
+    property var releasesFreshIds: ({})       // this visit's new arrivals: id (a video's "v:" id) -> true
+    property var releasesFollowedRows: []
+    property bool releasesFollowedHave: false
+    // The FOLLOWING grid shows a page of the follows at a time and grows by
+    // a page as it is scrolled near its end (the rows are already here; the
+    // page keeps a long list from being one giant scroll).
+    readonly property int releasesFollowedPage: 60
+    property int releasesFollowedLimit: 60
+    // The FOLLOWING and EXCLUDED pages' shape (roster, shelves or ledger,
+    // see relFollowFlick) and the follows' order (by name, or by latest release
+    // first), kept across launches.
+    property string releasesFollowView: {
+        var v = "" + waves.wavesPref("releases_follow_view")
+        return v === "shelves" || v === "ledger" ? v : "roster"
+    }
+    property string releasesFollowSort: waves.wavesPref("releases_follow_sort") === "recent" ? "recent" : "name"
+    function releasesSetFollowView(v) {
+        if (v === root.releasesFollowView) return
+        // A new shape is a new page: it opens at its top (the Releases /
+        // Artists switch keeps each page's place instead, releasesSetView).
+        root.relToTop(v === "shelves" ? relFollowShelves : v === "ledger" ? relFollowLedger : relFollowRoster)
+        root.relToTop(v === "shelves" ? relExcludedShelves : v === "ledger" ? relExcludedLedger : relExcludedRoster)
+        root.releasesFollowView = v
+        waves.setWavesPref("releases_follow_view", v)
+        root.relTipHide()
+        root.releasesFollowedLimit = root.releasesFollowedPage
+        root.releasesFollowedSet(root.releasesFollowedRows)
+        // The careers come only for the Ledger and every release only for
+        // the Shelves (see loadFollowed).
+        if ((v === "ledger" || v === "shelves") && root.releasesView === "manage") waves.loadFollowed()
+    }
+    function releasesSetFollowSort(v) {
+        if (v === root.releasesFollowSort) return
+        root.releasesFollowSort = v
+        waves.setWavesPref("releases_follow_sort", v)
+        root.releasesFollowedLimit = root.releasesFollowedPage
+        relFollowRoster.contentY = relFollowRoster.originY
+        relFollowShelves.contentY = relFollowShelves.originY
+        relFollowLedger.contentY = relFollowLedger.originY
+        root.releasesFollowedSet(root.releasesFollowedRows)
+    }
+    // The search box in the pane's header (relSearch): one needle per page,
+    // so each page's search is still there on the way back to it. Artists
+    // and Excluded filter the rows they hold; the feed asks the store, whose
+    // search reaches every release on record, past the window too (relFind*).
+    // A needle applies after a short pause in typing (relSearchDebounce),
+    // and the _rel*Applied copies are what the pages are filtered by.
+    property string releasesFeedNeedle: ""
+    property string releasesFollowNeedle: ""
+    property string releasesExcludedNeedle: ""
+    readonly property string releasesNeedle: root.releasesView === "manage" ? root.releasesFollowNeedle
+        : root.releasesView === "excluded" ? root.releasesExcludedNeedle : root.releasesFeedNeedle
+    property string _relFollowApplied: ""
+    property string _relExApplied: ""
+    property int releasesFollowedMatch: 0     // follows the Artists search leaves
+    // A chip Flow's width laid in one line (its shown chips and the gaps).
+    function relFlowW(flow) {
+        var w = 0, n = 0, kids = flow.children
+        for (var i = 0; i < kids.length; i++) {
+            if (!kids[i].visible || kids[i].implicitWidth <= 0) continue
+            w += kids[i].implicitWidth; n++
+        }
+        return w + Math.max(0, n - 1) * flow.spacing
+    }
+    function relSqueeze(s) { return ("" + (s || "")).split(/\s+/).filter(function (w) { return w !== "" }).join(" ") }
+    // Accents off, lower case: "bjork" finds "Björk" (NFC again after, so a
+    // kana sound mark, which is not in the stripped block, stays joined).
+    function relFold(s) { return ("" + (s || "")).normalize("NFD").replace(/[\u0300-\u036f]/g, "").normalize("NFC").toLowerCase() }
+    // The rows holding every word of `needle` somewhere in hay(row).
+    function relFilterRows(rows, needle, hay) {
+        var words = root.relFold(needle).split(/\s+/).filter(function (w) { return w !== "" })
+        if (!words.length) return rows
+        return rows.filter(function (r) {
+            var h = root.relFold(hay(r))
+            for (var i = 0; i < words.length; i++) if (h.indexOf(words[i]) < 0) return false
+            return true
+        })
+    }
+    function relSetNeedle(text) {
+        text = "" + (text || "")
+        if (text === root.releasesNeedle) return
+        if (root.releasesView === "manage") root.releasesFollowNeedle = text
+        else if (root.releasesView === "excluded") root.releasesExcludedNeedle = text
+        else root.releasesFeedNeedle = text
+        // Emptied, the whole page is back at once; a word waits for the pause.
+        if (root.relSqueeze(text) === "") { relSearchDebounce.stop(); root.relNeedleApply() }
+        else relSearchDebounce.restart()
+    }
+    Timer { id: relSearchDebounce; interval: 250; onTriggered: root.relNeedleApply() }
+    // Bring every page to its needle (only the ones that moved, each from its top).
+    function relNeedleApply() {
+        var f = root.relSqueeze(root.releasesFollowNeedle)
+        if (f !== root._relFollowApplied) {
+            root._relFollowApplied = f
+            root.releasesFollowedLimit = root.releasesFollowedPage
+            var ff = root.relFollowFlick(); ff.contentY = ff.originY
+            root.releasesFollowedSet(root.releasesFollowedRows)
+        }
+        var e = root.relSqueeze(root.releasesExcludedNeedle)
+        if (e !== root._relExApplied) {
+            root._relExApplied = e
+            var ef = root.relExcludedFlick(); ef.contentY = ef.originY
+            root.releasesExcludedSet(root.releasesExcludedRows)
+        }
+        root.relFindAsk()
+    }
+    // The feed's search: relFindAsked is the needle the feed shows ("" when
+    // browsing), relFindHave whether its answer has come. Until it has, the
+    // feed keeps what it shows rather than flash empty.
+    property string relFindAsked: ""
+    property var relFindRows: []
+    property bool relFindMore: false
+    property bool relFindHave: false
+    readonly property bool releasesFinding: root.relFindAsked !== ""
+    // Where the feed stood when a search began, so clearing it lands the
+    // page back there instead of jumping it to the top.
+    property real _relFeedBrowseY: NaN
+    property int _relFeedBrowseLimit: 0       // and how many cards it showed
+    // Bumped by a rewind, so a restore queued before it does not undo it.
+    property int _relFeedRestoreGen: 0
+    function relFindAsk() {
+        var n = root.relSqueeze(root.releasesFeedNeedle)
+        if (n === root.relFindAsked) return
+        if (root.relFindAsked === "") {
+            root._relFeedBrowseY = relFeedList.contentY - relFeedList.originY
+            root._relFeedBrowseLimit = root.releasesFeedLimit
+        }
+        root.relFindAsked = n
+        root.relFindHave = false
+        relFeedList.contentY = relFeedList.originY
+        if (n === "") {
+            root.relFindRows = []
+            root.relFindMore = false
+            // Every card that stood above the old spot is back first, so
+            // the restore is not clamped by a shorter list.
+            root.releasesFeedLimit = Math.max(root.releasesFeedPage, root._relFeedBrowseLimit)
+            root.releasesApply()
+            var back = root._relFeedBrowseY
+            root._relFeedBrowseY = NaN
+            var gen = root._relFeedRestoreGen
+            if (!isNaN(back) && back > 0) Qt.callLater(function () {
+                if (gen !== root._relFeedRestoreGen) return
+                // The column has not laid out the full feed yet (callLater
+                // runs before its polish), so its height would still be the
+                // search's short answer and clamp the spot to near the top.
+                relFeedList.forceLayout()
+                var top = relFeedList.originY
+                var most = Math.max(top, top + relFeedList.contentHeight - relFeedList.height)
+                relFeedList.contentY = Math.min(most, top + back)
+            })
+            return
+        }
+        waves.searchReleases(n, root.releasesFilter)
+    }
+    // The library artists the track floor leaves out (the EXCLUDED page).
+    // The views read ListModels synced in place (a FOLLOW or a floor change
+    // reloads the list, and a replaced model would jump it to the top); a
+    // row's data is read from _relExById by its key.
+    property var releasesExcludedRows: []
+    property var _relExById: ({})
+    property var _relExShelfKeys: ({})
+    ListModel { id: releasesExcludedModel }
+    // Room under the last row of the Following and Excluded views, so it
+    // scrolls clear of the shape switch in the pane's corner.
+    readonly property int relSwitchClear: 64
+    ListModel { id: releasesExcludedShelfModel }
+    // Bring a ListModel of {uid, sig, ...} to `items` in place: unchanged
+    // rows keep their delegates, moved ones move, changed ones are set.
+    function _relSyncModel(m, items) {
+        var want = {}
+        for (var i = 0; i < items.length; i++) want[items[i].uid] = true
+        for (var j = m.count - 1; j >= 0; j--) if (!want[m.get(j).uid]) m.remove(j)
+        for (i = 0; i < items.length; i++) {
+            var it = items[i], at = -1
+            for (var t = i; t < m.count; t++) if (m.get(t).uid === it.uid) { at = t; break }
+            if (at < 0) { m.insert(i, it); continue }
+            if (at !== i) m.move(at, i, 1)
+            if (m.get(i).sig !== it.sig) m.set(i, it)
+        }
+    }
+    // The excluded rows the page's search leaves (all of them with no needle);
+    // an album title held in the library finds its artist too.
+    property var releasesExcludedShown: []
+    function releasesExcludedSet(rows) {
+        rows = rows || []
+        var shown = root.relFilterRows(rows, root._relExApplied, function (r) {
+            var t = [r.name || ""], held = r.held || []
+            for (var h = 0; h < held.length; h++) t.push(held[h].title || "")
+            return t.join(" ")
+        })
+        var by = {}, items = []
+        for (var i = 0; i < shown.length; i++) {
+            var key = "" + (shown[i].key || shown[i].name || "")
+            if (key === "" || by[key]) continue
+            by[key] = shown[i]
+            items.push({ uid: key, sig: JSON.stringify(shown[i]) })
+        }
+        root._relExById = by
+        root.releasesExcludedRows = rows
+        root.releasesExcludedShown = shown
+        root._relSyncModel(releasesExcludedModel, items)
+        root.releasesExcludedShelvesSync()
+    }
+    // The shelves: a large letter head, then the letter's artists in rows
+    // of as many tiles as fit, each row its own delegate so only the rows
+    // near the view are built.
+    function releasesExcludedShelvesSync() {
+        var cols = Math.max(1, relExcludedShelves.cols), items = [], keys = {}
+        var secs = root.releasesExcludedSections
+        for (var s = 0; s < secs.length; s++) {
+            var sec = secs[s]
+            items.push({ uid: "h:" + sec.letter, sig: sec.letter + ":" + sec.rows.length, rowKind: "head",
+                         letter: sec.letter, cnt: sec.rows.length })
+            for (var c = 0; c * cols < sec.rows.length; c++) {
+                var chunk = sec.rows.slice(c * cols, (c + 1) * cols), ks = [], sigs = []
+                for (var k = 0; k < chunk.length; k++) {
+                    var key = "" + (chunk[k].key || chunk[k].name || "")
+                    ks.push(key); sigs.push(JSON.stringify(chunk[k]))
+                }
+                var uid = "r:" + sec.letter + ":" + c
+                keys[uid] = ks
+                items.push({ uid: uid, sig: cols + "|" + sigs.join("|"), rowKind: "row", letter: sec.letter, cnt: ks.length })
+            }
+        }
+        root._relExShelfKeys = keys
+        root._relSyncModel(releasesExcludedShelfModel, items)
+    }
+    // The Following and Excluded pages share one of three shapes, picked in
+    // the corner switch and kept across launches: "roster" (art cards in as
+    // many columns as fit), "shelves" (a row per artist, its latest covers
+    // across the width) or "ledger" (aligned columns and a release timeline).
+    function relDayNum(d) {
+        d = "" + (d || "")
+        return d.length >= 10 ? Math.floor(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 86400000) : 0
+    }
+    // "12 D AGO", "5 MO AGO", "2.5 Y AGO", "IN 14 D": how far a day is from today.
+    function relAgo(d) {
+        if (!d || root.todayIso === "") return ""
+        var n = root.relDayNum(root.todayIso) - root.relDayNum(d)
+        if (n === 0) return "TODAY"
+        var a = Math.abs(n)
+        var span = a < 31 ? a + " D" : a < 365 ? Math.round(a / 30.4) + " MO" : (a / 365).toFixed(a < 730 ? 1 : 0) + " Y"
+        return n < 0 ? "IN " + span : span + " AGO"
+    }
+    function relCount(n, one, many) { return n + " " + (n === 1 ? one : many) }
+    // The Excluded page's letter shelves: [{letter, rows}], "#" for the rest.
+    readonly property var releasesExcludedSections: {
+        var rows = root.releasesExcludedShown || [], out = [], by = {}
+        for (var i = 0; i < rows.length; i++) {
+            var c = ("" + (rows[i].name || "#")).charAt(0).toUpperCase()
+            if (!/[A-Z]/.test(c)) c = "#"
+            if (!by[c]) { by[c] = { letter: c, rows: [] }; out.push(by[c]) }
+            by[c].rows.push(rows[i])
+        }
+        return out
+    }
+    // What a follow row's releases look like, for its sig: a new release,
+    // a dropped one or a changed cover re-reads the row.
+    function relReleasesSig(r) {
+        var rs = (r && r.releases) || [], cs = (r && r.career) || [], ms = (r && r.missing) || []
+        return rs.length + ":" + (r.total || 0) + ":" + (rs.length ? rs[0].id + "/" + rs[0].art + "/" + rs[rs.length - 1].id : "")
+            + ":" + cs.length + (cs.length ? "/" + cs[0].id + "/" + cs[cs.length - 1].id : "")
+            + ":" + ms.length + (ms.length ? "/" + ms[0].id + "/" + ms[ms.length - 1].id : "")
+    }
+    function relFollowFlick() {
+        return root.releasesFollowView === "shelves" ? relFollowShelves
+             : root.releasesFollowView === "ledger" ? relFollowLedger : relFollowRoster
+    }
+    function relExcludedFlick() {
+        return root.releasesFollowView === "shelves" ? relExcludedShelves
+             : root.releasesFollowView === "ledger" ? relExcludedLedger : relExcludedRoster
+    }
+    // The timeline hint: the release(s) under the hovered mark, drawn over
+    // the pane (a row clips, the hint must not). The owner is the timeline
+    // that asked, so a row leaving only hides its own hint. Leaving the
+    // timeline lets the hint linger a moment, so the pointer can move onto
+    // it and pick one of its releases; relTipHotId is the one it points at.
+    property var relTipRows: []
+    // A period of two or more kinds lists each kind under a strip naming it
+    // with its count; the strip of the group in view stays at the top while
+    // the list scrolls. relTipItems is that list: a head item before each
+    // group, then its releases; relTipGroups the groups in list order.
+    property var relTipItems: []
+    property var relTipGroups: []  // [{group, n}]
+    readonly property int relTipHeadH: 28
+    function relTipGroupOf(r) {
+        var k = "" + (r.kind === "video" ? "video" : (r.rtype || "album"))
+        return k === "album" || k === "ep" || k === "video" ? k : "single"
+    }
+    function relTipGroupName(g) {
+        return g === "album" ? "ALBUMS" : g === "ep" ? "EPS" : g === "video" ? "MUSIC VIDEOS" : "SINGLES"
+    }
+    // The newest and the oldest of them, for the hint's date line (the rows
+    // themselves go by kind).
+    property var relTipNewest: null
+    property var relTipOldest: null
+    property var relTipOwner: null
+    property real relTipX: 0
+    property real relTipY: 0
+    property real relTipBelow: 0
+    property string relTipHotId: ""
+    // A period's releases show four at a time in the hint and scroll
+    // inside it past that, under fades the pages' lip curve at its scale.
+    readonly property int relTipMaxRows: 4
+    readonly property int relTipRowH: 44
+    readonly property int relTipFadeH: 24
+    readonly property int relTipPeek: 18
+    function relTipShow(item, x, y, below, rows) {
+        var p = item.mapToItem(relArea, x, y)
+        relTipLinger.stop()
+        root.relTipX = p.x; root.relTipY = p.y
+        root.relTipBelow = item.mapToItem(relArea, x, below).y
+        root.relTipOwner = item
+        // Albums first, then EPs, singles and music videos, each oldest
+        // first: a busy period's few albums and EPs read at a glance above
+        // its run of singles.
+        var rank = function (r) {
+            return { album: 0, ep: 1, single: 2, video: 3 }[root.relTipGroupOf(r)]
+        }
+        var sorted = (rows || []).slice()
+        var newest = null, oldest = null
+        for (var i = 0; i < sorted.length; i++) {
+            var d = "" + (sorted[i].day || "")
+            if (!newest || d > "" + newest.day) newest = sorted[i]
+            if (!oldest || d < "" + oldest.day) oldest = sorted[i]
+        }
+        sorted.sort(function (a, b) {
+            var ka = rank(a), kb = rank(b)
+            if (ka !== kb) return ka - kb
+            var da = "" + (a.day || ""), db = "" + (b.day || "")
+            if (da !== db) return da < db ? -1 : 1
+            return ("" + (a.title || "")).localeCompare("" + (b.title || ""))
+        })
+        root.relTipNewest = newest
+        root.relTipOldest = oldest
+        var groups = [], items = []
+        for (var j = 0; j < sorted.length; j++) {
+            var g = root.relTipGroupOf(sorted[j])
+            if (!groups.length || groups[groups.length - 1].group !== g) groups.push({ group: g, n: 0 })
+            groups[groups.length - 1].n++
+        }
+        for (var gi = 0, at = 0; gi < groups.length; gi++) {
+            items.push({ head: true, group: groups[gi].group, n: groups[gi].n })
+            for (var k = 0; k < groups[gi].n; k++) items.push(sorted[at++])
+        }
+        root.relTipGroups = groups
+        root.relTipItems = items
+        root.relTipRows = sorted
+    }
+    function relTipLeave(item) {
+        if (item === root.relTipOwner) relTipLinger.restart()
+    }
+    function relTipHide(item) {
+        if (item !== undefined && item !== root.relTipOwner) return
+        relTipLinger.stop()
+        root.relTipRows = []
+        root.relTipItems = []
+        root.relTipGroups = []
+        root.relTipNewest = null
+        root.relTipOldest = null
+        root.relTipOwner = null
+        root.relTipHotId = ""
+    }
+    Timer {
+        id: relTipLinger
+        interval: 140
+        onTriggered: if (!relTipHover.hovered && !(root.relTipOwner && root.relTipOwner.pointerIn)) root.relTipHide()
+    }
+    property bool releasesExcludedHave: false
+    function releasesExcludedLoad() {
+        if (root.libraryOn) waves.loadExcluded()
+        else { root.releasesExcludedSet([]); root.releasesExcludedHave = true }
+    }
+    // The artist page's toggle. Asked once per page shown, kept current by
+    // followStateChanged.
+    property bool artistFollowed: false
+    // Its TIDAL side: already a favorite there, and a change on its way.
+    property bool artistTidalFav: false
+    property bool artistTidalPending: false
+    function artistTidalRead() {
+        var id = root.artistData && root.artistData.id ? "" + root.artistData.id : ""
+        var info = id !== "" ? waves.followInfo(id) : null
+        root.artistTidalFav = !!(info && info.tidal_fav)
+        root.artistTidalPending = id !== "" && waves.tidalFavouritePending(id)
+    }
+    onArtistDataChanged: {
+        root.artistFollowed = !!(root.artistData && root.artistData.id)
+                              && waves.isFollowed("" + root.artistData.id)
+        root.artistTidalRead()
+    }
+    // Card rows of the feed list by row uid. Mutated in place and never
+    // reassigned: a row re-reads it only when its own sig changes, so a new
+    // release rebuilds the rows it shifts and leaves the rest alone.
+    property var _relCards: ({})
+    property int _relCols: 1
+    readonly property int relCardW: 200
+    readonly property int relCardGap: 16
+    readonly property int relVideoW: 356    // a music video: 16:9 at the cover's height
+    readonly property int relCardH: 268     // ArtCard (200 + 46) + the chip row
+    readonly property int relHeadH: 76      // a feed section head, text at its foot
+    readonly property var _relMonths: ["January", "February", "March", "April", "May", "June", "July",
+                                       "August", "September", "October", "November", "December"]
+    function releaseDay(r) { return ("" + ((r && (r.listed || r.date)) || "")).slice(0, 10) }
+    function _relShift(day, n) {
+        var d = new Date(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10) + n)
+        return root._isoDay(d)
+    }
+    // The section a release day falls in, relative to `today` (both "YYYY-MM-DD").
+    // A search's years past this one are a section each (`byYear`): a long
+    // career is a few heads, not dozens of one-card months.
+    function releasesBucketOf(day, today, byYear) {
+        if (day > today) return { key: "upcoming", label: "Upcoming" }
+        if (day === today) return { key: "today", label: "Today" }
+        if (day >= root._relShift(today, -6)) return { key: "week", label: "This week" }
+        if (day.slice(0, 7) === today.slice(0, 7)) return { key: "month", label: "This month" }
+        if (byYear && day.slice(0, 4) < today.slice(0, 4)) return { key: "y" + day.slice(0, 4), label: day.slice(0, 4) }
+        return { key: day.slice(0, 7), label: root._relMonths[+day.slice(5, 7) - 1] + " " + day.slice(0, 4) }
+    }
+    // One timeline entry's day as text: MusicBrainz often knows a release
+    // only by its year or month (kept in `shown`), and then says that much,
+    // never a first-of-January it was never told.
+    function relEntryDate(r, today) {
+        var shown = "" + ((r && r.mb && r.shown) || "")
+        if (shown.length === 4) return shown
+        if (shown.length === 7) return shown.slice(5, 7) + "-" + shown.slice(0, 4)
+        // Without a today (a header that names no relative day) it is the
+        // plain date, never an empty label.
+        var day = "" + ((r && r.day) || "")
+        return ("" + (today || "")).length === 10 ? root.releasesDateLabel(day, today) : root.dateText(day)
+    }
+    function releasesDateLabel(day, today) {
+        if (day.length !== 10 || today.length !== 10) return ""
+        if (day === today) return "TODAY"
+        if (day === root._relShift(today, -1)) return "YESTERDAY"
+        if (day === root._relShift(today, 1)) return "TOMORROW"
+        return root.dateText(day)
+    }
+    // A follow's latest release on record, for a gallery cell: "09-06-2026 · ALBUM".
+    function releasesLastLine(r) {
+        var day = "" + ((r && r.last_release) || "")
+        if (day === "" || root.todayIso === "") return ""
+        var kind = ("" + ((r && r.last_rtype) || "")).toUpperCase()
+        return root.releasesDateLabel(day, root.todayIso) + (kind !== "" ? " \u00b7 " + kind : "")
+    }
+    // [{key, label, rows}], newest first, Upcoming soonest first. The
+    // "upcoming" filter is every release dated ahead, of any kind; every
+    // other filter, All included, leaves those out.
+    function releasesSectionsOf(rows, today, filter, byYear) {
+        var keep = []
+        var ahead = filter === "upcoming"
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i]
+            if (!ahead && filter !== "all" && ("" + (r.rtype || "album")) !== filter) continue
+            var day = root.releaseDay(r)
+            if (day.length !== 10 || (day > today) !== ahead) continue
+            keep.push({ r: r, day: day, at: i })
+        }
+        keep.sort(function (a, b) { return a.day < b.day ? 1 : a.day > b.day ? -1 : a.at - b.at })
+        var out = [], byKey = {}
+        for (var k = 0; k < keep.length; k++) {
+            var b = root.releasesBucketOf(keep[k].day, today, byYear)
+            var s = byKey[b.key]
+            if (!s) { s = { key: b.key, label: b.label, rows: [] }; byKey[b.key] = s; out.push(s) }
+            s.rows.push(keep[k].r)
+        }
+        if (byKey.upcoming) byKey.upcoming.rows.reverse()
+        return out
+    }
+    // The list's items: a header per section, then its cards in rows as
+    // wide as `cols` covers. A music video is wider than a cover, so rows
+    // are filled by width, never by count.
+    function releasesItemsOf(sections, cols) {
+        var items = [], cards = {}
+        var rowW = cols * root.relCardW + (cols - 1) * root.relCardGap
+        for (var i = 0; i < sections.length; i++) {
+            var s = sections[i]
+            items.push({ uid: "h:" + s.key, rowKind: "head", label: s.label, cnt: s.rows.length,
+                         sig: s.label + "|" + s.rows.length })
+            // A video is wider than a cover, so a row that cannot take the
+            // next card still fills its last slot with a later cover from
+            // the same section (the next release that fits), so no row in
+            // a section ends short while there are cards left to show.
+            var chunks = [], cur = [], used = 0, left = s.rows.slice()
+            while (left.length > 0) {
+                var pick = -1
+                for (var c = 0; c < left.length; c++) {
+                    var w = left[c].kind === "video" ? root.relVideoW : root.relCardW
+                    if (cur.length === 0 || used + root.relCardGap + w <= rowW) { pick = c; break }
+                }
+                if (pick < 0) { chunks.push(cur); cur = []; used = 0; continue }
+                var card = left.splice(pick, 1)[0]
+                used += (cur.length > 0 ? root.relCardGap : 0) + (card.kind === "video" ? root.relVideoW : root.relCardW)
+                cur.push(card)
+            }
+            if (cur.length > 0) chunks.push(cur)
+            for (var k = 0; k < chunks.length; k++) {
+                var chunk = chunks[k]
+                var ids = []
+                for (var j = 0; j < chunk.length; j++)
+                    ids.push(chunk[j].id + "/" + (chunk[j].rtype || "") + "/" + root.releaseDay(chunk[j]))
+                var uid = "r:" + s.key + ":" + k
+                items.push({ uid: uid, rowKind: "row", label: "", cnt: chunk.length, sig: cols + "|" + ids.join(",") })
+                cards[uid] = chunk
+            }
+        }
+        return { items: items, cards: cards }
+    }
+    function releasesApply() {
+        if (root.todayIso === "") return
+        // A search shows its answer once it has come (the rows before it stay).
+        if (root.releasesFinding && !root.relFindHave) return
+        var secs = root.releasesFinding
+            ? root.releasesSectionsOf(root.relFindRows, root.todayIso, root.releasesFilter, true)
+            : root.releasesSectionsOf(root.releasesRows, root.todayIso, root.releasesFilter, false)
+        var n = 0
+        for (var i = 0; i < secs.length; i++) n += secs[i].rows.length
+        root.releasesShown = n
+        root._relBuilt = root.releasesItemsOf(secs, Math.max(1, root._relCols))
+        root.releasesReveal()
+    }
+    // Put the first releasesFeedLimit cards of _relBuilt on the list, in
+    // whole rows, each section's head with its first row.
+    function releasesReveal() {
+        var all = root._relBuilt.items
+        var items = [], left = root.releasesFeedLimit, head = null, i = 0
+        for (; i < all.length && left > 0; i++) {
+            var it = all[i]
+            if (it.rowKind === "head") { head = it; continue }
+            if (head !== null) { items.push(head); head = null }
+            items.push(it)
+            left -= it.cnt
+        }
+        root._relFeedMore = i < all.length
+        root._relSync(items, root._relBuilt.cards)
+        root._relRevealWait = true
+        // A page that does not fill the view (or a filter that leaves little
+        // of it) reaches for the next one once the rows are laid out.
+        relMoreCheck.restart()
+    }
+    // The section at depth `y` of the feed, for its scrollbar's bubble while
+    // dragged: "SEP 2026", "THIS WEEK" (the first head above the view's top,
+    // or the first one of all).
+    function relFeedSectionAt(y) {
+        var label = ""
+        for (var i = 0; i < relFeedRows.count; i++) {
+            var it = relFeedRows.itemAt(i)
+            if (!it || it.rowKind !== "head") continue
+            if (label !== "" && relFeedCol.y + it.y > y + 1) break
+            label = it.label
+        }
+        var m = /^([A-Za-z]+) (\d{4})$/.exec(label)
+        return m ? m[1].slice(0, 3).toUpperCase() + " " + m[2] : label.toUpperCase()
+    }
+    // The list's height is only an estimate until a changed model is laid
+    // out: measured that same turn, a long page reads short and pulls in one
+    // it did not need.
+    Timer {
+        id: relMoreCheck
+        interval: 60
+        onTriggered: {
+            root._relRevealWait = false
+            relFeedList.forceLayout()
+            root.releasesMaybeMore()
+        }
+    }
+    function releasesLoad() { waves.loadReleases(root.releasesMonths) }
+    // Called as the feed scrolls; shows the next page well before the bottom
+    // (~1.5 viewports early) so it feels endless: the next cards already
+    // here first, then the next months.
+    function releasesMaybeMore() {
+        if (!root.releasesOpen || root.releasesView !== "feed") return
+        var v = relFeedList
+        if (!v.visible || v.height <= 0) return
+        if (v.contentY - v.originY + v.height <= v.contentHeight - v.height * 1.5) return
+        if (root._relFeedMore) {
+            if (root._relRevealWait) return
+            root.releasesFeedLimit += root.releasesFeedPage
+            root.releasesReveal()
+            return
+        }
+        // A search's answer is whole: there is no next page of it.
+        if (root.releasesFinding) return
+        // Every release dated ahead is on the first page: an older one can
+        // add nothing to Upcoming.
+        if (root.releasesFilter === "upcoming") return
+        if (!root.releasesHasMore || root.releasesLoadingMore) return
+        root.releasesLoadingMore = true
+        root.releasesMonths += root.releasesPageMonths
+        root.releasesLoad()
+    }
+    // Back to the first page, at the top (a new visit, or the tab pressed again).
+    function releasesRewind() {
+        root._relFeedRestoreGen++
+        root._relFeedBrowseY = NaN
+        root.releasesMonths = root.releasesPageMonths
+        root.releasesFeedLimit = root.releasesFeedPage
+        root.releasesLoadingMore = false
+        root.releasesFollowedLimit = root.releasesFollowedPage
+        relFeedList.contentY = relFeedList.originY
+        // The Artists pages too, while hidden: their list is cut back to its
+        // first page on the way back in, which a deep scroll would have seen
+        // collapse under it and rebuild.
+        root.relToTop(root.relFollowFlick())
+        root.relToTop(root.relExcludedFlick())
+    }
+    // Bring releasesModel to `items` in place: unchanged rows keep their
+    // delegates (and their cards' art and hover state), moved ones move.
+    function _relSync(items, cards) {
+        var m = releasesModel
+        var want = {}
+        for (var i = 0; i < items.length; i++) want[items[i].uid] = true
+        for (var j = m.count - 1; j >= 0; j--) {
+            var gone = m.get(j).uid
+            if (!want[gone]) { delete root._relCards[gone]; m.remove(j) }
+        }
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            var at = -1
+            for (var t = i; t < m.count; t++) if (m.get(t).uid === it.uid) { at = t; break }
+            if (at < 0) { root._relCards[it.uid] = cards[it.uid] || []; m.insert(i, it); continue }
+            if (at !== i) m.move(at, i, 1)
+            if (m.get(i).sig !== it.sig) { root._relCards[it.uid] = cards[it.uid] || []; m.set(i, it) }
+        }
+    }
+    function releasesCounts() {
+        root.releasesUnseen = waves.releasesUnseenCount()
+        root.releasesFollowed = waves.followedCount()
+        root.releasesUnchecked = waves.releasesUnchecked()
+        root.releasesCheckReady = waves.releasesCheckNowReady()
+        root.releasesImportNotice = waves.artistImportNoticeNow()
+    }
+    // The pane is being looked at: whatever arrived is seen now (the badge
+    // clears), but its cards keep a dot for the rest of the visit.
+    function releasesSeen() {
+        var ids = waves.acknowledgeAllReleases()
+        if (ids && ids.length) {
+            var f = Object.assign({}, root.releasesFreshIds)
+            for (var i = 0; i < ids.length; i++) f["" + ids[i]] = true
+            root.releasesFreshIds = f
+        }
+        root.releasesCounts()
+    }
+    function releasesEnter() {
+        root.releasesSeen()
+        if (root.releasesView === "manage") {
+            // The page limit was reset on the way out: the kept rows are cut
+            // back to it now, as a reload that finds them unchanged sends nothing.
+            root.releasesFollowedSet(root.releasesFollowedRows)
+            waves.loadFollowed()
+        }
+        if (root.releasesView !== "feed") root.releasesExcludedLoad()
+        // A load dropped on its way (a sign-out mid-build) must not leave
+        // the feed waiting on it forever.
+        root.releasesLoadingMore = false
+        root.releasesLoad()
+    }
+    function openReleases() {
+        saveSearchView()
+        // Second press, Releases already showing: back to the top of the feed.
+        var alreadyActive = releasesOpen && !artistOpen && !settingsOpen && navOrigin === "releases"
+        if (alreadyActive) {
+            navPush(); markNav("releases top")
+            releasesView = "feed"
+            // The feed as it opens: no search either.
+            releasesFeedNeedle = ""
+            relSearchDebounce.stop()
+            relNeedleApply()
+            releasesRewind()
+            releasesEnter()
+            return
+        }
+        navPush(); markNav("releases"); navOrigin = "releases"
+        releasesOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
+        releasesEnter()
+    }
+    function releasesSetView(v) {
+        if (root.releasesView === v) return
+        // Each page keeps its place across the switch, as Browse's landing
+        // and drilled pages do: its Flickable stays alive behind the other
+        // and its loaded pages stay (the Artists list is not cut back to its
+        // first page here; a reload that finds the rows unchanged sends
+        // nothing, and one that finds changes reconciles them in place). A
+        // page is back at its top only on a new visit to the tab
+        // (releasesRewind).
+        root.releasesView = v
+        if (v === "manage") {
+            waves.loadFollowed()
+            root.releasesExcludedLoad()
+        } else if (v === "excluded") root.releasesExcludedLoad()
+        else relMoreCheck.restart()
+    }
+    function relToTop(f) {
+        f.cancelFlick()
+        f.contentY = f.originY
+    }
+    // Called as the Artists view scrolls; shows the next page of
+    // follows well before the bottom (~1.5 viewports early) so it feels
+    // endless.
+    function relFollowMaybeMore() {
+        if (!root.releasesOpen || root.releasesView !== "manage") return
+        if (releasesFollowedModel.count >= root.releasesFollowedMatch) return
+        var v = root.relFollowFlick()
+        if (!v.visible || v.height <= 0) return
+        if (v.contentY - v.originY + v.height > v.contentHeight - v.height * 1.5) {
+            root.releasesFollowedLimit += root.releasesFollowedPage
+            root.releasesFollowedSet(root.releasesFollowedRows)
+        }
+    }
+    // As relMoreCheck for the feed: the grid's height is an estimate until
+    // a changed model is laid out.
+    Timer {
+        id: relFollowMoreCheck
+        interval: 60
+        onTriggered: { root.relFollowFlick().forceLayout(); root.relFollowMaybeMore() }
+    }
+    onTodayIsoChanged: root.releasesApply()
+    onReleasesFilterChanged: {
+        // A search counts its limit under the filter: asked again for the new one.
+        if (root.releasesFinding) {
+            root.relFindHave = false
+            waves.searchReleases(root.relFindAsked, root.releasesFilter)
+        }
+        root.releasesFeedLimit = root.releasesFeedPage
+        root.releasesApply()
+    }
+    // The dots are for this visit to the tab: drilling into a release and
+    // coming back keeps them, switching tab ends the visit.
+    // The visit also ends the pages scrolled into: the next one starts at the
+    // top of the first page.
+    onNavOriginChanged: {
+        if (root.navOrigin === "releases") return
+        root.releasesFreshIds = ({})
+        root.releasesRewind()
+    }
+    ListModel { id: releasesModel }
+    // The manage grid's model, brought to the followed list in place (as
+    // _relSync does for the feed): every sweep step reloads the list, and a
+    // replaced model would throw the grid back to its top and rebuild every
+    // cell each time. A cell reads its artist from _relFollowById by uid and
+    // re-reads only when its own sig changes.
+    ListModel { id: releasesFollowedModel }
+    property var _relFollowById: ({})
+    function releasesFollowedSet(rows) {
+        // By name, or newest release first (an artist with nothing on record
+        // goes last, then by name). Sorted here either way: the rows passed
+        // in may be the other order's (a sort switch re-sorts the kept list).
+        rows = (rows || []).slice()
+        var byName = function (a, b) { return ("" + (a.name || "")).localeCompare("" + (b.name || "")) }
+        if (root.releasesFollowSort === "recent") {
+            rows.sort(function (a, b) {
+                var da = "" + (a.last_release || ""), db = "" + (b.last_release || "")
+                if (da !== db) return da === "" ? 1 : db === "" ? -1 : (da < db ? 1 : -1)
+                return byName(a, b)
+            })
+        } else {
+            rows.sort(byName)
+        }
+        root.releasesFollowedRows = rows
+        // The Artists search: the follows whose name holds every word.
+        var hits = root.relFilterRows(rows, root._relFollowApplied, function (r) { return r.name || "" })
+        root.releasesFollowedMatch = hits.length
+        var shown = hits.slice(0, root.releasesFollowedLimit)
+        var m = releasesFollowedModel
+        var want = {}, items = []
+        for (var i = 0; i < shown.length; i++) {
+            var r = shown[i], uid = "" + (r.id || "")
+            if (uid === "" || want[uid]) continue
+            want[uid] = true
+            items.push({ uid: uid, sig: [uid, r.name || "", r.art || "", JSON.stringify(r.lib === undefined ? null : r.lib),
+                                         r.libStamp || "", r.last_release || "", r.last_title || "", r.last_rtype || "",
+                                         root.relReleasesSig(r)].join("|") })
+            root._relFollowById[uid] = r
+        }
+        for (var j = m.count - 1; j >= 0; j--) {
+            var gone = m.get(j).uid
+            if (!want[gone]) { delete root._relFollowById[gone]; m.remove(j) }
+        }
+        for (i = 0; i < items.length; i++) {
+            var it = items[i], at = -1
+            for (var t = i; t < m.count; t++) if (m.get(t).uid === it.uid) { at = t; break }
+            if (at < 0) { m.insert(i, it); continue }
+            if (at !== i) m.move(at, i, 1)
+            if (m.get(i).sig !== it.sig) m.set(i, it)
+        }
+        // A page that does not fill the view reaches for the next one once
+        // the cells are laid out.
+        relFollowMoreCheck.restart()
+    }
+    // The sweep reports every step that changed the feed; a burst of them
+    // (the first check of many artists) settles into one reload.
+    Timer {
+        id: releasesRefetch
+        interval: 2000
+        onTriggered: {
+            // The walk or the My Tidal page may have followed or dropped the
+            // artist on screen: its toggle and TIDAL side follow the store.
+            if (root.artistData && root.artistData.id) {
+                root.artistFollowed = waves.isFollowed("" + root.artistData.id)
+                root.artistTidalRead()
+            }
+            // Seen needs eyes: a Waves sitting on this pane behind another
+            // app's window (windowUp, not active) must not eat the badge,
+            // or a day of finds is acknowledged with nobody looking.
+            if (root.releasesOpen && root.looking) {
+                root.releasesSeen()
+                root.releasesLoad()
+                // A search on screen is asked again (its answer replaces it in place).
+                if (root.releasesFinding) waves.searchReleases(root.relFindAsked, root.releasesFilter)
+                if (root.releasesView === "manage") waves.loadFollowed()
+            } else {
+                // Off the pane (or unfocused on it) only the badge and
+                // counts move; the feed reloads on the way back in
+                // (releasesEnter), or when focus returns (onActiveChanged).
+                root.releasesCounts()
+            }
+        }
+    }
+    Connections {
+        target: waves
+        function onReleasesChanged() {
+            root.releasesVideosOn = waves.wavesPref("releases_videos") !== "hide"
+            if (!root.releasesVideosOn && root.releasesFilter === "video") root.releasesFilter = "all"
+            releasesRefetch.restart()
+        }
+        function onReleasesLoaded(rows, more, months) {
+            // A load asked for before the pages moved (a reload racing a
+            // page, or a rewind) is not this page: the current ask follows.
+            if (months !== root.releasesMonths) return
+            root.releasesRows = rows || []
+            root.releasesHasMore = more
+            root.releasesLoadingMore = false
+            root.releasesHaveFeed = true
+            root.releasesApply()
+        }
+        function onReleasesSearched(needle, rows, more) {
+            // An answer for text the box no longer holds is not this search.
+            if (needle !== root.relFindAsked || needle === "") return
+            root.relFindRows = rows || []
+            root.relFindMore = more
+            root.relFindHave = true
+            root.releasesFeedLimit = root.releasesFeedPage
+            root.releasesApply()
+        }
+        function onReleasesProgress(done, total) {
+            root.releasesFollowed = total
+            root.releasesUnchecked = waves.releasesUnchecked()
+            root.releasesCheckReady = waves.releasesCheckNowReady()
+        }
+        function onFollowedLoaded(rows) {
+            root.releasesFollowedSet(rows)
+            root.releasesFollowedHave = true
+        }
+        function onExcludedLoaded(rows) {
+            root.releasesExcludedSet(rows || [])
+            root.releasesExcludedHave = true
+        }
+        // The floor moved, or a follow landed: the excluded list is stale.
+        function onFollowFloorChanged() { if (root.releasesOpen && root.releasesView !== "feed") root.releasesExcludedLoad() }
+        function onFollowStateChanged(aid, on) {
+            if (root.artistData && ("" + root.artistData.id) === ("" + aid)) {
+                root.artistFollowed = on
+                root.artistTidalRead()
+            }
+            root.releasesFollowed = waves.followedCount()
+            if (!on && root.releasesFollowedRows.length > 0)
+                root.releasesFollowedSet(root.releasesFollowedRows.filter(function (r) { return ("" + r.id) !== ("" + aid) }))
+            if (root.releasesOpen && root.releasesView === "excluded") root.releasesExcludedLoad()
+        }
+        // A library import followed many at once (one signal, not one each).
+        function onArtistImportDone(n) {
+            if (root.artistData) root.artistFollowed = waves.isFollowed("" + root.artistData.id)
+            root.releasesFollowed = waves.followedCount()
+            if (root.releasesOpen && root.releasesView === "manage") waves.loadFollowed()
+            if (root.releasesOpen && root.releasesView !== "feed") root.releasesExcludedLoad()
+        }
+        function onArtistImportNotice(notice) { root.releasesImportNotice = notice }
+        function onFollowTidalChanged(aid, fav) {
+            if (root.artistData && ("" + root.artistData.id) === ("" + aid)) root.artistTidalRead()
+        }
+        function onLoggedInChanged() { root.releasesCounts() }
+        // The badge is right from the first frame (root has its own onCompleted).
+        Component.onCompleted: root.releasesCounts()
     }
 
     // ---- Search tab state save/restore -----------------------------------
@@ -2956,7 +3965,7 @@ ApplicationWindow {
     // snapshotted the moment the user leaves the tab, and the Search nav
     // button restores it: first press returns exactly where you were (artist
     // page, expanded album, scroll); a second press while already on Search
-    // resets to a blank search page, mirroring Browse's two-step behaviour.
+    // resets to a blank search page, mirroring Browse's two-step behavior.
     property var searchSaved: null
     function saveSearchView() {
         if (navOrigin !== "search" || settingsOpen) return
@@ -2967,7 +3976,7 @@ ApplicationWindow {
             : { resultsY: results.contentY }
     }
     function openSearch() {
-        var onSearchTab = navOrigin === "search" && !settingsOpen && !libraryOpen && !browseOpen
+        var onSearchTab = navOrigin === "search" && !settingsOpen && !libraryOpen && !releasesOpen && !browseOpen
         if (!onSearchTab) {
             navPush()
             markNav("search restore")
@@ -2991,11 +4000,11 @@ ApplicationWindow {
                     // The id alone does not identify a page. My Tidal opens a
                     // LIBRARY-SCOPED page of the same artist (loadArtistLibrary,
                     // same id, same signal) whose payload carries only the
-                    // favourited albums, EPs and tracks and no videos at all,
+                    // favorited albums, EPs and tracks and no videos at all,
                     // and it fills these same four models. Matching ids there
                     // meant the refill was skipped and the full page's header
                     // and DOWNLOAD DISCOGRAPHY button stood over the
-                    // favourites subset, so the scope has to agree too. It is
+                    // favorites subset, so the scope has to agree too. It is
                     // the same-id collision the refresh path already guards
                     // against in onArtistLoaded.
                     var pageLoaded = artistData && ("" + artistData.id) === ("" + s.artistData.id)
@@ -3008,18 +4017,18 @@ ApplicationWindow {
                     bioExpanded = !!s.bio
                     if (!pageLoaded) fillArtistPage(s.artistData, false, s.artistY || 0)
                     artistOpen = true
-                    browseOpen = false; libraryOpen = false; settingsOpen = false
+                    browseOpen = false; libraryOpen = false; releasesOpen = false; settingsOpen = false
                     // Same-frame restore: the pane becomes visible this frame,
                     // so clamping contentY now lands pre-paint (no visible jump).
                     artistView.contentY = Math.min(s.artistY || 0, Math.max(0, artistView.contentHeight - artistView.height))
                 } else {
                     artistOpen = false
-                    browseOpen = false; libraryOpen = false; settingsOpen = false
+                    browseOpen = false; libraryOpen = false; releasesOpen = false; settingsOpen = false
                     if (s) results.contentY = Math.min(s.resultsY || 0, Math.max(0, results.contentHeight - results.height))
                 }
             } else {
                 // Only Settings was covering the Search view: uncover it as-is.
-                settingsOpen = false; browseOpen = false; libraryOpen = false
+                settingsOpen = false; browseOpen = false; libraryOpen = false; releasesOpen = false
             }
             // Ready to type immediately: the Search press hands the keyboard
             // to the field (existing text selected, so typing replaces it).
@@ -3047,7 +4056,7 @@ ApplicationWindow {
         // re-opening My Tidal shows the shelves it already has, instantly. The
         // backend serves the first load from its disk snapshot and every visit
         // triggers a quiet, throttled revalidation (repainting only when the
-        // favourites changed), so an app left running still stays current. The
+        // favorites changed), so an app left running still stays current. The
         // placeholder glyph shows only on the very first run (nothing cached
         // yet). Logout drops the cache (onLoggedInChanged), so a different
         // account still refetches.
@@ -3075,19 +4084,19 @@ ApplicationWindow {
     // same instant jump the update notice uses, no scroll animation.
     function openDownloadSetting() {
         navPush(); markNav("settings")
-        settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
+        settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
         Qt.callLater(function() { settingsPage.jumpToCard("downloads") })
     }
     // Deep-link to the FFmpeg card (from the pre-download gate).
     function openFfmpegSetting() {
         navPush(); markNav("settings")
-        settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
+        settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
         Qt.callLater(function() { settingsPage.jumpToCard("ffmpeg") })
     }
     // Deep-link to the FLAC signatures card (from the FLAC notice).
     function openFlacSetting() {
         navPush(); markNav("settings")
-        settingsOpen = true; artistOpen = false; libraryOpen = false; browseOpen = false
+        settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
         Qt.callLater(function() { settingsPage.jumpToCard("flac") })
     }
     // Browse: open the tab (fetching the landing page once per session) and
@@ -3097,14 +4106,14 @@ ApplicationWindow {
         // was left (open sub-page, stack, scroll all intact). Only a second
         // click, Browse already active and highlighted, goes home.
         saveSearchView()
-        var alreadyActive = browseOpen && !artistOpen && !libraryOpen && !settingsOpen
+        var alreadyActive = browseOpen && !artistOpen && !libraryOpen && !releasesOpen && !settingsOpen
                             && navOrigin === "browse"
         if (!alreadyActive) {
             navPush()
             markNav("browse return")
             navOrigin = "browse"
             browseOpen = true
-            settingsOpen = false; artistOpen = false; libraryOpen = false
+            settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
             if (root.signedIn && browseSections.length === 0 && !browseLoading) {
                 browseLoading = true; browseError = false
                 waves.loadBrowse()
@@ -3126,7 +4135,7 @@ ApplicationWindow {
         browsePageError = false
         browseHighlightId = ""
         browseOpen = true
-        settingsOpen = false; artistOpen = false; libraryOpen = false
+        settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
         // The tab button is an explicit "take me to the top of Browse":
         // cancel any armed hold and reset the landing's scroll directly
         // (the pane is alive, so a plain set is exact).
@@ -3430,7 +4439,7 @@ ApplicationWindow {
             // record where the user came from: this guard used to return
             // without pushing, so Back skipped the folder entirely and fell
             // through to whatever was under it in the history (Search).
-            if (!browseOpen || artistOpen || settingsOpen || libraryOpen) navPush()
+            if (!browseOpen || artistOpen || settingsOpen || libraryOpen || releasesOpen) navPush()
             browseHighlightId = highlight || ""
             browseHighlightPending = false
             return
@@ -3476,7 +4485,7 @@ ApplicationWindow {
     // its title links go inert then (clicking "go to album" on the album
     // you're already reading shouldn't re-navigate or grow the Back stack).
     function onAlbumPage(albumId) {
-        return browseOpen && !artistOpen && !settingsOpen && !libraryOpen
+        return browseOpen && !artistOpen && !settingsOpen && !libraryOpen && !releasesOpen
                && browsePageKey === "item:album:" + albumId
     }
     // Same idea for artist links: inert while that artist's page is open.
@@ -3487,7 +4496,7 @@ ApplicationWindow {
         if (!albumId || onAlbumPage(albumId)) return
         markNav("browse")
         openBrowseItem("album", albumId, highlight || "", title || "", art || "")   // snapshots the view being left
-        settingsOpen = false; artistOpen = false; libraryOpen = false
+        settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
         browseOpen = true
         if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
@@ -3499,11 +4508,11 @@ ApplicationWindow {
     // surface in just like openAlbumPage does for albums.
     function openPlaylistPage(playlistId, title, art) {
         if (!playlistId) return
-        if (browseOpen && !artistOpen && !settingsOpen && !libraryOpen
+        if (browseOpen && !artistOpen && !settingsOpen && !libraryOpen && !releasesOpen
             && browsePageKey === "item:playlist:" + playlistId) return
         markNav("browse")
         openBrowseItem("playlist", playlistId, "", title || "", art || "")
-        settingsOpen = false; artistOpen = false; libraryOpen = false
+        settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
         browseOpen = true
         if (root.signedIn && browseSections.length === 0 && !browseLoading) {
             browseLoading = true; browseError = false
@@ -3514,11 +4523,20 @@ ApplicationWindow {
     // and mixes to their own synthesized page; tracks to their album's page
     // with the track highlighted (falling back to the artist page for the
     // rare track without an album id).
+    // A release entry on the Artists page (a shelf tile, the timeline, its
+    // hint, the latest column): a music video plays, anything else opens
+    // its album page.
+    function openReleaseEntry(r) {
+        if (!r) return
+        if (r.kind === "video" || r.rtype === "video") root.openVideo("" + r.id, "" + (r.title || ""), "")
+        else root.openAlbumPage("" + r.id, "", "" + (r.title || ""), "" + (r.art || ""))
+    }
     function openBrowseCard(card) {
         var kind = card.kind || ""
         // The artist page switches the active surface itself in onArtistLoaded,
         // so those branches return before the browse-surface flip below.
         if (kind === "artist") { waves.loadArtist(card.id); return }
+        if (kind === "video") { root.openVideo(card.id, card.title || "", card.artist || ""); return }
         if (kind === "playlist" || kind === "mix" || kind === "album") {
             openBrowseItem(kind, card.id, "", card.title || "", card.art || "")
         } else if (kind === "track") {
@@ -3529,7 +4547,7 @@ ApplicationWindow {
         // This card is reused on My Tidal's Home shelves, which live in the
         // library pane, so make Browse the active surface; when the click came
         // from within Browse these flags are already set, so it is a no-op.
-        browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false
+        browseOpen = true; settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
     }
     // Browse rows carry per-item `artists` arrays; stash them in the same
     // artistsById side map the search/library rows use, so ArtistLinks inside
@@ -3829,7 +4847,7 @@ ApplicationWindow {
                 if (p) root.openVideo(p.id, p.title, p.artist)
             }
             // A scroll is page navigation, not a peek interaction. The card
-            // grows centred on the thumb, i.e. right under the cursor, so
+            // grows centered on the thumb, i.e. right under the cursor, so
             // swallowing the wheel froze scrolling wherever a peek was open.
             // Let the glance go and hand the event on to the page.
             onWheel: function(w){ root.peekClose(); w.accepted = false }
@@ -4060,17 +5078,30 @@ ApplicationWindow {
     // width, and the artist page's cover warm-up asks for exactly that.
     readonly property int albumRowArt: 46
     property var _warmSeen: ({})   // "url@w" -> true; mutated in place (nothing binds to it)
+    // The pool is held to the memory its pixels take, not to a count: a
+    // page of small covers (the Artists list decodes each at 88 px, 30 KB)
+    // keeps hundreds pinned where a count sized for big ones kept a few
+    // dozen rows, and scrolling back showed them loading again.
+    readonly property real warmArtBudget: 160 * 1024 * 1024
+    readonly property int warmArtMax: 3000
+    property real _warmBytes: 0
     function warmArt(u, w, h) {
         if (!u || w <= 0) return
         var k = u + "@" + w
         if (_warmSeen[k]) return
         _warmSeen[k] = true
-        warmArtModel.append({ u: "" + u, w: w, h: h })
-        if (warmArtModel.count > 220) {
-            var old = warmArtModel.get(0)
+        var cost = w * (h > 0 ? h : w) * 4
+        warmArtModel.append({ u: "" + u, w: w, h: h, cost: cost })
+        root._warmBytes += cost
+        var drop = 0
+        while (warmArtModel.count - drop > 1
+               && (root._warmBytes > root.warmArtBudget || warmArtModel.count - drop > root.warmArtMax)) {
+            var old = warmArtModel.get(drop)
             delete _warmSeen[old.u + "@" + old.w]
-            warmArtModel.remove(0)
+            root._warmBytes -= old.cost
+            drop++
         }
+        if (drop > 0) warmArtModel.remove(0, drop)
     }
     ListModel { id: warmArtModel }
     Item {
@@ -4188,13 +5219,221 @@ ApplicationWindow {
     // ====================================================================
     // Reusable components
     // ====================================================================
+    // Cover loading mark (Art Loader Lab pick 7, "ripple / alarm"): a grid
+    // of LED cells in the download bar's own idiom, edge to edge.
+    //   loading  a ring of lit cells widens from the center and fades as it
+    //            goes: 28 ticks out, 8 at rest, over a grid dimmed to 0.16
+    //   failed   the grid turns red at 0.10 and a red x lights over it; the
+    //            x breathes on ledPulse over ONE slow (3 s) red ripple, then
+    //            the whole face settles into the download bar's finishing
+    //            twinkle, kept faint
+    // Sits inside the caller's dark box (artTerm, paTerm), which owns the
+    // fill, border and the show/hide gate; the caller creates this only
+    // while that box is visible, so a settled cover holds none of it.
+    // Cost: the cells never read the clock. Each is placed once with its
+    // static edge fade inside a GROUP (one ring, or one hashed bucket), and
+    // only the group's opacity follows the tick: a 116px box is ~440 cells
+    // but ~20 tick bindings.
+    component ArtDots: Item {
+        id: ad
+        property bool round: false   // a disc (PreviewArt) instead of a rounded square
+        property real radius: 0
+        property bool failed: false
+        readonly property real s: width
+        readonly property bool compact: s < 64
+        readonly property int pitch: s < 30 ? 3 : compact ? 4 : Math.round(s / 20)
+        readonly property int dot: s < 30 ? 2 : compact ? 2 : Math.round(pitch * 0.6)   // DotMatrix: 3 px on, 2 off
+        // Odd (a center cell for the ring and the x) and one cell past the
+        // edge on each side, so the grid runs under the border and out.
+        readonly property int n: { var k = Math.ceil(s / pitch) + 1; return k % 2 ? k : k + 1 }
+        readonly property int half: (n - 1) / 2
+        readonly property real o: s / 2 - half * pitch - dot / 2
+        // The edge fade only takes a cell down to edgeFloor of its level,
+        // never out: a grid faded to nothing read as a blank margin round
+        // the box (lab livetest).
+        readonly property real fadeW: pitch * (compact ? 1.5 : 2)
+        readonly property real edgeFloor: 0.45
+        // DotMatrix.edgeVis: 0 at the edge, 1 a fade-length in.
+        function edgeVis(t) {
+            t = Math.max(0, Math.min(1, t))
+            var d = t < 0.25 ? 1 - (t / 0.25) * 0.18
+                  : t < 0.6 ? 0.82 - ((t - 0.25) / 0.35) * 0.54
+                  : 0.28 - ((t - 0.6) / 0.4) * 0.28
+            return 1 - d
+        }
+        // How far a line at cy sits in from the side of a rounded square of
+        // size s and corner radius r.
+        function chordInset(r, cy) {
+            var dy = Math.max(0, r - cy, cy - (s - r))
+            return dy > 0 ? r - Math.sqrt(Math.max(0, r * r - dy * dy)) : 0
+        }
+        // The x: long arms, three cells thick on the big boxes.
+        readonly property int xArm: compact ? Math.max(1, Math.min(2, half - 2)) : Math.round(half * 0.55)
+        readonly property int xThick: compact ? 0 : 1
+        readonly property real maxD: s * 0.5 * Math.SQRT2
+        readonly property real ringW: Math.max(pitch * 1.3, s * 0.09)
+        // Effective visibility: a box on a hidden page never reads the clock.
+        readonly property bool live: visible
+        // Ticks since the failure: one 60-tick ripple, then a 20-tick blend
+        // into the settled twinkle (settle 0 to 1).
+        property int failTick: 0
+        onFailedChanged: if (failed) failTick = root.marchTick
+        Component.onCompleted: if (failed) failTick = root.marchTick
+        readonly property int ft: (live && failed) ? (root.marchTick - failTick + 100000) % 100000 : 0
+        readonly property real settle: failed ? Math.max(0, Math.min(1, (ft - 60) / 20)) : 0
+        // DotMatrix's finishing twinkle, for a group at phase offset r.
+        function twinkle(r) { return 0.5 + 0.5 * Math.cos(2 * Math.PI * (root.shimmerPhase * 2 + r)) }
+        readonly property real ringR: {
+            if (!live) return -1e4
+            if (failed) return ft >= 60 ? -1e4 : (ft / 60) * (maxD + ringW)
+            var k = root.marchTick % 36
+            return k < 28 ? (k / 28) * (maxD + ringW) : -1e4
+        }
+        readonly property real ringFade: ringR < 0 ? 0 : 1 - 0.55 * ringR / (maxD + ringW)
+
+        // Cuts the rect r back until its far corner sits inside the circle
+        // (ccx, ccy, R): the far edge on the cell's main axis first, then
+        // the other one against what is left.
+        function trimTo(r, ccx, ccy, R) {
+            var dx = (r.x0 + r.x1) / 2 - ccx, dy = (r.y0 + r.y1) / 2 - ccy
+            function farX() { return dx >= 0 ? r.x1 - ccx : ccx - r.x0 }
+            function farY() { return dy >= 0 ? r.y1 - ccy : ccy - r.y0 }
+            function cutX(lim) { if (dx >= 0) r.x1 = Math.min(r.x1, ccx + lim); else r.x0 = Math.max(r.x0, ccx - lim) }
+            function cutY(lim) { if (dy >= 0) r.y1 = Math.min(r.y1, ccy + lim); else r.y0 = Math.max(r.y0, ccy - lim) }
+            for (var pass = 0; pass < 2; pass++) {
+                var fx = Math.max(0, farX()), fy = Math.max(0, farY())
+                if (fx * fx + fy * fy <= R * R) return
+                if (Math.abs(dx) >= Math.abs(dy)) {
+                    if (fy >= R) cutY(R * 0.98); else cutX(Math.sqrt(R * R - fy * fy))
+                } else {
+                    if (fx >= R) cutX(R * 0.98); else cutY(Math.sqrt(R * R - fx * fx))
+                }
+            }
+            var gx = Math.max(0, farX()), gy = Math.max(0, farY())
+            if (gx * gx + gy * gy > R * R) { r.x1 = r.x0; r.y1 = r.y0 }
+        }
+        // Every cell that reaches inside the outline, trimmed to it: on the
+        // disc and at a rounded corner the cell is cut back to the curve, so
+        // the grid runs right to the rim instead of stopping a whole block
+        // short of it ("a block in a circle", lab livetest).
+        function cellsOf(test) {
+            var out = []
+            for (var j = 0; j < n; j++) for (var i = 0; i < n; i++) {
+                var cx = i - half, cy = j - half
+                var c = { cx: cx, cy: cy, i: j * n + i,
+                          x: o + i * pitch, y: o + j * pitch,
+                          dist: Math.sqrt(cx * cx + cy * cy) * pitch }
+                var px = s / 2 + cx * pitch, py = s / 2 + cy * pitch
+                var inside = round ? s / 2 - c.dist
+                    : Math.min(px - chordInset(radius, py), s - chordInset(radius, py) - px,
+                               py - chordInset(radius, px), s - chordInset(radius, px) - py)
+                if (inside < -dot) continue
+                var r = { x0: c.x, y0: c.y, x1: c.x + dot, y1: c.y + dot }
+                if (round) trimTo(r, s / 2, s / 2, s / 2 - 1)
+                else {
+                    if (Math.min(px, s - px) < radius && Math.min(py, s - py) < radius)
+                        trimTo(r, px < s / 2 ? radius : s - radius, py < s / 2 ? radius : s - radius, radius)
+                    r.x0 = Math.max(0, r.x0); r.y0 = Math.max(0, r.y0)
+                    r.x1 = Math.min(s, r.x1); r.y1 = Math.min(s, r.y1)
+                }
+                if (r.x1 - r.x0 < 0.75 || r.y1 - r.y0 < 0.75) continue
+                c.x = r.x0; c.y = r.y0; c.w = r.x1 - r.x0; c.h = r.y1 - r.y0
+                c.e = edgeFloor + (1 - edgeFloor) * edgeVis(Math.max(0, inside) / fadeW)
+                if (test(c)) out.push(c)
+            }
+            return out
+        }
+        // fract(sin(i*k)*const), the same cheap stable hash as DotMatrix.
+        function hashOf(i, k) { var r = Math.sin(i * k) * 43758.5453; return r - Math.floor(r) }
+        function isX(c) {
+            var k = Math.max(Math.abs(c.cx), Math.abs(c.cy))
+            return (Math.abs(Math.abs(c.cx) - Math.abs(c.cy)) <= xThick && k <= xArm) || k === 0
+        }
+        // rings[k]: the cells whose distance rounds to k cells.
+        readonly property var rings: {
+            var all = cellsOf(function () { return true }), r = []
+            for (var q = 0; q < all.length; q++) {
+                var k = Math.round(all[q].dist / pitch)
+                while (r.length <= k) r.push([])
+                r[k].push(all[q])
+            }
+            return r
+        }
+        Repeater {
+            model: ad.rings.length
+            Item {
+                id: adRing
+                required property int index
+                readonly property real b: Math.max(0, 1 - Math.abs(index * ad.pitch - ad.ringR) / ad.ringW)
+                opacity: !ad.failed ? 0.16 + 0.84 * b * ad.ringFade : 0.10 + 0.32 * b * ad.ringFade
+                Repeater { model: ad.rings[adRing.index]; ArtDotCell { color: ad.failed ? root.red : root.accent } }
+            }
+        }
+        // Settled: every grid cell but the x in eight hashed buckets, each
+        // breathing on its own offset of shimmerPhase, laid over the 0.10
+        // grid at a faint 0.12 peak.
+        Loader {
+            active: ad.failed && ad.settle > 0
+            sourceComponent: Item {
+                Repeater {
+                    model: {
+                        var g = []
+                        for (var k = 0; k < 8; k++) g.push(ad.cellsOf(function (c) {
+                            return !ad.isX(c) && Math.floor(ad.hashOf(c.i + 3, 78.233) * 8) === k }))
+                        return g
+                    }
+                    Item {
+                        id: adTw
+                        required property int index
+                        required property var modelData
+                        opacity: ad.live ? ad.settle * 0.12 * ad.twinkle(adTw.index / 8) : 0
+                        Repeater { model: adTw.modelData; ArtDotCell { color: root.red } }
+                    }
+                }
+            }
+        }
+        // The x, in six hashed buckets (so the settled twinkle scatters
+        // instead of running in rings), only while failed.
+        Loader {
+            active: ad.failed
+            sourceComponent: Item {
+                Repeater {
+                    model: {
+                        var g = []
+                        for (var b = 0; b < 6; b++) g.push(ad.cellsOf(function (c) {
+                            return ad.isX(c) && Math.floor(ad.hashOf(c.i + 1, 12.9898) * 6) === b }))
+                        return g
+                    }
+                    Item {
+                        id: adArm
+                        required property int index
+                        required property var modelData
+                        opacity: !ad.live ? 0.95
+                               : (1 - ad.settle) * Math.min(1, 0.3 + root.ledPulse * 0.8)
+                                 + ad.settle * (0.72 + 0.23 * ad.twinkle(adArm.index / 6 + 0.37))
+                        Repeater {
+                            model: adArm.modelData
+                            ArtDotCell { color: root.red; opacity: Math.max(modelData.e, 0.6) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // One ArtDots cell, placed once: no binding here reads the clock.
+    component ArtDotCell: Rectangle {
+        required property var modelData
+        x: modelData.x; y: modelData.y
+        width: modelData.w; height: modelData.h; radius: 0   // sharp LED cells
+        opacity: modelData.e
+    }
     component Art: Rectangle {
         id: artRoot
         property string url: ""
         // Optional stand-in painted BENEATH the cover: a smaller copy the
         // caller already has on screen (the clicked card's thumbnail). It
         // shows the frame this Art is shown, the full cover then fades in
-        // over it, and neither the grey box nor the "art: GET" placeholder
+        // over it, and neither the gray box nor the "art: GET" placeholder
         // ever appears while a stand-in is up. When it is the very same URL
         // as `url` (the usual case, the page hero asks for the card size)
         // the two share one decoded pixmap and the cover is simply there.
@@ -4236,7 +5475,7 @@ ApplicationWindow {
         // decoded ONCE at (roughly) its first display size and then just scaled to
         // fit. Binding the decode size to the live element width made a window
         // resize re-request the Image on every step, and since opacity follows the
-        // load state (below) that blinked the cover to the grey placeholder. With a
+        // load state (below) that blinked the cover to the gray placeholder. With a
         // fixed size a resize never touches the Image, so it simply stays put.
         // Seeded at first layout; ×2 keeps it crisp on HiDPI screens.
         property int decodeW: 96
@@ -4269,7 +5508,7 @@ ApplicationWindow {
         property real fxGlossY: height / 2
         // What this cover IS, so the resting raise can follow the shared
         // player. The call site declares it; sites that leave fxId empty keep
-        // exactly the old behaviour, every binding below folds away.
+        // exactly the old behavior, every binding below folds away.
         // Matching is literal (this cover's own preview), the same rule
         // pvActive already applies everywhere else: a cover that lifts without
         // being asked reads as a glitch, and one album can sit on three
@@ -4357,7 +5596,7 @@ ApplicationWindow {
         SequentialAnimation {
             // Gated like the blink below: a paused preview's cover sits on
             // several shelves and on hidden panes, and each ran this loop at
-            // display rate behind a hidden tab or a minimised window.
+            // display rate behind a hidden tab or a minimized window.
             running: artRoot.fxPaused && artRoot.visible && root.onScreen
             loops: Animation.Infinite
             NumberAnimation { target: artRoot; property: "fxBreath"; to: 1
@@ -4370,7 +5609,7 @@ ApplicationWindow {
         onFxPausedChanged: if (!fxPaused) fxBreath = 0
         readonly property real fxBreathK: 1 - root.artPlayBreath * fxBreath
         readonly property real fxShadowDepth: fxShadow * fxBreathK
-        // A raised cover sits above its neighbours, so neither the swell nor
+        // A raised cover sits above its neighbors, so neither the swell nor
         // the shadow is sliced by the next sibling's background.
         // Held for the whole descent, not just while raised: dropping back
         // behind the next sibling's background at the instant the preview ends
@@ -4452,9 +5691,9 @@ ApplicationWindow {
             color: textDim
             font.family: root.mono; font.pixelSize: parent.width * 0.4
         }
-        // Terminal-fetch placeholder: a CRT box showing "art: GET" with a
-        // blinking cursor while loading, cross-fading to "art: ERR / no link"
-        // on failure, and fading out underneath the cover as it arrives.
+        // Loading placeholder: a dark box holding the LED-grid mark
+        // (ArtDots), a ripple while loading, a red x on failure, fading out
+        // underneath the cover as it arrives.
         Rectangle {
             id: artTerm
             anchors.fill: parent
@@ -4473,66 +5712,16 @@ ApplicationWindow {
                       && ((artRoot.artState === "loading" && artRoot.artWaited) || artRoot.artState === "failed")) ? 1 : 0
             visible: opacity > 0
             Behavior on opacity { enabled: artRoot.artWaited; NumberAnimation { duration: 300; easing.type: Easing.InQuad } }
-            // Below this the "art: GET / ERR" labels are unreadable, collapse
-            // to the bare prompt (loading) / a red x (failed).
-            readonly property bool compact: width < 64
-            // loading face
-            Column {
-                anchors.centerIn: parent; spacing: 4
-                opacity: artRoot.artState === "failed" ? 0 : 1
-                Behavior on opacity { NumberAnimation { duration: 250 } }
-                Text {
-                    visible: !artTerm.compact
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    textFormat: Text.PlainText; text: "art: GET"
-                    font.family: root.mono; font.pixelSize: Math.max(1, Math.round(artTerm.width * 0.11))
-                    color: root.accentContTx
-                }
-                Row {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: 2
-                    Text {
-                        textFormat: Text.PlainText; text: ">"
-                        font.family: root.mono
-                        font.pixelSize: Math.max(1, Math.round(artTerm.width * (artTerm.compact ? 0.22 : 0.11)))
-                        color: root.accent
-                    }
-                    Rectangle {
-                        width: artTerm.width * (artTerm.compact ? 0.16 : 0.08)
-                        height: artTerm.width * (artTerm.compact ? 0.26 : 0.13)
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: root.accent
-                        SequentialAnimation on opacity {
-                            // Pause the blink when hidden or unfocused, same
-                            // reasoning as the WaveMark parallax scroll.
-                            running: artRoot.artState === "loading" && artTerm.visible && root.onScreen
-                            loops: Animation.Infinite
-                            NumberAnimation { from: 1; to: 0; duration: 60 } PauseAnimation { duration: 420 }
-                            NumberAnimation { from: 0; to: 1; duration: 60 } PauseAnimation { duration: 420 }
-                        }
-                    }
-                }
-            }
-            // failed face
-            Column {
-                anchors.centerIn: parent; spacing: 4
-                opacity: artRoot.artState === "failed" ? 1 : 0
-                Behavior on opacity { NumberAnimation { duration: 250 } }
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    textFormat: Text.PlainText
-                    text: artTerm.compact ? "x" : "art: ERR"
-                    font.family: root.mono
-                    font.pixelSize: Math.max(1, Math.round(artTerm.width * (artTerm.compact ? 0.30 : 0.11)))
-                    font.bold: artTerm.compact
-                    color: root.red
-                }
-                Text {
-                    visible: !artTerm.compact
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    textFormat: Text.PlainText; text: "no link"
-                    font.family: root.mono; font.pixelSize: Math.max(1, Math.round(artTerm.width * 0.11))
-                    color: root.textDim
+            // Built only while the box shows (asynchronously: the box fades
+            // in over 300 ms anyway), so a page of settled covers holds no
+            // grid at all.
+            Loader {
+                anchors.fill: parent
+                active: artTerm.visible
+                asynchronous: true
+                sourceComponent: ArtDots {
+                    radius: artRoot.radius
+                    failed: artRoot.artState === "failed"
                 }
             }
         }
@@ -4588,9 +5777,9 @@ ApplicationWindow {
         }
     }
 
-    // One colour-coded badge carrying the quality tier and, when known, its
+    // One color-coded badge carrying the quality tier and, when known, its
     // format spec (e.g. "LOSSLESS 16/44.1", "HI-RES 24-bit"). The spec rides in
-    // a dimmer shade of the same tier colour, so the tier stays prominent while
+    // a dimmer shade of the same tier color, so the tier stays prominent while
     // spelling out what that tier means for this specific album/track.
     // Tier counts for a loaded track list: [] when uniform, else
     // [{q, n}, ...] best-tier-first, drives the MIXED variant of QualTag.
@@ -4616,7 +5805,7 @@ ApplicationWindow {
     // it is every track of a queued album and every not-yet-started track of a
     // running one, which is precisely the stretch where the only thing to say
     // is the request. Without it the column sat blank until each track's turn
-    // came. A track that is cancelled or failed says nothing: no tier was ever
+    // came. A track that is canceled or failed says nothing: no tier was ever
     // delivered for it, and the request is not news about a file that is not
     // coming. A skipped track (IN LIBRARY) states the copy you already hold:
     // its skip event carries that copy's tier as the delivery, full strength,
@@ -4636,6 +5825,22 @@ ApplicationWindow {
         var r = _tierRank[request], c = _tierRank[ceiling]
         if (r === undefined || c === undefined) return request
         return c > r ? ceiling : request
+    }
+    // The word a Releases feed card's badge states: what a download of it
+    // with no choice of its own lands as. ATMOS for an Atmos-only release,
+    // and for one carrying Atmos beside stereo while the setting asks for
+    // Atmos (QualPick's atmosFace), or whose Dolby Atmos edition was folded
+    // into it (atmos_ids: an auto-download takes that too); else the best tier
+    // the release offers, never above the Settings tier (Hi-Res on offer
+    // under a Lossless setting reads LOSSLESS). A row stored without a tier
+    // says nothing rather than claiming the setting's. Reads targetTier and
+    // atmosOn, so every card follows a change to either.
+    function releaseQualWord(card) {
+        var q = "" + ((card && card.quality) || "")
+        if (q === "") return ""
+        var twin = !!card.atmos_ids && card.atmos_ids.length > 0
+        if (q === "ATMOS" || ((card.atmos === true || twin) && root.atmosOn)) return "ATMOS"
+        return root.tierFloor(root.targetTier, q)
     }
     // The tier a ledger row states: the delivery once a file has landed, and
     // before that the honest prediction, the request floored by the track's
@@ -4735,7 +5940,7 @@ ApplicationWindow {
         property bool compact: false
         readonly property string specText: compact ? "" : (spec !== "" ? spec : root.qualSpec(qt.q))
         readonly property bool mixed: mix.length > 1
-        // The pill's colours, as plain properties so a surface that ANIMATES
+        // The pill's colors, as plain properties so a surface that ANIMATES
         // them (QualPick, the badge you can choose a tier on) binds its own
         // eased values here, while every other pill (the queue drawer's
         // hundreds of compact rows included) keeps these static defaults and
@@ -4873,7 +6078,7 @@ ApplicationWindow {
     // QualTag, untouched at rest, that grows a caret when hovered and drops a
     // menu of the four stereo tiers (and ATMOS, where the item carries Dolby
     // Atmos beside stereo) when clicked. A choice repaints the pill in the
-    // tier's container colour (plain ground = the catalog says, tinted = you
+    // tier's container color (plain ground = the catalog says, tinted = you
     // said) and holds until the item is given another tier: downloading at a
     // chosen tier leaves the pill stating it, so the badge and the copy on
     // disk agree. A track without a choice of its own follows its album's.
@@ -4984,7 +6189,7 @@ ApplicationWindow {
         }
         implicitWidth: tag.implicitWidth - extraW
         implicitHeight: 22
-        // The pill's colours ease between tiers on a pick, and its edge lights
+        // The pill's colors ease between tiers on a pick, and its edge lights
         // under the pointer; the caret's room grows with a spring.
         property color pillBg: tinted ? root.qualTint(shown) : root.qualBg(shown)
         property color pillEdge: hot ? root.qualFg(shown) : root.qualBorder(shown)
@@ -4997,13 +6202,13 @@ ApplicationWindow {
         // curve, over one duration, with nothing leading and nothing lagging.
         // InOutSine leaves and arrives at zero speed, so the change has no
         // edge at either end. Rounds that cross-faded a whole second pill over
-        // this one, or staggered the ink behind the ground, made every colour
+        // this one, or staggered the ink behind the ground, made every color
         // arrive twice on two curves: that is what read as jerky.
         //
         // Letters are the one thing that cannot be interpolated, so they are
         // the one thing handled apart, and still inside this change: they dip
         // out over the first four tenths and back in over the rest, which puts
-        // the badge's single wordless instant exactly where the colour is
+        // the badge's single wordless instant exactly where the color is
         // halfway. Only ever one word on the pill, never two crossing.
         readonly property int swapMs: root.hoverMotion ? 340 : 0
         readonly property int dipOutMs: Math.round(swapMs * 0.4)
@@ -5042,11 +6247,11 @@ ApplicationWindow {
         onMediaIdChanged: { armed = false; armTimer.restart(); ownedTier = "" }
         // What the pill actually DRAWS, which is not the same question as
         // which tier is chosen: choosing the tier a plain pill already states
-        // only tints it (colour alone, no dip), while choosing anything on a
+        // only tints it (color alone, no dip), while choosing anything on a
         // MIXED album replaces its whole face even when `shown` is unmoved.
         readonly property string face: (mix && mix.length > 1 && !tinted && !atmosFace) ? "MIXED" : shown
         property string lastFace: ""
-        // Colour and width ease on ANY choice; the letters dip only when there
+        // Color and width ease on ANY choice; the letters dip only when there
         // are different letters to arrive at.
         onOverrideChanged: if (armed && root.hoverMotion) { swapping = true; swapDone.restart() }
         // Only a badge that can be seen dips its letters: a flip of the Dolby
@@ -5100,9 +6305,9 @@ ApplicationWindow {
             contentOpacity: qpk.inkOp
         }
         // The outgoing letters, drawn with no ground and no border directly
-        // over the arriving ones and centred on the same pill, so this badge
+        // over the arriving ones and centered on the same pill, so this badge
         // carries exactly one ground and one border at every instant of the
-        // change. Frozen to the tier being left, colours included: the live
+        // change. Frozen to the tier being left, colors included: the live
         // pill's are already on their way elsewhere. Built only for the
         // fraction of a second a tier is actually leaving: a second pill on
         // every row of a results page is a whole pill's worth of work per row,
@@ -5202,7 +6407,7 @@ ApplicationWindow {
 
     // One row of a QualPick's menu: the tier as a pill-shaped line (dot, word,
     // spec) resting in white like the Settings dropdown, lit in the tier's own
-    // colours under the pointer and on the tier a download would ask for; a
+    // colors under the pointer and on the tier a download would ask for; a
     // DEFAULT mark on the row a download with no choice lands on (QualPick's
     // defaultTier), NOT OFFERED (dimmed, inert) on a tier the catalog cannot
     // land for this item.
@@ -5215,7 +6420,7 @@ ApplicationWindow {
         readonly property bool ok: pick ? pick.offered(t) : true
         // The copy on disk is this tier: say so, in the library badge's own
         // amber, so "you already have it" never reads as one of the tier
-        // colours the rest of the row is spoken in.
+        // colors the rest of the row is spoken in.
         readonly property bool inLibrary: pick !== null && pick.ownedTier !== "" && t === pick.ownedTier
         readonly property bool hovering: rowMa.containsMouse && ok
         readonly property bool lit: hovering || isCurrent
@@ -5279,7 +6484,7 @@ ApplicationWindow {
     // The "in your library" presence pill: amber identity, compact and STATIC.
     // The pill is color-coded by the QUALITY of the local copy (gold hi-res,
     // green lossless, cyan healthy lossy, red small lossy, amber when unknown),
-    // and that colour is the whole quality story: no hover reveal, nothing
+    // and that color is the whole quality story: no hover reveal, nothing
     // resizes. It reports presence (a partial copy spells out N OF M); the
     // prevention lives in the DownloadButton itself, which renders a full
     // local copy as the inert DOWNLOADED state (see its lib* properties). A
@@ -5366,9 +6571,9 @@ ApplicationWindow {
         // pills is a TAG MATCH, an inference from what the files say about
         // themselves, and nothing here was watched being downloaded. The mark
         // says so at a glance and costs no width, sitting exactly where the eye
-        // already lands. Quality is still the whole colour story (the mark
-        // takes the same class colour the dot did); this only separates
-        // "recognised on disk" from the app's own records, which never wear it.
+        // already lands. Quality is still the whole color story (the mark
+        // takes the same class color the dot did); this only separates
+        // "recognized on disk" from the app's own records, which never wear it.
         Text {
             id: pxMark
             textFormat: Text.PlainText
@@ -5452,9 +6657,119 @@ ApplicationWindow {
              : c === "high" ? root.cyanContTx : c === "low" ? root.redContTx : root.libContTx
     }
 
+    // ---- cover marks ------------------------------------------------------
+    // What a cover says about itself, in its two top corners: the library
+    // verdict on the left (a check for a proven complete copy, a half disc for
+    // a partial one, "?" for a match the matcher could not prove) and the
+    // quality tier on the right (the tier's own dot). At rest each is a 16px
+    // dot, so even a busy cover keeps its art; under the pointer both open
+    // into their words. The words are short on purpose (PARTIAL, never
+    // N OF M): two badges share one edge, and the count is already the
+    // download button's and the hover strip's story. Dark glass, the material
+    // the Releases quality chip wore, so a corner never changes material from
+    // one page to the next. Every cover with a download control wears these:
+    // the art cards, the console card and the album page's own cover.
+    component CoverDot: Rectangle {
+        id: cvd
+        property bool open: false
+        property string word: ""
+        property color ink: root.textHi
+        // The right-hand dot keeps its glyph on the cover's edge and grows
+        // inward, so both corners stay put as the words come and go.
+        property bool rightAnchored: false
+        default property alias glyph: cvdGlyph.data
+        height: 16; radius: 8
+        color: Qt.rgba(0.05, 0.06, 0.07, 0.78)
+        readonly property real full: 16 + cvdWord.implicitWidth + 6
+        width: cvd.open ? cvd.full : 16
+        Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        clip: true
+        Item {
+            id: cvdGlyph
+            x: cvd.rightAnchored ? cvd.width - 16 : 0
+            width: 16; height: 16
+        }
+        FontMetrics { id: cvdFm; font: cvdWord.font }
+        Text {
+            id: cvdWord
+            textFormat: Text.PlainText
+            x: cvd.rightAnchored ? cvd.width - 16 - implicitWidth : 15
+            // Capitals centered on the dot's own center, not the text box: a
+            // mono box keeps room for descenders a capital word never uses,
+            // and centering the box put the word off the glyph's center line.
+            y: Math.round(cvd.height / 2 + cvdFm.tightBoundingRect("H").height / 2 - baselineOffset)
+            opacity: cvd.open ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 140 } }
+            text: cvd.word; color: cvd.ink
+            font.family: root.mono; font.pixelSize: 8; font.bold: true; font.letterSpacing: 0.5
+        }
+    }
+    // The pair, filling the cover it is put in. libState is ArtCard's word
+    // for the verdict ("" / "partial" / "proven" / "maybe"), qualWord the
+    // tier word ("" for none), and `open` is the cover's own hover.
+    component CoverMarks: Item {
+        id: cvm
+        property string libState: ""
+        property string qclass: ""
+        property string albumId: ""        // the matched folder, for the click
+        property string qualWord: ""
+        property bool open: false
+        anchors.fill: parent
+        CoverDot {
+            id: cvmLib
+            objectName: "artLibBadge"
+            // What a probe reads a library badge by, the pair the pill this
+            // replaced carried: the class held and whether the identity is
+            // proven.
+            readonly property string qclass: cvm.qclass
+            readonly property bool proven: cvm.libState === "proven"
+            readonly property color glyphInk: root.pillClassFg(cvm.qclass)
+            x: 8; y: 8
+            visible: cvm.libState !== ""
+            open: cvm.open
+            word: cvm.libState === "partial" ? "PARTIAL" : "IN LIBRARY"
+            ink: root.pillClassTx(cvm.qclass)
+            Ico { anchors.centerIn: parent; visible: cvmLib.proven; name: "check"; color: cvmLib.glyphInk; size: 10; bold: 14 }
+            Rectangle {
+                anchors.centerIn: parent; visible: cvm.libState === "partial"
+                width: 8; height: 8; radius: 4; color: "transparent"; border.color: cvmLib.glyphInk; border.width: 1.5
+                Item {
+                    width: 4; height: 8; clip: true
+                    Rectangle { width: 8; height: 8; radius: 4; color: cvmLib.glyphInk }
+                }
+            }
+            FontMetrics { id: cvmMarkFm; font: cvmMark.font }
+            Text {
+                id: cvmMark
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.round(parent.height / 2 + cvmMarkFm.tightBoundingRect("?").height / 2 - baselineOffset)
+                visible: cvm.libState === "maybe"
+                textFormat: Text.PlainText; text: "?"; color: cvmLib.glyphInk
+                font.family: root.mono; font.pixelSize: 10; font.bold: true
+            }
+        }
+        // The pill's click, kept: open the matched folder. Gated by
+        // visibility, not enabled, for the cursor reason LibraryTag gives.
+        MouseArea {
+            anchors.fill: cvmLib
+            visible: cvmLib.visible && cvm.albumId !== ""
+            cursorShape: Qt.PointingHandCursor
+            onClicked: waves.revealLibraryAlbum(cvm.albumId)
+        }
+        CoverDot {
+            objectName: "artQualBadge"
+            readonly property string q: cvm.qualWord
+            x: cvm.width - 8 - width; y: 8
+            visible: cvm.qualWord !== ""
+            open: cvm.open; rightAnchored: true
+            word: cvm.qualWord; ink: root.qualFg(cvm.qualWord)
+            Rectangle { anchors.centerIn: parent; width: 6; height: 6; radius: 3; color: root.qualDot(cvm.qualWord) }
+        }
+    }
+
     // The album presence pill, self-resolving against the local scan index,
     // placed right beside the album title. Static IN LIBRARY (or N OF M) with
-    // a quality-coded dot; the colour class is the whole quality story.
+    // a quality-coded dot; the color class is the whole quality story.
     component AlbumPresencePill: LibraryTag {
         id: appl
         // The album's identity as ONE object ({artist, title, year, tracks}),
@@ -5576,7 +6891,7 @@ ApplicationWindow {
     //
     // Green and not a quality class on purpose: the green is the one the
     // download button and the browse card already turn when a release is in the
-    // library, so one page never says "owned" in two colours. Quality colour is
+    // library, so one page never says "owned" in two colors. Quality color is
     // the album pill's story, and an artist spanning FLAC and MP3 has no single
     // class to tell anyway.
     component ArtistBadges: Item {
@@ -5604,6 +6919,18 @@ ApplicationWindow {
         readonly property real barLabelPx: Math.max(8, Math.min(10, arb.barCountPx))
         // The words' own band, plus the room the smaller type gives back.
         readonly property real barHeight: Math.max(24, Math.min(34, arb.barCountPx * 2.8))
+        // The page form's counts are 15 px, or smaller when the caller gives
+        // a width they must fit (a shelf's head column), down to 10 px. Mono
+        // again, so the width at 15 px scales straight to the size that fits.
+        property real fitWidth: 0
+        TextMetrics {
+            id: abFit
+            font.family: root.mono; font.pixelSize: 15; font.bold: true
+            text: arb.fitWidth > 0 ? arb.albumLine + "\u00b7" + arb.songLine : ""
+        }
+        readonly property real pageCountPx: arb.fitWidth > 0 && abFit.advanceWidth > 0
+            ? Math.max(10, Math.min(15, Math.floor(15 * (arb.fitWidth - 16) / abFit.advanceWidth)))
+            : 15
         implicitWidth: arb.bar ? 0 : abPlate.implicitWidth
         implicitHeight: arb.bar ? arb.barHeight : abPlate.implicitHeight
         width: implicitWidth
@@ -5699,10 +7026,10 @@ ApplicationWindow {
 
             // THE STRIP'S WORDS. Every one of them carries a one-pixel black
             // outline: not a shadow and not a plate, it costs no space and
-            // changes no colour, and it is the difference between text that
+            // changes no color, and it is the difference between text that
             // survives a blown-out white studio cover and text that has to be
-            // hunted for. Centred, because a strip that spans the cover has no
-            // side to favour.
+            // hunted for. Centered, because a strip that spans the cover has no
+            // side to favor.
             Column {
                 anchors.centerIn: parent
                 spacing: 2
@@ -5763,16 +7090,16 @@ ApplicationWindow {
                 Text {
                     textFormat: Text.PlainText; text: arb.albumLine
                     color: root.textHi
-                    font.family: root.mono; font.pixelSize: 15; font.bold: true
+                    font.family: root.mono; font.pixelSize: arb.pageCountPx; font.bold: true
                 }
                 Text {
                     textFormat: Text.PlainText; text: "\u00b7"
-                    color: root.textDim; font.family: root.mono; font.pixelSize: 15
+                    color: root.textDim; font.family: root.mono; font.pixelSize: arb.pageCountPx
                 }
                 Text {
                     textFormat: Text.PlainText; text: arb.songLine
                     color: root.textHi
-                    font.family: root.mono; font.pixelSize: 15; font.bold: true
+                    font.family: root.mono; font.pixelSize: arb.pageCountPx; font.bold: true
                 }
             }
         }
@@ -5816,7 +7143,7 @@ ApplicationWindow {
     // Vector retry mark: two opposing arcs with arrowheads (sync-twin, diagonal),
     // chosen in the vector retry lab. Drawn geometry instead of a font glyph so
     // it renders identically on every OS: JetBrains Mono's only retry-shaped
-    // characters (↩ ↞) read thin and off-centre next to the heavy ↓ ✓ ▶, and
+    // characters (↩ ↞) read thin and off-center next to the heavy ↓ ✓ ▶, and
     // the classic circular arrows (↺ ↻ ⟳) are missing from the font entirely.
     component RetryMark: Item {
         id: rm
@@ -5915,7 +7242,7 @@ ApplicationWindow {
             ownPending = o.pending === true
         }
         // The library twin of `owned`, the same shape (and the same wording,
-        // colours and click-through) DownloadButton carries. This icon is the
+        // colors and click-through) DownloadButton carries. This icon is the
         // download control of the expanded album and playlist panels, and it
         // was the one download control in the app that never asked the scan:
         // a song already on disk read a plain arrow here while the badge on
@@ -5979,7 +7306,7 @@ ApplicationWindow {
         // done face but keeps a way through, exactly as on the full button.
         readonly property bool libClaim: liveSt === "" && !owned && libPresent
         // The gold face: only the UNPROVEN matches. A sure one falls through
-        // to the green done styling (state is the colour) while libClaim keeps
+        // to the green done styling (state is the color) while libClaim keeps
         // routing its click to the gate.
         readonly property bool libGuess: libClaim && !libSure
         // Cyan, and still a live download: completing an album is not a
@@ -6158,7 +7485,7 @@ ApplicationWindow {
         onVisibleChanged: if (visible) everShown = true
 
         // The same four load states as Art, so the disc can say which one it is
-        // in instead of showing one grey circle for all of them. Two
+        // in instead of showing one gray circle for all of them. Two
         // differences from Art, both deliberate:
         //   - "none" keys off url, not paImg.source: the retry below clears
         //     source and rebinds it, and a disc mid-retry is loading, not
@@ -6232,7 +7559,7 @@ ApplicationWindow {
         // This rides Qt's Image lifecycle (async + cache + warm-pool + an
         // observable error state) instead of a hand-painted Canvas: the Canvas
         // had only a success signal and no retry, so any fetch that failed during
-        // the search build's concurrent load burst left the disc grey forever, and
+        // the search build's concurrent load burst left the disc gray forever, and
         // some rows lost that lottery at random. The progress ring and glyph are
         // separate siblings below and paint on top of this art.
         // The still plate under the cover: the disc's own background and, on it,
@@ -6243,11 +7570,11 @@ ApplicationWindow {
             id: paPlate
             anchors.centerIn: parent
             width: 34; height: 34   // artR * 2, matching coverWrap
-            // Grey disc: the floor under everything, and all that shows once a
+            // Gray disc: the floor under everything, and all that shows once a
             // cover has landed.
             Rectangle { anchors.fill: parent; radius: width / 2; color: root.surface3 }
-            // Loading / failed mark, the compact form of the cover box's own
-            // terminal face (see Art's artTerm) shaped into the circle.
+            // Loading / failed mark: the cover box's own LED grid (see
+            // ArtDots) shaped into the circle.
             Rectangle {
                 id: paTerm
                 anchors.fill: parent
@@ -6259,38 +7586,14 @@ ApplicationWindow {
                 opacity: ((pa.artState === "loading" && pa.artWaited) || pa.artState === "failed") ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity { enabled: pa.artWaited; NumberAnimation { duration: 300; easing.type: Easing.InQuad } }
-                // loading face: prompt + cursor
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 1
-                    opacity: pa.artState === "failed" ? 0 : 1
-                    Behavior on opacity { NumberAnimation { duration: 250 } }
-                    Text {
-                        // Bigger prompt, slimmer cursor than the square box
-                        // uses: at 34px its ratios put a heavy block beside a
-                        // speck, and the pair has to read as a pair.
-                        textFormat: Text.PlainText; text: ">"
-                        font.family: root.mono; font.pixelSize: Math.max(1, Math.round(paPlate.width * 0.3))
-                        color: root.accent
+                Loader {
+                    anchors.fill: parent
+                    active: paTerm.visible
+                    asynchronous: true
+                    sourceComponent: ArtDots {
+                        round: true
+                        failed: pa.artState === "failed"
                     }
-                    Rectangle {
-                        width: paPlate.width * 0.12; height: paPlate.width * 0.21
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: root.accent
-                        // Shared blink (see root.termBlink). Gated on visible
-                        // first, so a settled disc's only dependency is
-                        // visible itself and it never reads the 20Hz tick.
-                        opacity: paTerm.visible ? root.termBlink : 1
-                    }
-                }
-                // failed face
-                Text {
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText; text: "x"
-                    font.family: root.mono; font.pixelSize: Math.max(1, Math.round(paPlate.width * 0.38))
-                    color: root.red
-                    opacity: pa.artState === "failed" ? 1 : 0
-                    Behavior on opacity { NumberAnimation { duration: 250 } }
                 }
             }
             // No cover at all (a track whose album has none): say so, the way
@@ -6306,7 +7609,7 @@ ApplicationWindow {
         Item {
             id: coverWrap
             anchors.centerIn: parent
-            width: 34; height: 34   // artR * 2: a 34px circle centred in the 48px box
+            width: 34; height: 34   // artR * 2: a 34px circle centered in the 48px box
             rotation: paVinyl.rot   // buffering vinyl spins the cover itself
             // The cover fades in over the plate instead of popping. On
             // coverWrap, not on the Image: the Image is layered for the circle
@@ -6330,7 +7633,7 @@ ApplicationWindow {
                 // Pin decoded pixels in the warm pool so a rebuilt row (tab switch,
                 // filter change, SHOW ALL) repaints without a re-decode. On a
                 // transient error, re-request a bounded number of times (the Canvas
-                // never did, hence the permanent grey): a cache/warm-pool hit makes
+                // never did, hence the permanent gray): a cache/warm-pool hit makes
                 // the retry instant. Qt.binding keeps the `source: pa.url` binding
                 // alive across the reload so a later url change still propagates.
                 property int retries: 0
@@ -6372,8 +7675,8 @@ ApplicationWindow {
         // (segment-lab round 2 winner, "solid arc"), drawn with the same
         // CurveRenderer as the Ico glyphs so the curve is genuinely smooth,
         // no rotated-rectangle corners. Fills clockwise from 12 o'clock.
-        // Outer edge 19.5 + 1.6 stays within 22 of centre, so the ring can
-        // never poke past the 44px thumb box and get clipped by neighbours.
+        // Outer edge 19.5 + 1.6 stays within 22 of center, so the ring can
+        // never poke past the 44px thumb box and get clipped by neighbors.
         Item {
             id: ledRing
             visible: pa.active
@@ -6665,10 +7968,10 @@ ApplicationWindow {
                 font.family: root.mono; font.pixelSize: 13; font.bold: true
                 anchors.verticalCenter: parent.verticalCenter
             }
-            // Morphing centre: the caret and the matrix crossfade while the box
+            // Morphing center: the caret and the matrix crossfade while the box
             // width animates, so it reads as one control expanding / collapsing.
             Item {
-                id: centre
+                id: center
                 anchors.verticalCenter: parent.verticalCenter
                 clip: true
                 // Loading widens the box to fit "buffering", the surrounding
@@ -6692,7 +7995,7 @@ ApplicationWindow {
                     text: tp.loading ? "buffering" : (tp.err ? "✕" : ">")
                     color: tp.err ? root.red : root.accent
                     font.family: root.mono; font.pixelSize: 13; font.bold: true
-                    opacity: tp.loading ? centre.loadPulse : (tp.expanded ? 0 : 1)
+                    opacity: tp.loading ? center.loadPulse : (tp.expanded ? 0 : 1)
                     Behavior on opacity { NumberAnimation { duration: 130 } }
                 }
                 Row {
@@ -6904,7 +8207,7 @@ ApplicationWindow {
     }
 
     // Outlined terminal download button. Idle: ↓ + uppercase label. Running:
-    // a monospace ASCII bar (█ filled + ░ dim) + %. Done/failed: colour + glyph.
+    // a monospace ASCII bar (█ filled + ░ dim) + %. Done/failed: color + glyph.
     // Hover swell (edge-lab round 3 winner): the control's outline turns
     // bright accent and breathes while the pointer is on it. Light only, no
     // travel: the line keeps its resting weight, exit is a fade in place.
@@ -6916,7 +8219,7 @@ ApplicationWindow {
         property real radL: root.btnRad     // 0 on the side that meets a divider
         property real radR: root.btnRad
         property real pulse: 0              // 0..1, the slow breath
-        property color tone: root.accent    // the frame colour family (gold on the library claim)
+        property color tone: root.accent    // the frame color family (gold on the library claim)
         color: "transparent"
         border.width: root.btnBorderW
         border.color: Qt.lighter(hs.tone, 1.04 + 0.14 * pulse)
@@ -7038,7 +8341,7 @@ ApplicationWindow {
         // is always the done shape and libPartial can never be true here. What
         // it keeps from the album side is the part that matters, the click
         // still opens the gate, because a track match is the most brittle
-        // guess this app makes (the key is the exact normalised title and
+        // guess this app makes (the key is the exact normalized title and
         // artist, edition qualifiers included) and a guess must never be the
         // end of the conversation. Never set for a video: the scan only ever
         // holds audio.
@@ -7047,7 +8350,7 @@ ApplicationWindow {
         // (artistLibraryPresence) is keyed on nothing else. The two
         // artist-wide buttons, "Download discography" on the artist page and
         // "Download artist" on a search card, were the last download controls
-        // that never asked, so an artist whose whole catalogue was already on
+        // that never asked, so an artist whose whole catalog was already on
         // disk still offered a plain DOWNLOAD.
         //
         // It is a second crossing on a surface whose ArtistBadges strip also
@@ -7080,7 +8383,7 @@ ApplicationWindow {
         // The identity axis of the verdict (presence "sure"): the match was
         // proven by year and edition title, not just the key. A sure claim
         // wears the same green IN LIBRARY as the fact tier (the state is the
-        // colour); gold MAYBE is reserved for unproven matches. What green
+        // color); gold MAYBE is reserved for unproven matches. What green
         // claim keeps that owned green lacks: the click still opens the gate.
         property bool libSure: false
         // The matched local folder, carried so the click-through can name it
@@ -7103,7 +8406,7 @@ ApplicationWindow {
                     // The artist grain. A discography has no completeness
                     // axis: nobody, this app least of all, can say what "all
                     // of it" is, so the rollup can only ever reach the PARTIAL
-                    // face, a still-live download button coloured to say part
+                    // face, a still-live download button colored to say part
                     // of this is already here. Reporting it as present + full
                     // would make an inert DOWNLOADED out of a question that
                     // has no answer, and there is no single folder to reveal,
@@ -7147,10 +8450,10 @@ ApplicationWindow {
         // because a wrong match must never be the end of the conversation.
         readonly property bool libClaim: liveSt === "" && !owned && libPresent
         // The gold face of a claim: only the UNPROVEN ones. A sure claim falls
-        // through to the green done styling below (state is the colour) while
+        // through to the green done styling below (state is the color) while
         // libClaim keeps routing its click to the gate.
         readonly property bool libGuess: libClaim && !libSure
-        // The partial twin: informative colour on a still-live button. Never
+        // The partial twin: informative color on a still-live button. Never
         // true alongside libClaim (present is either full or partial).
         readonly property bool libPartialClaim: liveSt === "" && !owned && libPartial
         // The click-through itself: explain the claim, show where the copy is,
@@ -7294,7 +8597,7 @@ ApplicationWindow {
         // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
         // width must not move when a claim resolves, or one matched album in a
         // list would shunt its own row's button out of line with every
-        // neighbour. Counted for the buttons that can reach the partial face,
+        // neighbor. Counted for the buttons that can reach the partial face,
         // album and artist, since a track button can never reach either state
         // and must not reserve width for them.
         Row {
@@ -7317,7 +8620,7 @@ ApplicationWindow {
         }
         // Queued measures too, now that it carries a cancel X: without it the
         // button grew the moment a click was queued, and in a track list every
-        // row's button is aligned against its neighbours'. Boxes, not the real
+        // row's button is aligned against its neighbors'. Boxes, not the real
         // glyphs: a QueueStack and an Ico per idle row would be three bars and
         // a vector path built for a state the row is almost never in.
         Row {
@@ -7335,7 +8638,7 @@ ApplicationWindow {
         // (Waves wrote that exact file), gold IN LIBRARY is a tag match, a
         // guess that stays clickable to explain itself.
         // A partial claim wears cyan: still a live download button (a click
-        // fetches what's missing), coloured to say part of this is on disk.
+        // fetches what's missing), colored to say part of this is on disk.
         readonly property color fill: libGuess ? root.goldCont : libPartialClaim ? root.cyanCont : st === "done" ? root.greenCont : st === "failed" ? root.redCont : root.accentCont
         readonly property color edge: libGuess ? root.goldDim : libPartialClaim ? root.cyanDim : st === "done" ? root.greenDim : st === "failed" ? root.red : root.accentDim
         // Bare = inside a RollSwap, where the pill draws BOTH fill and outline
@@ -7347,7 +8650,7 @@ ApplicationWindow {
         color: bare ? "transparent" : fill
         border.width: bare ? 0 : root.btnBorderW
         border.color: edge
-        // State changes FADE between colours instead of snapping: queued ->
+        // State changes FADE between colors instead of snapping: queued ->
         // running -> done reads as one button changing its mind, not three
         // buttons taking turns. 420ms InOutQuad, paced to land just after
         // the 340ms state roll below so the hue settles as the new face
@@ -7403,11 +8706,11 @@ ApplicationWindow {
                 DotMatrix {
                     objectName: "dbMatrix"
                     anchors.left: parent.left; anchors.right: parent.right
-                    // Centred to the DEVICE pixel, not the logical one: the
+                    // Centered to the DEVICE pixel, not the logical one: the
                     // grid is 27px in a 28px button, an offset of 0.5, which
                     // is a whole pixel at 2x. Rounding to a logical pixel sat
                     // the (then five-row) bar a pixel low on every retina
-                    // display (livetest report), and an anchor centre left it
+                    // display (livetest report), and an anchor center left it
                     // on a half pixel at 1x.
                     y: Math.round((parent.height - implicitHeight) / 2 * Screen.devicePixelRatio) / Screen.devicePixelRatio
                     // Seven rows of 3px cells with 1px gaps fill the button
@@ -7578,7 +8881,7 @@ ApplicationWindow {
                 // Skipped while a roll is already running, because then the
                 // state handler started it and owns matrixRollOut: without the
                 // guard, a state change that also changes the words (every run
-                // ending) restarted its own roll here and cancelled the
+                // ending) restarted its own roll here and canceled the
                 // matrix's exit. When no roll is in flight the change is a
                 // label-only swap, which clears the flag rather than inheriting
                 // whatever the last state change left in it.
@@ -7589,7 +8892,7 @@ ApplicationWindow {
                 // watch Waves write the file. It says MAYBE out loud, because
                 // this button is where a guess PREVENTS an action, and the
                 // hedge is the difference between "we recorded this" and "we
-                // recognised this". The gold stays: colour separates it from
+                // recognized this". The gold stays: color separates it from
                 // green DOWNLOADED, the word explains why they differ.
                 // With the library scan on, the done state reads IN LIBRARY
                 // instead of DOWNLOADED, but only when the library actually
@@ -7875,7 +9178,7 @@ ApplicationWindow {
         readonly property real idleLoopSecs: 20
         property real idleT: 0
         Timer {
-            // Pause while the window is off screen (hidden/minimised). Focus
+            // Pause while the window is off screen (hidden/minimized). Focus
             // is deliberately NOT part of the gate: an unfocused window is
             // still on screen, and the water freezing on every focus change
             // looked like a rendering glitch (livetest report).
@@ -7901,9 +9204,9 @@ ApplicationWindow {
 
             // Six-layer water lifted verbatim from the README banner GIF generator
             // (make_logo_gif.py): faint foam up top fading into brighter, denser
-            // swell. k = pattern-tiles travelled per loop (parallax: front faster);
+            // swell. k = pattern-tiles traveled per loop (parallax: front faster);
             // ph = initial offset (0..1 of a tile) so crests don't line up. px is
-            // the GIF's glyph size normalised to the 34px box reference.
+            // the GIF's glyph size normalized to the 34px box reference.
             Repeater {
                 model: [
                     { yf: 0.05, px: 3.5, op: 0.34, k: 1, ph: 0.00, pat: "   '    .     *   :   .   ", col: root.accentContTx },
@@ -7990,14 +9293,14 @@ ApplicationWindow {
             // Idle lightning: a fixed 20-second storm storyboard that loops
             // identically, seven strikes spread far apart. Big bolts frame the
             // box left and right, smaller ones scatter between, and the tall
-            // centre strike lights the whole box with a brief sheet flash.
+            // center strike lights the whole box with a brief sheet flash.
             // Every strike lives the same ~280ms flicker (near-full pre-flash,
             // dark beat, full flash, dim afterglow, the cadence read from the
             // README banner). Deliberately sparse: the free-running random
             // storm above stays a hover-only reward, and these hide while it
             // runs. `at` is milliseconds into the loop.
             Rectangle {
-                // Sheet flash for the big centre strike: the whole clip blinks
+                // Sheet flash for the big center strike: the whole clip blinks
                 // faintly white during that bolt's full-flash beat.
                 anchors.fill: parent
                 color: "#eafff1"
@@ -8013,7 +9316,7 @@ ApplicationWindow {
                     { at: 1400,  shape: "\\\n \\\n /\n/",          xf: 0.06, yf: 0, px: 9 },   // big, far left
                     { at: 4200,  shape: "\\\n \\",                 xf: 0.56, yf: 0, px: 5 },   // small
                     { at: 6800,  shape: " /\n/\n\\",               xf: 0.30, yf: 0, px: 5.5 }, // small
-                    { at: 9600,  shape: "\\\n \\\n  \\/\n  /\n /", xf: 0.45, yf: 0, px: 10 },  // big centre + flash
+                    { at: 9600,  shape: "\\\n \\\n  \\/\n  /\n /", xf: 0.45, yf: 0, px: 10 },  // big center + flash
                     { at: 13000, shape: "\\\n/\n\\\n \\",          xf: 0.74, yf: 0, px: 5 },   // small
                     { at: 15800, shape: "/\n \\\n  \\\n  /",       xf: 0.88, yf: 0, px: 9 },   // big, far right
                     { at: 18200, shape: " /\n/\n\\",               xf: 0.18, yf: 0, px: 4.5 }  // small
@@ -8102,7 +9405,7 @@ ApplicationWindow {
     // Console-spec button: the app's ordinary hugging button (label + btnPadH*2
     // wide, btnRad corners, uiFont 13 bold UPPERCASE) as a reusable component.
     // Every dialog button is one: a single action or a pair, they hug their
-    // labels in a centred row and never stretch half-empty across the card.
+    // labels in a centered row and never stretch half-empty across the card.
     // primary = lit cell (accentCont/accentDim, hover lightens), secondary =
     // outlined with the label warming textLo -> textHi on hover.
     component SpecBtn: Rectangle {
@@ -8112,7 +9415,7 @@ ApplicationWindow {
         // The red recipe (red on redCont, translucent red border), for the
         // destructive half of a button pair.
         property bool danger: false
-        // The same recipe in the palette's gold, for an action that interrupts
+        // The same recipe in yellow, for an action that interrupts
         // without discarding anything (pausing the queue). Not danger: nothing
         // is lost, and not primary: it is not the way forward either.
         property bool warn: false
@@ -8124,30 +9427,36 @@ ApplicationWindow {
         // A Phosphor glyph in place of the word, on a square of exactly the
         // button height, so it lines up with the worded buttons beside it. For
         // an action whose glyph says it faster than any label could (closing a
-        // panel), where a word would only cost room in a crowded header.
+        // panel), where a word would only cost room in a crowded header. With
+        // a label as well, the glyph leads the word (EXPORT's report buttons).
         property string icon: ""
         readonly property bool iconOnly: icon !== "" && label === ""
+        readonly property bool iconLed: icon !== "" && label !== ""
+        readonly property real icoSize: compact ? 11 : 14
+        readonly property real icoGap: compact ? 4 : 6
         signal clicked()
         readonly property color bg: danger ? root.redCont
-                                  : warn ? root.goldCont
+                                  : warn ? root.yellowCont
                                   : (primary ? root.accentCont : "transparent")
-        implicitWidth: iconOnly ? implicitHeight : sbTxt.implicitWidth + (compact ? 9 : root.btnPadH) * 2
-        implicitHeight: sbTxt.implicitHeight + (compact ? 3 : root.btnPadV) * 2
+        implicitWidth: iconOnly ? implicitHeight
+                     : sbTxt.implicitWidth + (iconLed ? icoSize + icoGap : 0) + (compact ? 8 : root.btnPadH) * 2
+        implicitHeight: sbTxt.implicitHeight + (compact ? 2 : root.btnPadV) * 2
         radius: compact ? 5 : root.btnRad
         color: (sbMa.containsMouse && (sb.primary || sb.danger || sb.warn)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
         border.width: 1
         border.color: danger ? Qt.alpha(root.red, 0.55)
-                    : warn ? Qt.alpha(root.gold, 0.55)
+                    : warn ? Qt.alpha(root.yellow, 0.55)
                     : (primary ? root.accentDim : root.border1)
         Behavior on color { ColorAnimation { duration: 110 } }
         Text {
             id: sbTxt; anchors.centerIn: parent
+            anchors.horizontalCenterOffset: sb.iconLed ? (sb.icoSize + sb.icoGap) / 2 : 0
             // Kept loaded while icon-only (empty, invisible): its line height is
             // what makes the square square, so it has to keep measuring.
             visible: !sb.iconOnly
             textFormat: Text.PlainText; text: sb.label
             color: sb.danger ? root.red
-                 : sb.warn ? root.gold
+                 : sb.warn ? root.yellow
                  : (sb.primary ? root.accent : (sbMa.containsMouse ? root.textHi : root.textLo))
             font.family: sb.compact ? root.mono : root.uiFont
             font.pixelSize: sb.compact ? 10 : 13; font.bold: true
@@ -8156,7 +9465,8 @@ ApplicationWindow {
         Ico {
             visible: sb.icon !== ""
             anchors.centerIn: parent
-            name: sb.icon; size: sb.compact ? 11 : 14; bold: 8
+            anchors.horizontalCenterOffset: sb.iconLed ? -(sbTxt.implicitWidth + sb.icoGap) / 2 : 0
+            name: sb.icon; size: sb.icoSize; bold: 8
             color: sbTxt.color   // one recipe for the word and the glyph, hover included
         }
         MouseArea {
@@ -8177,7 +9487,7 @@ ApplicationWindow {
         property bool highlight: false
         signal clicked()
         Layout.fillWidth: true
-        implicitHeight: gcRow.implicitHeight + 24; radius: 10
+        implicitHeight: gcRow.implicitHeight + 14; radius: 10
         color: highlight ? (gcMa.containsMouse ? Qt.lighter(root.accentCont, 1.35) : root.accentCont)
                          : (gcMa.containsMouse ? root.surface3 : root.surface0)
         border.width: 1; border.color: highlight ? root.accentDim : (gcMa.containsMouse ? root.outline : root.border1)
@@ -8193,7 +9503,7 @@ ApplicationWindow {
                     Text { textFormat: Text.PlainText; visible: gcard.chip !== ""; text: gcard.chip; color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.8 }
                     Item { Layout.fillWidth: true }
                 }
-                Text { textFormat: Text.PlainText; visible: gcard.desc !== ""; text: gcard.desc; color: root.textDim; font.pixelSize: 11; wrapMode: Text.WordWrap; lineHeight: 1.2; Layout.fillWidth: true }
+                Text { textFormat: Text.PlainText; visible: gcard.desc !== ""; text: gcard.desc; color: root.textLo; font.pixelSize: 11; wrapMode: Text.WordWrap; lineHeight: 1.2; Layout.fillWidth: true }
             }
             Ico { name: "arrow-right"; color: gcard.highlight ? root.accent : root.textDim; size: 15; Layout.alignment: Qt.AlignVCenter }
         }
@@ -8379,7 +9689,7 @@ ApplicationWindow {
 
     // Section header: small tracked uppercase label + thin rule + mono count chip.
     // CRT-tube nav tab ("Tube C" static-burst). At rest each tab is a dim
-    // phosphor-green panel with a grey label. On select it powers on like an old
+    // phosphor-green panel with a gray label. On select it powers on like an old
     // CRT: a burst of scanline static, then the panel strikes in from a collapsed
     // line (x, then y overshoot). Power-off crackles with static and collapses
     // back to a line, leaving a brief afterglow bar. Shared by the nav tabs.
@@ -8387,11 +9697,12 @@ ApplicationWindow {
         id: nt
         property string label: ""
         property bool active: false
+        property int badge: 0
         signal clicked()
         implicitHeight: navMetric.implicitHeight + root.btnPadV * 2
         implicitWidth: navMetric.implicitWidth + root.btnPadH * 2
 
-        // Colours for the CRT look. accent/accentCont/accentDim/accentSoft are
+        // Colors for the CRT look. accent/accentCont/accentDim/accentSoft are
         // shared app tokens; the dim phosphor-panel tones are local to this look.
         readonly property color navDimBg:     "#0b140f"
         readonly property color navDimBorder: "#1f3d2a"
@@ -8403,7 +9714,7 @@ ApplicationWindow {
         // hidden metric, reserves width so the label never reflows
         Text { id: navMetric; visible: false; textFormat: Text.PlainText; text: nt.label; font.pixelSize: 13; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
 
-        // idle body: dim phosphor panel; grey label that greys → green
+        // idle body: dim phosphor panel; gray label that grays → green
         Rectangle {
             id: navDim; anchors.fill: parent; radius: root.btnRad; color: nt.navDimBg
             border.width: 1; border.color: navMa.containsMouse ? nt.navDimHover : nt.navDimBorder
@@ -8446,6 +9757,80 @@ ApplicationWindow {
         Rectangle { id: navAfter; anchors.centerIn: parent; width: 7; height: 3; radius: 2; color: root.accent; opacity: 0 }
 
         MouseArea { id: navMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: nt.clicked() }
+
+        // A count in the corner (the Releases tab's unseen arrivals). It
+        // overhangs the tab instead of widening it, so the row never shifts.
+        // It flares in white hot and cools to green, counts through every
+        // number on the way up (each step bumps it), counts back down when
+        // the count clears, then shrinks away. Everything keys off the count,
+        // never off the badge's own visible.
+        Item {
+            id: ntBadge
+            objectName: "navTabBadge"
+            z: 2
+            property int disp: 0      // the number shown, stepping toward nt.badge
+            property int last: 1      // the last nonzero number, held while it shrinks
+            property real sc: 0
+            property real heat: 0     // 1 = white hot
+            readonly property bool on: nt.badge > 0 || disp > 0
+            height: 16; width: Math.max(16, ntBadgeT.implicitWidth + 8)
+            Behavior on width { NumberAnimation { duration: 90 } }
+            x: nt.width - width + 6; y: -6
+            visible: sc > 0.01 && opacity > 0.01
+            transform: Scale { origin.x: ntBadge.width / 2; origin.y: ntBadge.height / 2; xScale: ntBadge.sc; yScale: ntBadge.sc }
+            Component.onCompleted: { disp = nt.badge; last = Math.max(1, nt.badge); sc = on ? 1 : 0 }
+            onOnChanged: {
+                ntBadgeIn.stop(); ntBadgeOut.stop()
+                if (on) ntBadgeIn.restart(); else ntBadgeOut.restart()
+            }
+            Timer {
+                interval: 55; repeat: true; running: ntBadge.disp !== nt.badge
+                onTriggered: {
+                    var d = nt.badge - ntBadge.disp
+                    var step = Math.max(1, Math.ceil(Math.abs(d) / 6))
+                    ntBadge.disp += d > 0 ? step : -step
+                    if (ntBadge.disp > 0) ntBadge.last = ntBadge.disp
+                    if (d > 0) ntBadgeTick.restart()
+                }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: parent.width + 10 * ntBadge.heat; height: parent.height + 10 * ntBadge.heat
+                radius: height / 2; color: root.accent; opacity: 0.45 * ntBadge.heat
+            }
+            Item {
+                id: ntBadgeFace; anchors.fill: parent
+                transform: Scale { id: ntBadgeTs; origin.x: ntBadgeFace.width / 2; origin.y: ntBadgeFace.height / 2 }
+                Rectangle {
+                    anchors.fill: parent; radius: 8
+                    color: Qt.tint(root.accent, Qt.rgba(1, 1, 1, 0.8 * ntBadge.heat))
+                }
+                Text {
+                    id: ntBadgeT
+                    objectName: "navTabBadgeText"
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: ntBadge.last > 99 ? "99+" : ("" + ntBadge.last)
+                    color: root.accentText; font.family: root.mono; font.pixelSize: 10; font.bold: true
+                }
+            }
+            SequentialAnimation {
+                id: ntBadgeTick
+                NumberAnimation { target: ntBadgeTs; properties: "xScale,yScale"; to: 1.14; duration: 30 }
+                NumberAnimation { target: ntBadgeTs; properties: "xScale,yScale"; to: 1; duration: 120; easing.type: Easing.OutQuad }
+            }
+            ParallelAnimation {
+                id: ntBadgeIn
+                PropertyAction { target: ntBadge; property: "sc"; value: 1 }
+                NumberAnimation { target: ntBadge; property: "opacity"; from: 0; to: 1; duration: 120; easing.type: Easing.OutQuad }
+                NumberAnimation { target: ntBadge; property: "heat"; from: 1; to: 0; duration: 620; easing.type: Easing.OutCubic }
+            }
+            SequentialAnimation {
+                id: ntBadgeOut
+                NumberAnimation { target: ntBadge; property: "sc"; to: 0; duration: 200; easing.type: Easing.InBack; easing.overshoot: 2 }
+                ScriptAction { script: { ntBadge.heat = 0; ntBadge.opacity = 1 } }
+            }
+        }
 
         states: State { name: "on"; when: nt.active
             PropertyChanges { navLit.opacity: 1 }
@@ -8699,7 +10084,7 @@ ApplicationWindow {
         }
     }
 
-    // Search-results video thumbnail: the same peek behaviour as VideoThumb at
+    // Search-results video thumbnail: the same peek behavior as VideoThumb at
     // 16:9 and several hundred pixels wide, with the duration in the corner.
     // At this size a glance costs a real stream, so the dwell is longer and
     // guarded: any movement inside the thumb restarts it (only a resting
@@ -8722,7 +10107,7 @@ ApplicationWindow {
         PlayBadge { radius: 8; lit: bvtHover.hovered }
         // "You already downloaded this" rides the top-LEFT corner, across from
         // the resolution badge: same plate, same size, green (the on-disk
-        // owned colour). Videos never appear in the library scan (it only
+        // owned color). Videos never appear in the library scan (it only
         // walks audio), so the one truthful signal here is Waves' own
         // ownership record for this exact video id.
         property bool owned: false
@@ -8759,7 +10144,7 @@ ApplicationWindow {
             }
         }
         // Resolution rides the thumbnail's top-right corner (gold, the video
-        // tier's colour), same plate as the duration below it. On a 16:9
+        // tier's color), same plate as the duration below it. On a 16:9
         // thumbnail "video" goes without saying, so the badge is the spec
         // alone and the title below keeps its full width.
         Rectangle {
@@ -8798,7 +10183,7 @@ ApplicationWindow {
             enabled: bvt.peekable
             onHoveredChanged: {
                 if (hovered) {
-                    // Landing on a neighbour drops the open card at once:
+                    // Landing on a neighbor drops the open card at once:
                     // peekThumbHover is shared, so without this a sideways
                     // slide across the grid would pin the card open.
                     if (root.peekNow && root.peekNow.id !== bvt.videoId) root.peekClose()
@@ -8835,7 +10220,7 @@ ApplicationWindow {
 
     // One art-first video result cell: the 16:9 thumbnail with the title,
     // quality tag riding the title's end, artist and release date baseline-
-    // aligned below, and the download button centred on the text block. The
+    // aligned below, and the download button centered on the text block. The
     // search VIDEOS grid and the artist page's VIDEOS section are the same
     // cell at whatever width their grid hands it.
     component VideoCell: Column {
@@ -8888,7 +10273,7 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                     }
                 }
-                // Baseline-aligned, not centred: the mono date and the UI-font
+                // Baseline-aligned, not centered: the mono date and the UI-font
                 // artist have different descents, so matching line boxes still
                 // reads crooked.
                 Item {
@@ -8927,7 +10312,7 @@ ApplicationWindow {
                         visible: vcell.vcDate !== ""
                         anchors.left: vDot.right; anchors.leftMargin: 8
                         anchors.baseline: vArtists.baseline
-                        textFormat: Text.PlainText; text: vcell.vcDate
+                        textFormat: Text.PlainText; text: root.dateText(vcell.vcDate)
                         color: root.textLo; font.family: root.mono; font.pixelSize: 11
                     }
                 }
@@ -8964,7 +10349,7 @@ ApplicationWindow {
         // The percentage, carved INTO the bar on demand rather than printed
         // beside it (progress pill lab, rounds 2 to 5, 2026-08-17): `word`
         // ("37%") is spelled in a 3x5 dot font in the matrix's own cells,
-        // centred, always lit, on a PLATE (the glyph box plus a cell of
+        // centered, always lit, on a PLATE (the glyph box plus a cell of
         // margin) knocked back to near black whatever the bar under it is
         // doing, so the number reads the same at every percentage. Its cells
         // used to take the INVERSE of the bar under them (a hole where the
@@ -8981,10 +10366,10 @@ ApplicationWindow {
         // to its digit state on its own pseudo-random delay (the "dissolve"),
         // so the number condenses out of the bar and dissolves back into it,
         // and a reveal that reverses mid-way plays back from wherever it is.
-        // The zone is the WORD's own width, centred: one, two or three digits
+        // The zone is the WORD's own width, centered: one, two or three digits
         // all sit in the middle. It used to be a fixed four glyphs ("100%")
         // with the word right-aligned in it, so that 9 -> 10 and 99 -> 100
-        // moved nothing, but that hung every ordinary reading off centre to
+        // moved nothing, but that hung every ordinary reading off center to
         // the right for the sake of the one percent of a run that is 100.
         // Needs five rows (a digit is five tall); with fewer, or no word, the
         // matrix is the plain bar.
@@ -9047,7 +10432,7 @@ ApplicationWindow {
         // hid the opening several percent of a run entirely (livetest
         // report, 2026-08-17: a 56-track playlist at 9 tracks showed an
         // empty bar). With mirrorPads a pad copies its nearest real
-        // neighbour's state rather than staying dark, so a full bar's ends
+        // neighbor's state rather than staying dark, so a full bar's ends
         // still light and fade like the unpadded one; a pad never pulses.
         // 0 / 0 = no pads (the queue row, the scrubbers). Keep the count
         // small: the fill must still visibly start at the start of the bar
@@ -9074,46 +10459,40 @@ ApplicationWindow {
                   : 0.28 - ((t - 0.6) / 0.4) * 0.28
             return 1 - d
         }
-        // The column count follows a SETTLED width, not the live one. Cols
-        // riding width directly meant a drawer-edge drag (which resizes per
-        // mouse move) changed `total` on every pixel, and the Repeater tore
-        // down and rebuilt every dot each time: thousands of object churns
-        // per drag, a GUI event backlog, and a pointer that stayed wedged
-        // for a beat after letting go. The bar tolerating a stale column
-        // count for a beat is invisible; the churn was not.
-        // 300ms, and never while the drawer edge is held: at 120ms the one
-        // remaining rebuild landed mid-way through the grip's 220ms release
-        // animation and visibly froze it (a plain click, changing nothing,
-        // was smooth). Letting the release animation finish first moves the
-        // same rebuild onto a static screen, where it cannot be seen.
-        // Declared with a binding for a correct first paint, then the
-        // imperative assignment below BREAKS that binding so a drag can no
-        // longer ride it; from then on only the timer writes. The break is
-        // deferred one event-loop turn past completion, NOT done in
-        // onCompleted: a matrix is completed mid-cascade, before the sizes
-        // around it have finished landing (the download button's Loader
-        // builds it while the button is still the queued face's width, and
-        // the button widens to the running width a binding or two later), so
-        // breaking on completion latched that pre-layout width and the bar
-        // opened with two columns too many for the settle interval, then
-        // shed them. Every width write of the creating turn still rides the
-        // binding; the timer takes over from the next turn on.
-        property real _settledWidth: width
-        Component.onCompleted: Qt.callLater(function() { if (dm) dm._settledWidth = dm.width })
-        onWidthChanged: dmSettle.restart()
-        Timer {
-            id: dmSettle; interval: 300
-            onTriggered: if (root.queueEdgeHeld) dmSettle.restart(); else dm._settledWidth = dm.width
-        }
+        // The column count follows the LIVE width, so a bar in the queue
+        // keeps filling its row while the drawer edge is dragged rather than
+        // jumping to the new width after the hand lets go. What made that
+        // costly was the model, not the width: an integer Repeater model
+        // RESETS on every change, so each column gained or lost tore down
+        // and rebuilt every dot (thousands of object churns per drag, a GUI
+        // event backlog, a pointer wedged for a beat after letting go). The
+        // cells are a ListModel instead, kept at `total` by appending or
+        // dropping at its END, so a column more or less builds or frees just
+        // that column's cells. The cells already standing re-read their
+        // place from `cols` (index % cols), which is a binding pass, not a
+        // rebuild.
         readonly property int cols: {
-            var c = Math.max(1, Math.floor((_settledWidth + gap) / (dot + gap)))
+            var c = Math.max(1, Math.floor((width + gap) / (dot + gap)))
             return (maxCols > 0 && c > maxCols) ? maxCols : c
         }
         readonly property int total: rows * cols
         readonly property int litCount: Math.round(Math.max(0, Math.min(100, pct)) / 100 * fillTotal)
         implicitHeight: rows * dot + (rows - 1) * gap
+        ListModel { id: dmCells }
+        function _syncCells() {
+            var n = dmCells.count
+            if (total > n) {
+                var add = []
+                for (var i = n; i < total; ++i) add.push({})
+                dmCells.append(add)
+            } else if (total < n) {
+                dmCells.remove(total, n - total)
+            }
+        }
+        onTotalChanged: _syncCells()
+        Component.onCompleted: _syncCells()
         Repeater {
-            model: dm.total
+            model: dmCells
             delegate: Rectangle {
                 required property int index
                 readonly property int col: index % dm.cols
@@ -9166,6 +10545,708 @@ ApplicationWindow {
                   * (dm.edgeFadeH > 0 ? Math.min(dm.edgeVis((y + dm.dot / 2) / dm.edgeFadeH),
                                                  dm.edgeVis((dm.implicitHeight - y - dm.dot / 2) / dm.edgeFadeH)) : 1)
                 opacity: edgeMul * ((wordCell || plateCell) ? barOpacity + (wordTo - barOpacity) * wordT : barOpacity)
+            }
+        }
+    }
+
+    // The header's QUEUE button. The word morphs with the queue's state
+    // (QUEUE at rest, the batch percent while anything is active, DONE or FAIL
+    // for a beat) and only a change of WORD decrypts; the percent ticking up
+    // is written plain. The arrow drips while anything downloads, a hairline
+    // along the bottom fills with the batch, and the corner count rolls like
+    // an odometer. A finished download floats a check off the count and sends
+    // two rings out from it (the second a beat behind and smaller) while the
+    // count bumps and rolls down; a failure flashes the count red and shakes
+    // the button, and a red dot breathes in the corner while anything failed.
+    component QueueButton: Rectangle {
+        id: qb
+        objectName: "queueButton"
+        signal clicked()
+        implicitHeight: qbRow.implicitHeight + root.btnPadV * 2
+        // Held to the arrow, its 4px gap and QUEUE's width (the widest
+        // word), so neither the slot hugging the word nor the arrow folding
+        // away while finishing ever moves the header.
+        implicitWidth: 19 + qbMetric.implicitWidth + root.btnPadH * 2
+        radius: root.btnRad; color: "transparent"
+        border.color: qbMa.containsMouse ? root.outline : root.border1
+        Behavior on border.color { ColorAnimation { duration: 180 } }
+        transform: Translate { id: qbShk }
+
+        readonly property int running: root.activeQueueCount - root.queuedCount
+        // The batch: everything that became active since the queue was last
+        // idle. Finished rows count whole, running rows by their progress.
+        property int batchTotal: 0
+        property int batchDone: 0
+        property int batchFails: 0
+        property int _lastActive: 0
+        property real pct: 0
+        function measure() {
+            qb.pct = qb.batchTotal > 0
+                ? Math.max(0, Math.min(100, (qb.batchDone + root.queueRunningProgress() / 100) / qb.batchTotal * 100)) : 0
+        }
+        // Read as soon as the queue wakes, and the finishing flag drops when
+        // it empties: left standing from the last row's finish, it had the
+        // next download open on the whole map before the first tick.
+        Timer {
+            interval: 250; repeat: true; triggeredOnStart: true; running: root.activeQueueCount > 0
+            onTriggered: { qb.measure(); qb.finFrac = root.queueFinishFraction(); qb._fin = root.queueAllFinishing() }
+            onRunningChanged: if (!running) { qb._fin = false; qb.finFrac = 0 }
+        }
+        // Finishing: everything running is at 100% and only the final steps
+        // are left; the chart pours in as they land (finFrac). The arrow
+        // folds away while anything is active, the chart filling the button,
+        // and stays folded through the DONE flash, so DONE sits centered on
+        // its own and the arrow unfolds with QUEUE.
+        property bool _fin: false
+        property real finFrac: 0
+        readonly property bool finishing: _fin && mode === "run"
+        property real fz: finishing || root.activeQueueCount > 0 || mode === "done" ? 1 : 0
+        Behavior on fz { NumberAnimation { duration: 300 } }
+
+        property string flash: ""
+        readonly property string mode: flash !== "" ? flash : root.activeQueueCount > 0 ? "run" : "idle"
+        readonly property string word: mode === "run" ? Math.floor(qb.pct) + "%" : mode === "done" ? "DONE" : mode === "fail" ? "FAIL" : "QUEUE"
+        readonly property color tone: mode === "run" ? root.accent : mode === "done" ? root.green : mode === "fail" ? root.red : root.textLo
+        property string _shownMode: ""
+        property double _runLeft: 0
+        function showWord() {
+            // The word is hidden under the chart while running, so the words
+            // it leaves that for (the queue going idle, then DONE flashing in
+            // the same beat) come in whole, not scrambled up from nothing.
+            var t = Date.now()
+            if (qb._shownMode === "run" && qb.mode !== "run") qb._runLeft = t
+            if (qb.mode === qb._shownMode || qb._shownMode === "" || t - qb._runLeft < 100) {
+                qbWord._live = false; qbWord.target = qb.word; qbWord._live = true
+            } else qbWord.target = qb.word
+            qb._shownMode = qb.mode
+        }
+        onWordChanged: showWord()
+        Component.onCompleted: { qb._lastActive = root.activeQueueCount; showWord() }
+
+        RowLayout {
+            id: qbRow; anchors.centerIn: parent; spacing: 4 * (1 - qb.fz)
+            Item {
+                objectName: "queueButtonArrow"
+                implicitWidth: 15 * (1 - qb.fz); implicitHeight: 15; clip: true; opacity: 1 - qb.fz
+                Ico { name: "arrow-down"; color: qb.mode === "fail" ? root.red : root.accent; size: 15; bold: 10 }
+            }
+            // The header buttons' own face, with tabular digits so the percent
+            // keeps one width as it counts instead of jittering about its
+            // center. The slot hugs the word, keeping the arrow close; the
+            // button's width is fixed above.
+            Item {
+                implicitWidth: qbSlotW; implicitHeight: qbMetric.implicitHeight
+                property real qbSlotW: qbWord.implicitWidth
+                Behavior on qbSlotW { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Text { id: qbMetric; visible: false; textFormat: Text.PlainText; text: "QUEUE"; font: qbWord.font }
+                DecryptText {
+                    id: qbWord; objectName: "queueButtonWord"; anchors.centerIn: parent; color: qb.tone
+                    // The chart reads the percent while running and draws
+                    // its own DONE as it hands over; the word still sizes the
+                    // slot.
+                    opacity: qb.mode === "run" || qbStart.xT > 0 ? 0 : 1
+                    font.family: root.uiFont; font.pixelSize: 13; font.bold: true; font.letterSpacing: root.btnTrack
+                    font.features: { "tnum": 1 }
+                }
+            }
+        }
+        // The speed chart, the percent over the speed, and the pour.
+        QueueStart { id: qbStart; z: -1; anchors.centerIn: parent; btn: qb }
+
+        // The count in LED dots on the page's own color, cut into the
+        // corner, with digits that roll up when it grows and down when it
+        // shrinks. It pops in on the first item and
+        // shrinks away still showing the last number.
+        Rectangle {
+            id: qbBadge
+            objectName: "queueButtonBadge"
+            property int value: root.activeQueueCount
+            property int _last: 0
+            property int dir: 1
+            property real t: 1
+            z: 2
+            radius: 4; color: root.bg; clip: true
+            height: 13; width: Math.max(13, qbNew.text.length * 6.4 + 5)
+            x: qb.width - width + 5; y: -5
+            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            scale: value > 0 ? 1 : 0
+            Behavior on scale { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 2.2 } }
+            visible: scale > 0.01; opacity: qbDone.badgeOp
+            transform: Scale { origin.x: qbBadge.width / 2; origin.y: 6.5; xScale: qbDone.bump; yScale: qbDone.bump }
+            function fmt(v) { return v > 99 ? "99+" : "" + v }
+            Component.onCompleted: { if (value > 0) qbNew.text = fmt(value); _last = value }
+            onValueChanged: {
+                if (value <= 0) { _last = 0; return }
+                if (_last <= 0) { qbNew.text = fmt(value); _last = value; t = 1; return }
+                dir = value > _last ? 1 : -1
+                qbOld.text = fmt(_last); qbNew.text = fmt(value); _last = value
+                qbRoll.restart()
+            }
+            NumberAnimation { id: qbRoll; target: qbBadge; property: "t"; from: 0; to: 1; duration: 300; easing.type: Easing.OutCubic }
+            Rectangle { id: qbErr; anchors.fill: parent; radius: parent.radius; color: root.red; opacity: 0 }
+            Text {
+                id: qbOld
+                textFormat: Text.PlainText
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: (qbBadge.height - height) / 2 - qbBadge.dir * qbBadge.t * qbBadge.height
+                visible: qbBadge.t < 1
+                color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; opacity: 0
+            }
+            Text {
+                id: qbNew
+                textFormat: Text.PlainText
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: (qbBadge.height - height) / 2 + qbBadge.dir * (1 - qbBadge.t) * qbBadge.height
+                color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; opacity: 0
+            }
+            LedCount { cur: qbNew.text; old: qbOld.text; t: qbBadge.t; dir: qbBadge.dir }
+        }
+        SequentialAnimation {
+            id: qbErrAnim
+            NumberAnimation { target: qbErr; property: "opacity"; to: 1; duration: 60 }
+            PauseAnimation { duration: 450 }
+            NumberAnimation { target: qbErr; property: "opacity"; to: 0; duration: 320 }
+        }
+        // Sticky while anything in the queue has failed, breathing on the LED
+        // clock; overhangs the corner so it never widens the button.
+        Rectangle {
+            x: qb.width - 4; y: qb.height - 4; z: 3
+            width: 7; height: 7; radius: 3.5; color: root.red
+            visible: root.failedCount > 0
+            opacity: root.ledPulse + 0.15
+        }
+
+        // ---- the finish ----
+        // A download landing: the count bumps and sparks burst off it; the
+        // last one shatters the count into pieces that fall back in as a
+        // check. The header starts at the window's top edge, so the burst
+        // is fitted to the room above the count.
+        readonly property real bx: qbBadge.x + qbBadge.width / 2
+        readonly property real by: qbBadge.y + 6.5
+        QueueDone { id: qbDone; objectName: "queueButtonDone"; cx: qb.bx; cy: qb.by; bw: qbBadge.width; z: 4 }
+        function finish() { qbDone.play(root.activeQueueCount === 0, qb.mapToItem(null, qb.bx, qb.by).y) }
+
+        SequentialAnimation {
+            id: qbShake
+            NumberAnimation { target: qbShk; property: "x"; to: -3; duration: 40 }
+            NumberAnimation { target: qbShk; property: "x"; to: 3; duration: 60 }
+            NumberAnimation { target: qbShk; property: "x"; to: -2; duration: 50 }
+            NumberAnimation { target: qbShk; property: "x"; to: 2; duration: 50 }
+            NumberAnimation { target: qbShk; property: "x"; to: 0; duration: 40 }
+        }
+        Timer { id: qbFlashT; onTriggered: qb.flash = "" }
+        function say(m, ms) { qb.flash = m; qbFlashT.interval = ms; qbFlashT.restart() }
+        Connections {
+            target: root
+            function onActiveQueueCountChanged() {
+                var a = root.activeQueueCount, d = a - qb._lastActive
+                if (d > 0) {
+                    if (qb._lastActive === 0) { qb.batchTotal = 0; qb.batchDone = 0; qb.batchFails = 0 }
+                    qb.batchTotal += d
+                    if (qb.flash === "done") qb.flash = ""
+                }
+                qb._lastActive = a
+                qb.measure()
+            }
+            function onQueueRowSettled(status) {
+                if (status === "done" || status === "failed") qb.batchDone += 1
+                else qb.batchTotal = Math.max(qb.batchDone, qb.batchTotal - 1)
+                qb.measure()
+                if (status === "done") {
+                    if (root.activeQueueCount > 0) qb.say("done", 650)
+                    else if (qb.batchFails === 0) qb.say("done", 1600)
+                    qb.finish()
+                } else if (status === "failed") {
+                    qb.batchFails += 1
+                    qbErrAnim.restart(); qbShake.restart(); qb.say("fail", 1200)
+                }
+            }
+        }
+        MouseArea { id: qbMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: 10; onClicked: qb.clicked() }
+    }
+
+    // The QUEUE button's inside while anything downloads (queue start lab,
+    // rounds 3 to 12, "Skyline" with the "Tag 9" readout, the "Pour" finish
+    // and the "Into the count" handoff). The fill is the batch's speed chart: each percent
+    // stands as tall as the speed was when it arrived, so a stall leaves a
+    // valley, and a small tag hangs off the head reading the percent over
+    // the speed. While the files are put together the chart is poured in:
+    // the skyline settles to one level, which rises to the brim as the real
+    // finish steps land (btn.finFrac), the tag reading that share. Drawn
+    // edge to edge inside the button's border; paints only while it shows.
+    component QueueStart: Canvas {
+        id: st
+        objectName: "queueButtonChart"
+        property var btn: null
+        readonly property real lw: btn ? btn.width + 4 : 100
+        readonly property real lh: btn ? btn.height + 4 : 30
+        // Drawn at device resolution, shown at logical size.
+        readonly property real s: Screen.devicePixelRatio
+        width: lw * s; height: lh * s; scale: 1 / s
+        readonly property bool run: btn !== null && btn.mode === "run"
+        readonly property bool on: run || xT > 0
+        // The handoff: when the pour gave way to DONE (0 while none plays),
+        // and whether that was the batch's last download (the same call the
+        // button makes for its flash). A queue that went
+        // idle starts its next batch fresh, however soon it comes.
+        property double xT: 0
+        property bool xEnd: false
+        property bool fresh: false
+        // On the mode itself, not on run: the last row empties the queue
+        // first, so the button passes through idle on its way to DONE.
+        Connections {
+            target: st.btn
+            function onModeChanged() { if (st.btn.mode === "done" && st.finT > 0 && st.xT === 0) { st.xT = Date.now(); st.xEnd = root.activeQueueCount === 0 } }
+        }
+        Connections {
+            target: root
+            function onActiveQueueCountChanged() { if (root.activeQueueCount === 0) st.fresh = true }
+        }
+        opacity: on ? 1 : 0
+        visible: opacity > 0
+        readonly property real pct: btn ? btn.pct : 0
+        readonly property real rate: waves.downloadMbps || 0
+        readonly property string spdText: root.queueSpeedText()
+        // The last speed read, so the tag keeps it at 100% once the stream
+        // has stopped and the speed reads nothing.
+        property string lastSp: ""
+        onSpdTextChanged: if (spdText !== "") lastSp = spdText
+        property double bootT: 0
+        property double offT: -1e9
+        // sv is the speed on a log scale (2 Mb/s is 0, 400 Mb/s is 1),
+        // eased; ph is distance traveled, so a speed change bends the
+        // sparks instead of jumping them. prof is the speed at every percent.
+        property real sv: 0
+        property real ph: 0
+        property double _lt: 0
+        property var prof: []
+        property int profK: 0
+        function track(t) {
+            var dt = st._lt > 0 ? Math.max(0, Math.min(100, t - st._lt)) : 16
+            st._lt = t
+            var m = waves.paused ? 0 : st.rate, tgt = m > 0 ? clamp((Math.log(m) / Math.LN10 - 0.301) / 2.301) : 0
+            st.sv += (tgt - st.sv) * (1 - Math.exp(-dt / 300))
+            st.ph += dt / 1000 * (0.06 + 2.4 * st.sv)
+            var k = Math.floor(st.pct)
+            // A new batch starts a new chart (the boot clears it); the dip
+            // between two downloads of one batch keeps it. Stretches with
+            // no speed reading (finishing, paused) carry the last level.
+            if (st.prof.length !== 101) { var z = []; for (var i = 0; i <= 100; ++i) z.push(0); st.prof = z; st.profK = 0 }
+            while (st.profK <= k && st.profK <= 100) { st.prof[st.profK] = st.rate > 0 || st.profK === 0 ? st.sv : st.prof[st.profK - 1]; st.profK++ }
+        }
+        function profH(k, B) {
+            var N = Math.max(0, Math.floor(st.pct)), P = st.prof
+            if (k >= N) return B[3] * (0.1 + 0.78 * st.sv)
+            var a = P[Math.max(0, k - 1)] || 0, b = P[k] || 0, c = P[Math.min(k + 1, N)] || 0
+            return B[3] * (0.1 + 0.78 * (a + 2 * b + c) / 4)
+        }
+
+        // ---- the finish ----
+        // finT is when the finish began (latched as finishing starts, let go
+        // only if the batch drops back under 100%); fv is the real finish
+        // steps, eased.
+        property double finT: 0
+        property real fv: 0
+        property double _ft: 0
+        readonly property bool pouring: finT > 0
+        function finning(t) {
+            var b = st.btn
+            if (b && b.finishing && st.finT === 0) { st.finT = t; st.fv = 0; st._ft = t }
+            if (st.finT > 0 && !(b && b.finishing) && st.pct < 100) st.finT = 0
+            if (st.finT === 0) return false
+            var goal = b && b.finishing ? b.finFrac : 1, dt = Math.max(0, t - st._ft)
+            st._ft = t
+            st.fv += (goal - st.fv) * (1 - Math.exp(-dt / 220))
+            return true
+        }
+        function ease(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2 }
+        function lerp(a, b, u) { return a + (b - a) * u }
+        function pour(ctx, t, dim) {
+            var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h
+            var f = st.fv, tau = t - st.finT, sec = t / 1000
+            var ta = clamp(tau / 350)   // the download's tag hands over
+            var H = [], m = 0
+            for (var k = 0; k <= 100; ++k) { H.push(profH(k, B)); m += H[k] / 101 }
+            var X = function (k) { return x0 + w * k / 100 }
+            // The skyline settles to its mean level, which rises as the file
+            // fills, to the brim; the surface rocks less as it comes up.
+            var sl = ease(clamp(tau / 900)), L = lerp(m, h + 1.5, f)
+            var surf = function (k) { return lerp(H[k], L + Math.sin(k * 0.21 - sec * 5.5) * 1.1 * (1 - f) + Math.sin(k * 0.09 + sec * 3.1) * 0.6, sl) }
+            ctx.beginPath(); ctx.moveTo(X(0), bot)
+            for (k = 0; k <= 100; ++k) ctx.lineTo(X(k), bot - surf(k))
+            ctx.lineTo(X(100), bot); ctx.closePath()
+            var g = ctx.createLinearGradient(0, y0, 0, bot)
+            g.addColorStop(0, rgba((0.5 + 0.25 * f) * dim)); g.addColorStop(1, rgba((0.1 + 0.3 * f) * dim))
+            ctx.fillStyle = g; ctx.fill()
+            ctx.beginPath(); ctx.moveTo(X(0), bot - surf(0))
+            for (k = 1; k <= 100; ++k) ctx.lineTo(X(k), bot - surf(k))
+            ctx.strokeStyle = rgba(0.9 * dim, 0.25); ctx.lineWidth = 1; ctx.stroke()
+            // Bubbles rising through it.
+            for (var j = 0; j < 9; ++j) {
+                var u = (sec * (0.35 + 0.3 * hash(j)) + hash(j + 4)) % 1, kb = Math.floor(hash(j + 11) * 100)
+                ctx.fillStyle = rgba(0.5 * (1 - u) * sl * dim, 0.5); ctx.fillRect(X(kb), bot - u * surf(kb), 1, 1)
+            }
+            if (ta < 1) tag(ctx, B, x0 + w, bot - H[100], dim * (1 - ta))
+            finTag(ctx, B, x0 + w - 1, bot - surf(100), dim * ta)
+        }
+        // The finish's tag: what share of the file is put together, right
+        // aligned on the surface at the end.
+        function finTag(ctx, B, ax, ay, dim) {
+            if (dim <= 0.01) return
+            var tx = Math.min(ax - 5, B[0] + B[2] - 3), ty = tagY(B, ay)
+            ctx.save(); ctx.globalCompositeOperation = "source-over"
+            ctx.fillStyle = rgba(0.6 * dim); ctx.fillRect(ax - 4, ay - 0.5, 3, 1)
+            keyed(ctx, Math.round(st.fv * 100) + "%", tx, ty, st.tagPx, "right", ink(root.textHi, dim), dim)
+            keyed(ctx, "building", tx, ty + st.tagGap, st.tagPx, "right", rgba(0.95 * dim, 0.35), dim)
+            ctx.restore()
+        }
+
+        // ---- the download ----
+        function chart(ctx, t, dim, ta) {
+            var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, fx = x0 + w * st.pct / 100
+            // A fresh start sweeps in from the left, white at its edge.
+            var bk = clamp((t - st.bootT) / 540)
+            if (bk < 1) { ctx.save(); ctx.beginPath(); ctx.rect(x0 - 1, y0 - 1, w * bk + 1, h + 2); ctx.clip() }
+            var N = Math.max(0, Math.floor(st.pct)), hd = bot - profH(N, B)
+            var g = ctx.createLinearGradient(0, y0, 0, bot)
+            g.addColorStop(0, rgba(0.5 * dim)); g.addColorStop(1, rgba(0.1 * dim))
+            ctx.beginPath(); ctx.moveTo(x0, bot)
+            for (var k = 0; k < N; ++k) ctx.lineTo(x0 + w * k / 100, bot - profH(k, B))
+            ctx.lineTo(fx, hd); ctx.lineTo(fx, bot); ctx.closePath()
+            ctx.fillStyle = g; ctx.fill()
+            ctx.beginPath(); ctx.moveTo(x0, bot - profH(0, B))
+            for (k = 1; k < N; ++k) ctx.lineTo(x0 + w * k / 100, bot - profH(k, B))
+            ctx.lineTo(fx, hd)
+            ctx.strokeStyle = rgba(0.9 * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
+            // The level it is running at, ruled ahead to the end, over a
+            // dotted floor.
+            ctx.fillStyle = rgba(0.16 * dim)
+            for (var dx = fx + 2; dx < x0 + w; dx += 3) ctx.fillRect(dx, hd - 0.4, 1.2, 0.8)
+            ctx.fillStyle = rgba(0.12 * dim)
+            for (dx = fx + 1; dx < x0 + w; dx += 3) ctx.fillRect(dx, bot - 1.2, 1.2, 0.8)
+            // Sparks off the head, as many and as fast as the speed.
+            for (var j = 0; j < 8; ++j) {
+                if (j >= 2 + 6 * st.sv) break
+                var u = (st.ph * (0.9 + 0.5 * hash(j)) + hash(j + 5)) % 1
+                ctx.fillStyle = rgba((1 - u) * 0.7 * dim, 0.6)
+                ctx.fillRect(fx - 1 - u * 5 * hash(j + 9), hd - u * (4 + 6 * st.sv), 1, 1)
+            }
+            ctx.fillStyle = rgba(0.3 * dim, 0.3); ctx.fillRect(fx - 0.5, y0, 1, h)
+            ctx.fillStyle = rgba(dim, 0.85); ctx.fillRect(fx - 1, hd - 1, 2, 2)
+            tag(ctx, B, fx, hd, dim * (ta === undefined ? 1 : ta))
+            if (bk < 1) { ctx.restore(); ctx.fillStyle = rgba(0.8 * (1 - bk), 0.8); ctx.fillRect(x0 + w * bk - 1, y0, 2, h) }
+        }
+        // The tag: the percent over the speed (in the accent), hung off the
+        // head on a short leader and riding up and down with it; ahead of
+        // the head while there is room, behind it after. 9px on 8.75px
+        // lines, about as big as two lines go in the button.
+        readonly property real tagPx: 9
+        readonly property real tagGap: 8.75
+        function tagY(B, y) { return Math.max(B[1] + st.tagPx * 0.74 + 1, Math.min(B[1] + B[3] - st.tagGap - 1.5, y - 1)) }
+        function tag(ctx, B, fx, hd, dim) {
+            var x0 = B[0], w = B[2], P = st.tagPx
+            var spT = st.spdText || (st.pct >= 100 ? st.lastSp : ""), known = spT !== ""
+            var pc = Math.floor(st.pct) + "%", sp = spT || "-- Mb/s"
+            ctx.save(); ctx.globalCompositeOperation = "source-over"
+            var wt = Math.max(tw(ctx, pc, P), tw(ctx, sp, P)), ahead = x0 + w - fx - 6 >= wt
+            var ty = tagY(B, hd)
+            var tx = ahead ? fx + 5 : Math.min(fx - 5, x0 + w - 3), al = ahead ? "left" : "right"
+            ctx.fillStyle = rgba(0.6 * dim); ctx.fillRect(ahead ? fx + 1 : fx - 4, hd - 0.5, 3, 1)
+            keyed(ctx, pc, tx, ty, P, al, ink(root.textHi, dim), dim)
+            keyed(ctx, sp, tx, ty + st.tagGap, P, al, rgba((known ? 0.95 : 0.4) * dim, 0.35), dim)
+            ctx.restore()
+        }
+        // ---- the handoff ----
+        // The pour hands over in 1.35s: the pool tips toward the count and
+        // pours into it as DONE drops in from above, then DONE falls away as
+        // the chart sweeps back in from the left with the batch's history.
+        // The batch's last download plays up to its DONE, holds it as long
+        // as the button's flash, and fades.
+        function handoff(ctx, t, dim) {
+            var u0 = t - st.xT, D = st.xEnd ? 1600 : 1350, B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, sec = t / 1000
+            if (u0 >= D) {
+                // Over: back to the chart, or nothing once the queue is idle
+                // (the button's own word takes over from here).
+                if (st.run || st.xEnd || u0 > D + 1500) st.xT = 0
+                if (st.run) chart(ctx, t, dim)
+                return
+            }
+            var u = st.xEnd ? Math.min(u0, 650) : u0
+            if (st.xEnd) dim *= 1 - ease(clamp((u0 - 1300) / 300))
+            var full = h + 1.5, X = function (k) { return x0 + w * k / 100 }
+            var e = ease(clamp(u / 600))
+            if (e < 1) {
+                var tilt = Math.sin(Math.PI * Math.min(1, e * 1.2)) * 7
+                pool(ctx, B, X, function (k) { return Math.max(0, full * (1 - e) + tilt * (k / 100 - 0.4)) }, dim)
+                var bp = st.btn.mapToItem(st, st.btn.bx, st.btn.by), bx = bp.x / st.s, by = bp.y / st.s
+                for (var j = 0; j < 10; ++j) {
+                    var q = clamp((e - 0.06 * j) / 0.45)
+                    if (q <= 0 || q >= 1) continue
+                    var sx = x0 + w * (0.72 + 0.03 * hash(j)), sy = bot - full * (1 - e) - 1
+                    var px = lerp(sx, bx - 2, q), py = lerp(sy, by + 2, q) - Math.sin(Math.PI * q) * 4
+                    ctx.fillStyle = rgba(0.9 * dim * (1 - q * 0.6), 0.6); ctx.fillRect(px - 0.75, py - 0.75, 1.5, 1.5)
+                }
+            }
+            var bk = clamp((u - 700) / 480)
+            if (bk > 0) {
+                ctx.save(); ctx.beginPath(); ctx.rect(x0 - 1, y0 - 1, w * ease(bk) + 1, h + 2); ctx.clip()
+                chart(ctx, t, dim, clamp((u - 1100) / 200)); ctx.restore()
+                if (bk < 1) { ctx.fillStyle = rgba(0.9 * dim * (1 - bk), 0.85); ctx.fillRect(x0 + w * ease(bk) - 1, y0, 2, h) }
+            }
+            var din = ease(clamp((u - 150) / 380)), dout = ease(clamp((u - 720) / 360))
+            word(ctx, B, din * (1 - dout), lerp(-15, 0, din) + 15 * dout, dim)
+        }
+        // The pool as the pour left it, tipped by y(k), its height at
+        // percent k.
+        function pool(ctx, B, x, y, a) {
+            var bot = B[1] + B[3]
+            ctx.beginPath(); ctx.moveTo(x(0), bot)
+            for (var k = 0; k <= 100; ++k) ctx.lineTo(x(k), bot - y(k))
+            ctx.lineTo(x(100), bot); ctx.closePath()
+            var g = ctx.createLinearGradient(0, B[1], 0, bot)
+            g.addColorStop(0, rgba(0.75 * a)); g.addColorStop(1, rgba(0.4 * a))
+            ctx.fillStyle = g; ctx.fill()
+            ctx.beginPath(); ctx.moveTo(x(0), bot - y(0))
+            for (k = 1; k <= 100; ++k) ctx.lineTo(x(k), bot - y(k))
+            ctx.strokeStyle = rgba(0.9 * a, 0.25); ctx.lineWidth = 1; ctx.stroke()
+        }
+        // The button's DONE, drawn here so it can move with the handoff: the
+        // same face, size and green, with a dark keyline.
+        function word(ctx, B, a, dy, dim) {
+            if (a <= 0) return
+            ctx.save(); ctx.globalCompositeOperation = "source-over"
+            ctx.font = "bold 13px \"" + root.uiFont + "\""; ctx.textAlign = "center"; ctx.textBaseline = "middle"
+            var x = B[0] + B[2] / 2, y = B[1] + B[3] / 2 + 0.5 + dy
+            ctx.lineJoin = "round"; ctx.lineWidth = 3; ctx.strokeStyle = ink(root.bg, 0.85 * a * dim); ctx.strokeText("DONE", x, y)
+            ctx.fillStyle = ink(root.green, a * dim); ctx.fillText("DONE", x, y)
+            ctx.restore()
+        }
+        // Mono text with a dark keyline round each glyph, so it reads where
+        // it crosses the chart's line or fill.
+        function keyed(ctx, str, x, y, px, al, col, dim) {
+            ctx.font = "bold " + px + "px \"" + root.mono + "\""; ctx.textAlign = al; ctx.textBaseline = "alphabetic"
+            ctx.lineJoin = "round"; ctx.lineWidth = 2.5; ctx.strokeStyle = ink(root.bg, 0.9 * dim)
+            ctx.strokeText(str, x, y); ctx.fillStyle = col; ctx.fillText(str, x, y)
+        }
+        function tw(ctx, str, px) { ctx.font = "bold " + px + "px \"" + root.mono + "\""; return ctx.measureText(str).width }
+        // The accent at alpha a, mixed c of the way to white.
+        function rgba(a, c) {
+            var k = c || 0, A = root.accent
+            return "rgba(" + Math.round(255 * (A.r + (1 - A.r) * k)) + "," + Math.round(255 * (A.g + (1 - A.g) * k)) + ","
+                + Math.round(255 * (A.b + (1 - A.b) * k)) + "," + Math.max(0, a) + ")"
+        }
+        function ink(c, a) { return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + Math.max(0, a) + ")" }
+        function hash(i) { var r = Math.sin(i * 12.9898) * 43758.5453; return r - Math.floor(r) }
+        function clamp(v) { return v < 0 ? 0 : v > 1 ? 1 : v }
+        // The inside of the border, read off the button itself.
+        function box() {
+            if (st.btn) { var a = st.btn.mapToItem(st, 0, 0); return [a.x / st.s + 1.5, a.y / st.s + 1.5, st.btn.width - 3, st.btn.height - 3] }
+            return [1.5, 1.5, st.lw - 3, st.lh - 3]
+        }
+
+        onOnChanged: {
+            var t = Date.now()
+            // A fresh batch sweeps in; a beat off (the DONE between two
+            // downloads) comes back as it was.
+            if (on) { if (t - offT > 2500 || st.fresh) { bootT = t; prof = [] } st.fresh = false } else offT = t
+        }
+        // Full rate only while something moves. A queue that is paused, or
+        // waiting with nothing arriving (offline, a NAS that went away), has
+        // a chart that has settled, and at zero speed its sparks drift well
+        // under a pixel a frame, so four frames a second look the same. A
+        // speed or a pause wakes it at once, and a hidden window draws
+        // nothing (the clocks are wall time, so it picks up where it is).
+        property bool calm: false
+        readonly property bool busy: !calm || xT > 0 || pouring || (btn !== null && btn.finishing)
+        readonly property bool paused: waves.paused
+        onRateChanged: calm = false
+        onPausedChanged: calm = false
+        onPctChanged: if (calm) requestPaint()
+        Timer { interval: st.busy ? 16 : 250; repeat: true; running: st.visible && root.windowUp; onTriggered: st.requestPaint() }
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            ctx.clearRect(0, 0, st.width, st.height)
+            if (!st.visible) return
+            ctx.scale(st.s, st.s)
+            var B = box(), r = root.btnRad - 1.5
+            ctx.beginPath(); ctx.roundedRect(B[0], B[1], B[2], B[3], r, r); ctx.clip()
+            ctx.globalCompositeOperation = "lighter"
+            var t = Date.now(), dim = waves.paused ? 0.5 : 1
+            track(t)
+            st.calm = (waves.paused || st.rate <= 0) && st.sv < 0.002 && t - st.bootT > 600
+            if (st.xT > 0) handoff(ctx, t, dim)
+            else if (finning(t)) pour(ctx, t, dim)
+            else chart(ctx, t, dim)
+        }
+    }
+
+    // The QUEUE button's count in 3x5 LED dots, rolling a row at a time
+    // between the old number and the new one as the count's own roll (t, dir)
+    // runs.
+    component LedCount: Canvas {
+        id: lc
+        property string cur: ""
+        property string old: ""
+        property real t: 1
+        property int dir: 1
+        property color ink: root.accent
+        readonly property real pitch: 1.6
+        readonly property real s: Screen.devicePixelRatio
+        readonly property real lw: parent ? parent.width : 16
+        readonly property real lh: parent ? parent.height : 13
+        width: lw * s; height: lh * s; scale: 1 / s
+        anchors.centerIn: parent
+        readonly property var f3: ({
+            "0": [7, 5, 5, 5, 7], "1": [2, 6, 2, 2, 7], "2": [7, 1, 7, 4, 7], "3": [7, 1, 3, 1, 7], "4": [5, 5, 7, 1, 1],
+            "5": [7, 4, 7, 1, 7], "6": [7, 4, 7, 5, 7], "7": [7, 1, 1, 2, 2], "8": [7, 5, 7, 5, 7], "9": [7, 5, 7, 1, 7], "+": [0, 2, 7, 2, 0]
+        })
+        onCurChanged: requestPaint()
+        onTChanged: requestPaint()
+        onInkChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        function draw(ctx, txt, shift, P) {
+            var n = txt.length, x0 = lc.lw / 2 - (n * 4 - 1) * P / 2, y0 = lc.lh / 2 - 5 * P / 2
+            for (var j = 0; j < n; ++j) {
+                var g = lc.f3[txt.charAt(j)]
+                if (!g) continue
+                for (var r = 0; r < 5; ++r) {
+                    var rr = r + shift
+                    if (rr < 0 || rr > 4) continue
+                    for (var c = 0; c < 3; ++c) if ((g[rr] >> (2 - c)) & 1) ctx.fillRect(x0 + (j * 4 + c) * P + 0.15, y0 + r * P + 0.15, P - 0.3, P - 0.3)
+                }
+            }
+        }
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            ctx.clearRect(0, 0, lc.width, lc.height)
+            ctx.scale(lc.s, lc.s)
+            ctx.fillStyle = lc.ink
+            var P = lc.pitch, k = Math.round(lc.t * 6)
+            if (lc.t < 1 && lc.old !== "") { draw(ctx, lc.old, lc.dir * k, P); draw(ctx, lc.cur, lc.dir * (k - 6), P) }
+            else draw(ctx, lc.cur, 0, P)
+        }
+    }
+
+    // The QUEUE button's finish (queue done lab, round 1, "Shatter"), one
+    // canvas centered on the count, in LED pieces. Mid batch
+    // the count bumps and a ring of sparks bursts off it while it rolls
+    // down. On the last download the count hands its pixels to the pieces:
+    // they burst out to a ring, fall back in as a check, a dotted ring
+    // goes out, and the check twinkles away. Paints only while it plays.
+    component QueueDone: Canvas {
+        id: dn
+        property real cx: 0
+        property real cy: 0
+        property real bw: 16
+        readonly property real lw: 72
+        readonly property real lh: 52
+        // Drawn at device resolution, shown at logical size.
+        readonly property real s: Screen.devicePixelRatio
+        width: lw * s; height: lh * s; scale: 1 / s
+        x: cx - width / 2; y: cy - height / 2
+        property bool playing: false
+        property bool last: false
+        property double t0: 0
+        property real fit: 1    // the burst's scale, held under the window's top edge
+        property real reach: 0  // how far above the center it has drawn, logical px
+        property real badgeOp: 1
+        property real bump: 1
+        property var pp: []   // the count's pixels, left to right
+        property var kk: []   // the check's, along its stroke
+        visible: playing
+        function play(isLast, room) {
+            var X = [], hw = dn.bw / 2
+            for (var y = -7; y <= 7; y += 2)
+                for (var x = -hw + 1; x <= hw - 1; x += 2) {
+                    var dx = Math.max(0, Math.abs(x) - (hw - 8))
+                    if (dx * dx + y * y <= 60) X.push([x, y])
+                }
+            X.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1] })
+            var N = X.length, A = [-5, 0.5], B = [-1.6, 3.9], C = [5.4, -4.6]
+            var l1 = Math.hypot(B[0] - A[0], B[1] - A[1]), l2 = Math.hypot(C[0] - B[0], C[1] - B[1]), Y = []
+            for (var i = 0; i < N; ++i) {
+                // Two rows of pieces down the stroke, so it reads bold.
+                var d = (Math.floor(i / 2) * 2 + 1) / N * (l1 + l2), seg = d < l1, u = seg ? d / l1 : (d - l1) / l2
+                var p0 = seg ? A : B, p1 = seg ? B : C, L = seg ? l1 : l2, o = i % 2 ? 0.65 : -0.65
+                Y.push([p0[0] + (p1[0] - p0[0]) * u - (p1[1] - p0[1]) / L * o, p0[1] + (p1[1] - p0[1]) * u + (p1[0] - p0[0]) / L * o])
+            }
+            dn.pp = X; dn.kk = Y; dn.last = isLast
+            dn.fit = Math.max(0.5, Math.min(1, (room - 1.5) / 16.5))
+            dn.reach = 0; dn.t0 = Date.now(); dn.playing = true
+        }
+        Timer { interval: 16; repeat: true; running: dn.playing; onTriggered: dn.requestPaint() }
+
+        function hash(i) { var r = Math.sin(i * 12.9898) * 43758.5453; return r - Math.floor(r) }
+        function clamp(v) { return v < 0 ? 0 : v > 1 ? 1 : v }
+        function eo(k) { return 1 - Math.pow(1 - k, 3) }
+        function ease(k) { return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2 }
+        function lerp(a, b, k) { return a + (b - a) * k }
+
+        function dot(ctx, x, y, al, sz, c) {
+            if (al <= 0.01) return
+            dn.reach = Math.max(dn.reach, -y + sz * 1.3)
+            x += dn.lw / 2; y += dn.lh / 2
+            // root.accent (61, 255, 110) toward white.
+            var R = Math.round(61 + 194 * c), B = Math.round(110 + 145 * c)
+            ctx.fillStyle = "rgba(" + R + ",255," + B + "," + (al * 0.16) + ")"
+            ctx.fillRect(x - sz * 1.3, y - sz * 1.3, sz * 2.6, sz * 2.6)
+            ctx.fillStyle = "rgba(" + R + ",255," + B + "," + al + ")"
+            ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz)
+        }
+        // A dotted ring spreading from r0 to r1 and fading, starting at T.
+        function ring(ctx, t, T, ms, r0, r1, n) {
+            var k = clamp((t - T) / ms)
+            if (k <= 0 || k >= 1) return
+            var r = lerp(r0, r1, eo(k))
+            for (var j = 0; j < n; ++j) {
+                var a = 2 * Math.PI * j / n
+                dot(ctx, Math.cos(a) * r, Math.sin(a) * r, 0.9 * (1 - k), 1.1, 0.3 * (1 - k))
+            }
+        }
+
+        // Draws frame t (ms) and says how long the finish runs.
+        function frame(ctx, t) {
+            var i, k, k2, q, f = dn.fit
+            if (!dn.last) {
+                dn.bump = 1 + 0.22 * Math.sin(Math.PI * clamp(t / 280))
+                k = eo(clamp(t / 480))
+                for (i = 0; i < 14; ++i) {
+                    q = 2 * Math.PI * (i + 0.5) / 14
+                    dot(ctx, Math.cos(q) * lerp(8, 15, k) * f, Math.sin(q) * lerp(8, 15, k) * 0.9 * f, 1 - clamp(t / 480), 1.1, 0.8 * (1 - k))
+                }
+                return 520
+            }
+            dn.badgeOp = 1 - clamp(t / 110)
+            var N = dn.pp.length
+            for (i = 0; i < N; ++i) {
+                var P = dn.pp[i], K = dn.kk[i], h = hash(i + 3)
+                // Out to a ring along its own bearing, then back in to the check.
+                var a = (P[0] === 0 && P[1] === 0 ? hash(i) * 6.283 : Math.atan2(P[1], P[0])) + (hash(i + 2) - 0.5) * 0.5
+                var r = (12 + 3 * hash(i + 1)) * f
+                k = eo(clamp((t - 40) / 360)); k2 = ease(clamp((t - 440 - 180 * h) / 360))
+                var x = lerp(lerp(P[0], Math.cos(a) * r, k), K[0], k2), y = lerp(lerp(P[1], Math.sin(a) * r, k), K[1], k2)
+                var c = 0.8 * Math.sin(Math.PI * k) * (1 - k2) + 0.9 * Math.sin(Math.PI * k2)
+                // Each piece twinkles out on its own beat.
+                var al = clamp(t / 60) * (1 - clamp((t - 1200 - 260 * hash(i + 5)) / 140))
+                dot(ctx, x, y, al, 1.15, c)
+            }
+            ring(ctx, t, 760, 520, 7 * f, 15 * f, 22)
+            return 1620
+        }
+
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            ctx.clearRect(0, 0, dn.width, dn.height)
+            if (!dn.playing) return
+            ctx.scale(dn.s, dn.s)
+            ctx.globalCompositeOperation = "lighter"
+            var t = Date.now() - dn.t0
+            if (t > frame(ctx, t)) {
+                dn.playing = false; dn.badgeOp = 1; dn.bump = 1
+                ctx.clearRect(0, 0, dn.lw, dn.lh)
             }
         }
     }
@@ -9315,7 +11396,7 @@ ApplicationWindow {
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 2
                     // Title with the presence pill floating right beside the
-                    // rendered text (static, quality told by its colour class).
+                    // rendered text (static, quality told by its color class).
                     // The pill lives INSIDE the full-width Text so the title
                     // keeps its layout size and elides only for real overflow.
                     Text {
@@ -9363,7 +11444,7 @@ ApplicationWindow {
                     ArtistLinks {
                         Layout.fillWidth: true
                         artists: ab.leadArtists
-                        suffix: (listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " trks" : "")
+                        suffix: root.dateText(listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " trks" : "")
                     }
                 }
                 PopMeter { value: popularity; Layout.alignment: Qt.AlignVCenter }
@@ -9460,7 +11541,7 @@ ApplicationWindow {
                             width: parent.width
                             px: 14
                             artists: ab.leadArtists
-                            suffix: (listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
+                            suffix: root.dateText(listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
                         }
                         Row {
                             spacing: 10; topPadding: 6
@@ -9952,7 +12033,7 @@ ApplicationWindow {
     component ExplicitMark: Rectangle {
         objectName: "explicitMark"
         radius: 3; color: "transparent"
-        // textLo, a step lighter than the dim grey: at 14px the mark sank
+        // textLo, a step lighter than the dim gray: at 14px the mark sank
         // into the row background.
         border.color: root.textLo; border.width: 1
         implicitWidth: 14; implicitHeight: 14
@@ -9985,7 +12066,7 @@ ApplicationWindow {
         readonly property bool pulsing: ntPulse.running
         // Where the word's capitals sit, measured from the glyphs, so a caller
         // beside much larger type can line the two up by eye rather than by
-        // their boxes (a 26px title's box centre is not its capitals' centre).
+        // their boxes (a 26px title's box center is not its capitals' center).
         readonly property real capMiddle: ntWord.y + ntWord.baselineOffset - ntFm.tightBoundingRect("NEW").height / 2
         FontMetrics { id: ntFm; font: ntWord.font }
         implicitHeight: compact ? 14 : 18
@@ -10040,7 +12121,7 @@ ApplicationWindow {
         property int px: 12
         clip: true
         // A Row has no baseline of its own; publish the name text's so callers
-        // can baseline-align a date or tag sitting beside it (centring two
+        // can baseline-align a date or tag sitting beside it (centering two
         // fonts with different descents reads crooked).
         FontMetrics { id: alFm; font.pixelSize: al.px }
         baselineOffset: alFm.ascent
@@ -10174,7 +12255,7 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                     visible: num > 0
                     text: num + "."
-                    // textHi to match the title's resting colour (set to the same
+                    // textHi to match the title's resting color (set to the same
                     // value, not bound to the title, which whitens on hover).
                     color: root.textHi
                     font.family: root.mono; font.pixelSize: 12
@@ -10266,7 +12347,7 @@ ApplicationWindow {
                     ArtistLinks { Layout.fillWidth: true; artists: root.artistsById[tId] || []; suffix: album; albumId: trow.albumId }
                 }
                 PopMeter { value: popularity; Layout.alignment: Qt.AlignVCenter }
-                Text { textFormat: Text.PlainText; text: date !== "" ? date : year; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 84; Layout.alignment: Qt.AlignVCenter }
+                Text { textFormat: Text.PlainText; text: root.dateText(date !== "" ? date : year); color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 84; Layout.alignment: Qt.AlignVCenter }
                 Text { textFormat: Text.PlainText; text: duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 40; Layout.alignment: Qt.AlignVCenter }
                 // Fixed-width slot, badge anchored right so it hugs the button,
                 // short badges (HI-RES) leave the slack on their left, not as a
@@ -10316,19 +12397,132 @@ ApplicationWindow {
         property Flickable pane   // the vertical page to drive
         property var shelf: parent  // the horizontal shelf this rides on (a ListView)
         // Both axes are driven explicitly (and the event always accepted) so
-        // behaviour never depends on wheel fall-through between the handler and
+        // behavior never depends on wheel fall-through between the handler and
         // the Flickable: vertical wheel scrolls the page, horizontal wheel (a
         // trackpad sideways swipe) scrolls the shelf itself.
+        // From the origin, not 0: a ListView pane with a header starts above
+        // 0, and a clamp at 0 would never scroll back to its first row.
         onWheel: function(ev) {
             if (Math.abs(ev.angleDelta.y) >= Math.abs(ev.angleDelta.x)) {
                 if (pane) {
-                    var maxY = Math.max(0, pane.contentHeight - pane.height)
-                    pane.contentY = Math.max(0, Math.min(maxY, pane.contentY - ev.angleDelta.y))
+                    var maxY = pane.originY + Math.max(0, pane.contentHeight - pane.height)
+                    pane.contentY = Math.max(pane.originY, Math.min(maxY, pane.contentY - ev.angleDelta.y))
                 }
             } else if (shelf) {
-                var maxX = Math.max(0, shelf.contentWidth - shelf.width)
-                shelf.contentX = Math.max(0, Math.min(maxX, shelf.contentX - ev.angleDelta.x))
+                var maxX = shelf.originX + Math.max(0, shelf.contentWidth - shelf.width)
+                shelf.contentX = Math.max(shelf.originX, Math.min(maxX, shelf.contentX - ev.angleDelta.x))
             }
+            ev.accepted = true
+        }
+    }
+
+    // macOS sends a trackpad swipe's end as the fingers lift unless the
+    // momentum's first event is already queued; on a busy frame it is not,
+    // and the momentum then arrives after the end. A Flickable takes that
+    // late momentum for a new drag from where the swipe began and snaps back
+    // there (Qt 6.11), so a fast flick threw the page screens back, and a
+    // page that unloads rows far from view (the Releases feed) went blank
+    // until they loaded again. Laid over a page, this scrolls such momentum
+    // itself and passes every other wheel event on to the page. It takes no
+    // clicks or hover.
+    // It rides on the page itself, over its rows and under nothing (a
+    // Flickable's declared children would scroll with its content, so it is
+    // parented to the page directly). A sideways swipe is left to the
+    // shelves, which drive their own scrolling (ShelfWheelRedirect).
+    component MomentumGuard: MouseArea {
+        id: guard
+        property Flickable flick: null
+        // Inside a swipe the page's own scrolling is right.
+        property bool swiping: false
+        parent: flick
+        anchors.fill: parent
+        z: 1000
+        acceptedButtons: Qt.NoButton
+        // A MouseArea owns the cursor over everything it covers, even one
+        // that takes no buttons and names no cursorShape (Qt 6.11), so laid
+        // over a page it turned every pointing hand under it (Settings'
+        // buttons, PREVIEW, DOWNLOAD) into an arrow. QML cannot give the
+        // claim back, so the guard wears the cursor of whatever is under the
+        // pointer. A HoverHandler on the page itself follows the pointer (one
+        // on the guard, or any hover of its own, would starve the rows
+        // beneath of theirs: the page is visited after its rows, so it sees
+        // every move and takes nothing). The search is Qt's own: every
+        // visible, enabled child under the point, topmost first, descended
+        // before the child itself is judged, and the first area with a
+        // cursorShape wins. A disabled one (a busy button) is passed over with
+        // everything in it, as Qt passes it over. Editable text wears the
+        // I-beam Qt gives it (TextInput names no cursorShape). Not childAt's
+        // single topmost item: a button's label sits above its MouseArea as a
+        // sibling, so over the glyphs that found no cursor at all and the
+        // hand flickered off.
+        property int under: Qt.ArrowCursor
+        cursorShape: under
+        HoverHandler {
+            parent: guard.flick
+            onPointChanged: guard.track(point.position)
+            onHoveredChanged: if (!hovered) guard.under = Qt.ArrowCursor
+        }
+        function cursorUnder(item, px, py, depth) {
+            var kids = item.children
+            for (var i = (kids ? kids.length : 0) - 1; i >= 0; i--) {
+                var c = kids[i]
+                if (!c.visible || c.enabled === false || c.width === undefined || c.opacity === 0) continue
+                var p = item.mapToItem(c, px, py)
+                if (p.x < 0 || p.y < 0 || p.x >= c.width || p.y >= c.height) continue
+                if (depth < 32) {
+                    var deep = cursorUnder(c, p.x, p.y, depth + 1)
+                    if (deep >= 0) return deep
+                }
+                if (c.cursorShape !== undefined) return c.cursorShape
+                // A TextInput, or a TextEdit you can type in or select.
+                if (c.cursorPosition !== undefined && c.readOnly !== undefined
+                        && (c.readOnly === false || c.selectByMouse === true)) return Qt.IBeamCursor
+            }
+            return -1
+        }
+        function track(pos) {
+            if (!flick) return
+            var it = flick.contentItem, p = flick.mapToItem(it, pos.x, pos.y)
+            var shape = cursorUnder(it, p.x, p.y, 0)
+            under = shape >= 0 ? shape : Qt.ArrowCursor
+        }
+        // The innermost list under the pointer that scrolls up and down and
+        // has room the way the momentum goes (an open queue row's ledger
+        // box): the swipe before it was its own, so its momentum is too. At
+        // its end the page carries on, as the wheel does.
+        // Every visible child under the point is walked, not childAt's
+        // topmost one: a row's click overlay sits over its ledger.
+        function inner(ev) {
+            var found = null
+            function walk(item) {
+                var kids = item.children
+                for (var i = 0; i < (kids ? kids.length : 0); i++) {
+                    var c = kids[i]
+                    if (!c.visible || c.width === undefined) continue
+                    var p = mapToItem(c, ev.x, ev.y)
+                    if (c.width > 0 && c.height > 0 && (p.x < 0 || p.y < 0 || p.x >= c.width || p.y >= c.height)) continue
+                    if (c.contentY !== undefined && c.interactive && c.flickableDirection !== Flickable.HorizontalFlick) {
+                        var room = ev.pixelDelta.y < 0 ? c.originY + c.contentHeight - c.height - c.contentY
+                                                       : c.contentY - c.originY
+                        if (room > 0.5) found = c
+                    }
+                    walk(c.contentItem !== undefined ? c.contentItem : c)
+                }
+            }
+            walk(flick.contentItem)
+            return found
+        }
+        onWheel: function (ev) {
+            if (ev.phase === Qt.ScrollBegin) swiping = true
+            else if (ev.phase === Qt.ScrollEnd || ev.phase === Qt.NoScrollPhase) swiping = false
+            // A wheel event that moves no pixels (an angle-only notch) is
+            // never taken: scrolling it by its pixels would swallow it.
+            var late = !swiping && (ev.phase === Qt.ScrollUpdate || ev.phase === Qt.ScrollMomentum)
+                       && ev.pixelDelta.y !== 0 && Math.abs(ev.pixelDelta.y) >= Math.abs(ev.pixelDelta.x)
+            if (!late || !flick || !flick.visible) { ev.accepted = false; return }
+            var f = inner(ev) || flick
+            var maxY = f.originY + Math.max(0, f.contentHeight - f.height)
+            f.contentY = Math.max(f.originY, Math.min(maxY, f.contentY - ev.pixelDelta.y))
             ev.accepted = true
         }
     }
@@ -10345,9 +12539,11 @@ ApplicationWindow {
     // hoists the overlay back onto it, viewport-fixed above the delegates.
     // The gradient runs top-to-bottom, so each band is built sideways and
     // rotated about its center: -90 points the dense edge left, 90 right.
+    // `tone` is what the shelf sits on: the page, or a card's surface.
     component ShelfEdgeFades: Item {
         id: sef
         property Flickable shelf: null
+        property color tone: "#0d0f12"
         readonly property real fadeW: 34
         anchors.fill: shelf
         z: 10
@@ -10363,12 +12559,14 @@ ApplicationWindow {
             x: (sef.fadeW - sef.height) / 2; y: (sef.height - sef.fadeW) / 2
             rotation: -90
             visible: sef.shelf !== null && opacity > 0
-            opacity: sef.shelf ? Math.min(1, Math.max(0, sef.shelf.contentX) / sef.fadeW) : 0
+            // From the origin, not 0: a strip of mixed tile widths re-estimates
+            // where its first tile sits once scrolled far and back.
+            opacity: sef.shelf ? Math.min(1, Math.max(0, sef.shelf.contentX - sef.shelf.originX) / sef.fadeW) : 0
             gradient: Gradient {
-                GradientStop { position: 0; color: "#0d0f12" }
-                GradientStop { position: 0.25; color: Qt.alpha("#0d0f12", 0.82) }
-                GradientStop { position: 0.6; color: Qt.alpha("#0d0f12", 0.28) }
-                GradientStop { position: 1; color: Qt.alpha("#0d0f12", 0) }
+                GradientStop { position: 0; color: sef.tone }
+                GradientStop { position: 0.25; color: Qt.alpha(sef.tone, 0.82) }
+                GradientStop { position: 0.6; color: Qt.alpha(sef.tone, 0.28) }
+                GradientStop { position: 1; color: Qt.alpha(sef.tone, 0) }
             }
         }
         Rectangle {
@@ -10377,12 +12575,12 @@ ApplicationWindow {
             rotation: 90
             visible: sef.shelf !== null && opacity > 0
             opacity: sef.shelf ? Math.min(1, Math.max(0,
-                         sef.shelf.contentWidth - sef.shelf.width - sef.shelf.contentX) / sef.fadeW) : 0
+                         sef.shelf.originX + sef.shelf.contentWidth - sef.shelf.width - sef.shelf.contentX) / sef.fadeW) : 0
             gradient: Gradient {
-                GradientStop { position: 0; color: "#0d0f12" }
-                GradientStop { position: 0.25; color: Qt.alpha("#0d0f12", 0.82) }
-                GradientStop { position: 0.6; color: Qt.alpha("#0d0f12", 0.28) }
-                GradientStop { position: 1; color: Qt.alpha("#0d0f12", 0) }
+                GradientStop { position: 0; color: sef.tone }
+                GradientStop { position: 0.25; color: Qt.alpha(sef.tone, 0.82) }
+                GradientStop { position: 0.6; color: Qt.alpha(sef.tone, 0.28) }
+                GradientStop { position: 1; color: Qt.alpha(sef.tone, 0) }
             }
         }
     }
@@ -10442,7 +12640,7 @@ ApplicationWindow {
                 width: parent.width
                 mediaId: aId; label: "Download artist"
                 // What the strip on the cover already says, said again by the
-                // control that would act on it: a catalogue you partly hold
+                // control that would act on it: a catalog you partly hold
                 // is not a fresh grab.
                 libArtist: aName
                 onTap: function(){ waves.downloadArtist(aId) }
@@ -10591,8 +12789,8 @@ ApplicationWindow {
             }
             return "DOWNLOAD"
         }
-        // The pill's tier colours, so the two things this card can say never
-        // disagree about what a colour means: green proven, gold guess, cyan
+        // The pill's tier colors, so the two things this card can say never
+        // disagree about what a color means: green proven, gold guess, cyan
         // partial, accent for a plain download.
         readonly property color libInk: bc.libState === "proven" ? root.green
                                       : bc.libState === "maybe" ? root.gold
@@ -10611,6 +12809,17 @@ ApplicationWindow {
                     anchors.fill: parent
                     cursorShape: bc.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: root.openBrowseCard(bc.card)
+                }
+                // The same two corner marks the art card wears, opened by
+                // the cover's own hover (the card-wide handler above is for
+                // prefetch, and a pointer on the caption is not asking).
+                HoverHandler { id: bcArtHover }
+                CoverMarks {
+                    libState: bc.libState
+                    albumId: bc.libPresence ? (bc.libPresence.local_album_id || "") : ""
+                    qclass: bc.libPresence ? (bc.libPresence.local_class || "") : ""
+                    qualWord: (bc.kind === "album" || bc.kind === "track") ? root.releaseQualWord(bc.card) : ""
+                    open: bcArtHover.hovered
                 }
             }
             Text {
@@ -10661,15 +12870,25 @@ ApplicationWindow {
                 // control alone, which always fits. Measured off the parts
                 // rather than the Row, because the Row's implicitWidth is what
                 // hiding the word changes (reading it here would be a loop).
+                // Before the word stands down, the gaps give way: the one to
+                // the box (6 to 3) and the ones inside the control (4 to 3).
+                // PREVIEW fit the 156px card by about 2px in the macOS font,
+                // so a slightly wider one (DejaVu Sans, the usual Linux UI
+                // font) hid the word on every card at its normal size.
                 readonly property real gapW: 6
+                readonly property real gapMinW: 3
+                readonly property real spaceW: 4
+                readonly property real spaceMinW: 3
                 readonly property real icoW: 10
-                readonly property real stopW: bcPvStop.visible ? bcPvRow.spacing + bcPvStop.implicitWidth : 0
-                readonly property real availW: parent.width - bcDlBox.width - gapW
-                readonly property real naturalW: icoW + bcPvRow.spacing + bcPvWord.implicitWidth + stopW
-                readonly property bool tight: naturalW > availW
+                readonly property int spaces: bcPvStop.visible ? 2 : 1
+                readonly property real partsW: icoW + bcPvWord.implicitWidth + (bcPvStop.visible ? bcPvStop.implicitWidth : 0)
+                readonly property real over: Math.max(0, partsW + spaces * spaceW + gapW - (parent.width - bcDlBox.width))
+                readonly property real give: spaces * (spaceW - spaceMinW) + (gapW - gapMinW)
+                readonly property bool tight: over > give
                 Row {
                     id: bcPvRow
-                    anchors.verticalCenter: parent.verticalCenter; spacing: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: bcPv.tight ? bcPv.spaceW : bcPv.spaceW - (bcPv.spaceW - bcPv.spaceMinW) * bcPv.over / bcPv.give
                     Ico {
                         // The click pauses (togglePreview), it doesn't stop,
                         // so the active glyph is a pause, matching the art view.
@@ -10835,7 +13054,7 @@ ApplicationWindow {
     // opacity, which gates the children's MouseAreas: a control on its way out
     // can never swallow a click. Place it where the control used to be
     // anchored and put the control inside.
-    // Settings > Advanced > "Hover controls slide in". Off keeps the plain
+    // Settings > Appearance > "Hover controls slide in". Off keeps the plain
     // fade the controls used before the motion landed, for anyone who finds
     // the movement distracting.
     property bool hoverMotion: waves.wavesPref("hover_control_motion") !== false
@@ -10902,7 +13121,7 @@ ApplicationWindow {
         property color liveBorder: idleBorder
         readonly property bool motion: root.hoverMotion
         readonly property real travel: 16
-        // Centred horizontally by anchor, placed vertically by the belt below:
+        // Centered horizontally by anchor, placed vertically by the belt below:
         // centerIn would own y and fight it.
         onIdleItemChanged: if (idleItem) {
             idleItem.parent = rswPill
@@ -11145,10 +13364,510 @@ ApplicationWindow {
     // card, no frame, quiet caption beneath, download surfacing only on hover
     // (or while it carries live download state). hero:true renders the big
     // top-shelf variant with the caption overlaid on a bottom scrim.
+    // A small mono fact chip for the Releases feed (a date, a release kind,
+    // a count). accent = something still to come.
+    component RelChip: Rectangle {
+        id: rch
+        property string text: ""
+        property bool accent: false
+        property bool danger: false   // red: a release TIDAL does not carry
+        radius: 3; color: "transparent"; border.width: 1
+        border.color: rch.danger ? root.redDim : rch.accent ? root.accentDim : root.border1
+        implicitHeight: 16; implicitWidth: rchT.implicitWidth + 10
+        width: implicitWidth; height: implicitHeight
+        Text {
+            id: rchT
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: rch.text
+            color: rch.danger ? root.red : rch.accent ? root.accent : root.textLo
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.6
+        }
+    }
+    // A group's strip in the timeline hint: a flat band across the list
+    // between hairlines, the kind and its count. The copy pinned to the top
+    // casts a soft edge over the rows scrolling under it.
+    component RelTipStrip: Item {
+        id: rts
+        property string group: ""
+        property int n: 0
+        property bool pinned: false
+        Rectangle {
+            anchors.fill: parent
+            color: Qt.darker(root.surface2, 1.22)
+            Rectangle { width: parent.width; height: 1; color: root.border1 }
+            Rectangle { y: parent.height - 1; width: parent.width; height: 1; color: root.border1 }
+        }
+        // Its edge thins as the next strip pushes it out, so the shadow
+        // never falls across the strip taking its place.
+        Rectangle {
+            visible: rts.pinned
+            opacity: Math.max(0, 1 + rts.y / 8)
+            y: parent.height; width: parent.width; height: 8
+            gradient: Gradient {
+                GradientStop { position: 0; color: Qt.alpha("#000000", 0.35) }
+                GradientStop { position: 1; color: Qt.alpha("#000000", 0) }
+            }
+        }
+        Text {
+            objectName: "relTipStripText"
+            anchors.left: parent.left; anchors.leftMargin: 9
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: root.relTipGroupName(rts.group) + "  \u00b7  " + rts.n
+            color: root.textHi
+            font.family: root.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2
+        }
+    }
+    // The covers an Excluded artist's library albums carry, in one tile: one
+    // fills it, two split it, three are a half and two quarters, four are
+    // quarters. Never an empty cell.
+    component RelCovers: Item {
+        id: rcv
+        property var covers: []
+        readonly property int n: Math.min(4, rcv.covers.length)
+        readonly property real hw: (width - 2) / 2
+        readonly property real hh: (height - 2) / 2
+        function at(i) { return i < rcv.n ? ("" + rcv.covers[i]) : "" }
+        Art { visible: rcv.n <= 1; anchors.fill: parent; radius: 8; url: rcv.at(0) }
+        Art { visible: rcv.n >= 2; x: 0; y: 0; width: rcv.hw; height: rcv.n === 4 ? rcv.hh : rcv.height; radius: 4; url: rcv.at(0) }
+        Art { visible: rcv.n === 2; x: rcv.hw + 2; y: 0; width: rcv.hw; height: rcv.height; radius: 4; url: rcv.at(1) }
+        Art { visible: rcv.n >= 3; x: rcv.hw + 2; y: 0; width: rcv.hw; height: rcv.hh; radius: 4; url: rcv.at(1) }
+        Art { visible: rcv.n >= 3; x: rcv.hw + 2; y: rcv.hh + 2; width: rcv.hw; height: rcv.hh; radius: 4; url: rcv.at(2) }
+        Art { visible: rcv.n === 4; x: 0; y: rcv.hh + 2; width: rcv.hw; height: rcv.hh; radius: 4; url: rcv.at(3) }
+    }
+    // A Ledger column head; one with a sortKey sorts the list when clicked.
+    component RelColHead: Text {
+        id: rch2
+        property string sortKey: ""
+        readonly property bool on: rch2.sortKey !== "" && root.releasesFollowSort === rch2.sortKey
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 9
+        textFormat: Text.PlainText
+        color: rch2.on ? root.accent : root.textDim
+        font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1
+        MouseArea {
+            anchors.fill: parent; anchors.margins: -6
+            enabled: rch2.sortKey !== ""; cursorShape: Qt.PointingHandCursor
+            onClicked: root.releasesSetFollowSort(rch2.sortKey)
+        }
+    }
+    // A follow's whole career, the Ledger's last column, as an LED panel in
+    // the download bar's dot grammar: every cell of the span an unlit dot,
+    // a release lighting its column from the floor (six for an album, four
+    // for an EP, two for a single, one more when a column holds several; a
+    // music video's dot is cyan),
+    // green when it came out in the last 30 days or is still to come. The
+    // span is the artist's own: from the first of January of their first
+    // release to today, or, after ten quiet years, to the end of the year
+    // of their last. Its first year is carved into the dots at the left and
+    // NOW at the right; while the pointer scrubs along, NOW reads the year
+    // under it. Hovering shows the nearest release in the pane's hint, and
+    // a click opens it.
+    component RelTimeline: Item {
+        id: tl
+        property var releases: []  // newest first, each {id, title, art, day, rtype, tracks, kind?}
+        // What MusicBrainz lists and TIDAL does not carry, newest first,
+        // each {id, rgid, title, day, rtype, mb: true}: drawn in red on the
+        // same bars. Empty with the MusicBrainz setting off.
+        property var missing: []
+        readonly property int now: root.relDayNum(root.todayIso)
+        // Oldest first, so a newer column draws on top.
+        readonly property var marks: {
+            var out = [], rs = tl.releases || [], ms = tl.missing || []
+            for (var i = rs.length - 1; i >= 0; i--) {
+                var day = "" + rs[i].day
+                if (day.length >= 10) out.push({ r: rs[i], dn: root.relDayNum(day), mb: false })
+            }
+            for (var j = ms.length - 1; j >= 0; j--) {
+                var dm = "" + ms[j].day
+                if (dm.length >= 10) out.push({ r: ms[j], dn: root.relDayNum(dm), mb: true })
+            }
+            out.sort(function (a, b) { return a.dn - b.dn })
+            return out
+        }
+        readonly property int firstYear: tl.marks.length ? +("" + tl.marks[0].r.day).slice(0, 4) : +root.todayIso.slice(0, 4)
+        readonly property int lastYear: tl.marks.length ? +("" + tl.marks[tl.marks.length - 1].r.day).slice(0, 4) : tl.firstYear
+        readonly property int lastDn: tl.marks.length ? tl.marks[tl.marks.length - 1].dn : tl.now
+        readonly property bool ended: tl.marks.length > 0 && tl.now - tl.lastDn > 3652
+        // From Jan 1 of the first year (the year carved at the left), at
+        // least a year wide: a debut under a year old pads to its year's end.
+        readonly property int t0: root.relDayNum(tl.firstYear + "-01-01")
+        readonly property int t1: Math.max(tl.t0 + 365,
+                                           tl.ended ? root.relDayNum((tl.lastYear + 1) + "-01-01") - 1 : Math.max(tl.now, tl.lastDn) + 10)
+        readonly property real spanYears: (tl.t1 - tl.t0) / 365.25
+        // A hairline every 1, 2, 5 or 10 years by the span's length, the
+        // first at least half a step clear of the start.
+        readonly property int step: tl.spanYears <= 6 ? 1 : tl.spanYears <= 12 ? 2 : tl.spanYears <= 30 ? 5 : 10
+        readonly property var divs: {
+            var out = [], y0 = Math.ceil((tl.firstYear + Math.max(1, tl.step / 2)) / tl.step) * tl.step
+            for (var y = y0; ; y += tl.step) {
+                var dn = root.relDayNum(y + "-01-01")
+                if (dn >= tl.t1) break
+                if (dn > tl.t0) out.push(dn)
+            }
+            return out
+        }
+        // The matrix: 3 px dots on a 5 px pitch, six rows. Four glyphs of a
+        // 3x5 dot font take 15 columns at either end; the span gets the rest.
+        readonly property real pitch: 5
+        readonly property int rows: 6
+        readonly property real mH: tl.rows * tl.pitch - 2
+        readonly property int cols: Math.max(1, Math.floor(width / tl.pitch))
+        readonly property int wordCols: 15
+        readonly property int c0: tl.wordCols + 2
+        readonly property int c1: Math.max(tl.c0 + 1, tl.cols - tl.wordCols - 2)
+        readonly property real trY: 7
+        readonly property real trH: height - 14
+        readonly property real my: Math.round(tl.trY + (tl.trH - tl.mH) / 2)
+        readonly property real baseY: tl.my + tl.mH
+        function xOf(dn) { return tl.c0 * tl.pitch + (dn - tl.t0) / Math.max(1, tl.t1 - tl.t0) * (tl.c1 - tl.c0) * tl.pitch }
+        function colOf(dn) { return Math.max(tl.c0, Math.min(tl.c1 - 1, Math.floor(tl.xOf(dn) / tl.pitch))) }
+        // A career with a release still to come keeps at least one column
+        // past NOW for it, however long the span (else today and that day
+        // share the last column and its bar lands in the gap past the grid).
+        readonly property bool hasAhead: tl.lastDn > tl.now
+        readonly property int nowCol: Math.min(tl.colOf(tl.now), tl.hasAhead ? tl.c1 - 2 : tl.c1 - 1)
+        // The span in periods: a year on a long career, a half-year or a
+        // quarter on a short one, so a bar is never a sliver.
+        readonly property int perMonths: tl.spanYears > 14 ? 12 : tl.spanYears > 7 ? 6 : 3
+        function periodOf(dn) {
+            var d = new Date(dn * 86400000), p = Math.floor(d.getUTCMonth() / tl.perMonths)
+            return [d.getUTCFullYear(), p]
+        }
+        function periodStart(y, p) { return root.relDayNum(y + "-" + ("0" + (p * tl.perMonths + 1)).slice(-2) + "-01") }
+        // One bar per period that saw a release: as wide as its stretch of
+        // time, a dot high per release (the matrix is the ceiling: a busier
+        // period fills it and samples its mix), stacked albums (0) first,
+        // then EPs (1), then singles (2), so the base of a bar is its
+        // heaviest records, then music videos (3), in cyan, and on top what
+        // MusicBrainz lists that TIDAL lacks (4), in red. What is still to
+        // come is its own bar, so a bar never crosses NOW.
+        readonly property var lit: {
+            var by = {}, out = []
+            for (var i = 0; i < tl.marks.length; i++) {
+                var m = tl.marks[i], yp = tl.periodOf(m.dn), k = "" + (m.r.rtype || "album")
+                var ahead = m.dn > tl.now, key = yp[0] + "/" + yp[1] + (ahead ? "+" : "")
+                var e = by[key] || (by[key] = { y: yp[0], p: yp[1], n: 0, ids: [], rows: [], kinds: [], ahead: ahead, fresh: false })
+                e.n++; e.ids.push("" + m.r.id); e.rows.unshift(m.r)
+                e.kinds.push(m.mb ? 4 : k === "album" ? 0 : k === "ep" ? 1 : k === "video" ? 3 : 2)
+                if (!m.mb && !ahead && tl.now - m.dn <= 30) e.fresh = true
+            }
+            for (var kk in by) {
+                var x = by[kk]
+                var a = tl.periodStart(x.y, x.p), b = tl.periodStart(x.y + (x.p + 1 === 12 / tl.perMonths ? 1 : 0), (x.p + 1) % (12 / tl.perMonths))
+                x.c0 = x.ahead ? Math.max(tl.nowCol + 1, tl.colOf(a)) : Math.min(tl.nowCol, tl.colOf(a))
+                x.c1 = x.ahead ? Math.max(x.c0, tl.colOf(b) - 1) : Math.min(tl.nowCol, Math.max(x.c0, tl.colOf(b) - 1))
+                // A gap column between bars wide enough to spare one.
+                if (x.c1 - x.c0 >= 3) x.c1--
+                out.push(x)
+            }
+            // Periods that land on the same columns (a long career on a
+            // narrow timeline) are one bar holding them all: drawn over each
+            // other, the older could never be pointed at or listed.
+            out.sort(function (p, q) { return (p.ahead - q.ahead) || (p.c0 - q.c0) || (p.y - q.y) || (p.p - q.p) })
+            var bars = []
+            for (var m = 0; m < out.length; m++) {
+                var cur = out[m], prev = bars.length ? bars[bars.length - 1] : null
+                if (prev && prev.ahead === cur.ahead && cur.c0 <= prev.c1) {
+                    prev.c1 = Math.max(prev.c1, cur.c1)
+                    prev.n += cur.n
+                    prev.ids = prev.ids.concat(cur.ids)
+                    prev.rows = cur.rows.concat(prev.rows)  // newest first
+                    prev.kinds = prev.kinds.concat(cur.kinds)
+                    prev.fresh = prev.fresh || cur.fresh
+                } else {
+                    bars.push(cur)
+                }
+            }
+            // A dot high per release up to the matrix, sampling the mix with
+            // both ends kept: the heaviest records at the base, and the top
+            // kind (a video, a release TIDAL lacks) always shows.
+            for (var z = 0; z < bars.length; z++) {
+                var e = bars[z], h = Math.min(tl.rows, e.n), dots = []
+                e.kinds.sort()
+                for (var d = 0; d < h; d++) dots.push(e.kinds[h > 1 ? Math.round(d * (e.n - 1) / (h - 1)) : 0])
+                e.dots = dots
+            }
+            return bars
+        }
+        function barAt(col) {
+            for (var i = 0; i < tl.lit.length; i++)
+                if (col >= tl.lit[i].c0 && col <= tl.lit[i].c1) return tl.lit[i]
+            return null
+        }
+        property var near: []      // the releases under the pointer, newest first
+        property var hot: ({})     // their ids, lit while this timeline owns the hint
+        readonly property bool owns: root.relTipOwner === tl
+        readonly property bool pointerIn: tlMa.containsMouse
+        function isLit(id) {
+            return tl.owns && (root.relTipHotId !== "" ? root.relTipHotId === id : !!tl.hot[id])
+        }
+        Component.onDestruction: root.relTipHide(tl)
+        // The scrub: the year under the pointer; once the pointer moves
+        // on into this timeline's hint, the year it left from, held while
+        // the hint stays up wherever the pointer goes in it; -1 when neither.
+        property real scrubX: -1
+        property int heldYear: -1
+        onOwnsChanged: if (!tl.owns) tl.heldYear = -1
+        readonly property int scrubCol: tl.scrubX < 0 ? -1
+            : Math.max(tl.c0, Math.min(tl.c1 - 1, Math.floor(tl.scrubX / tl.pitch)))
+        readonly property int scrubYear: {
+            if (tl.scrubCol >= 0) {
+                var f = ((tl.scrubCol + 0.5) * tl.pitch - tl.c0 * tl.pitch) / ((tl.c1 - tl.c0) * tl.pitch)
+                return new Date((tl.t0 + f * (tl.t1 - tl.t0)) * 86400000).getUTCFullYear()
+            }
+            if (tl.owns && tl.heldYear >= 0) return tl.heldYear
+            if (tl.owns && root.relTipHotId !== "")
+                for (var i = 0; i < tl.marks.length; i++)
+                    if ("" + tl.marks[i].r.id === root.relTipHotId) return +("" + tl.marks[i].r.day).slice(0, 4)
+            return -1
+        }
+        readonly property string endWord: tl.scrubYear >= 0 ? "" + tl.scrubYear
+            : !tl.ended ? "NOW" : tl.lastYear === tl.firstYear ? "" : "" + tl.lastYear
+        readonly property color endTint: tl.scrubYear >= 0 || !tl.ended ? root.accent : root.textLo
+        readonly property var glyphs: ({
+            "0": ["111","101","101","101","111"], "1": ["010","110","010","010","111"],
+            "2": ["111","001","111","100","111"], "3": ["111","001","111","001","111"],
+            "4": ["101","101","111","001","001"], "5": ["111","100","111","001","111"],
+            "6": ["111","100","111","101","111"], "7": ["111","001","001","001","001"],
+            "8": ["111","101","111","101","111"], "9": ["111","101","111","001","111"],
+            // The letters are drawn wider than the digits (N and O four
+            // columns, W five), so NOW spans the room a year takes and reads
+            // as NOW, not a squeezed MOW.
+            "N": ["1001","1101","1011","1001","1001"], "O": ["0110","1001","1001","1001","0110"],
+            "W": ["10001","10001","10101","10101","01010"] })
+        function glyphW(ch) { var g = tl.glyphs[ch]; return g ? g[0].length : 3 }
+        // A word's lit cells, its last column on `endCol`, on rows 1..5, a
+        // blank column between letters.
+        function cells(word, endCol) {
+            var out = [], w = -1
+            for (var i = 0; i < word.length; i++) w += tl.glyphW(word[i]) + 1
+            var col = endCol - w + 1
+            for (var g = 0; g < word.length; g++) {
+                var rowsG = tl.glyphs[word[g]] || []
+                for (var r = 0; r < rowsG.length; r++)
+                    for (var c = 0; c < rowsG[r].length; c++)
+                        if (rowsG[r][c] === "1") out.push([(col + c) * tl.pitch, tl.my + (r + 1) * tl.pitch])
+                col += tl.glyphW(word[g]) + 1
+            }
+            return out
+        }
+        function gridRows(fromCol, toCol) {
+            var out = [], xa = fromCol * tl.pitch, xb = toCol * tl.pitch - 2
+            if (xb <= xa) return out
+            for (var r = 0; r < tl.rows; r++) {
+                var y = tl.my + r * tl.pitch + 1.5
+                out.push([Qt.point(xa, y), Qt.point(xb, y)])
+            }
+            return out
+        }
+        Rectangle {
+            x: -8; y: tl.trY; width: tl.width + 16; height: tl.trH; radius: 6
+            color: "#0a0c0f"; border.color: root.divider
+        }
+        // The unlit grid (the span, then the two word zones), and a green
+        // tint on what is still to come for a career that is going on.
+        Shape {
+            anchors.fill: parent
+            ShapePath {
+                strokeColor: root.surface3; strokeWidth: 3; capStyle: ShapePath.FlatCap
+                strokeStyle: ShapePath.DashLine; dashPattern: [1, 2 / 3]
+                fillColor: "transparent"
+                PathMultiline {
+                    paths: tl.gridRows(tl.c0, tl.ended ? tl.c1 : tl.nowCol + 1)
+                        .concat(tl.gridRows(0, tl.wordCols)).concat(tl.gridRows(tl.cols - tl.wordCols, tl.cols))
+                }
+            }
+            ShapePath {
+                strokeColor: Qt.alpha(root.accent, 0.1); strokeWidth: 3; capStyle: ShapePath.FlatCap
+                strokeStyle: ShapePath.DashLine; dashPattern: [1, 2 / 3]
+                fillColor: "transparent"
+                PathMultiline { paths: tl.ended ? [] : tl.gridRows(tl.nowCol + 1, tl.c1) }
+            }
+        }
+        Repeater {
+            model: tl.divs
+            Rectangle {
+                required property var modelData
+                x: tl.colOf(modelData) * tl.pitch - 1; y: tl.my - 3; width: 1; height: tl.mH + 6
+                color: root.border1
+            }
+        }
+        Rectangle { visible: !tl.ended; x: (tl.nowCol + 1) * tl.pitch - 1; y: tl.my - 3; width: 1; height: tl.mH + 6; color: root.accentDim }
+        Repeater {
+            model: tl.cells("" + tl.firstYear, tl.wordCols - 1)
+            Rectangle { required property var modelData; x: modelData[0]; y: modelData[1]; width: 3; height: 3; color: root.accent }
+        }
+        Repeater {
+            model: tl.cells(tl.endWord, tl.cols - 1)
+            Rectangle { required property var modelData; x: modelData[0]; y: modelData[1]; width: 3; height: 3; color: tl.endTint }
+        }
+        // The scrub head: the pointer's column, dimly lit, unless a bar
+        // under the pointer is lit instead.
+        Repeater {
+            model: tl.scrubCol >= 0 && tl.near.length === 0 ? tl.rows : 0
+            Rectangle {
+                required property int index
+                x: tl.scrubCol * tl.pitch; y: tl.my + index * tl.pitch; width: 3; height: 3
+                color: Qt.alpha(root.accent, 0.35)
+            }
+        }
+        Repeater {
+            model: tl.lit
+            Item {
+                id: lc
+                required property var modelData
+                readonly property bool on: lc.modelData.ids.some(function (i) { return tl.isLit(i) })
+                // Lit green while hovered, fresh or still to come; else an
+                // album dot is bright, an EP's softer, a single's dim, a
+                // video's cyan. A release TIDAL lacks is red whatever the
+                // bar does.
+                readonly property bool green: lc.on || lc.modelData.fresh || lc.modelData.ahead
+                x: lc.modelData.c0 * tl.pitch; y: tl.my; width: (lc.modelData.c1 - lc.modelData.c0 + 1) * tl.pitch; height: tl.mH
+                // Every column of the bar carries the same stack: one dot per
+                // (column, row), with no item per column between.
+                readonly property int high: lc.modelData.dots.length
+                Repeater {
+                    model: (lc.modelData.c1 - lc.modelData.c0 + 1) * lc.high
+                    Rectangle {
+                        required property int index
+                        readonly property int row: index % lc.high
+                        readonly property int kind: lc.modelData.dots[row]
+                        x: Math.floor(index / lc.high) * tl.pitch; y: tl.mH - 3 - row * tl.pitch; width: 3; height: 3
+                        color: kind === 4 ? root.red : lc.on ? root.accentSoft : lc.green ? root.accent
+                             : kind === 3 ? root.cyan : kind === 0 ? root.textHi : root.textLo
+                        opacity: kind === 4 ? (lc.on ? 1 : 0.9) : lc.on ? 1
+                               : lc.modelData.ahead && !lc.modelData.fresh ? 0.55
+                               : kind === 0 ? 1 : kind === 1 ? 0.95 : 0.78
+                    }
+                }
+            }
+        }
+        MouseArea {
+            id: tlMa
+            anchors.fill: parent; hoverEnabled: true
+            cursorShape: tl.near.some(function (r) { return !r.mb }) ? Qt.PointingHandCursor : Qt.ArrowCursor
+            // The bar under the pointer (or a column to either side of
+            // one), with everything in its period (those the hint lists,
+            // to be picked there).
+            function pick(mx) {
+                var col = Math.floor(mx / tl.pitch), bar = tl.barAt(col) || tl.barAt(col - 1) || tl.barAt(col + 1)
+                if (!bar) { tl.near = []; tl.hot = ({}); root.relTipHide(tl); return }
+                var hot = {}
+                for (var j = 0; j < bar.ids.length; j++) hot[bar.ids[j]] = true
+                tl.near = bar.rows; tl.hot = hot; root.relTipHotId = ""
+                root.relTipShow(tl, Math.round((bar.c0 + bar.c1 + 1) * tl.pitch / 2), tl.trY - 2, tl.trY + tl.trH + 2, bar.rows)
+            }
+            onPositionChanged: function (mouse) { tl.scrubX = mouse.x; pick(mouse.x) }
+            onExited: { tl.heldYear = tl.owns ? tl.scrubYear : -1; tl.scrubX = -1; tl.near = []; root.relTipLeave(tl) }
+            onClicked: {
+                // The newest release TIDAL has: a mark for one it lacks opens nothing.
+                var r = null
+                for (var i = 0; i < tl.near.length && !r; i++) if (!tl.near[i].mb) r = tl.near[i]
+                if (!r) return
+                root.relTipHide(tl)
+                root.openReleaseEntry(r)
+            }
+        }
+    }
+    // One release in the Releases feed: the album card (cover, title, artist,
+    // library pill, hover download), then what the feed is about: when, what
+    // kind, explicit or not. The caption's own date is dropped for the date
+    // chip. A dot marks what arrived since the last visit, for this visit.
+    component ReleaseCard: Item {
+        id: rc
+        property var card: ({})
+        readonly property string day: root.releaseDay(card)
+        readonly property bool upcoming: root.todayIso !== "" && day > root.todayIso
+        readonly property bool video: card.kind === "video"
+        width: video ? root.relVideoW : root.relCardW; height: root.relCardH
+        // A music video is drawn 16:9 at the cover's height, so it reads as a
+        // video at a glance and the feed rows keep their heights.
+        Loader {
+            id: rcCard
+            width: rc.width; height: root.relCardH - 22
+            sourceComponent: rc.video ? relVideoBody : relAlbumBody
+        }
+        Component { id: relAlbumBody; ArtCard { card: rc.card; hideDate: true } }
+        Component {
+            id: relVideoBody
+            Item {
+                readonly property int secs: rc.card.duration_sec || 0
+                BigVideoThumb {
+                    id: rvThumb
+                    width: parent.width; height: root.relCardW
+                    url: rc.card.art || ""
+                    videoId: "" + (rc.card.id || ""); vTitle: rc.card.title || ""; vArtist: rc.card.artist || ""
+                    vDuration: parent.secs > 0 ? Math.floor(parent.secs / 60) + ":" + ("0" + parent.secs % 60).slice(-2) : ""
+                    spec: "" + (rc.card.quality || "")
+                }
+                // Title and artist where a cover's are, the download beside
+                // them, as on the artist page's video cells.
+                Column {
+                    anchors.left: parent.left; anchors.right: rvDl.left; anchors.rightMargin: 10
+                    anchors.top: rvThumb.bottom; anchors.topMargin: 8
+                    spacing: 2
+                    Text {
+                        textFormat: Text.PlainText
+                        text: rc.card.title || ""
+                        color: root.textHi; font.pixelSize: 13; font.bold: true
+                        width: parent.width; elide: Text.ElideRight
+                        font.underline: rvTitleMa.containsMouse
+                        MouseArea {
+                            id: rvTitleMa
+                            anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left
+                            width: Math.min(parent.implicitWidth, parent.width)
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.openBrowseCard(rc.card)
+                        }
+                    }
+                    ArtistLinks {
+                        artists: root.cardLeadArtists(rc.card); px: 11
+                        width: Math.min(implicitWidth, parent.width)
+                    }
+                }
+                DownloadButton {
+                    id: rvDl
+                    anchors.right: parent.right
+                    anchors.top: rvThumb.bottom; anchors.topMargin: 10
+                    mediaId: "" + (rc.card.id || ""); ownedCheck: true; label: "Download"; noun: "video"
+                    onTap: function(){ waves.downloadVideo("" + (rc.card.id || "")) }
+                }
+            }
+        }
+        Row {
+            anchors.top: rcCard.bottom; anchors.topMargin: 6
+            height: 16; spacing: 6
+            Rectangle {
+                objectName: "releaseFreshDot"
+                // A video's id carries its "v:" mark (an album can share the number).
+                visible: !!root.releasesFreshIds[(rc.video ? "v:" : "") + (rc.card.id || "")]
+                width: 6; height: 6; radius: 3; color: root.accent
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            RelChip {
+                objectName: "releaseDateChip"
+                text: root.releasesDateLabel(rc.day, root.todayIso); accent: rc.upcoming
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            RelChip {
+                objectName: "releaseKindChip"
+                text: ("" + (rc.card.rtype || "")).toUpperCase(); visible: text !== ""
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            ExplicitMark { visible: rc.card.explicit === true; anchors.verticalCenter: parent.verticalCenter }
+        }
+    }
+
     component ArtCard: Item {
         id: ac
         property var card: ({})
         property bool hero: false
+        property bool hideDate: false   // see CardCaption.hideDate
+        // The quality word for the cover's top-right mark, "" for none: the
+        // release's best tier under the quality setting (releaseQualWord),
+        // for the kinds that have an audio tier to state.
+        property string qualWord: (ac.kind === "album" || ac.kind === "track") ? root.releaseQualWord(ac.card) : ""
         readonly property string kind: card.kind || ""
         readonly property real artSize: hero ? 280 : 200
         width: artSize
@@ -11162,7 +13881,7 @@ ApplicationWindow {
             onHoveredChanged: hovered ? root.hoverPrefetch(ac.card) : root.hoverPrefetchCancel(ac.card)
         }
         // The library verdict this card carries, resolved ONCE per card. The
-        // hover strip needs it to colour its download half and the pill needs
+        // hover strip needs it to color its download half and the pill needs
         // it to say what is held, and asking twice would be two QML->Python
         // calls per card on a shelf of them (the economy AlbumPresencePill's
         // single-object property exists for). Albums only: a playlist or a mix
@@ -11341,23 +14060,21 @@ ApplicationWindow {
                 }
                 CardCaption { card: ac.card; px: 12; metaColor: "#f2f4f7"; width: parent.width; settled: ac.haveIt }
             }
-            // The library pill, top-left over the art: the one corner no
-            // caption or hover control uses. Unlike the strip it does NOT wait
-            // for a hover, which is the whole reason it is here: a shelf of
-            // cards has to answer "what do I already have" at a glance, and
-            // the strip only appears under the cursor. Fed from the card's own
-            // resolved verdict rather than AlbumPresencePill, which would ask
-            // the same question a second time per card.
-            LibraryTag {
-                shown: ac.libPresent
-                settleKey: "" + (ac.card.id || "")
-                x: 10; y: 10
-                have: ac.libPresence ? (ac.libPresence.local_tracks || 0) : 0
-                total: ac.card.tracks || 0
-                declared: ac.libPresence ? (ac.libPresence.local_declared || 0) : 0
+            // The cover marks, top corners over the art: the top edge is the
+            // one no caption or hover control uses, so they stay up under the
+            // strip. Unlike the strip they do NOT wait for a hover, which is
+            // the whole reason they are here: a shelf of cards has to answer
+            // "what do I already have" at a glance, and the strip only
+            // appears under the cursor. Fed from the card's own resolved
+            // verdict rather than AlbumPresencePill, which would ask the same
+            // question a second time per card. A child of the art, so they
+            // ride the hover tilt with the cover.
+            CoverMarks {
+                libState: ac.libState
                 albumId: ac.libPresence ? (ac.libPresence.local_album_id || "") : ""
                 qclass: ac.libPresence ? (ac.libPresence.local_class || "") : ""
-                proven: ac.libSure
+                qualWord: ac.qualWord
+                open: acWrapHover.hovered
             }
             // The artist answer to the pill above, for the same reason: a shelf
             // of artists has to say "what do I already have" at a glance. It
@@ -11430,7 +14147,7 @@ ApplicationWindow {
                                         : (acRiser.acPvSt === "error" ? root.red : root.accentDim)
                 // The idle pill's outline comes with the verdict too, so the
                 // two halves read as one control in one mood rather than a
-                // coloured half bolted into an accent frame.
+                // colored half bolted into an accent frame.
                 idleBorder: acStrip.stEdge
                 liveItem: Column {
                     id: acLive
@@ -11475,10 +14192,10 @@ ApplicationWindow {
                 idleItem: Item {
                     id: acStrip
                     width: acStripRow.implicitWidth; height: 30
-                    // The verdict, in the tier colours the library pill uses,
+                    // The verdict, in the tier colors the library pill uses,
                     // so the two things a card now says (the pill's what you
                     // have, the half's what a click will do) never disagree
-                    // about what a colour means. Unlike the full download
+                    // about what a color means. Unlike the full download
                     // button this half stays UNFILLED: the strip is a thin
                     // outlined control riding on artwork, and filling one half
                     // of it made a solid block of a shape whose whole job is to
@@ -11521,7 +14238,7 @@ ApplicationWindow {
                     // The strip is sized by its own words and nothing capped it
                     // against the cover it rides on, so the long ones outgrew
                     // the artwork, which clips, and lost their first and last
-                    // letters at both ends (the pill is centred). On the
+                    // letters at both ends (the pill is centered). On the
                     // ordinary 200px card DOWNLOADED ran 7px past the cover,
                     // and the everyday DOWNLOAD and IN LIBRARY closed to within
                     // 5px of its edge, having already overrun the 10px-inset
@@ -11532,17 +14249,26 @@ ApplicationWindow {
                     // much as it must, down to a floor that still reads as a
                     // button. Measured against the ART, not that inset slot:
                     // the pill may come within 6px of the cover's edge, which
-                    // is where the last few pixels come from.
+                    // is where the last few pixels come from. Past the padding
+                    // floor the gap between each glyph and its word gives way
+                    // too: DOWNLOADED sat on that floor with under a pixel to
+                    // spare, so a slightly wider UI font (DejaVu Sans, the
+                    // usual Linux one) ran it past the fence. Measured off the
+                    // parts rather than the Rows, whose implicitWidth carries
+                    // the gap this decides (reading it here would be a loop).
                     readonly property real padFull: 20
                     readonly property real padMin: 8
+                    readonly property real gapFull: 6
+                    readonly property real gapMin: 2
                     readonly property real availW: acArt.width - 12
-                    readonly property real naturalW: acStripPv.implicitWidth + acStripDl.implicitWidth
-                                                     + root.btnBorderW + 2 * padFull
+                    readonly property real naturalW: acStripPvIco.implicitWidth + acStripPvWord.implicitWidth
+                                                     + acStripDlIco.implicitWidth + acStripDlWord.implicitWidth
+                                                     + 2 * gapFull + root.btnBorderW + 2 * padFull
+                    readonly property real over: Math.max(0, naturalW - availW)
                     // Halved because both halves give the same amount up, which
                     // keeps the divider where the words put it.
-                    readonly property real pad: naturalW <= availW
-                                                ? padFull
-                                                : Math.max(padMin, padFull - (naturalW - availW) / 2)
+                    readonly property real pad: Math.max(padMin, padFull - over / 2)
+                    readonly property real gap: Math.max(gapMin, gapFull - Math.max(0, over - 2 * (padFull - padMin)) / 2)
                     // Hover swell: one handler split by x (the halves' own
                     // MouseAreas would steal the hover), so crossing the
                     // divider hands the light over without a gap. Where PREVIEW
@@ -11562,7 +14288,7 @@ ApplicationWindow {
                         z: 1
                         x: acStrip.dividerX; width: acStrip.width - acStrip.dividerX; height: acStrip.height
                         radL: 0
-                        // The lit edge takes the verdict's own colour, so
+                        // The lit edge takes the verdict's own color, so
                         // hovering a claimed half does not flash accent green
                         // over a gold or cyan control.
                         tone: acStrip.stInk
@@ -11575,9 +14301,9 @@ ApplicationWindow {
                             implicitWidth: acStripPv.implicitWidth + acStrip.pad; implicitHeight: 30
                             Row {
                                 id: acStripPv
-                                anchors.centerIn: parent; spacing: 6
-                                Ico { name: "play"; color: root.accent; size: 11; anchors.verticalCenter: parent.verticalCenter }
-                                Text { textFormat: Text.PlainText; text: "PREVIEW"; color: root.accent; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
+                                anchors.centerIn: parent; spacing: acStrip.gap
+                                Ico { id: acStripPvIco; name: "play"; color: root.accent; size: 11; anchors.verticalCenter: parent.verticalCenter }
+                                Text { id: acStripPvWord; textFormat: Text.PlainText; text: "PREVIEW"; color: root.accent; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -11589,9 +14315,9 @@ ApplicationWindow {
                             implicitWidth: acStripDl.implicitWidth + acStrip.pad; implicitHeight: 30
                             Row {
                                 id: acStripDl
-                                anchors.centerIn: parent; spacing: 6
-                                Ico { name: (acStrip.dlDone || ac.libClaim) ? "check" : "arrow-down"; color: acStrip.stInk; size: (acStrip.dlDone || ac.libClaim) ? 14 : 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
-                                Text { textFormat: Text.PlainText; text: acStrip.stWord; color: acStrip.stInk; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
+                                anchors.centerIn: parent; spacing: acStrip.gap
+                                Ico { id: acStripDlIco; name: (acStrip.dlDone || ac.libClaim) ? "check" : "arrow-down"; color: acStrip.stInk; size: (acStrip.dlDone || ac.libClaim) ? 14 : 12; bold: 10; anchors.verticalCenter: parent.verticalCenter }
+                                Text { id: acStripDlWord; textFormat: Text.PlainText; text: acStrip.stWord; color: acStrip.stInk; font.family: root.uiFont; font.pixelSize: 10; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -11657,7 +14383,7 @@ ApplicationWindow {
                     onClicked: root.openBrowseCard(ac.card)
                 }
             }
-            CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width; settled: ac.haveIt }
+            CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width; settled: ac.haveIt; hideDate: ac.hideDate }
         }
     }
 
@@ -11735,7 +14461,7 @@ ApplicationWindow {
         readonly property real restorePad: pendingRestoreY >= 0
             ? Math.max(0, pendingRestoreY + height - realContentH) : 0
         contentWidth: width; contentHeight: realContentH + restorePad
-        ScrollBar.vertical: ScrollBar {}
+        ScrollBar.vertical: WavesScrollBar {}
         boundsBehavior: Flickable.StopAtBounds
         property real pendingRestoreY: -1
         property string pendingRestoreKey: ""
@@ -12159,7 +14885,7 @@ ApplicationWindow {
                     // top-up, and two screens of slack is more than a flick
                     // covers before the next band brings the following rows
                     // in. The highlight row is exempt at any distance: it
-                    // arms browseHighlightPending and centres the page, so
+                    // arms browseHighlightPending and centers the page, so
                     // it must exist even when the window is elsewhere.
                     active: hiRow || shortSec
                             || (index > anchorRow - 2 * rps
@@ -12434,7 +15160,7 @@ ApplicationWindow {
                 delegate: Text {
                     required property var modelData
                     textFormat: Text.PlainText
-                    x: -8 - (bt.idx % 5) * 9   // stagger so neighbours don't sync
+                    x: -8 - (bt.idx % 5) * 9   // stagger so neighbors don't sync
                     y: Math.round(bt.height * modelData.yf)
                     text: modelData.pat.repeat(4)
                     font.family: root.mono; font.pixelSize: modelData.px
@@ -12594,7 +15320,7 @@ ApplicationWindow {
         cacheBuffer: 800
         reuseItems: true
         boundsBehavior: Flickable.StopAtBounds
-        ScrollBar.vertical: ScrollBar {}
+        ScrollBar.vertical: WavesScrollBar { outside: true }
         // Pin the scroll spot across a revalidate refill (same pattern as the
         // playlist-folder list): the fill resets contentY, so the armed spot
         // is re-applied as the delegates lay out, until it is reachable. A
@@ -12787,12 +15513,15 @@ ApplicationWindow {
         if (dropped.length > 0) {
             var tracks = Object.assign({}, root.queueTracks), forgot = false
             var exp = Object.assign({}, root.queueExpanded), collapsed = false
+            var miss = Object.assign({}, root.queueLedgerMissing), unmissed = false
             for (var d = 0; d < dropped.length; ++d) {
                 if (tracks[dropped[d]] !== undefined) { delete tracks[dropped[d]]; forgot = true }
                 if (exp[dropped[d]] !== undefined) { delete exp[dropped[d]]; collapsed = true }
+                if (miss[dropped[d]] !== undefined) { delete miss[dropped[d]]; unmissed = true }
             }
             if (forgot) root.queueTracks = tracks
             if (collapsed) root.queueExpanded = exp
+            if (unmissed) root.queueLedgerMissing = miss
         }
         queuePartition()
         updateQueueCounts()
@@ -12870,7 +15599,7 @@ ApplicationWindow {
         // the header pulse is named: the section that GREW. A promotion bumps
         // two sections in the same tick, one down and one up, and only the
         // rise is news.
-        if (d > 0) { root.pulseSection = grp; root.pulseTick += 1 }
+        if (d > 0) { root.pulseSection = grp; root.pulseAt = Date.now(); root.pulseTick += 1 }
     }
     // Model index where a group begins: the groups sit in a fixed order and
     // each is contiguous, so a boundary is a sum of counts.
@@ -12881,6 +15610,47 @@ ApplicationWindow {
         s += root.failedCount; if (grp === "stopped") return s
         s += root.stoppedCount; if (grp === "downloading") return s
         return s + root.downloadingCount
+    }
+    // Summed progress (0 to 100 each) of the rows downloading right now. Only
+    // the Downloading group is read, so the cost is the few rows in flight,
+    // never the whole queue.
+    function queueRunningProgress() {
+        var m = queueModel, lo = queueGroupStart("downloading")
+        var hi = Math.min(m.count, lo + root.downloadingCount), sum = 0
+        for (var i = lo; i < hi; ++i) { var r = m.get(i); if (r.status === "running") sum += r.progress || 0 }
+        return sum
+    }
+    // How far the running rows' finish steps have come, 0 to 1 (the mean of
+    // each row's queueItemFinish), for the QUEUE button's pour.
+    property var queueFinish: ({})
+    // The batch's download speed for the QUEUE button's tag, "" while
+    // nothing streams.
+    function queueSpeedText() {
+        var m = waves.downloadMbps || 0
+        return m <= 0 ? "" : (m < 10 ? m.toFixed(1) : Math.round(m)) + " Mb/s"
+    }
+    function queueFinishFraction() {
+        var m = queueModel, lo = queueGroupStart("downloading")
+        var hi = Math.min(m.count, lo + root.downloadingCount), sum = 0, n = 0
+        for (var i = lo; i < hi; ++i) {
+            var r = m.get(i)
+            if (r.status !== "running") continue
+            sum += root.queueFinish[r.qid] || 0; ++n
+        }
+        return n ? sum / n : 0
+    }
+    // True while something runs and every running row sits at 100%: nothing
+    // is streaming, only the final steps (merge, extract, tagging) are left.
+    function queueAllFinishing() {
+        var m = queueModel, lo = queueGroupStart("downloading")
+        var hi = Math.min(m.count, lo + root.downloadingCount), any = false
+        for (var i = lo; i < hi; ++i) {
+            var r = m.get(i)
+            if (r.status !== "running") continue
+            if ((r.progress || 0) < 99.9) return false
+            any = true
+        }
+        return any
     }
     // Re-point the index entries of model rows lo..hi after a shift.
     function queueIndexFix(lo, hi) {
@@ -12946,8 +15716,10 @@ ApplicationWindow {
         var was = row.status, wasGrp = row.uiGroup
         if (was !== it.status) {
             m.setProperty(i, "status", it.status)
-            if (queueActiveStatus(was) !== queueActiveStatus(it.status))
+            if (queueActiveStatus(was) !== queueActiveStatus(it.status)) {
                 root.activeQueueCount += queueActiveStatus(it.status) ? 1 : -1
+                if (queueActiveStatus(was)) root.queueRowSettled(it.status)
+            }
         }
         // Wall-clock stamp of when the row finished: the root lingerClock
         // promotes on doneAt+5s whether or not the queue drawer (and so this
@@ -12992,27 +15764,30 @@ ApplicationWindow {
         }
         if (idxs.length === 0) return
         idxs.sort(function (a, b) { return b - a })
-        var tracks = null, exp = null, mids = null
+        var tracks = null, exp = null, miss = null, mids = null
         for (var k = 0; k < idxs.length; ++k) {
             var at = idxs[k], row = m.get(at), qid = row.qid
             queueGroupBump(row.uiGroup, -1)
-            if (queueActiveStatus(row.status)) root.activeQueueCount -= 1
+            if (queueActiveStatus(row.status)) { root.activeQueueCount -= 1; root.queueRowSettled("removed") }
             if (row.status === "done" && !row.moved) queueLingerDrop(qid)
             // A row that has left the queue takes its per-qid state with it:
             // the expanded track list AND the expansion flag itself (see
             // reconcileQueue). One copy of each for the whole sweep.
             if (root.queueTracks[qid] !== undefined) { if (!tracks) tracks = Object.assign({}, root.queueTracks); delete tracks[qid] }
             if (root.queueExpanded[qid] !== undefined) { if (!exp) exp = Object.assign({}, root.queueExpanded); delete exp[qid] }
+            if (root.queueLedgerMissing[qid] !== undefined) { if (!miss) miss = Object.assign({}, root.queueLedgerMissing); delete miss[qid] }
             var mid = row.media_id
             m.remove(at)
             root.qidAt.splice(at, 1)
             delete root.queueRowIndex[qid]
+            delete root.queueFinish[qid]
             if (mid) { if (!mids) mids = {}; mids[mid] = true }
             if (at < lo) lo = at
         }
         if (mids) root.dlHoldersRelease(mids)
         if (tracks) root.queueTracks = tracks
         if (exp) root.queueExpanded = exp
+        if (miss) root.queueLedgerMissing = miss
         queueIndexFix(lo, m.count - 1)
     }
 
@@ -13036,7 +15811,7 @@ ApplicationWindow {
     // times a second and is what made a long batch feel heavy (issue #24). The
     // map above is rebuilt after every structural change; a tick landing
     // between a move and that rebuild pays for one rebuild here, not a scan.
-    // -1 means the row is gone, which a late tick for a cancelled job will see.
+    // -1 means the row is gone, which a late tick for a canceled job will see.
     function queueRowIndexOf(qid) {
         var i = root.queueRowIndex[qid]
         if (i !== undefined && i < queueModel.count && queueModel.get(i).qid === qid) return i
@@ -13409,14 +16184,14 @@ ApplicationWindow {
             root.favMixesPending = false
             root.favVideosPending = false
             // The keep-alive My Tidal panes hold the previous account's
-            // favourites for their whole life; only the account flip may
+            // favorites for their whole life; only the account flip may
             // clear them (loadLib no longer clears on category switches).
             libAlbumsModel.clear(); libTracksModel.clear(); libArtistsModel.clear()
             libPlaylistsModel.clear(); libMixesModel.clear(); libVideosModel.clear()
             root.libCatHasMore = ({})
             root.libLoadingMore = false
             // The sort picked per category is this account's view of its
-            // own favourites; the next account starts from the defaults.
+            // own favorites; the next account starts from the defaults.
             root.libSort = ({})
             // The saved Search drill-in can hold the previous account's artist
             // page, restorable from the Search tab: same class of leak as the
@@ -13628,7 +16403,7 @@ ApplicationWindow {
             // the search tier is live on artist pages). Dropped payloads stay
             // in the backend's search cache, re-searching is instant.
             if (root._searchSeq !== root._navSeq
-                || root.browseOpen || root.libraryOpen || root.settingsOpen) return
+                || root.browseOpen || root.libraryOpen || root.releasesOpen || root.settingsOpen) return
             if (r.refresh) {
                 // The wire's answer to a search painted from an older result
                 // (the backend's stale-then-revalidate, see search()): the
@@ -13673,7 +16448,7 @@ ApplicationWindow {
             root.navOrigin = "search"
             root.browseOpen = false
             root.artistOpen = false
-            root.libraryOpen = false
+            root.libraryOpen = false; root.releasesOpen = false
             root.trackCache = ({})
             root.resetExpandedAlbums({})
             // Playlist rows expand the same way, and their cache has to go with
@@ -13791,7 +16566,7 @@ ApplicationWindow {
                 root.resetExpandedAlbums({})
             }
             root.artistOpen = true      // target-first (see openLibrary): keep Search inactive mid-switch
-            root.libraryOpen = false
+            root.libraryOpen = false; root.releasesOpen = false
             root.fillArtistPage(p, held)
         }
         // The whole queue (a full resync); updateQueueCounts, at the end of
@@ -13806,6 +16581,7 @@ ApplicationWindow {
             var i = root.queueRowIndexOf(qid)
             if (i >= 0) queueModel.setProperty(i, "progress", pct)
         }
+        function onQueueItemFinish(qid, frac) { if (root.queueRowIndexOf(qid) >= 0) root.queueFinish[qid] = frac }
         // ---- queue-row album expansion: per-track snapshot + live updates ----
         // These three land per track EVENT (state changes, and a pct batch
         // twice a second while an album downloads), so the map is updated in
@@ -13851,6 +16627,12 @@ ApplicationWindow {
                                     fpct: row.fpct || 0, quality: row.quality, expected: row.expected || "",
                                     owned: row.owned || "" })
             root.queueTracks[qid] = copy; root.queueTracksChanged()
+        }
+        // The missing-tracks export's answer, said on the button that asked.
+        function onMissingTracksExported(qid, count, path) {
+            root.queueExportWord = path !== "" ? "SAVED" : count === 0 ? "NOTHING TO EXPORT" : "FAILED"
+            root.queueExportQid = qid
+            queueExportWordTimer.restart()
         }
         function onQueueTrackPct(qid, ticks) {
             var arr = root.queueTracks[qid]
@@ -13973,6 +16755,13 @@ ApplicationWindow {
                     onClicked: root.openSearch()
                 }
                 NavTab {
+                    objectName: "releasesTab"
+                    label: "Releases"
+                    active: root.navOrigin === "releases" && !root.settingsOpen
+                    badge: root.releasesUnseen
+                    onClicked: root.openReleases()
+                }
+                NavTab {
                     label: "My Tidal"
                     active: root.navOrigin === "library" && !root.settingsOpen
                     onClicked: root.openLibrary()
@@ -13980,24 +16769,9 @@ ApplicationWindow {
                 NavTab {
                     label: "Settings"
                     active: root.settingsOpen
-                    onClicked: { root.navPush(); root.markNav("settings"); root.settingsOpen = true; root.artistOpen = false; root.libraryOpen = false }
+                    onClicked: { root.navPush(); root.markNav("settings"); root.settingsOpen = true; root.artistOpen = false; root.libraryOpen = false; root.releasesOpen = false }
                 }
-                // queue (outlined) with count badge
-                Rectangle {
-                    implicitHeight: qrow.implicitHeight + root.btnPadV * 2; implicitWidth: qrow.implicitWidth + root.btnPadH * 2; radius: root.btnRad
-                    color: "transparent"; border.color: root.border1
-                    RowLayout {
-                        id: qrow; anchors.centerIn: parent; spacing: 7
-                        Ico { name: "arrow-down"; color: root.accent; size: 15; bold: 10 }
-                        Text { text: "QUEUE"; color: root.textLo; font.pixelSize: 13; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack }
-                        Rectangle {
-                            visible: root.activeQueueCount > 0; radius: 9; color: root.accent
-                            implicitWidth: Math.max(18, qc.implicitWidth + 10); implicitHeight: 18
-                            Text { textFormat: Text.PlainText; id: qc; anchors.centerIn: parent; text: root.activeQueueCount; color: root.accentText; font.family: root.mono; font.pixelSize: 11; font.bold: true }
-                        }
-                    }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: queueDrawer.open() }
-                }
+                QueueButton { onClicked: queueDrawer.open() }
                 // connection pill
                 Rectangle {
                     implicitHeight: 26; implicitWidth: connRow.implicitWidth + 22; radius: 13
@@ -14030,7 +16804,7 @@ ApplicationWindow {
                 // item, and Shapes can leak through an ancestor's clip/opacity,
                 // it kept painting over Browse / My Tidal at the tier's old spot.
                 visible: height > 0
-                readonly property bool shown: !root.settingsOpen && !root.libraryOpen && !root.browseOpen
+                readonly property bool shown: !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && !root.browseOpen
                 height: shown ? tierContent.implicitHeight : 0
                 Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
@@ -14092,7 +16866,7 @@ ApplicationWindow {
                                     submitArmed = false
                                     if (!searchBox.isTidalUrl(text) && !armed) return
                                     if (seqAtPaste !== root._navSeq
-                                        || root.browseOpen || root.libraryOpen || root.settingsOpen) return
+                                        || root.browseOpen || root.libraryOpen || root.releasesOpen || root.settingsOpen) return
                                     root.submitSearch(root.searchQueryText(text))
                                 }
                             }
@@ -14214,7 +16988,7 @@ ApplicationWindow {
                                 contentItem: ListView {
                                     clip: true; implicitHeight: contentHeight
                                     model: sortBox.popup.visible ? sortBox.delegateModel : null
-                                    ScrollBar.vertical: ScrollBar {}
+                                    ScrollBar.vertical: WavesScrollBar {}
                                 }
                             }
                         }
@@ -14239,7 +17013,7 @@ ApplicationWindow {
                     // in (staggered fade + downward settle) as the bar grows down.
                     RowLayout {
                         Layout.fillWidth: true; Layout.leftMargin: 22; Layout.topMargin: 8; spacing: 8
-                        visible: root.signedIn && root.hasResults && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.browseOpen
+                        visible: root.signedIn && root.hasResults && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && !root.browseOpen
                         Repeater {
                             model: [["all", "All"], ["artists", "Artists"], ["albums", "Albums"], ["tracks", "Tracks"], ["videos", "Videos"], ["playlists", "Playlists"], ["mixes", "Mixes"]]
                             delegate: Rectangle {
@@ -14303,7 +17077,7 @@ ApplicationWindow {
         // artist page): the whole navHistory as pills, current page lit.
         Item {
             Layout.fillWidth: true; Layout.topMargin: 8
-            visible: root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen
+            visible: root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen
                      && root.browsePageKey !== ""
             implicitHeight: 30
             clip: true
@@ -14321,7 +17095,7 @@ ApplicationWindow {
         // navigation itself.
         Item {
             Layout.fillWidth: true; Layout.fillHeight: true
-            visible: root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen
+            visible: root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen
             // Fetch on first reveal too (e.g. the user signed in while
             // already on the tab); idempotent thanks to the loading flags
             // here and the in-flight guard backend-side.
@@ -14387,7 +17161,7 @@ ApplicationWindow {
 
                     // Landing, console style: the Genres / Moods / Decades
                     // chip sets lead the page (the art-first layout renders
-                    // the same data as colour tiles BELOW the content
+                    // the same data as color tiles BELOW the content
                     // shelves instead). No page-key term: the landing pane
                     // stays alive behind a drilled page, tearing the chips
                     // down here is exactly the rebuild the two-pane design
@@ -14491,7 +17265,7 @@ ApplicationWindow {
                         }
                     }
 
-                    // Landing, art-first: genre / mood / decade colour-tile
+                    // Landing, art-first: genre / mood / decade color-tile
                     // shelves close the page, content first, wayfinding
                     // last, the way the streaming services arrange their
                     // home pages.
@@ -14612,7 +17386,7 @@ ApplicationWindow {
                         // list lands, instead of the whole strip waiting on
                         // the slowest page of a long playlist. Held back for
                         // highlight opens: those hide the whole column until
-                        // the row has centred itself (browseHighlightPending),
+                        // the row has centered itself (browseHighlightPending),
                         // and a header that shows, vanishes and returns blinks.
                         readonly property bool skeleton: hd === null && keyKind !== ""
                                                          && root.browseHighlightId === ""
@@ -14676,6 +17450,26 @@ ApplicationWindow {
                                 url: browseItemHeader.hd ? (browseItemHeader.hd.art || "") : ""
                                 // The clicked card's cover, up from the first frame.
                                 underUrl: root.browseArtHint
+                                // The page's cover wears the marks the card that
+                                // led here wore, in the same corners: the library
+                                // verdict is the page's own (root.libraryPresence,
+                                // albums only, since a playlist must never wear an
+                                // album's library state) and the tier is the
+                                // header's. The pill that stood beside the title
+                                // said the same thing a second time.
+                                HoverHandler { id: bihArtHover }
+                                CoverMarks {
+                                    readonly property var lp: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
+                                                              ? root.libraryPresence : null
+                                    libState: !(lp && lp.present) ? ""
+                                              : !lp.full ? "partial"
+                                              : lp.sure === true ? "proven" : "maybe"
+                                    albumId: lp ? (lp.local_album_id || "") : ""
+                                    qclass: lp ? (lp.local_class || "") : ""
+                                    qualWord: (browseItemHeader.hd && browseItemHeader.hd.kind === "album")
+                                              ? root.releaseQualWord(browseItemHeader.hd) : ""
+                                    open: bihArtHover.hovered
+                                }
                             }
                             Column {
                                 spacing: 7
@@ -14689,7 +17483,8 @@ ApplicationWindow {
                                     color: root.textDim; font.pixelSize: 11; font.family: root.uiFont
                                     font.bold: true; font.letterSpacing: 1.5
                                 }
-                                // Title + the presence pill right beside it.
+                                // Title, with the NEW tag beside it (the library
+                                // verdict rides the cover, see bihArt).
                                 Row {
                                     width: parent.width
                                     spacing: 10
@@ -14699,30 +17494,11 @@ ApplicationWindow {
                                         text: browseItemHeader.hd ? (browseItemHeader.hd.title || "") : root.browseTitleHint
                                         color: root.textHi; font.pixelSize: 26; font.bold: true
                                         width: Math.min(implicitWidth,
-                                                        parent.width - (bihPill.shown ? bihPill.width + 10 : 0)
-                                                        - (bihNew.shown ? bihNew.width + 10 : 0))
+                                                        parent.width - (bihNew.shown ? bihNew.width + 10 : 0))
                                         elide: Text.ElideRight
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
-                                    LibraryTag {
-                                        id: bihPill
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        // One pill for every album page you open, so the
-                                        // page you open next must not read as news.
-                                        settleKey: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
-                                        shown: !!(browseItemHeader.hd && browseItemHeader.hd.kind === "album"
-                                                   && root.libraryPresence && root.libraryPresence.present)
-                                        have: root.libraryPresence ? (root.libraryPresence.local_tracks || 0) : 0
-                                        total: browseItemHeader.hd ? (browseItemHeader.hd.num_tracks || 0) : 0
-                                        declared: root.libraryPresence ? (root.libraryPresence.local_declared || 0) : 0
-                                        albumId: root.libraryPresence ? (root.libraryPresence.local_album_id || "") : ""
-                                        qclass: root.libraryPresence ? (root.libraryPresence.local_class || "") : ""
-                                        // Same identity axis as the search-row pills: a proven
-                                        // match drops the "?" here too.
-                                        proven: !!(root.libraryPresence && root.libraryPresence.present
-                                                   && root.libraryPresence.sure === true)
-                                    }
-                                    // Capitals on the title's capitals: centred by
+                                    // Capitals on the title's capitals: centered by
                                     // box, the small mono word sat visibly high
                                     // beside the 26px title.
                                     FontMetrics { id: bihTitleFm; font: bihTitle.font }
@@ -14899,10 +17675,10 @@ ApplicationWindow {
             // Breathing space inside the scroll area (contentCol y), not as
             // an outer margin; see BrowseScroll.
             Layout.fillWidth: true; Layout.fillHeight: true
-            visible: !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.browseOpen
+            visible: !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && !root.browseOpen
             clip: true
             contentWidth: width; contentHeight: contentCol.height + 32
-            ScrollBar.vertical: ScrollBar {}
+            ScrollBar.vertical: WavesScrollBar {}
             boundsBehavior: Flickable.StopAtBounds
 
             // Hold the scroll position steady across a window resize. The ARTISTS
@@ -15057,11 +17833,11 @@ ApplicationWindow {
                             delegate: Loader {
                                 width: artistStrip.cardW
                                 // The card's own height until it exists (its
-                                // square cover and the 119px of name, meter and
+                                // square cover and the 115px of name, meter and
                                 // buttons under it), so the strip keeps one
                                 // height while cards land and while the ones
                                 // past the reach wait unbuilt.
-                                height: item ? item.implicitHeight : width + 119
+                                height: item ? item.implicitHeight : width + 115
                                 // Built within the reach, and kept built while
                                 // a chip or the SHOW ALL grid has the strip
                                 // hidden, until the next search. A card leaving
@@ -15102,7 +17878,7 @@ ApplicationWindow {
                         model: artistsModel
                         delegate: Loader {
                             width: artistFlow.cardW
-                            height: item ? item.implicitHeight : width + 119
+                            height: item ? item.implicitHeight : width + 115
                             // Complement of the strip: shown only when NOT in strip mode,
                             // and only while this grid is the artist surface of the
                             // results. A type chip other than Artists leaves strip mode
@@ -15321,7 +18097,7 @@ ApplicationWindow {
         ColumnLayout {
             id: artistPane
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.topMargin: 8
-            visible: root.artistOpen && !root.settingsOpen && !root.libraryOpen
+            visible: root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen
             // No gap between the back bar and the scroll area (rows would be
             // cut off floating over raw background); the 8px lives inside
             // artistView (artistCol y) instead.
@@ -15349,7 +18125,7 @@ ApplicationWindow {
                     ? Math.max(0, pendingRestoreY + height - realContentH) : 0
                 readonly property real realContentH: artistCol.height + 32
                 contentWidth: width; contentHeight: realContentH + restorePad
-                ScrollBar.vertical: ScrollBar {}
+                ScrollBar.vertical: WavesScrollBar {}
                 boundsBehavior: Flickable.StopAtBounds
                 // A fresh artist page starts at the top (it used to inherit the
                 // previous artist's scroll offset); a Back that arms a restore
@@ -15442,9 +18218,40 @@ ApplicationWindow {
                                 libArtist: root.artistData.name || ""
                                 onTap: function(){ waves.downloadArtist(root.artistData.id) }
                             }
+                            // Follow for the Releases feed (Waves' own list; it
+                            // reaches the TIDAL favorites only through the
+                            // mirror pref or the button after it).
+                            SpecBtn {
+                                objectName: "artistFollowBtn"
+                                anchors.verticalCenter: parent.verticalCenter
+                                label: root.artistFollowed ? "FOLLOWING" : "FOLLOW"
+                                onClicked: {
+                                    var a = root.artistData
+                                    if (!a || !a.id) return
+                                    if (root.artistFollowed) waves.unfollowArtist("" + a.id)
+                                    else waves.followArtist("" + a.id, "" + (a.name || ""), "" + (a.art || ""))
+                                }
+                            }
+                            // One artist onto the TIDAL favorites, by hand.
+                            // Hidden once it is there. Shown with the mirror pref
+                            // on too: the mirror never sends an imported follow,
+                            // one from before it was on, or a change TIDAL refused.
+                            SpecBtn {
+                                objectName: "artistTidalBtn"
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.signedIn && root.artistFollowed && !root.artistTidalFav
+                                compact: true
+                                label: root.artistTidalPending ? "SENDING TO TIDAL" : "ALSO FOLLOW ON TIDAL"
+                                onClicked: {
+                                    var a = root.artistData
+                                    if (!a || !a.id || root.artistTidalPending) return
+                                    waves.followOnTidal("" + a.id)
+                                    root.artistTidalRead()
+                                }
+                            }
                             // A library-scoped artist page (opened from My Tidal)
                             // shows only owned releases; offer a jump to the artist's
-                            // full catalogue page. loadArtist() is the full path and
+                            // full catalog page. loadArtist() is the full path and
                             // onArtistLoaded swaps the view (Back returns here).
                             Text {
                                 visible: !!root.artistData.libraryScoped
@@ -15685,6 +18492,1709 @@ ApplicationWindow {
             onFlacResumeRequested: function(where) { root.flacFixResume = true; root.flacFixWhere = where; root.confirmFlacFix = true }
         }
 
+        // ---- Releases page ---------------------------------------------
+        ColumnLayout {
+            id: releasesPane
+            objectName: "releasesPane"
+            Layout.fillWidth: true; Layout.fillHeight: true; Layout.topMargin: 8
+            visible: root.releasesOpen
+            spacing: 0
+
+            // Top bar: the headline is the pane's own switch, Releases or the
+            // artists you follow, in large type with a green bar under the one
+            // that is open; that view's chips follow it, the actions on the right.
+            RowLayout {
+                Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22
+                spacing: 18
+                Item {
+                    id: releasesTitle
+                    objectName: "releasesTitle"
+                    // What the page is showing, for whoever asks.
+                    readonly property string text: root.releasesView === "manage" ? "Artists"
+                        : root.releasesView === "excluded" ? "Excluded artists" : "Releases"
+                    readonly property Item onItem: rhRep.count === 2 ? rhRep.itemAt(root.releasesView === "feed" ? 0 : 1) : null
+                    implicitWidth: rhRow.implicitWidth; implicitHeight: 40
+                    Layout.alignment: Qt.AlignVCenter
+                    Row {
+                        id: rhRow
+                        height: parent.height; spacing: 24
+                        Repeater {
+                            id: rhRep
+                            model: [["feed", "Releases"], ["manage", "Artists"]]
+                            delegate: Item {
+                                id: rh
+                                required property var modelData
+                                objectName: "relHeadline_" + modelData[0]
+                                // Artists stays lit on the excluded page, which sits under it.
+                                readonly property bool on: modelData[0] === "feed" ? root.releasesView === "feed" : root.releasesView !== "feed"
+                                width: rhWord.implicitWidth + (rhCount.visible ? rhCount.implicitWidth + 6 : 0); height: parent.height
+                                Text {
+                                    id: rhWord
+                                    textFormat: Text.PlainText; text: rh.modelData[1]
+                                    font.pixelSize: 24; font.bold: true
+                                    color: rh.on ? root.textHi : rhMa.containsMouse ? root.textLo : root.textDim
+                                    Behavior on color { ColorAnimation { duration: 180 } }
+                                    anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: -2
+                                }
+                                // How many you follow, raised beside the word.
+                                Text {
+                                    id: rhCount
+                                    visible: rh.modelData[0] === "manage" && root.releasesFollowed > 0
+                                    textFormat: Text.PlainText; text: root.releasesFollowed
+                                    font.family: root.mono; font.pixelSize: 12
+                                    color: rh.on ? root.accent : root.textDim
+                                    x: rhWord.implicitWidth + 6; y: rhWord.y + 3
+                                }
+                                MouseArea {
+                                    id: rhMa
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.releasesSetView(rh.modelData[0])
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        id: rhBar
+                        // Placed, not slid, the first time it has somewhere to be.
+                        property bool armed: false
+                        readonly property Item cur: releasesTitle.onItem
+                        onCurChanged: if (cur && !armed) Qt.callLater(function () { rhBar.armed = true })
+                        y: parent.height - 3; height: 3; radius: 1.5; color: root.accent
+                        x: cur ? cur.x : 0; width: cur ? cur.width : 0
+                        Behavior on x { enabled: rhBar.armed; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                        Behavior on width { enabled: rhBar.armed; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                    }
+                }
+                Rectangle { width: 1; height: 22; color: root.border1; Layout.alignment: Qt.AlignVCenter }
+                // A definite-width Flow inside a fillWidth Item (see libTabsFlow).
+                // The page's chips on the left, its search box at the right
+                // end (relSearch), which opens into the room the chips leave.
+                Item {
+                    id: relChipsBox
+                    Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
+                    // Grows with the chips when a narrow window wraps them, so
+                    // a wrapped chip gets a line of its own above the page.
+                    implicitHeight: Math.max(30, relTabsFlow.visible ? relTabsFlow.implicitHeight
+                        : relFollowFlow.visible ? relFollowFlow.implicitHeight : 30)
+                    // How wide the open page's chips are laid in one line.
+                    readonly property real chipsW: root.releasesView === "manage" ? root.relFlowW(relFollowFlow)
+                        : root.releasesView === "feed" ? root.relFlowW(relTabsFlow) : relExLabel.implicitWidth
+                    readonly property real room: width - chipsW - 12
+                    // While the box is open the feed's chips are plain words
+                    // (relTabsFlow), narrow enough to stay beside it so a search
+                    // can still be narrowed by kind. Only when even that leaves
+                    // too little room does the box take the whole line and the
+                    // chips step aside until it closes.
+                    readonly property bool cover: relSearch.open && room < 150
+                    readonly property real chipsLineW: cover ? width : width - relSearch.width - 12
+                    // The artists' order (their shape is the corner switch, relViewSwitch).
+                    Flow {
+                        id: relFollowFlow
+                        objectName: "relFollowFlow"
+                        visible: root.releasesView === "manage"
+                        width: relChipsBox.chipsLineW; spacing: 8
+                        opacity: relChipsBox.cover ? 0 : 1; enabled: !relChipsBox.cover
+                        Behavior on opacity { NumberAnimation { duration: 160 } }
+                        Repeater {
+                            model: [["name", "By name"], ["recent", "By latest release"]]
+                            delegate: Rectangle {
+                                id: fchip
+                                required property var modelData
+                                readonly property bool on: root.releasesFollowSort === modelData[0]
+                                radius: 8; implicitHeight: 30; implicitWidth: fcRow.implicitWidth + 26
+                                color: on ? root.accentCont : "transparent"
+                                border.color: on ? root.accentDim : root.border1
+                                Row {
+                                    id: fcRow; anchors.centerIn: parent; spacing: 7
+                                    Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: fchip.on ? root.accent : root.textDim }
+                                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: fchip.modelData[1]; color: fchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.releasesSetFollowSort(fchip.modelData[0])
+                                }
+                            }
+                        }
+                    }
+                    Flow {
+                        id: relTabsFlow
+                        objectName: "relTabsFlow"
+                        visible: root.releasesView === "feed"
+                        // Too narrow for the chips at full size: they hug their
+                        // words closer, so every one still fits on the one line.
+                        readonly property real fullW: {
+                            var w = 0, n = 0, kids = children
+                            for (var i = 0; i < kids.length; i++) {
+                                if (kids[i].fullW === undefined) continue
+                                w += kids[i].fullW; n++
+                            }
+                            return w + Math.max(0, n - 1) * 8
+                        }
+                        // Judged against the line the closed glyph leaves, so opening or
+                        // closing the search never resizes them.
+                        readonly property bool compact: fullW > relChipsBox.width - 42
+                        width: relChipsBox.chipsLineW; spacing: relSearch.open ? 2 : compact ? 6 : 8
+                        opacity: relChipsBox.cover ? 0 : 1; enabled: !relChipsBox.cover
+                        Behavior on opacity { NumberAnimation { duration: 160 } }
+                        Repeater {
+                            model: root.releasesVideosOn
+                                   ? [["all", "All"], ["album", "Albums"], ["ep", "EPs"], ["single", "Singles"], ["video", "Videos"], ["", ""], ["upcoming", "Upcoming"]]
+                                   : [["all", "All"], ["album", "Albums"], ["ep", "EPs"], ["single", "Singles"], ["", ""], ["upcoming", "Upcoming"]]
+                            delegate: Rectangle {
+                                id: rchip
+                                required property var modelData
+                                // The gap that sets Upcoming apart from the kinds.
+                                readonly property bool spacer: modelData[0] === ""
+                                readonly property bool on: !spacer && root.releasesFilter === modelData[0]
+                                readonly property real fullW: spacer ? 6 : rcWord.implicitWidth + 13 + 26
+                                // Searching: no frame and no dot, the chosen one underlined.
+                                readonly property bool words: relSearch.open
+                                radius: 8; implicitHeight: 30
+                                implicitWidth: spacer ? (words ? 0 : relTabsFlow.compact ? 2 : 6)
+                                    : rcRow.implicitWidth + (words ? 8 : relTabsFlow.compact ? 16 : 26)
+                                color: on && !words ? root.accentCont : "transparent"
+                                border.color: spacer || words ? "transparent" : on ? root.accentDim : root.border1
+                                Rectangle {
+                                    visible: rchip.words && rchip.on
+                                    anchors.bottom: parent.bottom; anchors.bottomMargin: 2
+                                    x: 4; width: parent.width - 8; height: 2; radius: 1; color: root.accent
+                                }
+                                Row {
+                                    id: rcRow; visible: !rchip.spacer; anchors.centerIn: parent; spacing: 7
+                                    Rectangle { visible: !rchip.words; width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: rchip.on ? root.accent : root.textDim }
+                                    Text { id: rcWord; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: rchip.modelData[1]; color: rchip.on || (rchip.words && rcMa.containsMouse) ? root.accent : root.textLo; font.pixelSize: 13 }
+                                }
+                                MouseArea { id: rcMa; anchors.fill: parent; enabled: !rchip.spacer; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.releasesFilter = rchip.modelData[0] }
+                            }
+                        }
+                    }
+                    // The excluded page, under Artists, names itself here.
+                    Text {
+                        id: relExLabel
+                        visible: root.releasesView === "excluded"
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText; text: "Excluded artists"
+                        color: root.textLo; font.pixelSize: 15; font.bold: true
+                        opacity: relChipsBox.cover ? 0 : 1
+                        Behavior on opacity { NumberAnimation { duration: 160 } }
+                    }
+                    // The page's search: a glyph until it is clicked (or
+                    // Cmd+F), then a box with the cursor in it. It stays open
+                    // while it holds text; Esc clears it, a second Esc closes it.
+                    Rectangle {
+                        id: relSearch
+                        objectName: "relSearch"
+                        property bool open: false
+                        // Only an open or a close slides; a resize follows at once.
+                        property bool sliding: false
+                        anchors.right: parent.right; anchors.top: parent.top
+                        height: 30; radius: 8
+                        width: !open ? 30 : relChipsBox.cover ? relChipsBox.width : Math.min(260, relChipsBox.room)
+                        Behavior on width { enabled: relSearch.sliding; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                        Timer { id: relSearchSlide; interval: 220; onTriggered: relSearch.sliding = false }
+                        color: open ? root.surface : "transparent"
+                        border.color: relSearchField.activeFocus ? root.accent : open ? root.outline
+                                    : relSearchMa.containsMouse ? root.accentDim : root.border1
+                        Behavior on border.color { ColorAnimation { duration: 160 } }
+                        property real closedAt: 0
+                        function slide(on) {
+                            if (on === open) return
+                            sliding = true; relSearchSlide.restart()
+                            if (!on) closedAt = Date.now()
+                            open = on
+                        }
+                        function show() {
+                            slide(true)
+                            relSearchField.forceActiveFocus()
+                            relSearchField.selectAll()
+                        }
+                        // Folded away at once, whatever it holds.
+                        function collapse() {
+                            relSearchField.text = ""
+                            relSearchField.focus = false
+                            slide(false)
+                        }
+                        function dismiss() {
+                            if (relSearchField.text !== "") { relSearchField.text = ""; return }
+                            relSearchField.focus = false
+                            slide(false)
+                        }
+                        // The page's needle, shown: a page switch, or a reset
+                        // from elsewhere (the tab pressed again).
+                        readonly property string needle: root.releasesNeedle
+                        onNeedleChanged: {
+                            if (relSearchField.text !== needle) relSearchField.text = needle
+                            if (needle !== "") slide(true)
+                            else if (!relSearchField.activeFocus) slide(false)
+                        }
+                        Ico {
+                            id: relSearchIco
+                            name: "search"; size: 15
+                            color: relSearch.open || relSearchMa.containsMouse ? root.accent : root.textLo
+                            x: (30 - size) / 2; anchors.verticalCenter: parent.verticalCenter
+                        }
+                        MouseArea {
+                            id: relSearchMa
+                            objectName: "relSearchGlyph"
+                            // The whole glyph while closed, only the magnifier once
+                            // open, where a second click folds the box away.
+                            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                            width: relSearch.open ? 30 : parent.width
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            // Read at the press. The field loses focus to this very
+                            // click before the press lands here, which has already
+                            // started the close: a close that recent counts as open.
+                            property bool wasOpen: false
+                            onPressed: wasOpen = relSearch.open || Date.now() - relSearch.closedAt < 250
+                            onClicked: wasOpen ? relSearch.collapse() : relSearch.show()
+                        }
+                        TextField {
+                            id: relSearchField
+                            objectName: "relSearchField"
+                            visible: relSearch.open
+                            anchors.left: parent.left; anchors.leftMargin: 30
+                            anchors.right: relSearchClear.visible ? relSearchClear.left : parent.right
+                            anchors.rightMargin: relSearchClear.visible ? 2 : 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+                            background: Rectangle { color: "transparent" }
+                            color: root.textHi
+                            placeholderTextColor: root.textLo
+                            font.pixelSize: 14; selectByMouse: true
+                            placeholderText: root.releasesView === "manage" ? "Search artists…"
+                                : root.releasesView === "excluded" ? "Search excluded artists…"
+                                : root.releasesFilter === "album" ? "Search albums…"
+                                : root.releasesFilter === "ep" ? "Search EPs…"
+                                : root.releasesFilter === "single" ? "Search singles…"
+                                : root.releasesFilter === "video" ? "Search music videos…"
+                                : root.releasesFilter === "upcoming" ? "Search upcoming…" : "Search releases…"
+                            onTextChanged: root.relSetNeedle(text)
+                            // Enter applies now rather than after the pause.
+                            onAccepted: { relSearchDebounce.stop(); root.relNeedleApply() }
+                            onActiveFocusChanged: if (!activeFocus && text === "") relSearch.slide(false)
+                        }
+                        Item {
+                            id: relSearchClear
+                            objectName: "relSearchClear"
+                            visible: relSearch.open && relSearchField.text !== ""
+                            anchors.right: parent.right; width: 28; height: parent.height
+                            Ico {
+                                name: "close"; size: 11
+                                color: relSearchClearMa.containsMouse ? root.textHi : root.textLo
+                                anchors.centerIn: parent
+                            }
+                            MouseArea {
+                                id: relSearchClearMa
+                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { relSearchField.text = ""; relSearchField.forceActiveFocus() }
+                            }
+                        }
+                        Shortcut {
+                            sequence: "Esc"
+                            enabled: relSearchField.activeFocus && root.peekNow === null && root.videoNow === null
+                                     && !followDialog.open && !importDialog.open
+                            onActivated: relSearch.dismiss()
+                        }
+                        Shortcut {
+                            sequences: [StandardKey.Find]
+                            enabled: releasesPane.visible && root.peekNow === null && root.videoNow === null
+                                     && !followDialog.open && !importDialog.open
+                            onActivated: relSearch.show()
+                        }
+                    }
+                }
+                RelChip {
+                    objectName: "releasesChecking"
+                    // Only signed in: the sweep does not run otherwise.
+                    visible: root.signedIn && root.releasesUnchecked > 0; accent: true
+                    text: "CHECKING " + Math.max(0, root.releasesFollowed - root.releasesUnchecked) + "/" + root.releasesFollowed
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                // Every follow checked again now (albums, EPs, singles and
+                // music videos), at the first-check pace. The CHECKING chip
+                // takes its place while that runs.
+                // For an hour after one it reads CHECKED and rests.
+                SpecBtn {
+                    objectName: "releasesCheckNowBtn"
+                    visible: root.signedIn && root.releasesFollowed > 0 && root.releasesUnchecked === 0
+                    compact: true; label: root.releasesCheckReady ? "CHECK NOW" : "CHECKED"
+                    enabled: root.releasesCheckReady; opacity: enabled ? 1 : 0.5
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: if (waves.releasesCheckNow()) root.releasesCounts()
+                }
+                SpecBtn {
+                    objectName: "releasesFollowBtn"
+                    visible: root.signedIn
+                    compact: true; label: "FOLLOW ARTIST"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: followDialog.show()
+                }
+                // On the artists page, where a whole library's worth lands.
+                SpecBtn {
+                    objectName: "releasesImportBtn"
+                    visible: root.signedIn && root.libraryOn && root.releasesView === "manage"
+                    compact: true; label: "IMPORT LIBRARY"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: importDialog.show()
+                }
+                // The library artists the track floor left out: their own page.
+                SpecBtn {
+                    objectName: "releasesExcludedBtn"
+                    visible: root.signedIn && root.libraryOn && root.releasesView === "manage" && root.releasesExcludedRows.length > 0
+                    compact: true; label: root.releasesExcludedRows.length + " EXCLUDED"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.releasesSetView("excluded")
+                }
+                SpecBtn {
+                    objectName: "releasesViewBtn"
+                    visible: root.releasesView === "excluded"
+                    compact: true; label: "BACK"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.releasesSetView("manage")
+                }
+            }
+
+            // The library line: artists the library gained since the last
+            // import, or names an automatic import left for a look.
+            Rectangle {
+                id: relImportLine
+                objectName: "relImportLine"
+                readonly property string kind: root.releasesImportNotice ? ("" + (root.releasesImportNotice.kind || "")) : ""
+                readonly property int n: root.releasesImportNotice ? (root.releasesImportNotice.n || 0) : 0
+                visible: root.signedIn && root.libraryOn && kind !== "" && n > 0
+                Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22; Layout.topMargin: 10
+                implicitHeight: rilRow.implicitHeight + 16
+                radius: 10; color: root.surface; border.color: root.border1
+                RowLayout {
+                    id: rilRow
+                    anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 8
+                    spacing: 10
+                    Text {
+                        Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                        color: root.textLo; font.pixelSize: 13
+                        text: relImportLine.kind === "more"
+                            ? "Your library has " + relImportLine.n + (relImportLine.n === 1 ? " artist" : " artists") + " you have not imported yet."
+                            : relImportLine.n + (relImportLine.n === 1 ? " name" : " names") + " from your library need a look before they can be followed."
+                    }
+                    SpecBtn {
+                        objectName: "relImportLineGo"
+                        compact: true; primary: true
+                        label: relImportLine.kind === "more" ? "IMPORT" : "LOOK"
+                        onClicked: {
+                            if (relImportLine.kind === "more") importDialog.startMore()
+                            else {
+                                // A hand review still waiting comes back as it was left
+                                // (its close names are the tray's); else the tray.
+                                var kept = importDialog.handReviewKept()
+                                importDialog.show()
+                                if (!kept) importDialog.reviewTray()
+                                waves.dismissArtistImportNotice()
+                            }
+                        }
+                    }
+                    SpecBtn {
+                        objectName: "relImportLineLater"
+                        compact: true; label: "NOT NOW"
+                        onClicked: waves.dismissArtistImportNotice()
+                    }
+                }
+            }
+
+            Item {
+                id: relArea
+                Layout.fillWidth: true; Layout.fillHeight: true
+
+                // The feed: a header per section, then its cards a row at a
+                // time. A Flickable over a Column of row shells, not a
+                // ListView: a ListView guesses the height of the rows it has
+                // not created from the ones it has, and a feed mixing short
+                // heads with tall card rows guessed wrong enough that a
+                // flick to the top overshot into blank space and was pulled
+                // back a beat later (reported from livetesting). Every shell
+                // is alive (an Item of a known height, cheap by the hundred),
+                // so the height is exact and the scrollbar true; the cards
+                // themselves load behind each shell's asynchronous Loader as
+                // the shell nears the view and go when it is far, so a year
+                // of releases still costs only the rows around the viewport,
+                // and a flick never creates five cards in one frame.
+                Flickable {
+                    id: relFeedList
+                    objectName: "relFeedList"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    visible: root.releasesView === "feed"
+                    clip: true
+                    contentWidth: width; contentHeight: relFeedCol.height
+                    flickableDirection: Flickable.VerticalFlick
+                    boundsBehavior: Flickable.StopAtBounds
+                    // Dragged, the bar names the section at the top of the
+                    // view (read off its own position: the list follows it).
+                    ScrollBar.vertical: WavesScrollBar {
+                        outside: true
+                        function name() { section = root.relFeedSectionAt(position * relFeedList.contentHeight) }
+                        onPressedChanged: if (pressed) name()
+                        onPositionChanged: if (pressed) name()
+                    }
+                    onContentYChanged: root.releasesMaybeMore()
+                    onHeightChanged: relMoreCheck.restart()
+                    // A window just short of the next column would leave a
+                    // gutter either side as wide as a card: the rows then
+                    // take that column, drawn a little smaller to fit (down
+                    // to 0.9, never larger than a card's own size).
+                    readonly property int fullCols: root.gridCols(root.relCardW, root.relCardGap, 9999, width)
+                    readonly property int oneMoreW: (fullCols + 1) * root.relCardW + fullCols * root.relCardGap
+                    readonly property int liveCols: width / oneMoreW >= 0.9 ? fullCols + 1 : fullCols
+                    readonly property int liveRowW: liveCols * root.relCardW + (liveCols - 1) * root.relCardGap
+                    readonly property real liveFit: Math.min(1, width / liveRowW)
+                    // The columns and the fit the rows are drawn with follow
+                    // the live width only once it has held for a beat: a
+                    // window being dragged, or zoomed to full screen (macOS
+                    // animates that through many widths), would otherwise
+                    // re-chunk every row and redraw every card at a new size
+                    // on each frame along the way.
+                    property int cols: 1
+                    property real fit: 1
+                    readonly property int rowW: cols * root.relCardW + (cols - 1) * root.relCardGap
+                    readonly property int fitW: Math.round(rowW * fit)
+                    onLiveColsChanged: relFitSettle.restart()
+                    onLiveFitChanged: relFitSettle.restart()
+                    Timer {
+                        id: relFitSettle
+                        interval: 120
+                        onTriggered: { relFeedList.cols = relFeedList.liveCols; relFeedList.fit = relFeedList.liveFit }
+                    }
+                    onColsChanged: { root._relCols = cols; root.releasesApply() }
+                    Component.onCompleted: { cols = liveCols; fit = liveFit; root._relCols = cols }
+                    // The ListView calls the pane and its tests still make.
+                    function forceLayout() { relFeedCol.forceLayout() }
+                    function itemAtIndex(i) { return relFeedRows.itemAt(i) }
+                    Column {
+                        id: relFeedCol
+                        width: relFeedList.width
+                        // False from a shell's arrival until the column has
+                        // placed it: a new shell sits at y 0 until then, and
+                        // must not read as near the top of the view.
+                        property bool placed: true
+                        onPositioningComplete: placed = true
+                        Item { width: 1; height: 8 }
+                        Repeater {
+                            id: relFeedRows
+                            model: releasesModel
+                            onItemAdded: relFeedCol.placed = false
+                            delegate: Item {
+                                id: relItem
+                                required property int index
+                                required property string uid
+                                required property string rowKind
+                                required property string label
+                                required property int cnt
+                                required property string sig
+                                width: relFeedCol.width
+                                // The first head sits right under the bar; the
+                                // others take their air from the row above.
+                                height: rowKind === "head" ? (index === 0 ? root.relHeadH - 22 : root.relHeadH)
+                                                           : Math.round(root.relCardH * relFeedList.fit) + 22
+                                // Re-read only when this row's own content changed.
+                                readonly property var cards: {
+                                    var s = relItem.sig
+                                    return relItem.rowKind === "row" && s !== "" ? (root._relCards[relItem.uid] || []) : []
+                                }
+                                // Cards load within 1.5 viewports of the view
+                                // and unload beyond three: the gap between
+                                // keeps a flick from churning the same rows.
+                                readonly property real viewH: relFeedList.height
+                                readonly property real viewY: relFeedList.contentY
+                                readonly property bool near: relItem.rowKind === "row" && relFeedCol.placed
+                                                             && relItem.y + relItem.height > viewY - viewH * 1.5
+                                                             && relItem.y < viewY + viewH * 2.5
+                                readonly property bool far: relFeedCol.placed
+                                                            && (relItem.y + relItem.height < viewY - viewH * 3
+                                                                || relItem.y > viewY + viewH * 4)
+                                // Set only on the way in and out (never bound
+                                // to near), so the gap between holds for every
+                                // row, the first screen's too.
+                                property bool shown: false
+                                onNearChanged: if (near) shown = true
+                                onFarChanged: if (far) shown = false
+                                // A section head: the period, large, with its
+                                // count, and a rule from there to the end of
+                                // the card rows, run through the middle of the
+                                // count so the two read as one line.
+                                Item {
+                                    objectName: "releasesSection"
+                                    readonly property string label: relItem.label
+                                    readonly property int count: relItem.cnt
+                                    visible: relItem.rowKind === "head"
+                                    x: Math.max(0, (relItem.width - relFeedList.fitW) / 2)
+                                    width: Math.min(relItem.width, relFeedList.fitW); height: parent.height
+                                    // The period and its count sit centered
+                                    // over the rows (the art is centered too,
+                                    // and on a wide screen a head at the far
+                                    // left is a long look away), with the rule
+                                    // running out to both edges.
+                                    Text {
+                                        id: relHeadText
+                                        x: Math.round((parent.width - width - 12 - relHeadCount.width) / 2)
+                                        anchors.bottom: parent.bottom; anchors.bottomMargin: 18
+                                        textFormat: Text.PlainText
+                                        text: relItem.label
+                                        color: root.textHi; font.pixelSize: 26; font.bold: true; font.letterSpacing: -0.4
+                                    }
+                                    Text {
+                                        id: relHeadCount
+                                        anchors.left: relHeadText.right; anchors.leftMargin: 12
+                                        anchors.baseline: relHeadText.baseline
+                                        textFormat: Text.PlainText
+                                        text: relItem.cnt + (relItem.cnt === 1 ? " release" : " releases")
+                                        color: root.textDim; font.family: root.mono; font.pixelSize: 12; font.letterSpacing: 0.6
+                                    }
+                                    // As heavy as the bar under Releases | Artists
+                                    // (rhBar), in the text color, centered on the
+                                    // count's lowercase letters, one piece either
+                                    // side of the words.
+                                    Rectangle {
+                                        objectName: "relHeadRuleLeft"
+                                        anchors.left: parent.left; anchors.right: relHeadText.left; anchors.rightMargin: 18
+                                        y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
+                                        height: 3; radius: 1.5; color: root.textHi; opacity: 0.85
+                                    }
+                                    Rectangle {
+                                        objectName: "relHeadRule"
+                                        anchors.left: relHeadCount.right; anchors.leftMargin: 18; anchors.right: parent.right
+                                        y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
+                                        height: 3; radius: 1.5; color: root.textHi; opacity: 0.85
+                                    }
+                                    FontMetrics { id: relHeadCountFm; font: relHeadCount.font }
+                                }
+                                // A shell whose cards are still being built
+                                // wears dim card-shaped stand-ins: a hard
+                                // flick outruns the asynchronous loaders, and
+                                // bare water where results just were reads as
+                                // the feed losing them (user report). Cheap
+                                // rectangles, loaded synchronously, held until
+                                // the real row has finished fading in over
+                                // them. A cover this row already showed is
+                                // painted too: the warm pool still holds its
+                                // pixels (same url, decode size and crop as
+                                // Art asks), so scrolling back to it finds
+                                // the art in place, never a blank box.
+                                Loader {
+                                    id: relRowGhost
+                                    objectName: "relRowGhost"
+                                    active: relItem.rowKind === "row" && relItem.shown
+                                            && (relRowLd.status !== Loader.Ready || relRowLd.opacity < 1)
+                                    x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
+                                    scale: relFeedList.fit; transformOrigin: Item.TopLeft
+                                    sourceComponent: Row {
+                                        spacing: root.relCardGap
+                                        Repeater {
+                                            model: relItem.cards
+                                            delegate: Item {
+                                                id: ghost
+                                                required property var modelData
+                                                width: (modelData.kind || "") === "video" ? root.relVideoW : root.relCardW
+                                                height: root.relCardH
+                                                Rectangle {
+                                                    width: ghost.width; height: root.relCardW
+                                                    radius: 12; color: root.surface2
+                                                    border.color: root.border1; border.width: 1
+                                                }
+                                                Image {
+                                                    objectName: "relGhostArt"
+                                                    width: ghost.width; height: root.relCardW
+                                                    source: ghost.modelData.art || ""
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                    cache: true
+                                                    // Art decodes square at twice its width.
+                                                    sourceSize.width: ghost.width * 2
+                                                    sourceSize.height: ghost.width * 2
+                                                    visible: status === Image.Ready
+                                                }
+                                                Rectangle {
+                                                    y: root.relCardW + 10; width: Math.round(ghost.width * 0.7)
+                                                    height: 11; radius: 5.5; color: root.surface2
+                                                }
+                                                Rectangle {
+                                                    y: root.relCardW + 28; width: Math.round(ghost.width * 0.45)
+                                                    height: 9; radius: 4.5; color: root.surface2
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Loader {
+                                    id: relRowLd
+                                    active: relItem.rowKind === "row" && relItem.shown
+                                    asynchronous: true
+                                    // Each row sits centered on its own
+                                    // width: one that packs fewer pixels
+                                    // than a full row (a video beside two
+                                    // covers) does not hang off the left.
+                                    x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
+                                    scale: relFeedList.fit; transformOrigin: Item.TopLeft
+                                    opacity: status === Loader.Ready ? 1 : 0
+                                    Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                                    sourceComponent: Row {
+                                        spacing: root.relCardGap
+                                        // Slots by count, cards by index: a
+                                        // window resize that re-chunks the
+                                        // rows rebinds the cards in place
+                                        // instead of rebuilding them all.
+                                        Repeater {
+                                            model: relItem.cards.length
+                                            delegate: ReleaseCard {
+                                                required property int index
+                                                card: relItem.cards[index] || ({})
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Item {
+                            // A search cut at its cap says so where it ends.
+                            readonly property bool capped: root.releasesFinding && root.relFindHave && root.relFindMore
+                            width: 1; height: root.releasesLoadingMore || capped ? 46 : 24
+                            Text {
+                                objectName: "relFindCapped"
+                                x: (relFeedCol.width - implicitWidth) / 2; anchors.verticalCenter: parent.verticalCenter
+                                visible: root.releasesLoadingMore || parent.capped
+                                textFormat: Text.PlainText
+                                text: parent.capped ? "SHOWING THE " + root.relFindRows.length + " NEWEST MATCHES" : "Loading more…"
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 11
+                            }
+                        }
+                    }
+                }
+                // Nothing to show yet: say why, and what to do about it.
+                Column {
+                    objectName: "releasesEmpty"
+                    visible: root.releasesView === "feed" && releasesModel.count === 0
+                             && (root.releasesFinding ? root.relFindHave
+                                 : (root.releasesHaveFeed || root.releasesFollowed === 0)
+                                   && (!root.releasesHasMore || root.releasesFilter === "upcoming"))
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 88; width: Math.min(parent.width - 44, 560); spacing: 12
+                    readonly property int why: root.releasesFinding ? 4 : root.releasesFollowed === 0 ? 0
+                                             : root.releasesRows.length > 0 ? 1
+                                             : root.signedIn && root.releasesUnchecked > 0 ? 2 : 3
+                    Text {
+                        id: relEmptyHead
+                        width: parent.width; horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                        text: parent.why === 0 ? "Follow artists to see their new releases"
+                            : parent.why === 1 ? (root.releasesFilter === "upcoming" ? "Nothing announced yet" : "Nothing under this filter")
+                            : parent.why === 2 ? "Checking the artists you follow"
+                            : parent.why === 4 ? "No releases match \u201c" + root.relFindAsked + "\u201d"
+                            : "No releases yet"
+                        color: root.textLo; font.pixelSize: 22
+                        SequentialAnimation on opacity {
+                            running: relEmptyHead.visible && root.onScreen; loops: Animation.Infinite
+                            NumberAnimation { from: 0.5; to: 1.0; duration: 1500; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 1.0; to: 0.5; duration: 1500; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Text {
+                        width: parent.width; horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                        text: parent.why === 0 ? "Search for an artist, or open one and press Follow. Their new albums, EPs and singles"
+                                                 + (root.releasesVideosOn ? " and music videos" : "") + " land here, newest first."
+                            : parent.why === 1 ? (root.releasesFilter === "upcoming"
+                                                  ? "Releases the artists you follow have dated ahead wait here until their day."
+                                                  : root.releasesFilter === "all" ? "Everything on record is still ahead: see Upcoming."
+                                                  : "Pick All to see every release.")
+                            : parent.why === 2 ? "Releases show up here as each artist is checked."
+                            : parent.why === 4 ? (root.releasesFilter === "all"
+                                                  ? "The search looks through every release on record from the artists you follow."
+                                                  : "Pick All to search every kind of release.")
+                            : "Nothing from the artists you follow in this window. New ones land here as they come out."
+                        color: root.textDim; font.pixelSize: 13
+                    }
+                    Row {
+                        visible: parent.why === 0 && root.signedIn
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        spacing: 10
+                        SpecBtn {
+                            objectName: "releasesEmptyFollowBtn"
+                            primary: true; label: "FOLLOW ARTIST"
+                            onClicked: followDialog.show()
+                        }
+                        SpecBtn {
+                            objectName: "releasesEmptyImportBtn"
+                            visible: root.libraryOn
+                            label: "IMPORT LIBRARY"
+                            onClicked: importDialog.show()
+                        }
+                    }
+                }
+
+                // ROSTER: the follows as art cards, as many equal columns as
+                // the width holds (two at the window's minimum).
+                GridView {
+                    id: relFollowRoster
+                    objectName: "relFollowRoster"
+                    visible: root.releasesView === "manage" && root.releasesFollowView === "roster"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    clip: true
+                    model: releasesFollowedModel
+                    property int cols: Math.max(2, Math.floor(width / 380))
+                    cellWidth: width > 0 ? Math.floor(width / cols) : 380
+                    cellHeight: 104
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    header: Item { width: 1; height: 6 }
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    onContentYChanged: root.relFollowMaybeMore()
+                    onHeightChanged: relFollowMoreCheck.restart()
+                    delegate: Item {
+                        id: raCell
+                        required property string uid
+                        required property string sig
+                        width: relFollowRoster.cellWidth; height: relFollowRoster.cellHeight
+                        // sig in the binding: the row is re-read when it changes.
+                        readonly property var row: (raCell.sig, root._relFollowById[raCell.uid] || ({}))
+                        readonly property string lastDay: "" + (raCell.row.last_release || "")
+                        readonly property var prefetchCard: ({ kind: "artist", id: raCell.uid, art: "" + (raCell.row.art || "") })
+                        HoverHandler {
+                            id: raHover
+                            onHoveredChanged: hovered ? root.hoverPrefetch(raCell.prefetchCard) : root.hoverPrefetchCancel(raCell.prefetchCard)
+                        }
+                        Rectangle {
+                            anchors.fill: parent; anchors.margins: 4; radius: 10
+                            color: raHover.hovered ? root.surface2 : root.surface; border.color: root.border1
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtist(raCell.uid) }
+                            Art {
+                                id: raArt
+                                x: 8; anchors.verticalCenter: parent.verticalCenter
+                                width: parent.height - 16; height: width; radius: 8; hoverFx: true
+                                fxKind: "artist"; fxId: raCell.uid
+                                url: raCell.row.art || ""
+                            }
+                            Column {
+                                anchors.left: raArt.right; anchors.leftMargin: 14
+                                anchors.right: parent.right; anchors.rightMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+                                Text {
+                                    textFormat: Text.PlainText; text: raCell.row.name || ""
+                                    color: root.textHi; font.pixelSize: 15; font.bold: true
+                                    elide: Text.ElideRight; width: parent.width - (raHover.hovered ? raUnfollow.width + 8 : 0)
+                                }
+                                ArtistBadges {
+                                    artistName: "" + (raCell.row.name || "")
+                                    libBaked: raCell.row.lib; libStamp: raCell.row.libStamp
+                                }
+                                // The latest release on record: its day, kind and title.
+                                RowLayout {
+                                    objectName: "raLatest"
+                                    width: parent.width; spacing: 6
+                                    RelChip {
+                                        visible: raCell.lastDay !== ""
+                                        text: root.releasesDateLabel(raCell.lastDay, root.todayIso)
+                                        accent: root.todayIso !== "" && raCell.lastDay > root.todayIso
+                                    }
+                                    RelChip { text: ("" + (raCell.row.last_rtype || "")).toUpperCase(); visible: raCell.lastDay !== "" && text !== "" }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: raCell.lastDay !== "" ? ("" + (raCell.row.last_title || "")) : "No release on record yet"
+                                        color: raCell.lastDay !== "" ? root.textLo : root.textDim; font.pixelSize: 12
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                            SpecBtn {
+                                id: raUnfollow
+                                objectName: "unfollowBtn"
+                                visible: raHover.hovered
+                                anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 8
+                                compact: true; danger: true; label: "UNFOLLOW"
+                                onClicked: waves.unfollowArtist(raCell.uid)
+                            }
+                        }
+                    }
+                }
+                // SHELVES: a row per follow, the artist on the left and their
+                // releases across the rest, newest first, on a shelf that
+                // scrolls sideways the way Browse's do.
+                ListView {
+                    id: relFollowShelves
+                    objectName: "relFollowShelves"
+                    visible: root.releasesView === "manage" && root.releasesFollowView === "shelves"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    clip: true
+                    model: releasesFollowedModel
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    header: Item { width: 1; height: 6 }
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    onContentYChanged: root.relFollowMaybeMore()
+                    onHeightChanged: relFollowMoreCheck.restart()
+                    // One size of tile, the cover over its title and date, and
+                    // a card tall enough to hold it with room under the date.
+                    // The cover is the artist photo's size, level with it, and
+                    // wide enough for the longest date line.
+                    readonly property real tileW: 120
+                    readonly property real tileH: tileW + 8 + Math.ceil(sbTitleFm.height) + Math.ceil(sbDateFm.height)
+                    FontMetrics { id: sbTitleFm; font.pixelSize: 11 }
+                    FontMetrics { id: sbDateFm; font.family: root.mono; font.pixelSize: 10 }
+                    delegate: Item {
+                        id: sbRow
+                        required property string uid
+                        required property string sig
+                        width: ListView.view.width; height: relFollowShelves.tileH + 38
+                        readonly property var row: (sbRow.sig, root._relFollowById[sbRow.uid] || ({}))
+                        readonly property var releases: sbRow.row.releases || []
+                        readonly property var prefetchCard: ({ kind: "artist", id: sbRow.uid, art: "" + (sbRow.row.art || "") })
+                        HoverHandler { id: sbHover }
+                        Rectangle {
+                            anchors.fill: parent; anchors.topMargin: 3; anchors.bottomMargin: 3; radius: 12
+                            color: root.surface; border.color: root.border1
+                            Item {
+                                id: sbHead
+                                x: 12; anchors.top: sbStrip.top
+                                width: 300; height: 120
+                                HoverHandler {
+                                    id: sbHeadHover
+                                    onHoveredChanged: hovered ? root.hoverPrefetch(sbRow.prefetchCard) : root.hoverPrefetchCancel(sbRow.prefetchCard)
+                                }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtist(sbRow.uid) }
+                                Art {
+                                    id: sbArt
+                                    width: 120; height: 120; radius: 10; hoverFx: true
+                                    fxKind: "artist"; fxId: sbRow.uid
+                                    url: sbRow.row.art || ""
+                                }
+                                Column {
+                                    anchors.left: sbArt.right; anchors.leftMargin: 14; anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 7
+                                    Text {
+                                        textFormat: Text.PlainText; text: sbRow.row.name || ""
+                                        color: root.textHi; font.pixelSize: 16; font.bold: true
+                                        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; width: parent.width
+                                    }
+                                    ArtistBadges {
+                                        artistName: "" + (sbRow.row.name || "")
+                                        libBaked: sbRow.row.lib; libStamp: sbRow.row.libStamp
+                                        fitWidth: parent.width
+                                    }
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        visible: (sbRow.row.total || 0) > 0
+                                        text: root.relCount(sbRow.row.total || 0, "RELEASE", "RELEASES") + " · SINCE " + (sbRow.row.since || "")
+                                        color: root.textDim; font.family: root.mono; font.pixelSize: 10; font.letterSpacing: 0.6
+                                    }
+                                }
+                            }
+                            Rectangle { id: sbRule; x: sbHead.x + sbHead.width + 16; y: 16; width: 1; height: parent.height - 32; color: root.divider }
+                            ListView {
+                                id: sbStrip
+                                objectName: "relShelfStrip"
+                                anchors.left: sbRule.right; anchors.leftMargin: 16
+                                anchors.right: parent.right; anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: relFollowShelves.tileH
+                                orientation: ListView.Horizontal
+                                spacing: 14; clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                model: sbRow.releases
+                                delegate: Column {
+                                    id: sbTile
+                                    required property var modelData
+                                    readonly property bool ahead: root.todayIso !== "" && ("" + sbTile.modelData.day) > root.todayIso
+                                    // A music video keeps the row's height and
+                                    // shows its still 16:9.
+                                    readonly property bool video: sbTile.modelData.kind === "video"
+                                    width: sbTile.video ? Math.round(relFollowShelves.tileW * 16 / 9) : relFollowShelves.tileW
+                                    spacing: 4
+                                    Art {
+                                        width: parent.width; height: relFollowShelves.tileW; radius: 6; hoverFx: true
+                                        fxKind: sbTile.video ? "" : "album"; fxId: sbTile.video ? "" : "" + sbTile.modelData.id
+                                        url: "" + (sbTile.modelData.art || "")
+                                        PlayBadge { visible: sbTile.video; radius: 6 }
+                                        MouseArea {
+                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.openReleaseEntry(sbTile.modelData)
+                                        }
+                                    }
+                                    Text {
+                                        textFormat: Text.PlainText; text: "" + (sbTile.modelData.title || "")
+                                        color: root.textLo; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width
+                                    }
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        text: root.releasesDateLabel("" + sbTile.modelData.day, root.todayIso) + " · " + ("" + (sbTile.modelData.rtype || "")).toUpperCase()
+                                        color: sbTile.ahead ? root.accent : root.textDim
+                                        // Untracked: "09-02-2026 · SINGLE" whole in a 120 px tile.
+                                        font.family: root.mono; font.pixelSize: 10
+                                        elide: Text.ElideRight; width: parent.width
+                                    }
+                                }
+                                ShelfWheelRedirect { pane: relFollowShelves }
+                                ShelfEdgeFades { tone: root.surface }
+                            }
+                            Text {
+                                visible: sbRow.releases.length === 0
+                                anchors.left: sbStrip.left; anchors.verticalCenter: sbStrip.verticalCenter
+                                textFormat: Text.PlainText; text: "No release on record yet"
+                                color: root.textDim; font.pixelSize: 13
+                            }
+                            SpecBtn {
+                                objectName: "unfollowBtn"
+                                visible: sbHover.hovered
+                                anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 8
+                                compact: true; danger: true; label: "UNFOLLOW"
+                                onClicked: waves.unfollowArtist(sbRow.uid)
+                            }
+                        }
+                    }
+                }
+                // LEDGER: aligned columns under a head that stays put and
+                // sorts; what a wide window has left over goes to a timeline
+                // of each artist's releases.
+                ListView {
+                    id: relFollowLedger
+                    objectName: "relFollowLedger"
+                    visible: root.releasesView === "manage" && root.releasesFollowView === "ledger"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    clip: true
+                    model: releasesFollowedModel
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    headerPositioning: ListView.OverlayHeader
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    onContentYChanged: { root.relTipHide(); root.relFollowMaybeMore() }
+                    onHeightChanged: relFollowMoreCheck.restart()
+                    readonly property real gap: 16
+                    readonly property real wArt: 44
+                    readonly property real wArtist: Math.max(180, Math.min(300, width * 0.2))
+                    readonly property real wNum: 62
+                    readonly property real wDate: 100
+                    readonly property real wLatestBase: Math.max(240, Math.min(440, width * 0.26))
+                    readonly property real wActRaw: width - (12 + wArt + gap + wArtist + gap + wNum * 2 + gap + wLatestBase + gap + wDate + gap + 14)
+                    // The timeline's two words take 170 px; below 360 its span
+                    // is a sliver. Then the latest release gives the timeline
+                    // its room (WHEN still dates it, and the timeline's hint
+                    // names it), unless even that leaves no readable timeline,
+                    // when the latest title takes all of it instead.
+                    readonly property real wActNoLatest: wActRaw + wLatestBase + gap
+                    readonly property bool showLatest: wActRaw >= 360 || wActNoLatest < 140
+                    readonly property bool showAct: showLatest ? wActRaw >= 140 : true
+                    readonly property real wLatest: !showLatest ? 0 : showAct ? wLatestBase : wLatestBase + Math.max(0, wActRaw)
+                    readonly property real wAct: !showAct ? 0 : showLatest ? wActRaw : wActNoLatest
+                    readonly property real xArtist: 12 + wArt + gap
+                    readonly property real xAlbums: xArtist + wArtist + gap
+                    readonly property real xSongs: xAlbums + wNum
+                    readonly property real xLatest: xSongs + wNum + gap
+                    readonly property real xDate: showLatest ? xLatest + wLatest + gap : xLatest
+                    readonly property real xAct: xDate + wDate + gap
+                    header: Rectangle {
+                        width: relFollowLedger.width; height: 40; z: 3; color: root.bg
+                        RelColHead { x: relFollowLedger.xArtist; text: "ARTIST" + (on ? "  ▲" : ""); sortKey: "name" }
+                        RelColHead { x: relFollowLedger.xAlbums + relFollowLedger.wNum - width; text: "ALBUMS" }
+                        RelColHead { x: relFollowLedger.xSongs + relFollowLedger.wNum - width; text: "SONGS" }
+                        RelColHead { visible: relFollowLedger.showLatest; x: relFollowLedger.xLatest; text: "LATEST RELEASE" + (on ? "  ▼" : ""); sortKey: "recent" }
+                        // With the latest release given way, its date heads
+                        // the column and sorts in its place.
+                        RelColHead {
+                            x: relFollowLedger.xDate
+                            sortKey: relFollowLedger.showLatest ? "" : "recent"
+                            text: relFollowLedger.showLatest ? "WHEN" : "LATEST" + (on ? "  ▼" : "")
+                        }
+                        // Each timeline is the artist's own span, so the head
+                        // names what it shows rather than a shared scale.
+                        RelColHead { visible: relFollowLedger.showAct; x: relFollowLedger.xAct; text: "EVERY RELEASE, FIRST TO LATEST" }
+                        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.border1 }
+                    }
+                    delegate: Item {
+                        id: lgRow
+                        required property string uid
+                        required property string sig
+                        width: ListView.view.width; height: 60
+                        readonly property var row: (lgRow.sig, root._relFollowById[lgRow.uid] || ({}))
+                        readonly property var lib: lgRow.row.lib || ({})
+                        readonly property var latest: (lgRow.row.releases || []).length > 0 ? lgRow.row.releases[0] : null
+                        readonly property string lastDay: "" + (lgRow.row.last_release || "")
+                        readonly property var prefetchCard: ({ kind: "artist", id: lgRow.uid, art: "" + (lgRow.row.art || "") })
+                        HoverHandler {
+                            id: lgHover
+                            onHoveredChanged: hovered ? root.hoverPrefetch(lgRow.prefetchCard) : root.hoverPrefetchCancel(lgRow.prefetchCard)
+                        }
+                        Rectangle {
+                            anchors.fill: parent; anchors.topMargin: 2; anchors.bottomMargin: 2; radius: 8
+                            color: lgHover.hovered ? root.surface2 : "transparent"
+                        }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.loadArtist(lgRow.uid) }
+                        Art {
+                            x: 12; anchors.verticalCenter: parent.verticalCenter
+                            width: relFollowLedger.wArt; height: width; radius: 6
+                            fxKind: "artist"; fxId: lgRow.uid
+                            url: lgRow.row.art || ""
+                        }
+                        Column {
+                            x: relFollowLedger.xArtist; width: relFollowLedger.wArtist; anchors.verticalCenter: parent.verticalCenter
+                            spacing: 3
+                            // The name, and on hover UNFOLLOW right after it
+                            // (the name gives way to it, never the timeline).
+                            Item {
+                                width: parent.width; height: lgName.implicitHeight
+                                Text {
+                                    id: lgName
+                                    textFormat: Text.PlainText; text: lgRow.row.name || ""
+                                    color: root.textHi; font.pixelSize: 14; font.bold: true
+                                    elide: Text.ElideRight
+                                    width: Math.min(implicitWidth, parent.width - (lgUnfollow.visible ? lgUnfollow.width + 10 : 0))
+                                }
+                                SpecBtn {
+                                    id: lgUnfollow
+                                    objectName: "unfollowBtn"
+                                    visible: lgHover.hovered
+                                    x: lgName.width + 10; anchors.verticalCenter: lgName.verticalCenter
+                                    compact: true; danger: true; label: "UNFOLLOW"
+                                    onClicked: waves.unfollowArtist(lgRow.uid)
+                                }
+                            }
+                            Text {
+                                textFormat: Text.PlainText
+                                text: ({ library: "FROM YOUR LIBRARY", tidal: "TIDAL FAVORITE", manual: "FOLLOWED BY YOU" })["" + (lgRow.row.origin || "")] || ""
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 9; font.letterSpacing: 0.8
+                            }
+                        }
+                        Text {
+                            x: relFollowLedger.xAlbums; width: relFollowLedger.wNum; anchors.verticalCenter: parent.verticalCenter
+                            horizontalAlignment: Text.AlignRight; textFormat: Text.PlainText
+                            text: lgRow.lib.present ? ("" + (lgRow.lib.albums || 0)) : "–"
+                            color: lgRow.lib.present ? root.green : root.textDim; font.family: root.mono; font.pixelSize: 14; font.bold: true
+                        }
+                        Text {
+                            x: relFollowLedger.xSongs; width: relFollowLedger.wNum; anchors.verticalCenter: parent.verticalCenter
+                            horizontalAlignment: Text.AlignRight; textFormat: Text.PlainText
+                            text: lgRow.lib.present ? ("" + (lgRow.lib.tracks || 0)) : "–"
+                            color: lgRow.lib.present ? root.textHi : root.textDim; font.family: root.mono; font.pixelSize: 14
+                        }
+                        Item {
+                            visible: relFollowLedger.showLatest
+                            x: relFollowLedger.xLatest; width: relFollowLedger.wLatest; height: parent.height
+                            Art {
+                                id: lgCover
+                                visible: lgRow.latest !== null
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 44; height: 44; radius: 4; hoverFx: true
+                                fxKind: "album"; fxId: lgRow.latest ? "" + lgRow.latest.id : ""
+                                url: lgRow.latest ? "" + (lgRow.latest.art || "") : ""
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.openReleaseEntry(lgRow.latest)
+                                }
+                            }
+                            Column {
+                                anchors.left: lgRow.latest !== null ? lgCover.right : parent.left; anchors.leftMargin: lgRow.latest !== null ? 12 : 0
+                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                spacing: 4
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: lgRow.lastDay !== "" ? ("" + (lgRow.row.last_title || "")) : "No release on record yet"
+                                    color: lgRow.lastDay !== "" ? root.textLo : root.textDim; font.pixelSize: 13
+                                    elide: Text.ElideRight; width: parent.width
+                                }
+                                RelChip { text: ("" + (lgRow.row.last_rtype || "")).toUpperCase(); visible: lgRow.lastDay !== "" && text !== "" }
+                            }
+                        }
+                        Column {
+                            x: relFollowLedger.xDate; width: relFollowLedger.wDate; anchors.verticalCenter: parent.verticalCenter
+                            spacing: 4; visible: lgRow.lastDay !== ""
+                            Text {
+                                textFormat: Text.PlainText; text: root.releasesDateLabel(lgRow.lastDay, root.todayIso)
+                                color: root.todayIso !== "" && lgRow.lastDay > root.todayIso ? root.accent : root.textHi
+                                font.family: root.mono; font.pixelSize: 12; font.bold: true
+                            }
+                            Text {
+                                textFormat: Text.PlainText; text: root.relAgo(lgRow.lastDay)
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 9; font.letterSpacing: 0.8
+                            }
+                        }
+                        // With the latest release given way, a follow with
+                        // nothing on record says so under LATEST.
+                        Text {
+                            visible: !relFollowLedger.showLatest && lgRow.lastDay === ""
+                            x: relFollowLedger.xDate; anchors.verticalCenter: parent.verticalCenter
+                            textFormat: Text.PlainText; text: "NONE YET"
+                            color: root.textDim; font.family: root.mono; font.pixelSize: 12; font.letterSpacing: 0.8
+                        }
+                        RelTimeline {
+                            objectName: "relTimeline"
+                            visible: relFollowLedger.showAct
+                            x: relFollowLedger.xAct; width: relFollowLedger.wAct; height: parent.height
+                            releases: lgRow.row.career || []
+                            missing: lgRow.row.missing || []
+                        }
+                        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.divider }
+                    }
+                }
+                Text {
+                    visible: root.releasesView === "manage" && root.releasesFollowedHave && root.releasesFollowedRows.length === 0
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 88; width: Math.min(parent.width - 44, 560); horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    text: "You are not following anyone yet. Search for an artist, or open one and press Follow."
+                    color: root.textLo; font.pixelSize: 16
+                }
+                Text {
+                    id: relFollowNoMatch
+                    objectName: "relFollowNoMatch"
+                    visible: root.releasesView === "manage" && root.releasesFollowedRows.length > 0
+                             && root._relFollowApplied !== "" && root.releasesFollowedMatch === 0
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 88; width: Math.min(parent.width - 44, 560); horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    text: "No artist you follow matches \u201c" + root._relFollowApplied + "\u201d"
+                    color: root.textLo; font.pixelSize: 16
+                }
+
+                // The EXCLUDED page: the library artists the track floor left
+                // out, each one a FOLLOW away, in the shape the Following
+                // page uses. A follow made here is the user's own, so the
+                // floor never offers to drop it again. Each artist is shown
+                // by what the library holds of them: the covers in its album
+                // folders, the titles, years and the best copy.
+                Text {
+                    id: relExcludedIntro
+                    visible: root.releasesView === "excluded" && root.releasesExcludedRows.length > 0
+                    x: 22; y: 4; width: parent.width - 44
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    text: "Artists in your library with fewer tracks than the floor in Settings, Library, are not followed by the import. Follow any of them here: a follow you make yourself stays whatever the floor says."
+                    color: root.textLo; font.pixelSize: 13
+                }
+                GridView {
+                    id: relExcludedRoster
+                    objectName: "relExcludedRoster"
+                    visible: root.releasesView === "excluded" && root.releasesFollowView === "roster"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    anchors.topMargin: relExcludedIntro.height + 12
+                    clip: true
+                    model: releasesExcludedModel
+                    property int cols: Math.max(2, Math.floor(width / 380))
+                    cellWidth: width > 0 ? Math.floor(width / cols) : 380
+                    cellHeight: 104
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    delegate: Item {
+                        id: rxCell
+                        required property string uid
+                        required property string sig
+                        // sig in the binding: the row is re-read when it changes.
+                        readonly property var row: (rxCell.sig, root._relExById[rxCell.uid] || ({}))
+                        width: relExcludedRoster.cellWidth; height: relExcludedRoster.cellHeight
+                        readonly property var held: rxCell.row.held || []
+                        readonly property var first: rxCell.held.length > 0 ? rxCell.held[0] : ({})
+                        Rectangle {
+                            anchors.fill: parent; anchors.margins: 4; radius: 10
+                            color: root.surface; border.color: root.border1
+                            RelCovers {
+                                id: rxArt
+                                x: 8; anchors.verticalCenter: parent.verticalCenter
+                                width: parent.height - 16; height: width
+                                covers: rxCell.row.covers || []
+                            }
+                            Column {
+                                anchors.left: rxArt.right; anchors.leftMargin: 14
+                                anchors.right: rxFollow.left; anchors.rightMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+                                Text {
+                                    textFormat: Text.PlainText; text: "" + (rxCell.row.name || "")
+                                    color: root.textHi; font.pixelSize: 15; font.bold: true
+                                    elide: Text.ElideRight; width: parent.width
+                                }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: ("" + (rxCell.first.title || "")) + (rxCell.held.length > 1 ? "  +" + (rxCell.held.length - 1) + " more" : "")
+                                    color: root.textLo; font.pixelSize: 12
+                                    elide: Text.ElideRight; width: parent.width
+                                }
+                                Row {
+                                    spacing: 6
+                                    RelChip { text: "" + (rxCell.row.span || ""); visible: text !== "" }
+                                    RelChip { text: root.relCount(rxCell.row.tracks || 0, "TRACK", "TRACKS") }
+                                    RelChip { text: "" + (rxCell.row.best || ""); visible: text !== "" }
+                                }
+                            }
+                            SpecBtn {
+                                id: rxFollow
+                                objectName: "excludedFollowBtn"
+                                anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
+                                compact: true; primary: true; label: "FOLLOW"
+                                onClicked: importDialog.startNames(["" + (rxCell.row.name || "")], true)
+                            }
+                        }
+                    }
+                }
+                ListView {
+                    id: relExcludedShelves
+                    objectName: "relExcludedShelves"
+                    visible: root.releasesView === "excluded" && root.releasesFollowView === "shelves"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    anchors.topMargin: relExcludedIntro.height + 4
+                    clip: true
+                    model: releasesExcludedShelfModel
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    readonly property int cols: Math.max(5, Math.floor((width + 14) / (156 + 14)))
+                    readonly property real tileW: Math.floor((width - (cols - 1) * 14) / cols)
+                    onColsChanged: root.releasesExcludedShelvesSync()
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    delegate: Item {
+                        id: seRow
+                        required property string uid
+                        required property string sig
+                        required property string rowKind
+                        required property string letter
+                        required property int cnt
+                        required property int index
+                        width: ListView.view.width
+                        height: seRow.rowKind === "head" ? (seRow.index === 0 ? 48 : 70) + 14 : seTiles.height + 16
+                        // A letter head, the feed's large section head.
+                        Item {
+                            visible: seRow.rowKind === "head"
+                            width: parent.width; height: seRow.index === 0 ? 48 : 70
+                            Text {
+                                id: seHead
+                                anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.bottomMargin: 12
+                                textFormat: Text.PlainText; text: seRow.letter
+                                color: root.textHi; font.pixelSize: 26; font.bold: true; font.letterSpacing: -0.4
+                            }
+                            Text {
+                                anchors.left: seHead.right; anchors.leftMargin: 12; anchors.baseline: seHead.baseline
+                                textFormat: Text.PlainText; text: root.relCount(seRow.cnt, "artist", "artists")
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 12; font.letterSpacing: 0.6
+                            }
+                            Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.divider }
+                        }
+                        Row {
+                            id: seTiles
+                            visible: seRow.rowKind === "row"
+                            spacing: 14
+                            // sig in the binding: the tiles re-read when the row changes.
+                            readonly property var keys: seRow.rowKind === "row" ? (seRow.sig, root._relExShelfKeys[seRow.uid] || []) : []
+                            Repeater {
+                                model: seTiles.keys.length
+                                delegate: Item {
+                                    id: seTile
+                                    required property int index
+                                    readonly property var row: (seRow.sig, root._relExById[seTiles.keys[seTile.index]] || ({}))
+                                    readonly property var held: seTile.row.held || []
+                                    readonly property var first: seTile.held.length > 0 ? seTile.held[0] : ({})
+                                    width: relExcludedShelves.tileW; height: seCol.implicitHeight
+                                    HoverHandler { id: seHover }
+                                    Column {
+                                        id: seCol
+                                        width: parent.width; spacing: 5
+                                        RelCovers { width: parent.width; height: width; covers: seTile.row.covers || [] }
+                                        Text {
+                                            textFormat: Text.PlainText; text: "" + (seTile.row.name || "")
+                                            color: root.textHi; font.pixelSize: 13; font.bold: true
+                                            elide: Text.ElideRight; width: parent.width
+                                        }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            text: ("" + (seTile.first.title || "")) + (seTile.held.length > 1 ? "  +" + (seTile.held.length - 1) : "")
+                                            color: root.textLo; font.pixelSize: 11
+                                            elide: Text.ElideRight; width: parent.width
+                                        }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            text: [("" + (seTile.row.span || "")), root.relCount(seTile.row.tracks || 0, "TRACK", "TRACKS"), ("" + (seTile.row.best || ""))].filter(function (s) { return s !== "" }).join(" · ")
+                                            color: root.textDim; font.family: root.mono; font.pixelSize: 10; font.letterSpacing: 0.6
+                                            elide: Text.ElideRight; width: parent.width
+                                        }
+                                    }
+                                    SpecBtn {
+                                        objectName: "excludedFollowBtn"
+                                        visible: seHover.hovered
+                                        anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 8
+                                        compact: true; primary: true; label: "FOLLOW"
+                                        onClicked: importDialog.startNames(["" + (seTile.row.name || "")], true)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Two ledgers side by side once each still gets 640 px.
+                GridView {
+                    id: relExcludedLedger
+                    objectName: "relExcludedLedger"
+                    visible: root.releasesView === "excluded" && root.releasesFollowView === "ledger"
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                    anchors.topMargin: relExcludedIntro.height + 4
+                    clip: true
+                    model: releasesExcludedModel
+                    readonly property int cols: width >= 1280 ? 2 : 1
+                    cellWidth: Math.floor(width / cols); cellHeight: 60
+                    cacheBuffer: 800
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
+                    readonly property real gap: 16
+                    readonly property real cw: cellWidth - (cols > 1 ? 12 : 0)
+                    readonly property real wArtist: Math.max(170, Math.min(240, cw * 0.27))
+                    readonly property real wNum: 52
+                    readonly property real wQ: 92
+                    readonly property real wBtn: 80
+                    readonly property real xArtist: 10 + 44 + 14
+                    readonly property real xHeld: xArtist + wArtist + gap
+                    readonly property real wHeld: cw - xHeld - gap - wNum - gap - wQ - gap - wBtn - 8
+                    readonly property real xTracks: xHeld + wHeld + gap
+                    readonly property real xQ: xTracks + wNum + gap
+                    readonly property real chipW: 190
+                    readonly property int chipFit: Math.max(1, Math.floor((wHeld + 14) / (chipW + 14)))
+                    header: Rectangle {
+                        width: relExcludedLedger.width; height: 40; color: root.bg
+                        Repeater {
+                            model: relExcludedLedger.cols
+                            Item {
+                                required property int index
+                                x: index * relExcludedLedger.cellWidth; width: relExcludedLedger.cw; height: parent.height
+                                RelColHead { x: relExcludedLedger.xArtist; text: "ARTIST" }
+                                RelColHead { x: relExcludedLedger.xHeld; text: "IN YOUR LIBRARY" }
+                                RelColHead { x: relExcludedLedger.xTracks + relExcludedLedger.wNum - width; text: "TRACKS" }
+                                RelColHead { x: relExcludedLedger.xQ; text: "BEST COPY" }
+                                Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.border1 }
+                            }
+                        }
+                    }
+                    footer: Item { width: 1; height: root.relSwitchClear }
+                    delegate: Item {
+                        id: lxRow
+                        required property string uid
+                        required property string sig
+                        readonly property var row: (lxRow.sig, root._relExById[lxRow.uid] || ({}))
+                        width: relExcludedLedger.cellWidth; height: 60
+                        readonly property var held: lxRow.row.held || []
+                        Item {
+                            width: relExcludedLedger.cw; height: parent.height
+                            RelCovers {
+                                x: 10; anchors.verticalCenter: parent.verticalCenter
+                                width: 44; height: 44
+                                covers: lxRow.row.covers || []
+                            }
+                            Column {
+                                x: relExcludedLedger.xArtist; width: relExcludedLedger.wArtist; anchors.verticalCenter: parent.verticalCenter
+                                spacing: 3
+                                Text {
+                                    textFormat: Text.PlainText; text: "" + (lxRow.row.name || "")
+                                    color: root.textHi; font.pixelSize: 14; font.bold: true
+                                    elide: Text.ElideRight; width: parent.width
+                                }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: root.relCount(lxRow.row.albums || 0, "ALBUM", "ALBUMS") + (lxRow.row.span ? " · " + lxRow.row.span : "")
+                                    color: root.textDim; font.family: root.mono; font.pixelSize: 9; font.letterSpacing: 0.8
+                                }
+                            }
+                            Row {
+                                x: relExcludedLedger.xHeld; width: relExcludedLedger.wHeld; anchors.verticalCenter: parent.verticalCenter
+                                spacing: 14
+                                Repeater {
+                                    model: lxRow.held.slice(0, relExcludedLedger.chipFit)
+                                    delegate: Column {
+                                        id: lxChip
+                                        required property var modelData
+                                        width: lxRow.held.length === 1 || relExcludedLedger.chipFit === 1 ? relExcludedLedger.wHeld : relExcludedLedger.chipW
+                                        spacing: 4
+                                        Text {
+                                            textFormat: Text.PlainText; text: "" + (lxChip.modelData.title || "")
+                                            color: root.textLo; font.pixelSize: 13; elide: Text.ElideRight; width: parent.width
+                                        }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            text: [("" + (lxChip.modelData.year || "")), root.relCount(lxChip.modelData.tracks || 0, "TRACK", "TRACKS")].filter(function (s) { return s !== "" }).join(" · ")
+                                            color: root.textDim; font.family: root.mono; font.pixelSize: 10; font.letterSpacing: 0.6
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: lxRow.held.length > relExcludedLedger.chipFit
+                                x: relExcludedLedger.xTracks - relExcludedLedger.gap - implicitWidth + 8; anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText; text: "+" + (lxRow.held.length - relExcludedLedger.chipFit)
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 11; font.bold: true
+                            }
+                            Text {
+                                x: relExcludedLedger.xTracks; width: relExcludedLedger.wNum; anchors.verticalCenter: parent.verticalCenter
+                                horizontalAlignment: Text.AlignRight; textFormat: Text.PlainText
+                                text: "" + (lxRow.row.tracks || 0)
+                                color: root.textHi; font.family: root.mono; font.pixelSize: 14; font.bold: true
+                            }
+                            RelChip {
+                                x: relExcludedLedger.xQ; anchors.verticalCenter: parent.verticalCenter
+                                text: "" + (lxRow.row.best || ""); visible: text !== ""
+                            }
+                            SpecBtn {
+                                objectName: "excludedFollowBtn"
+                                anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                                compact: true; primary: true; label: "FOLLOW"
+                                onClicked: importDialog.startNames(["" + (lxRow.row.name || "")], true)
+                            }
+                            Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.divider }
+                        }
+                    }
+                }
+
+                // The timeline hint: the release(s) under the hovered pin,
+                // above it (below when the top is too close), kept inside
+                // the pane, with a pointer at the pin.
+                Item {
+                    id: relTip
+                    objectName: "relTip"
+                    z: 80
+                    visible: root.relTipRows.length > 0 && root.releasesView === "manage" && root.releasesFollowView === "ledger"
+                    readonly property bool flip: root.relTipY - height < 4
+                    width: 300; height: relTipBox.height + 7
+                    x: Math.max(8, Math.min(parent.width - width - 8, root.relTipX - width / 2))
+                    y: flip ? root.relTipBelow : root.relTipY - height
+                    HoverHandler { id: relTipHover; onHoveredChanged: if (!hovered) relTipLinger.restart() }
+                    // Holds the pointer, so nothing under the hint reacts; a
+                    // wheel over it stops here too, past the end of a list
+                    // that scrolls or on one too short to, rather than
+                    // scrolling the page and the hint away.
+                    MouseArea {
+                        anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.AllButtons
+                        onWheel: function (w) { w.accepted = true }
+                    }
+                    Rectangle {
+                        id: relTipCaret
+                        width: 10; height: 10; rotation: 45
+                        x: Math.max(12, Math.min(relTip.width - 22, root.relTipX - relTip.x - 5))
+                        y: relTip.flip ? 2 : relTipBox.height - 5
+                        color: root.surface2; border.color: root.border1
+                    }
+                    Rectangle {
+                        id: relTipBox
+                        y: relTip.flip ? 7 : 0
+                        width: parent.width; height: relTipCol.implicitHeight + 20
+                        radius: 10; color: root.surface2; border.color: root.border1
+                        // Covers the caret's inner half so it reads as one shape.
+                        Rectangle {
+                            x: relTipCaret.x - 2; width: 14; height: 6
+                            y: relTip.flip ? 1 : parent.height - 7
+                            color: root.surface2
+                        }
+                        Column {
+                            id: relTipCol
+                            x: 12; y: 10; width: parent.width - 24
+                            spacing: 8
+                            Text {
+                                objectName: "relTipDate"
+                                width: parent.width
+                                textFormat: Text.PlainText
+                                readonly property var r0: root.relTipNewest
+                                readonly property var r1: root.relTipOldest
+                                readonly property string d0: r0 ? "" + r0.day : ""
+                                readonly property string d1: r1 ? "" + r1.day : ""
+                                text: (d0 === d1 ? (r0 && r0.mb && r0.shown ? root.relEntryDate(r0, "") : root.dateText(d0))
+                                                 : root.relEntryDate(r1, root.todayIso) + " – " + root.relEntryDate(r0, root.todayIso))
+                                      + "  ·  " + root.relAgo(d0)
+                                color: root.todayIso !== "" && d0 > root.todayIso ? root.accent : root.textDim
+                                font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.8
+                                elide: Text.ElideRight
+                            }
+                            // Every release of the period, four in view; a
+                            // longer period scrolls inside the box under the
+                            // pointer, with the pages' soft edges (the queue's
+                            // open ledger does the same). 4 px of air around
+                            // the rows keeps their hover plate unclipped.
+                            ListView {
+                                id: relTipList
+                                objectName: "relTipList"
+                                readonly property bool scrolls: contentHeight > height + 0.5
+                                readonly property bool heads: root.relTipGroups.length > 1
+                                // The group whose strip has reached the top, and
+                                // how far below the top the next strip is (it
+                                // pushes the pinned one up and out as it comes,
+                                // then takes its place where it already sits).
+                                // Read off the known row heights, not indexAt: a
+                                // jump asks before the rows there are laid out.
+                                readonly property var pin: {
+                                    var s = contentY - originY, y = 4, g = "", next = 1e9
+                                    for (var i = 0; i < root.relTipItems.length; i++) {
+                                        var it = root.relTipItems[i]
+                                        if (it.head) {
+                                            if (y - s > 0) { next = y - s; break }
+                                            g = it.group
+                                        }
+                                        y += (it.head ? root.relTipHeadH : root.relTipRowH) + spacing
+                                    }
+                                    return { group: g, next: next }
+                                }
+                                readonly property string currentGroup: pin.group
+                                x: -4; width: parent.width + 8
+                                // Past four, the top of the next row peeks under
+                                // the bottom fade: the sign there is more. Room
+                                // for two group strips besides.
+                                height: Math.min(contentHeight,
+                                                 root.relTipMaxRows * (root.relTipRowH + spacing) - spacing + 8
+                                                 + (heads ? 2 * (root.relTipHeadH + spacing) : 0)
+                                                 + (root.relTipRows.length > root.relTipMaxRows ? root.relTipPeek : 0))
+                                header: Item { width: 1; height: 4 }
+                                footer: Item { width: 1; height: 4 }
+                                clip: true; spacing: 8
+                                boundsBehavior: Flickable.StopAtBounds
+                                interactive: scrolls
+                                model: heads ? root.relTipItems : root.relTipRows
+                                // A new period starts at its first release.
+                                onModelChanged: positionViewAtBeginning()
+                                // Each row spans the list (a ListView puts its
+                                // rows at x 0, whatever they ask), the release
+                                // inset 4 px inside it.
+                                delegate: Item {
+                                    id: tipRow
+                                    required property var modelData
+                                    readonly property bool head: !!tipRow.modelData.head
+                                    // A release MusicBrainz lists and TIDAL lacks: no
+                                    // cover, a red chip, nothing to open.
+                                    readonly property bool mb: !!tipRow.modelData.mb
+                                    width: relTipList.width
+                                    height: tipRow.head ? root.relTipHeadH : root.relTipRowH
+                                    // Across the list's full width, past the
+                                    // rows' 4 px of air.
+                                    RelTipStrip {
+                                        visible: tipRow.head
+                                        anchors.fill: parent
+                                        group: tipRow.head ? "" + tipRow.modelData.group : ""
+                                        n: tipRow.head ? tipRow.modelData.n : 0
+                                    }
+                                    Item {
+                                        visible: !tipRow.head
+                                        x: 4; width: parent.width - 8; height: root.relTipRowH
+                                        Rectangle {
+                                            anchors.fill: parent; anchors.margins: -4; radius: 6
+                                            color: tipRowMa.containsMouse ? root.surface3 : "transparent"
+                                        }
+                                        MouseArea {
+                                            id: tipRowMa
+                                            anchors.fill: parent; anchors.margins: -4
+                                            enabled: !tipRow.mb && !tipRow.head
+                                            hoverEnabled: true; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onContainsMouseChanged: root.relTipHotId = containsMouse ? "" + tipRow.modelData.id
+                                                : root.relTipHotId === "" + tipRow.modelData.id ? "" : root.relTipHotId
+                                            // The page opens first: hiding the hint
+                                            // takes this row, and this handler's
+                                            // scope with it.
+                                            onClicked: {
+                                                root.openReleaseEntry(tipRow.modelData)
+                                                root.relTipHide()
+                                            }
+                                        }
+                                        Art {
+                                            id: tipArt
+                                            visible: !tipRow.mb
+                                            // A music video's still is 16:9.
+                                            width: tipRow.mb ? 0 : tipRow.modelData.kind === "video" ? 78 : 44; height: 44; radius: 4
+                                            url: "" + (tipRow.modelData.art || "")
+                                            PlayBadge { visible: tipRow.modelData.kind === "video"; radius: 4 }
+                                        }
+                                        Column {
+                                            anchors.left: tipArt.right; anchors.leftMargin: tipRow.mb ? 0 : 10; anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 5
+                                            Text {
+                                                textFormat: Text.PlainText; text: "" + (tipRow.modelData.title || "")
+                                                color: root.textHi; font.pixelSize: 13; font.bold: true
+                                                elide: Text.ElideRight; width: parent.width
+                                            }
+                                            Row {
+                                                spacing: 6
+                                                RelChip { visible: root.relTipGroups.length < 2; text: ("" + (tipRow.modelData.rtype || "album")).toUpperCase() }
+                                                RelChip { objectName: "relTipMbChip"; visible: tipRow.mb; danger: true; text: "NOT ON TIDAL" }
+                                                RelChip {
+                                                    visible: (tipRow.modelData.tracks || 0) > 0
+                                                    text: root.relCount(tipRow.modelData.tracks || 0, "TRACK", "TRACKS")
+                                                }
+                                                RelChip {
+                                                    visible: root.relTipRows.length > 1
+                                                    text: root.relEntryDate(tipRow.modelData, root.todayIso)
+                                                    accent: root.todayIso !== "" && ("" + tipRow.modelData.day) > root.todayIso
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // The strip of the group in view, once the first
+                                // has scrolled under the top.
+                                RelTipStrip {
+                                    id: relTipPinned
+                                    objectName: "relTipPinned"
+                                    parent: relTipList
+                                    z: 3
+                                    pinned: true
+                                    visible: relTipList.heads && relTipList.currentGroup !== ""
+                                    x: 0; y: Math.min(0, relTipList.pin.next - height)
+                                    width: relTipList.width; height: root.relTipHeadH
+                                    group: relTipList.currentGroup
+                                    n: {
+                                        for (var i = 0; i < root.relTipGroups.length; i++)
+                                            if (root.relTipGroups[i].group === relTipList.currentGroup) return root.relTipGroups[i].n
+                                        return 0
+                                    }
+                                }
+                                Repeater {
+                                    model: 2
+                                    delegate: Rectangle {
+                                        required property int index
+                                        readonly property bool atEnd: index === 1
+                                        readonly property real scrolled: relTipList.contentY - relTipList.originY
+                                        readonly property real rest: relTipList.contentHeight - relTipList.height - scrolled
+                                        objectName: atEnd ? "relTipFadeBottom" : "relTipFadeTop"
+                                        parent: relTipList
+                                        width: relTipList.width; height: root.relTipFadeH
+                                        y: atEnd ? relTipList.height - height : 0
+                                        rotation: atEnd ? 180 : 0
+                                        opacity: !relTipList.scrolls ? 0
+                                            : Math.min(1, Math.max(0, atEnd ? rest : scrolled) / root.relTipFadeH)
+                                        visible: opacity > 0
+                                        gradient: Gradient {
+                                            GradientStop { position: 0; color: root.surface2 }
+                                            GradientStop { position: 0.25; color: Qt.alpha(root.surface2, 0.82) }
+                                            GradientStop { position: 0.6; color: Qt.alpha(root.surface2, 0.28) }
+                                            GradientStop { position: 1; color: Qt.alpha(root.surface2, 0) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    visible: root.releasesView === "excluded" && root.releasesExcludedHave && root.releasesExcludedRows.length === 0
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 88; width: Math.min(parent.width - 44, 560); horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    text: root.libraryOn ? "Every artist in your library clears the floor, or is followed already."
+                                         : "Turn on your library in Settings to see the artists an import leaves out."
+                    color: root.textLo; font.pixelSize: 16
+                }
+                Text {
+                    id: relExcludedNoMatch
+                    objectName: "relExcludedNoMatch"
+                    visible: root.releasesView === "excluded" && root.releasesExcludedRows.length > 0
+                             && root._relExApplied !== "" && root.releasesExcludedShown.length === 0
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 88; width: Math.min(parent.width - 44, 560); horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    text: "No excluded artist or album matches \u201c" + root._relExApplied + "\u201d"
+                    color: root.textLo; font.pixelSize: 16
+                }
+            }
+        }
+
         // ---- Library page ----------------------------------------------
         ColumnLayout {
             id: libraryPane
@@ -15736,7 +20246,7 @@ ApplicationWindow {
                         }
                     }
                 }
-                // Tracks tab only: queue every favourite track (issue #43).
+                // Tracks tab only: queue every favorite track (issue #43).
                 // The rollup has no ownership record, so the button shows live
                 // download state only, like a playlist folder's.
                 Item {
@@ -15757,7 +20267,7 @@ ApplicationWindow {
                         st: favTracksBtn.st
                     }
                 }
-                // Albums tab: every favourite album, under the same album
+                // Albums tab: every favorite album, under the same album
                 // settings as a Download album click on each.
                 Item {
                     visible: root.libraryCategory === "albums"
@@ -15777,7 +20287,7 @@ ApplicationWindow {
                         st: favAlbumsBtn.st
                     }
                 }
-                // Artists tab: every favourite artist's discography. The badge
+                // Artists tab: every favorite artist's discography. The badge
                 // counts artists still to finish.
                 Item {
                     visible: root.libraryCategory === "artists"
@@ -15835,7 +20345,7 @@ ApplicationWindow {
                         st: favMixesBtn.st
                     }
                 }
-                // Videos tab: every favourite video.
+                // Videos tab: every favorite video.
                 Item {
                     visible: root.libraryCategory === "videos"
                     Layout.alignment: Qt.AlignVCenter
@@ -15904,7 +20414,7 @@ ApplicationWindow {
                         contentItem: ListView {
                             clip: true; implicitHeight: contentHeight
                             model: libSortBox.popup.visible ? libSortBox.delegateModel : null
-                            ScrollBar.vertical: ScrollBar {}
+                            ScrollBar.vertical: WavesScrollBar {}
                         }
                     }
                 }
@@ -15975,7 +20485,7 @@ ApplicationWindow {
                     boundsBehavior: Flickable.StopAtBounds
                     // Breathing space inside the scroll area (see BrowseScroll).
                     header: Item { width: 1; height: 8 }
-                    ScrollBar.vertical: ScrollBar {}
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
                     // Same revalidate scroll pinning as LibList (this grid is
                     // the one category pane that isn't a LibList).
                     property real pendingY: -1
@@ -16106,11 +20616,11 @@ ApplicationWindow {
                     anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
                     clip: true
                     contentWidth: width; contentHeight: homeCol.height + 32
-                    ScrollBar.vertical: ScrollBar {}
+                    ScrollBar.vertical: WavesScrollBar { outside: true }
                     boundsBehavior: Flickable.StopAtBounds
                     Column {
                         id: homeCol
-                        // y matches the favourites lists' 8px in-scroll padding
+                        // y matches the favorites lists' 8px in-scroll padding
                         // exactly, or the content would jump vertically when
                         // switching between the category tabs.
                         y: 8
@@ -16267,7 +20777,7 @@ ApplicationWindow {
                         clip: true; spacing: 8
                         cacheBuffer: 800
                         boundsBehavior: Flickable.StopAtBounds
-                        ScrollBar.vertical: ScrollBar {}
+                        ScrollBar.vertical: WavesScrollBar { outside: true }
                         header: Item { width: 1; height: 8 }
                         footer: Item { width: 1; height: 20 }
                         model: libFolderModel
@@ -16391,7 +20901,7 @@ ApplicationWindow {
             // Browse layout switch (art-first vs console), floating over the
             // pane's bottom-right corner so it costs the landing page no row.
             Rectangle {
-                visible: root.signedIn && root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && root.browsePageKey === ""
+                visible: root.signedIn && root.browseOpen && !root.artistOpen && !root.settingsOpen && !root.libraryOpen && !root.releasesOpen && root.browsePageKey === ""
                 anchors.right: parent.right; anchors.bottom: parent.top
                 anchors.rightMargin: 22; anchors.bottomMargin: 14
                 radius: 14; implicitHeight: 28; implicitWidth: styleSeg.implicitWidth + 10
@@ -16441,7 +20951,7 @@ ApplicationWindow {
                 Item { Layout.fillWidth: true }
                 // Update notice: the right slot goes gold when a newer release is
                 // waiting. Full line when the bar is idle; compacts to LED +
-                // version while the mini player is up so the centre stays clear
+                // version while the mini player is up so the center stays clear
                 // (npInfo's budget subtracts this slot either way). Click opens
                 // Settings, where the updater card carries the install button.
                 RowLayout {
@@ -16472,7 +20982,7 @@ ApplicationWindow {
                             // onActiveChanged refresh has run.
                             onClicked: {
                                 root.navPush(); root.markNav("settings")
-                                root.settingsOpen = true; root.artistOpen = false; root.libraryOpen = false
+                                root.settingsOpen = true; root.artistOpen = false; root.libraryOpen = false; root.releasesOpen = false
                                 Qt.callLater(function() { settingsPage.jumpToCard("updates") })
                             }
                         }
@@ -16550,7 +21060,7 @@ ApplicationWindow {
             // paused/stopped, and clicking the title/artist jumps back to the
             // artist page (and expands the track's album). One shared player.
             // It docks to the bar's right corner whenever that corner is free
-            // (the wordmark hides while playing) and slides to the centre only
+            // (the wordmark hides while playing) and slides to the center only
             // when the update notice needs the corner, one animated move each
             // way so the controls never look like they are bouncing around.
             // Hovering anywhere on the bottom bar (not just the ✕) reveals the
@@ -16640,11 +21150,11 @@ ApplicationWindow {
                     readonly property real leftGuard: 22 + 7 + 10 + Math.min(statusText.implicitWidth, statusBar.width * 0.22) + 24
                     // The right slot is no longer guaranteed empty while playing:
                     // the update notice stays up (compacted). Guard on whichever
-                    // side claims more so the centred row stays clear of both.
+                    // side claims more so the centered row stays clear of both.
                     readonly property real rightGuard: 22 + (statusUpdate.visible ? statusUpdate.implicitWidth + 24 : 0)
                     readonly property real fixedParts: 20 + 18 + stopMetrics.width + 27
                     // Docked right (no update notice) the row spans from the
-                    // status text's guard to the bar's right margin; centred
+                    // status text's guard to the bar's right margin; centered
                     // (notice up) it is bounded symmetrically by the wider side.
                     readonly property real budget: Math.max(120, statusUpdate.visible
                         ? statusBar.width - 2 * Math.max(leftGuard, rightGuard) - fixedParts
@@ -16868,7 +21378,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Text { text: "Download queue"; color: root.textHi; font.pixelSize: 16; font.bold: true }
                 Item { Layout.fillWidth: true }
-                // Pause / resume all. Gold while running (pausing interrupts but
+                // Pause / resume all. Yellow while running (pausing interrupts but
                 // loses nothing), green once paused, where RESUME is the way
                 // forward. Both are SpecBtn, so the fill, the border and the
                 // hover lift are the exit prompt's, not a local imitation.
@@ -16905,7 +21415,7 @@ ApplicationWindow {
             ListView {
                 id: queueList
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 0
-                model: queueModel; ScrollBar.vertical: ScrollBar {}
+                model: queueModel; ScrollBar.vertical: WavesScrollBar { outside: true; reach: 16; beside: queueDrawer.contentItem }
 
                 // Grouped sections: Completed (collapsible) · Failed · Stopped · Downloading · Queued
                 section.property: "uiGroup"
@@ -16940,7 +21450,7 @@ ApplicationWindow {
                             // happening right now reads near-white, what is only
                             // waiting stays dim, so the eye lands on Downloading
                             // first when the drawer opens.
-                            // The three settled sections carry a colour each:
+                            // The three settled sections carry a color each:
                             // Completed the soft green, Failed the hot red,
                             // Stopped the soft red, still red (work you ended,
                             // not work that finished) but a step softer than
@@ -16970,7 +21480,7 @@ ApplicationWindow {
                         // Every section clears itself. Riding the header means
                         // the scope needs no spelling out (it takes the section
                         // it sits on), so the control stays one short word in
-                        // that section's own colour instead of a grey footer
+                        // that section's own color instead of a gray footer
                         // button that has to name what it sweeps. Downloading
                         // has none: stopping a live transfer is the row's own
                         // control, never a bulk one.
@@ -17011,13 +21521,25 @@ ApplicationWindow {
                     // tests/test_queue_section_pulse.py) and it would need a
                     // freshness window to stop a header the view recycles
                     // minutes later replaying an old pulse.
+                    // The frame is not always enough: on a busy GUI thread
+                    // the view can re-section its headers AFTER the timer
+                    // has fired, and the header that started the pulse is
+                    // handed elsewhere (which drops it) while the one handed
+                    // the grown section had already said "not me". So a
+                    // header handed the pulsing section within a moment of
+                    // the tick plays it on arrival. The window is short and
+                    // reads the tick's own time, so a header recycled later
+                    // never replays it.
                     Connections { target: root; function onPulseTickChanged() { secArm.restart() } }
                     Timer {
                         id: secArm
                         interval: 16
                         onTriggered: if (secItem.section === root.pulseSection) secPulse.restart()
                     }
-                    onSectionChanged: { secPulse.stop(); secLbl.scale = 1 }
+                    onSectionChanged: {
+                        secPulse.stop(); secLbl.scale = 1
+                        if (secItem.section === root.pulseSection && Date.now() - root.pulseAt < 400) secPulse.restart()
+                    }
                     SequentialAnimation {
                         id: secPulse
                         objectName: "queueSectionPulse"
@@ -17060,20 +21582,33 @@ ApplicationWindow {
                     // no track fetch, because there is nothing to open.
                     readonly property bool peekable: expandable || single
                     readonly property bool peeking: peekable && !qexp && !!(qBody.item && qBody.item.hovering)
-                    // How many track rows the ledger holds, and how many of
-                    // them are actually built. A ledger row is not cheap (four
-                    // texts, two DecryptText cells, three running Behaviors),
-                    // and the Repeater below is not virtualised, so the count
-                    // is the cost. An album is 10 to 30 rows, which is what
-                    // this was written for; a playlist is routinely hundreds
-                    // and can be thousands, and the peek is reached by the
-                    // pointer merely crossing the row, so an unbounded count
-                    // would spend a quarter of a second of the GUI thread on a
-                    // gesture nobody made on purpose. The peek builds only
-                    // what its 30px sliver can show; the expansion, which the
-                    // user did ask for, builds up to root.queueLedgerMax and
-                    // says how many rows it is not showing.
+                    // How many track rows the ledger holds, and how many it
+                    // lists. A ledger row is not cheap (four texts, two
+                    // DecryptText cells, three running Behaviors), so the list
+                    // below is a ListView that builds only the rows in view: an
+                    // album is 10 to 30 rows, a playlist routinely hundreds and
+                    // can be thousands, and the peek is reached by the pointer
+                    // merely crossing the row. The peek's list is only as tall
+                    // as its 30px sliver, so it builds a handful; the expansion
+                    // scrolls through every track.
                     readonly property int ledgerLen: (root.queueTracks[model.qid] || []).length
+                    // The positions of the tracks that did not land (failed, or
+                    // refused by TIDAL), for the MISSING view and its count.
+                    // Only worked out while the list is on screen.
+                    readonly property var ledgerMissing: {
+                        var out = []
+                        if (!ledgerHolding) return out
+                        var arr = root.queueTracks[model.qid] || []
+                        for (var i = 0; i < arr.length; ++i)
+                            if (arr[i].status === "failed" || arr[i].status === "unavailable") out.push(i)
+                        return out
+                    }
+                    // Held for as long as the list is on screen, not just
+                    // while the row is open: a row folding, and the peek it
+                    // folds into, keep showing exactly what was there, so
+                    // nothing swaps under the motion (not even for a frame).
+                    readonly property bool missingOnly: ledgerHolding && ledgerMissing.length > 0
+                                                        && root.queueLedgerMissing[model.qid] === true
                     // While the sliver is still CLOSING it keeps what it was
                     // showing. Bound to the hover alone, the ledger emptied on
                     // the frame the pointer left and the card then spent the
@@ -17084,9 +21619,22 @@ ApplicationWindow {
                     // sliver, whose whole content is one line of text, was the
                     // clearest case of all.
                     readonly property bool ledgerHolding: qexp || peeking || !!(qBody.item && qBody.item.ledgerAnimating)
-                    readonly property int ledgerShown: qexp ? Math.min(ledgerLen, root.queueLedgerMax)
-                                                    : ledgerHolding ? Math.min(ledgerLen, root.queueLedgerPeek)
-                                                    : 0
+                    readonly property int ledgerShown: !ledgerHolding ? 0 : missingOnly ? ledgerMissing.length : ledgerLen
+                    // The open list's ceiling: a fixed box of rows, so an
+                    // album still shows whole and a long collection scrolls
+                    // inside it instead of stretching the card.
+                    readonly property real ledgerCap: root.queueLedgerMaxRows * (root.queueLedgerRowH + root.queueLedgerGap)
+                                                      - root.queueLedgerGap
+                    // Nothing missing any more (every failure retried and
+                    // landed): back to ALL, so a later failure never drops the
+                    // row into MISSING without the user choosing it again.
+                    onLedgerMissingChanged: if (qexp && ledgerMissing.length === 0
+                                                && root.queueLedgerMissing[model.qid] === true) showMissing(false)
+                    function showMissing(on) {
+                        var m = Object.assign({}, root.queueLedgerMissing)
+                        if (on) m[model.qid] = true; else delete m[model.qid]
+                        root.queueLedgerMissing = m
+                    }
                     function qtoggle() {
                         // A single has no ledger to open; the card is the whole story.
                         if (!expandable) { return }
@@ -17272,7 +21820,7 @@ ApplicationWindow {
                                     }
                                 }
                                 // The quality the row is fetching at, beside the
-                                // dismiss X and centred with it. Compact: the
+                                // dismiss X and centered with it. Compact: the
                                 // drawer has room for the tier word, not for the
                                 // full spec behind it, and the expanded ledger
                                 // states the per-track detail anyway. The DONE
@@ -17369,7 +21917,16 @@ ApplicationWindow {
                                 // arrived, a step the card took before the smooth part
                                 // of the motion had begun.
                                 Layout.fillWidth: true; Layout.bottomMargin: implicitHeight > 0.5 ? 2 : 0
-                                implicitHeight: qrow.qexp ? qtrackCol.implicitHeight : (qrow.peeking ? 30 : 0)
+                                // Reaches into the card's right padding, where the
+                                // ledger's scrollbar sits clear of the rows; the
+                                // rows themselves keep the card's width below.
+                                Layout.rightMargin: -8
+                                // A row with missing tracks peeks taller by its
+                                // ALL / MISSING bar, so the sliver still shows a
+                                // track under it rather than only the buttons.
+                                implicitHeight: qrow.qexp ? qtrackCol.implicitHeight
+                                              : qrow.peeking ? 30 + (ledgerBar.visible ? ledgerBar.implicitHeight + qtrackCol.spacing : 0)
+                                              : 0
                                 Behavior on implicitHeight {
                                     NumberAnimation {
                                         id: qtrackAnim
@@ -17387,6 +21944,7 @@ ApplicationWindow {
                                 ColumnLayout {
                                     id: qtrackCol
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                    anchors.rightMargin: 8
                                     spacing: 3
                                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line1 }
                                     Text {
@@ -17404,7 +21962,68 @@ ApplicationWindow {
                                         text: "Single track, nothing to expand"
                                         color: root.textDim; font.family: root.mono; font.pixelSize: 10
                                     }
-                                Repeater {
+                                // A long collection's ledger can hold tracks that
+                                // did not land anywhere in it, so it says how many
+                                // and can list only those (with their own numbers),
+                                // and hands them to the missing-tracks export.
+                                // Only there when something is missing.
+                                RowLayout {
+                                    id: ledgerBar
+                                    objectName: "qLedgerBar"
+                                    // Held with the list itself (see missingOnly), so
+                                    // a fold never drops it out from under the rows.
+                                    visible: qrow.ledgerHolding && qrow.ledgerMissing.length > 0
+                                    Layout.fillWidth: true; spacing: 6
+                                    SpecBtn {
+                                        objectName: "qLedgerAll"
+                                        compact: true; primary: !qrow.missingOnly
+                                        label: "ALL · " + qrow.ledgerLen
+                                        onClicked: { qrow.showMissing(false); qLedger.positionViewAtBeginning() }
+                                    }
+                                    SpecBtn {
+                                        objectName: "qLedgerMissing"
+                                        compact: true; danger: qrow.missingOnly
+                                        label: "MISSING · " + qrow.ledgerMissing.length
+                                        onClicked: { qrow.showMissing(true); qLedger.positionViewAtBeginning() }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    SpecBtn {
+                                        objectName: "qLedgerExport"
+                                        compact: true; icon: "export"
+                                        label: root.queueExportLabel(qrow.model.qid, "REPORT")
+                                        onClicked: waves.exportMissingTracks(qrow.model.qid)
+                                    }
+                                }
+                                ListView {
+                                    id: qLedger
+                                    objectName: "qLedgerList"
+                                    readonly property real pitch: root.queueLedgerRowH + root.queueLedgerGap
+                                    readonly property bool scrolls: contentHeight > height + 0.5
+                                    Layout.fillWidth: true
+                                    // Every row while open, up to the cap; the peek's
+                                    // sliver only ever shows its first few. Folding,
+                                    // it keeps its open box until the card has closed
+                                    // over it, so the closing card still shows rows to
+                                    // its edge rather than a blank box. Held whole,
+                                    // never shrunk frame by frame with the card: a
+                                    // list resized on every frame of the glide home
+                                    // lost its rows for the whole fold (seen offscreen,
+                                    // one fold in three).
+                                    property bool folding: false
+                                    Layout.preferredHeight: count === 0 ? 0
+                                        : Math.min(count * pitch - spacing,
+                                                   qrow.qexp || folding ? qrow.ledgerCap : root.queueLedgerPeek * pitch)
+                                    visible: count > 0
+                                    clip: true; spacing: root.queueLedgerGap
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    ScrollBar.vertical: qLedgerScroll
+                                    // Open and longer than its cap, it takes its own
+                                    // presses: a click or a drag on the list never
+                                    // folds the card (the header above it still
+                                    // does). A list that fits stays inert, so a
+                                    // click on an album's tracks folds it as before
+                                    // and the wheel passes straight to the drawer.
+                                    interactive: qrow.qexp && scrolls
                                     // The count, not the array: every live tick
                                     // (queueTrackState/Pct, 2 a second while an album
                                     // downloads) signals a change on root.queueTracks,
@@ -17414,24 +22033,98 @@ ApplicationWindow {
                                     // under the pointer. With the count as the model
                                     // the rows stay alive and each one's texts
                                     // re-evaluate in place.
-                                    model: qrow.ledgerShown
+                                    //
+                                    // Held as a ListModel of empty slots that grows
+                                    // and shrinks at its END, not as a bare int: a
+                                    // changed int is a model reset, which threw a
+                                    // scrolled list back to the top (and rebuilt
+                                    // every row) whenever a track failed live or a
+                                    // playlist's list grew. The slots carry nothing;
+                                    // each row still reads its track by index.
+                                    readonly property int wantRows: qrow.ledgerShown
+                                    model: ListModel { id: ledgerRows }
+                                    function syncRows() {
+                                        var have = ledgerRows.count
+                                        if (wantRows > have) {
+                                            var add = []
+                                            for (var i = have; i < wantRows; ++i) add.push({ s: 0 })
+                                            ledgerRows.append(add)
+                                        } else if (wantRows < have) {
+                                            ledgerRows.remove(wantRows, have - wantRows)
+                                        }
+                                    }
+                                    // A beat later, never on the spot: the instant a
+                                    // fold begins the row reads neither open nor yet
+                                    // closing (the card's motion starts a binding
+                                    // later), and synced right then the list emptied
+                                    // and rebuilt mid-fold, its rows gone or thrown
+                                    // to the top for a frame. Deferred, a flip that
+                                    // undoes itself in the same pass changes nothing.
+                                    onWantRowsChanged: Qt.callLater(syncRows)
+                                    Component.onCompleted: syncRows()
+                                    // A fold takes the list back to its first track,
+                                    // gliding there in the same motion as the card
+                                    // closing (same length, same curve), so the peek
+                                    // it folds into starts at the top and nothing on
+                                    // screen ever jumps or swaps.
+                                    // Driven as the distance left to the top, read
+                                    // against the list's LIVE origin every frame: a
+                                    // ListView moves its origin as it re-measures rows
+                                    // on the way, so animating contentY itself
+                                    // overshot past the first track into blank space.
+                                    property real homeFrom: 0
+                                    property real homeFrac: 0
+                                    onHomeFracChanged: if (ledgerHome.running)
+                                        contentY = originY + Math.min(homeFrom, Math.max(0, contentHeight - height)) * homeFrac
+                                    NumberAnimation {
+                                        id: ledgerHome
+                                        target: qLedger; property: "homeFrac"; from: 1; to: 0
+                                        duration: 220; easing.type: Easing.OutCubic
+                                        onStopped: if (!qrow.qexp) qLedger.positionViewAtBeginning()
+                                    }
+                                    Connections {
+                                        target: qrow
+                                        function onQexpChanged() {
+                                            if (qrow.qexp) { ledgerHome.stop(); qLedger.folding = false; return }
+                                            qLedger.folding = true
+                                            qLedger.homeFrom = qLedger.contentY - qLedger.originY
+                                            if (qLedger.homeFrom > 0.5) ledgerHome.restart()
+                                        }
+                                    }
+                                    // Closed: back to the peek's size, under a card
+                                    // already folded over it. Checked a beat later, as
+                                    // a fold that interrupts the opening motion
+                                    // restarts it (a stop, then a start).
+                                    Connections {
+                                        target: qtrackAnim
+                                        function onRunningChanged() {
+                                            if (!qtrackAnim.running) Qt.callLater(function () {
+                                                if (!qtrackAnim.running && !qrow.qexp) qLedger.folding = false
+                                            })
+                                        }
+                                    }
                                     delegate: RowLayout {
                                         required property int index
                                         // Depends on root.queueTracks, so each tick
                                         // refreshes this row's snapshot in place.
-                                        readonly property var td: (root.queueTracks[qrow.model.qid] || [])[index] || ({})
-                                        Layout.fillWidth: true; spacing: 8
+                                        // MISSING lists only the tracks that did not
+                                        // land, each still under its own number.
+                                        readonly property var td: (root.queueTracks[qrow.model.qid] || [])[
+                                            qrow.missingOnly ? qrow.ledgerMissing[index] : index] || ({})
+                                        width: ListView.view.width
+                                        height: root.queueLedgerRowH; spacing: 8
                                         Text {
                                             textFormat: Text.PlainText
                                             text: (td.num || "") + ""
                                             color: root.textDim; font.family: root.mono; font.pixelSize: 10
-                                            Layout.preferredWidth: 16; horizontalAlignment: Text.AlignRight
+                                            Layout.preferredWidth: Math.max(16, Math.ceil(ledgerDigit.advanceWidth * String(qrow.ledgerLen).length))
+                                            horizontalAlignment: Text.AlignRight
                                         }
                                         Text {
                                             objectName: "qTrackTitle"
                                             textFormat: Text.PlainText
                                             text: td.title || ""
-                                            // Grey until the track is actually
+                                            // Gray until the track is actually
                                             // yours: a finished download or a
                                             // copy already in the library reads
                                             // bright, a failure reads red, the
@@ -17611,20 +22304,66 @@ ApplicationWindow {
                                         }
                                     }
                                 }
-                                // The ledger is capped, so say what it is not
-                                // showing rather than ending on a row that
-                                // looks like the last one. Only ever seen on a
-                                // playlist far larger than the drawer can list.
-                                Text {
-                                    objectName: "qTrackMore"
-                                    textFormat: Text.PlainText
-                                    readonly property int rest: qrow.ledgerLen - qrow.ledgerShown
-                                    visible: qrow.qexp && rest > 0
-                                    text: rest + (rest === 1 ? " more track" : " more tracks")
-                                    color: root.textDim
-                                    font.family: root.mono; font.pixelSize: 10
-                                    Layout.topMargin: 2
                                 }
+                                // The scroll fades, the pages' lip at the box's
+                                // edges: rows fade in and out of the box instead
+                                // of being cut off hard. Scroll-gated like the
+                                // lip, so a list at its top has no top fade, one
+                                // at its end no bottom fade, and a list that fits
+                                // none at all. In the card's own color, laid over
+                                // the rows (they take no input, so the wheel and
+                                // clicks still reach the list).
+                                Repeater {
+                                    model: 2
+                                    delegate: Rectangle {
+                                        required property int index
+                                        readonly property bool atEnd: index === 1
+                                        readonly property real scrolled: qLedger.contentY - qLedger.originY
+                                        readonly property real rest: qLedger.contentHeight - qLedger.height - scrolled
+                                        objectName: atEnd ? "qLedgerFadeBottom" : "qLedgerFadeTop"
+                                        x: qtrackCol.x + qLedger.x; width: qLedger.width
+                                        height: Math.min(root.queueLedgerFadeH, qLedger.height / 2)
+                                        y: qtrackCol.y + qLedger.y + (atEnd ? qLedger.height - height : 0)
+                                        rotation: atEnd ? 180 : 0
+                                        opacity: !qLedger.visible || !qLedger.scrolls ? 0
+                                            : Math.min(1, Math.max(0, atEnd ? rest : scrolled) / root.queueLedgerFadeH)
+                                        visible: opacity > 0
+                                        readonly property color card: qrow.isComp ? root.surface : root.surface2
+                                        gradient: Gradient {
+                                            GradientStop { position: 0; color: card }
+                                            GradientStop { position: 0.25; color: Qt.alpha(card, 0.82) }
+                                            GradientStop { position: 0.6; color: Qt.alpha(card, 0.28) }
+                                            GradientStop { position: 1; color: Qt.alpha(card, 0) }
+                                        }
+                                    }
+                                }
+                                // The ledger's scrollbar: a hairline in the card's
+                                // padding, beside the rows rather than over them,
+                                // so the rows keep their full width and line up
+                                // with the bar above. Faint at rest, brighter
+                                // while the list moves or under the pointer, and
+                                // only on an open list that scrolls. Its hit area
+                                // is wider than the line, so it can still be
+                                // dragged.
+                                ScrollBar {
+                                    id: qLedgerScroll
+                                    objectName: "qLedgerScroll"
+                                    orientation: Qt.Vertical
+                                    policy: ScrollBar.AlwaysOn
+                                    x: qtrackCol.x + qLedger.x + qLedger.width + 1
+                                    y: qtrackCol.y + qLedger.y
+                                    width: 7; height: qLedger.height
+                                    leftPadding: 3; rightPadding: 2; topPadding: 0; bottomPadding: 0
+                                    opacity: qLedger.visible && qLedger.interactive ? 1 : 0
+                                    visible: opacity > 0
+                                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                                    background: null
+                                    contentItem: Rectangle {
+                                        implicitWidth: 2; radius: 1
+                                        color: root.textDim
+                                        opacity: qLedgerScroll.active || qLedgerScroll.hovered ? 0.85 : 0.35
+                                        Behavior on opacity { NumberAnimation { duration: 150 } }
+                                    }
                                 }
                             }
                         }
@@ -17654,6 +22393,16 @@ ApplicationWindow {
                 // targeted cases, so all this one owes the user is "empty the
                 // list". It never touches a transfer already writing bytes,
                 // which the row's own stop control is for.
+                // Every track in the queue that failed or that TIDAL refused,
+                // in one CSV (a failed single included), so the songs can be
+                // looked up elsewhere. A row's own EXPORT takes just its own.
+                SpecBtn {
+                    objectName: "queueExportAll"
+                    visible: waves.missingTracks > 0 || root.failedCount > 0
+                    icon: "export"
+                    label: root.queueExportLabel(-1, "MISSING REPORT")
+                    onClicked: waves.exportMissingTracks(-1)
+                }
                 // Pushes the button to the trailing edge, under the section
                 // headers' own controls, so the three CLEARs line up vertically.
                 Item { Layout.fillWidth: true }
@@ -17683,7 +22432,7 @@ ApplicationWindow {
             z: 50
 
             // Where the grip point is on the edge (the spot the magnet glow
-            // centres on). WRITTEN by the MouseArea below, never read off
+            // centers on). WRITTEN by the MouseArea below, never read off
             // mouseY: it must not follow the pointer during the drag (the
             // glow's squeeze stays on the spot that was taken hold of), and
             // letting go must leave it exactly where it was let go. Bound to
@@ -17697,7 +22446,7 @@ ApplicationWindow {
             // moved: the pointer arriving on the band, or taking hold of it.
             // Both are jumps to somewhere the light was not, and the light
             // belongs under the pointer at once; the smoothing below is for
-            // travelling along the edge. Without this, grabbing the edge low
+            // traveling along the edge. Without this, grabbing the edge low
             // down after the light was last seen high up drags a comet
             // through the drag's first quarter second.
             property bool placing: false
@@ -17712,24 +22461,24 @@ ApplicationWindow {
                 id: gripGlow
                 x: 0
                 width: gripMouse.pressed ? 4 : 3
-                // What the light is centred on: the grip point, held clear of the
+                // What the light is centered on: the grip point, held clear of the
                 // very ends so a blob in a corner is not half off the edge.
                 // The travel animation lives HERE rather than on y, because y
                 // moves when the HEIGHT changes too, and the two disagreeing is
                 // the whole bug: y was smoothed by distance (1600 px/s) while
                 // the height was timed (220ms), so letting go near the bottom
                 // of a tall window re-formed the finished blob up at the top
-                // and then slid it down. Centre and height cannot disagree.
-                property real centre: Math.max(35, Math.min(parent.height - 35, queueGrip.handY))
-                Behavior on centre { enabled: !queueGrip.placing; SmoothedAnimation { velocity: 1600 } }
+                // and then slid it down. Center and height cannot disagree.
+                property real center: Math.max(35, Math.min(parent.height - 35, queueGrip.handY))
+                Behavior on center { enabled: !queueGrip.placing; SmoothedAnimation { velocity: 1600 } }
                 // Grabbed, the light runs the whole edge: twice the drawer's
                 // height, so its own fade stays off screen and only the bright
                 // middle shows. Let go, it collapses back to a blob. Nothing
                 // but the height changes between those two, and it changes
-                // about the centre, so both ends travel the same distance in
+                // about the center, so both ends travel the same distance in
                 // the same time and the grip point keeps the middle throughout.
                 height: gripMouse.pressed ? parent.height * 2 : 190
-                y: centre - height / 2
+                y: center - height / 2
                 opacity: queueGrip.lit ? 1 : 0
                 gradient: Gradient {
                     GradientStop { position: 0.0;  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0) }
@@ -17760,10 +22509,9 @@ ApplicationWindow {
                 // which is the same axis this one drags in. Without it the
                 // drawer slides shut instead of resizing.
                 preventStealing: true
-                onPressedChanged: root.queueEdgeHeld = pressed
                 property real startScene: 0
                 property real startWidth: 0
-                // Hovering, the glow follows the pointer; holding, its centre
+                // Hovering, the glow follows the pointer; holding, its center
                 // stays put and the pointer's job is the width instead. The
                 // pressed guard matters: mid-drag the edge lags the pointer,
                 // and a vertical wiggle makes the pointer leave and re-enter
@@ -17806,9 +22554,98 @@ ApplicationWindow {
                  : root.libraryCategory === "playlists" ? libPlaylistsList
                  : root.libraryCategory === "mixes" ? libMixesList
                  : root.libraryCategory === "videos" ? libVideosList : null)
+             : root.releasesOpen ? (root.releasesView === "manage" ? root.relFollowFlick()
+                 : root.releasesView === "excluded" ? root.relExcludedFlick() : relFeedList)
              : root.browseOpen ? (root.browsePageKey === "" ? browseLanding : browseDrill)
              : root.settingsOpen ? null
              : results
+    }
+
+    // Every page that scrolls up and down wears a MomentumGuard, so a fast
+    // trackpad swipe never throws it back to where the swipe began. Made by
+    // an Instantiator, not a Repeater: each guard is parented to its page,
+    // and a Repeater would try to stack them as its own siblings (a warning
+    // per guard at every launch).
+    Instantiator {
+        model: [artistView, homePane, results, browseLanding, browseDrill,
+                libArtistsGrid, libAlbumsList, libTracksList, libPlaylistsList, libFolderList, libMixesList, libVideosList,
+                relFeedList, relFollowRoster, relFollowShelves, relFollowLedger,
+                relExcludedRoster, relExcludedShelves, relExcludedLedger,
+                queueList, settingsPage.scroller]
+        delegate: MomentumGuard {
+            required property var modelData
+            objectName: "momentumGuard_" + (modelData.objectName || "")
+            flick: modelData
+        }
+    }
+
+    // The Following and Excluded pages' shape switch: the three names on a
+    // track, a pill that slides to the one picked. It lives here, above the
+    // scroll dressing, and not in the pane: there the bottom edge fade
+    // painted over it. Pinned to the pane's bottom right corner.
+    Item {
+        id: relViewSwitch
+        objectName: "relViewSwitch"
+        readonly property bool live: root.releasesOpen
+            && (root.releasesView === "manage" ? root.releasesFollowedRows.length > 0
+                : root.releasesView === "excluded" && root.releasesExcludedRows.length > 0)
+        visible: live && root.uiShown > 0
+        opacity: root.uiShown
+        // The pane's corner in this item's parent; the leading terms are
+        // binding dependencies (mapToItem alone is not notifiable).
+        readonly property point corner: live
+            ? (root.width, root.height, relArea.width, relArea.height,
+               relArea.mapToItem(relViewSwitch.parent, relArea.width, relArea.height))
+            : Qt.point(0, 0)
+        x: corner.x - width - 36; y: corner.y - height - 14
+        width: rvsTrack.width; height: rvsTrack.height
+        readonly property var kinds: [["roster", "Roster"], ["shelves", "Shelves"], ["ledger", "Ledger"]]
+        readonly property int at: Math.max(0, ["roster", "shelves", "ledger"].indexOf(root.releasesFollowView))
+        Rectangle {
+            id: rvsTrack
+            width: rvsRow.width + 8; height: 38; radius: height / 2
+            color: Qt.alpha(root.surface, 0.96); border.color: root.border1
+            Rectangle {
+                id: rvsPill
+                readonly property Item cur: rvsRep.count > relViewSwitch.at ? rvsRep.itemAt(relViewSwitch.at) : null
+                // Placed, not slid, the first time it has somewhere to be.
+                property bool armed: false
+                onCurChanged: if (cur && !armed) Qt.callLater(function () { rvsPill.armed = true })
+                x: 4 + (cur ? cur.x : 0); y: 4
+                width: cur ? cur.width : 0; height: parent.height - 8; radius: height / 2
+                color: root.accentCont; border.color: root.accentDim
+                Behavior on x { enabled: rvsPill.armed; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                Behavior on width { enabled: rvsPill.armed; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+            }
+            Row {
+                id: rvsRow
+                x: 4; y: 4; height: parent.height - 8
+                Repeater {
+                    id: rvsRep
+                    model: relViewSwitch.kinds
+                    delegate: Item {
+                        id: rvsBtn
+                        required property var modelData
+                        objectName: "relViewBtn_" + modelData[0]
+                        readonly property bool on: root.releasesFollowView === rvsBtn.modelData[0]
+                        width: rvsT.implicitWidth + 30; height: rvsRow.height
+                        Text {
+                            id: rvsT
+                            anchors.centerIn: parent
+                            textFormat: Text.PlainText; text: rvsBtn.modelData[1]
+                            color: rvsBtn.on ? root.accent : rvsMa.containsMouse ? root.textHi : root.textLo
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                            font.pixelSize: 13; font.bold: rvsBtn.on
+                        }
+                        MouseArea {
+                            id: rvsMa
+                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.releasesSetFollowView(rvsBtn.modelData[0])
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Rectangle {
@@ -18099,7 +22936,7 @@ ApplicationWindow {
         }
     }
 
-    // Reset all settings to default (Advanced settings). Confirms before
+    // Reset all settings to default (Settings > Diagnostics). Confirms before
     // anything happens; the reset keeps the account signed in and only puts
     // the settings-page values back to their factory defaults.
     Rectangle {
@@ -18138,7 +22975,7 @@ ApplicationWindow {
         }
     }
 
-    // FLAC signature fix (Advanced settings). Confirms with the file count and
+    // FLAC signature fix (Settings > FFmpeg & FLAC). Confirms with the file count and
     // says exactly what is written: the 34-byte header block of each file the
     // scan found without a signature, and nothing else. The same gate asks to
     // resume a fix that stopped before it finished (flacFixResume): the count
@@ -18196,7 +23033,7 @@ ApplicationWindow {
         }
     }
 
-    // Reset application (Advanced settings): the factory wipe. Confirms with
+    // Reset application (Settings > Diagnostics): the factory wipe. Confirms with
     // an explicit description of what is erased; on confirm the backend wipes
     // its saved state and the app closes so the next launch is a first run.
     Rectangle {
@@ -18626,7 +23463,7 @@ ApplicationWindow {
             // console "decode": every glyph scrambles, then characters lock
             // in left to right while the tail keeps churning, with a bright
             // flash that fades as the word resolves. Deliberate, not a bug.
-            // CANCEL (installing) stays plain grey: no glitch on it.
+            // CANCEL (installing) stays plain gray: no glitch on it.
             Text {
                 id: utAct
                 Layout.alignment: Qt.AlignBaseline
@@ -18816,7 +23653,7 @@ ApplicationWindow {
                     Layout.minimumHeight: 60
                     contentHeight: termsBody.implicitHeight
                     clip: true; boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar {
+                    ScrollBar.vertical: WavesScrollBar {
                         // Tolerance, not a bare >: layout rounding leaves the
                         // content a hair taller than the view and armed the
                         // bar on a window with room to spare.
@@ -18854,7 +23691,10 @@ ApplicationWindow {
                     color: root.textHi; font.pixelSize: 13; font.bold: true; lineHeight: 1.3
                 }
                 RowLayout {
-                    Layout.fillWidth: true; spacing: 10
+                    id: ackRow
+                    // Centered under the privacy note, like the button below it.
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.maximumWidth: parent.width; spacing: 10
                     Rectangle {
                         id: ackChk
                         property bool checked: false
@@ -18866,7 +23706,8 @@ ApplicationWindow {
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: ackChk.checked = !ackChk.checked }
                     }
                     Text {
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        Layout.maximumWidth: ackRow.Layout.maximumWidth - ackChk.width - ackRow.spacing
+                        wrapMode: Text.WordWrap; textFormat: Text.PlainText
                         text: "I have read and agree to these terms."
                         color: root.textHi; font.pixelSize: 13
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: ackChk.checked = !ackChk.checked }
@@ -18999,7 +23840,7 @@ ApplicationWindow {
                     // which is also the evidence the identity was proven from.
                     // The owned mode is a different conversation: a record of
                     // a download Waves made, not a guess to be judged.
-                    // Each promise below is conditional because the behaviour
+                    // Each promise below is conditional because the behavior
                     // is: with "Skip existing" on nothing on disk is ever
                     // replaced, with it off a same-named file of the same
                     // track is (that is what the setting asks for). Either
@@ -19115,7 +23956,7 @@ ApplicationWindow {
             implicitHeight: uoCol.implicitHeight + 40
             radius: 14; color: root.surface2; border.color: root.outline
             // The slide itself: parked below the bottom edge until the gate
-            // opens, then rides up to centre as the scrim dims.
+            // opens, then rides up to center as the scrim dims.
             anchors.verticalCenterOffset: updateOptInGate.shouldShow
                 ? 0 : updateOptInGate.height / 2 + height
             Behavior on anchors.verticalCenterOffset {
@@ -19175,7 +24016,7 @@ ApplicationWindow {
             && !updateOptInGate.shouldShow
         readonly property bool shouldShow: promptsClear
             && !setupSettings.flacNoticeSeen
-            && root.browseOpen && !root.settingsOpen && !root.artistOpen && !root.libraryOpen
+            && root.browseOpen && !root.settingsOpen && !root.artistOpen && !root.libraryOpen && !root.releasesOpen
         // Latched: once up it stays until answered, whatever moves behind it.
         // Taken a beat later and re-read then: one flip (signedIn, say) can
         // reach this binding before the update prompt's, and the transient
@@ -19219,7 +24060,7 @@ ApplicationWindow {
                     text: "FLAC files from earlier versions"
                 }
                 // StyledText for the one bold phrase, lit in textHi: a string
-                // literal plus a palette colour, no remote data. The phrase is
+                // literal plus a palette color, no remote data. The phrase is
                 // the point: the music is fine and the fix is optional.
                 Text { // guard:deliberate-richtext flac-notice-body
                     textFormat: Text.StyledText; Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -19235,6 +24076,683 @@ ApplicationWindow {
             }
         }
     }
+
+    // Follow an artist by name (the Releases pane's FOLLOW ARTIST). Artists
+    // only, one request per settled needle; each row follows or unfollows in
+    // place, and a click anywhere else on a row opens that artist.
+    Rectangle {
+        id: followDialog
+        objectName: "followDialog"
+        // The overlay layer, for the reason exitGate gives.
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1200
+        visible: open
+        property bool open: false
+        property string needle: ""      // the text the shown rows answer
+        property var rows: []
+        property bool busy: false
+        property bool failed: false
+        // Bumped on every follow flip, so each row re-reads its own state.
+        property int followTick: 0
+        // ``text`` starts a search for it (a name from the import review).
+        function show(text) {
+            rows = []; needle = ""; busy = false; failed = false
+            followField.text = text || ""
+            open = true
+            // The same name as last time changes no text, so ask here too.
+            if (followField.text.trim() !== "") followDebounce.restart()
+            Qt.callLater(function() { followField.forceActiveFocus() })
+        }
+        // A review parked for this search comes back when it closes.
+        function close() { followDebounce.stop(); open = false; importDialog.unpark() }
+        function ask() {
+            followDebounce.stop()
+            if (followField.text.trim() === "") { rows = []; needle = ""; busy = false; failed = false; return }
+            busy = true
+            waves.searchArtists(followField.text)
+        }
+        // The artist asked for comes up, not the review parked behind this
+        // dialog: that one waits (importDialog.show() brings it back).
+        function openArtist(aid) { importDialog.parked = false; close(); waves.loadArtist(aid) }
+        color: "#cc06070e"
+        MouseArea { anchors.fill: parent; onClicked: followDialog.close() }
+        Timer { id: followDebounce; interval: 250; onTriggered: followDialog.ask() }
+        Connections {
+            target: waves
+            function onArtistSearchResults(asked, found, ok) {
+                // Only the answer to the text still in the field.
+                if (!followDialog.open || asked !== followField.text) return
+                followDialog.busy = false
+                followDialog.failed = !ok
+                followDialog.needle = asked
+                followDialog.rows = found || []
+            }
+            function onFollowStateChanged(aid, on) { followDialog.followTick++ }
+            function onLoggedInChanged() { if (!waves.loggedIn) followDialog.close() }
+        }
+        Rectangle {
+            anchors.centerIn: parent; width: 480
+            implicitHeight: fdCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: fdCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textHi; font.pixelSize: 18; font.bold: true
+                    text: "Follow an artist"
+                }
+                Rectangle {
+                    Layout.fillWidth: true; implicitHeight: 44; radius: 8; color: root.surface
+                    border.color: followField.activeFocus ? root.accent : root.outline
+                    Behavior on border.color { ColorAnimation { duration: 160; easing.type: Easing.OutQuad } }
+                    RowLayout {
+                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 10; spacing: 10
+                        Ico { name: "search"; color: root.accent; size: 16 }
+                        TextField {
+                            id: followField
+                            objectName: "followField"
+                            Layout.fillWidth: true
+                            placeholderText: "Artist name…"
+                            color: root.textHi; placeholderTextColor: root.textLo; font.pixelSize: 14
+                            background: Rectangle { color: "transparent" }
+                            onTextChanged: {
+                                if (text.trim() === "") followDialog.ask()
+                                else followDebounce.restart()
+                            }
+                            onAccepted: followDialog.ask()
+                        }
+                    }
+                }
+                Text {
+                    objectName: "followStatus"
+                    visible: followDialog.rows.length === 0
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13
+                    text: followDialog.busy ? "Searching…"
+                        : followDialog.failed ? "The search did not go through. Try again in a moment."
+                        : followDialog.needle !== "" ? "No artists found."
+                        : "Search TIDAL for an artist. Their new releases will show up in the feed."
+                }
+                ListView {
+                    id: followList
+                    objectName: "followList"
+                    visible: followDialog.rows.length > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(followDialog.rows.length, 6) * 56
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: followDialog.rows
+                    ScrollBar.vertical: WavesScrollBar { outside: true; reach: 20; beside: fdCol.parent }
+                    delegate: Rectangle {
+                        id: fdRow
+                        required property var modelData
+                        readonly property string aid: "" + (modelData.id || "")
+                        readonly property bool on: { followDialog.followTick; return waves.isFollowed(fdRow.aid) }
+                        width: ListView.view.width; height: 56; radius: 8
+                        color: fdMa.containsMouse ? root.surface : "transparent"
+                        MouseArea {
+                            id: fdMa; anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: followDialog.openArtist(fdRow.aid)
+                        }
+                        RowLayout {
+                            anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 12
+                            Art {
+                                Layout.preferredWidth: 44; Layout.preferredHeight: 44
+                                radius: 6; url: fdRow.modelData.art || ""
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                textFormat: Text.PlainText; elide: Text.ElideRight
+                                text: fdRow.modelData.name || ""
+                                color: root.textHi; font.pixelSize: 14; font.bold: true
+                            }
+                            SpecBtn {
+                                objectName: "followRowBtn"
+                                compact: true; primary: !fdRow.on
+                                label: fdRow.on ? "FOLLOWING" : "FOLLOW"
+                                onClicked: {
+                                    if (fdRow.on) waves.unfollowArtist(fdRow.aid)
+                                    else waves.followArtist(fdRow.aid, "" + (fdRow.modelData.name || ""), "" + (fdRow.modelData.art || ""))
+                                }
+                            }
+                        }
+                    }
+                }
+                SpecBtn {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 2
+                    label: "DONE"
+                    onClicked: followDialog.close()
+                }
+            }
+        }
+    }
+    Shortcut { sequence: "Esc"; enabled: followDialog.open; onActivated: followDialog.close() }
+
+    // Follow the library's artists in one go (IMPORT LIBRARY on the Releases
+    // pane). Nothing is followed until the review is confirmed: the run
+    // reads the library, the review shows what it found, and the picks are
+    // followed together. Names it could not settle stay in a tray, reviewed
+    // later from the same dialog.
+    Rectangle {
+        id: importDialog
+        objectName: "importDialog"
+        // The overlay layer, for the reason exitGate gives.
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1200
+        visible: open
+        property bool open: false
+        // start | tags | scan | review | error | done
+        property string stage: "start"
+        property int done: 0
+        property int total: 0
+        property string error: ""
+        property int followedNow: 0
+        property int skipped: 0
+        property int trayCount: 0
+        property bool fromTray: false
+        // The run read a library still being scanned: the review covers
+        // the artists saved so far (``artists`` of them).
+        property bool scanning: false
+        property int artists: 0
+        // A confirm is on its way: only its answer moves this dialog on (an
+        // automatic import reports through the same signal).
+        property bool confirming: false
+        // Parked while the follow dialog searches for one of the review's
+        // names: the review and its picks come back when that closes.
+        property bool parked: false
+        // A run over names the user asked for one by one (the EXCLUDED
+        // page): its picks are followed as the user's own.
+        property bool manualPicks: false
+        // The review: {kind: head|match|fuzzy|none, key, name, ...}.
+        property var rows: []
+        // The list shows rows through importModel, brought to them in place:
+        // FORGET / NOT THESE remove one row, and a replaced model would throw
+        // the list back to its top each time. A row reads itself from
+        // rowByKey by key and re-reads only when its own sig changes.
+        property var rowByKey: ({})
+        onRowsChanged: {
+            var m = importModel, want = {}, items = []
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i]
+                want[r.key] = true
+                items.push({ uid: "" + r.key, sig: JSON.stringify(r) })
+                rowByKey[r.key] = r
+            }
+            for (var j = m.count - 1; j >= 0; j--) {
+                var gone = m.get(j).uid
+                if (!want[gone]) { delete rowByKey[gone]; m.remove(j) }
+            }
+            for (i = 0; i < items.length; i++) {
+                var it = items[i], at = -1
+                for (var t = i; t < m.count; t++) if (m.get(t).uid === it.uid) { at = t; break }
+                if (at < 0) { m.insert(i, it); continue }
+                if (at !== i) m.move(at, i, 1)
+                if (m.get(i).sig !== it.sig) m.set(i, it)
+            }
+        }
+        ListModel { id: importModel }
+        // Row key -> the TIDAL artist picked for it ({id, name, art}).
+        property var picks: ({})
+        property int pickCount: 0
+        // Ticked matches only (ALL / NONE acts on those, never a hand pick).
+        readonly property int matchPickCount: {
+            var n = 0
+            for (var i = 0; i < rows.length; i++) if (rows[i].kind === "match" && picks[rows[i].key]) n++
+            return n
+        }
+        readonly property bool running: stage === "tags" || stage === "scan"
+        function show() {
+            parked = false
+            // A review still on the table comes back as it was left.
+            if (stage === "review" && rows.length > 0) { open = true; return }
+            stage = "start"; error = ""; rows = []; picks = ({}); pickCount = 0
+            trayCount = waves.artistImportTrayCount()
+            open = true
+        }
+        function close() {
+            if (running) waves.cancelArtistImport()
+            if (running || stage !== "review") stage = "start"
+            open = false
+        }
+        function discard() { stage = "start"; rows = []; picks = ({}); pickCount = 0; close() }
+        function start() {
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false
+            stage = "tags"
+            waves.startArtistImport()
+        }
+        // The EXCLUDED page's FOLLOW: the review over just those names.
+        function startNames(names, manual) {
+            if (running) { open = true; return }
+            if (handReviewKept()) { show(); return }
+            parked = false; rows = []; picks = ({}); pickCount = 0
+            trayCount = 0
+            open = true
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false
+            manualPicks = !!manual
+            stage = "tags"
+            waves.startArtistImportNames(names)
+        }
+        // The tab's offer: only the artists found since the last import.
+        // A review from a run the user has not confirmed or discarded yet.
+        function handReviewKept() { return stage === "review" && rows.length > 0 && !fromTray }
+        function startMore() {
+            if (running) { open = true; return }
+            // Finish the review on the table first; a new run would replace it.
+            if (handReviewKept()) { show(); return }
+            parked = false; rows = []; picks = ({}); pickCount = 0
+            trayCount = 0
+            open = true
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false
+            stage = "tags"
+            waves.startArtistImportMore()
+        }
+        function park(name) { parked = true; open = false; followDialog.show(name) }
+        // One line under a close name: how sure your library makes Waves,
+        // and why (the titles of yours this artist has). A row weighed
+        // before the library had a say, or one it could not read, says so.
+        function candidateWhy(c) {
+            if (!c || c.checked !== true) return "Not checked"
+            var n = c.owned_n || 0
+            if (n === 0) return c.conf + "% \u00b7 none of yours"
+            var names = (c.owned || []).join(", ")
+            return c.conf + "% \u00b7 " + names + (n > c.owned.length ? " +" + (n - c.owned.length) : "")
+        }
+        function unpark() { if (parked) { parked = false; open = true } }
+        function setPick(key, artist) {
+            var p = Object.assign({}, picks)
+            if (artist) p[key] = artist
+            else delete p[key]
+            picks = p
+            pickCount = Object.keys(p).length
+        }
+        function setAllMatched(on) {
+            var p = Object.assign({}, picks)
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i]
+                if (r.kind !== "match") continue
+                if (on) p[r.key] = r.artist
+                else delete p[r.key]
+            }
+            picks = p
+            pickCount = Object.keys(p).length
+        }
+        function drop(key) {
+            waves.dismissArtistImportTray(key)
+            setPick(key, null)
+            var keep = rows.filter(function (r) { return r.key !== key })
+            // A section left with only its header goes too, and each header
+            // counts the rows it still has.
+            var out = []
+            for (var i = 0; i < keep.length; i++) {
+                var r = keep[i]
+                if (r.kind !== "head") { out.push(r); continue }
+                var n = 0
+                for (var j = i + 1; j < keep.length && keep[j].kind !== "head"; j++) n++
+                if (n > 0) out.push(n === r.n ? r : Object.assign({}, r, { n: n }))
+            }
+            rows = out
+        }
+        // matched / fuzzy / unmatched rows as the review's flat list.
+        function build(matched, fuzzy, unmatched) {
+            var out = [], p = ({})
+            if (matched.length) {
+                out.push({ kind: "head", key: "h:m", label: "FOUND ON TIDAL", n: matched.length, all: true })
+                for (var i = 0; i < matched.length; i++) {
+                    var m = matched[i]
+                    out.push({ kind: "match", key: "" + m.norm, name: "" + m.name, albums: m.albums || 0,
+                               reason: "" + (m.reason || ""), artist: m.artist, owned: m.owned || [] })
+                    // Unfollowed here before: offered, but left unticked.
+                    if (!m.unfollowed) p["" + m.norm] = m.artist
+                }
+            }
+            if (fuzzy.length) {
+                out.push({ kind: "head", key: "h:f", label: "PICK THE RIGHT ONE", n: fuzzy.length, all: false })
+                for (var j = 0; j < fuzzy.length; j++)
+                    out.push({ kind: "fuzzy", key: "" + fuzzy[j].norm, name: "" + fuzzy[j].name,
+                               albums: fuzzy[j].albums || 0, candidates: fuzzy[j].candidates || [] })
+            }
+            if (unmatched.length) {
+                out.push({ kind: "head", key: "h:u", label: "NOT FOUND", n: unmatched.length, all: false })
+                for (var k = 0; k < unmatched.length; k++)
+                    out.push({ kind: "none", key: "" + unmatched[k].norm, name: "" + unmatched[k].name,
+                               albums: unmatched[k].albums || 0 })
+            }
+            rows = out; picks = p; pickCount = Object.keys(p).length
+            stage = "review"
+        }
+        function reviewTray() {
+            var tray = waves.artistImportTray() || []
+            var fz = [], un = []
+            for (var i = 0; i < tray.length; i++) {
+                if ((tray[i].candidates || []).length > 0) fz.push(tray[i])
+                else un.push(tray[i])
+            }
+            // Tray names come from library runs: their picks are library follows.
+            fromTray = true; skipped = 0; manualPicks = false
+            build([], fz, un)
+        }
+        function confirm() {
+            var out = []
+            for (var k in picks) {
+                var a = picks[k]
+                out.push({ id: "" + a.id, name: "" + (a.name || ""), art: "" + (a.art || ""), norm: k })
+            }
+            if (out.length === 0) return
+            rows = []; picks = ({}); pickCount = 0
+            // The answer comes back inside the call; a confirm with nothing
+            // valid in it never answers, and must not leave the flag up.
+            confirming = true
+            if (manualPicks) waves.confirmArtistPicks(out)
+            else waves.confirmArtistImport(out)
+            confirming = false
+        }
+        color: "#cc06070e"
+        MouseArea { anchors.fill: parent; onClicked: if (!importDialog.running) importDialog.close() }
+        Connections {
+            target: waves
+            function onArtistImportProgress(d, t, st) {
+                if (!importDialog.running) return
+                importDialog.stage = st; importDialog.done = d; importDialog.total = t
+            }
+            function onArtistImportReady(payload) {
+                if (!importDialog.running) return
+                importDialog.skipped = payload.skipped || 0
+                importDialog.scanning = !!payload.scanning
+                importDialog.artists = payload.artists || 0
+                importDialog.build(payload.matched || [], payload.fuzzy || [], payload.unmatched || [])
+            }
+            function onArtistImportError(word) {
+                if (!importDialog.open && !importDialog.running) return
+                importDialog.error = word; importDialog.stage = "error"
+            }
+            function onArtistImportDone(n) {
+                if (!importDialog.confirming) return
+                importDialog.confirming = false
+                importDialog.followedNow = n
+                importDialog.stage = "done"
+            }
+            function onLoggedInChanged() { if (!waves.loggedIn) importDialog.discard() }
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(600, parent.width - 48)
+            implicitHeight: idCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: idCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textHi; font.pixelSize: 18; font.bold: true
+                    text: importDialog.stage === "review" && importDialog.fromTray ? "Artists to look at"
+                        : importDialog.stage === "done" ? "Following"
+                        : "Follow your library's artists"
+                }
+                Text {
+                    objectName: "importStatus"
+                    visible: importDialog.stage !== "review" || importDialog.rows.length === 0
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textLo; font.pixelSize: 13
+                    text: {
+                        var d = importDialog
+                        if (d.stage === "start")
+                            return "Waves finds each artist in your library on TIDAL. Artists you downloaded with Waves are recognized from their files at once; the rest are searched one a second, so a big library takes a few minutes. Nothing is followed until you say so, and your TIDAL favorites are not changed."
+                        if (d.stage === "tags") return "Reading your files… " + d.done + " of " + d.total
+                        if (d.stage === "scan") {
+                            // One search a second, so what is left is the time left.
+                            var mins = Math.round((d.total - d.done) / 60)
+                            return "Searching TIDAL… " + d.done + " of " + d.total
+                                 + (mins >= 2 ? ", about " + mins + " minutes left" : "")
+                        }
+                        if (d.stage === "error")
+                            return d.error === "not-signed-in" ? "Sign in to TIDAL first."
+                                 : d.error === "no-library" ? "Turn on your library in Settings and let it finish scanning first."
+                                 : d.error === "library-scanning" ? "Your library is still being scanned. Its first artists are ready in a moment, so try again shortly."
+                                 : d.error === "rate-limited" ? "TIDAL asked Waves to slow down. Try again in a little while."
+                                 : d.error === "offline" ? "TIDAL could not be reached. Check your connection and try again."
+                                 : d.error === "library-changed" ? "Your library folder changed while this ran. Try again once it is scanned."
+                                 : "Your library could not be read. Try again after its next scan."
+                        if (d.stage === "done")
+                            return d.followedNow === 0 ? "You already follow every artist you picked."
+                                 : "Now following " + d.followedNow + (d.followedNow === 1 ? " more artist" : " more artists") + ". Their releases show up as each one is checked."
+                        // An empty review.
+                        return d.fromTray ? "Nothing left to look at."
+                             : d.scanning ? "Every artist found so far is already followed" + (d.skipped > 0 ? " or set aside." : ".")
+                             : "Every artist in your library is already followed" + (d.skipped > 0 ? " or set aside." : ".")
+                    }
+                }
+                // The run's progress.
+                Rectangle {
+                    visible: importDialog.running
+                    Layout.fillWidth: true; implicitHeight: 4; radius: 2; color: root.surface
+                    Rectangle {
+                        height: parent.height; radius: 2; color: root.accent
+                        width: importDialog.total > 0 ? parent.width * importDialog.done / importDialog.total : 0
+                        Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutQuad } }
+                    }
+                }
+                Text {
+                    objectName: "importScanningNote"
+                    visible: importDialog.stage === "review" && importDialog.scanning && !importDialog.fromTray
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textDim; font.pixelSize: 12
+                    text: "Your library is still being scanned, so this covers the " + importDialog.artists
+                        + (importDialog.artists === 1 ? " artist" : " artists")
+                        + " found so far. The rest are offered on the Releases tab when the scan finishes."
+                }
+                Text {
+                    visible: importDialog.stage === "start" && importDialog.trayCount > 0
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.textDim; font.pixelSize: 12
+                    text: importDialog.trayCount + (importDialog.trayCount === 1 ? " name" : " names") + " from an earlier import still need a look."
+                }
+                ListView {
+                    id: importList
+                    objectName: "importList"
+                    visible: importDialog.stage === "review" && importDialog.rows.length > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(contentHeight, 420)
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    cacheBuffer: 600
+                    model: importModel
+                    ScrollBar.vertical: WavesScrollBar { outside: true; reach: 20; beside: idCol.parent }
+                    delegate: Item {
+                        id: idRow
+                        required property string uid
+                        required property string sig
+                        // sig in the binding: the row is re-read when it changes.
+                        readonly property var rowData: (idRow.sig, importDialog.rowByKey[idRow.uid] || ({}))
+                        readonly property string kind: rowData.kind || ""
+                        readonly property var picked: importDialog.picks[idRow.uid]
+                        width: ListView.view.width
+                        height: kind === "head" ? 36 : kind === "fuzzy" ? 104 : 56
+                        // A section header.
+                        RowLayout {
+                            visible: idRow.kind === "head"
+                            anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4
+                            Text {
+                                Layout.fillWidth: true; textFormat: Text.PlainText
+                                text: idRow.rowData.label + "  " + (idRow.rowData.n || 0)
+                                color: root.textLo; font.family: root.mono; font.pixelSize: 11; font.bold: true
+                                font.letterSpacing: 1.4
+                            }
+                            SpecBtn {
+                                objectName: "importAllBtn"
+                                visible: idRow.rowData.all === true
+                                compact: true
+                                label: importDialog.matchPickCount > 0 ? "NONE" : "ALL"
+                                onClicked: importDialog.setAllMatched(importDialog.matchPickCount === 0)
+                            }
+                        }
+                        // A match: checked unless unticked.
+                        Rectangle {
+                            visible: idRow.kind === "match"
+                            anchors.fill: parent; radius: 8
+                            color: imMa.containsMouse ? root.surface : "transparent"
+                            MouseArea {
+                                id: imMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: importDialog.setPick(idRow.rowData.key, idRow.picked ? null : idRow.rowData.artist)
+                            }
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 12
+                                Rectangle {
+                                    objectName: "importTick"
+                                    Layout.preferredWidth: 18; Layout.preferredHeight: 18; radius: 4
+                                    color: idRow.picked ? root.accentCont : "transparent"
+                                    border.color: idRow.picked ? root.accentDim : root.border1
+                                    Ico { anchors.centerIn: parent; visible: !!idRow.picked; name: "check"; color: root.accent; size: 12 }
+                                }
+                                Art {
+                                    Layout.preferredWidth: 40; Layout.preferredHeight: 40
+                                    radius: 6; url: idRow.kind === "match" ? (idRow.rowData.artist.art || "") : ""
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                                        text: idRow.rowData.name || ""
+                                        color: root.textHi; font.pixelSize: 14; font.bold: true
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                                        text: idRow.kind !== "match" ? ""
+                                            : idRow.rowData.reason === "tag" ? "From your files' tags"
+                                            : idRow.rowData.reason === "library" ? "Matches your library: " + (idRow.rowData.owned || []).join(", ")
+                                            : (idRow.rowData.albums || 0) + ((idRow.rowData.albums || 0) === 1 ? " album" : " albums") + " in your library"
+                                        color: root.textDim; font.pixelSize: 12
+                                    }
+                                }
+                            }
+                        }
+                        // Several close names: pick one, or none.
+                        ColumnLayout {
+                            visible: idRow.kind === "fuzzy"
+                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Text {
+                                    Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                                    text: idRow.rowData.name || ""
+                                    color: root.textHi; font.pixelSize: 14; font.bold: true
+                                }
+                                SpecBtn {
+                                    objectName: "importDismissBtn"
+                                    compact: true; label: "NOT THESE"
+                                    onClicked: importDialog.drop(idRow.rowData.key)
+                                }
+                            }
+                            Row {
+                                spacing: 8
+                                Repeater {
+                                    model: idRow.kind === "fuzzy" ? idRow.rowData.candidates : []
+                                    delegate: Rectangle {
+                                        id: cand
+                                        objectName: "importCandidate"
+                                        required property var modelData
+                                        readonly property bool on: !!idRow.picked && ("" + idRow.picked.id) === ("" + cand.modelData.id)
+                                        width: 176; height: 52; radius: 8
+                                        color: cand.on ? root.accentCont : (cMa.containsMouse ? root.surface : "transparent")
+                                        border.color: cand.on ? root.accentDim : root.border1
+                                        MouseArea {
+                                            id: cMa; anchors.fill: parent; hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: importDialog.setPick(idRow.rowData.key, cand.on ? null
+                                                : { id: "" + cand.modelData.id, name: "" + (cand.modelData.name || ""), art: "" + (cand.modelData.art || "") })
+                                        }
+                                        Row {
+                                            anchors.fill: parent; anchors.margins: 6; spacing: 8
+                                            Art { width: 40; height: 40; radius: 6; url: cand.modelData.art || "" }
+                                            Column {
+                                                width: parent.width - 48; anchors.verticalCenter: parent.verticalCenter
+                                                spacing: 1
+                                                Text {
+                                                    width: parent.width
+                                                    textFormat: Text.PlainText; elide: Text.ElideRight
+                                                    text: cand.modelData.name || ""
+                                                    color: cand.on ? root.accent : root.textHi; font.pixelSize: 13
+                                                }
+                                                Text {
+                                                    objectName: "importCandidateWhy"
+                                                    width: parent.width
+                                                    textFormat: Text.PlainText; elide: Text.ElideRight
+                                                    text: importDialog.candidateWhy(cand.modelData)
+                                                    color: cand.modelData.checked === true && (cand.modelData.owned_n || 0) > 0
+                                                           ? root.textLo : root.textDim
+                                                    font.pixelSize: 11
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Not found: search by hand, or let it go.
+                        RowLayout {
+                            visible: idRow.kind === "none"
+                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 10
+                            Text {
+                                Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                                text: idRow.rowData.name || ""
+                                color: root.textHi; font.pixelSize: 14; font.bold: true
+                            }
+                            SpecBtn {
+                                objectName: "importSearchBtn"
+                                compact: true; label: "SEARCH"
+                                onClicked: importDialog.park(idRow.rowData.name || "")
+                            }
+                            SpecBtn {
+                                objectName: "importForgetBtn"
+                                compact: true; label: "FORGET"
+                                onClicked: importDialog.drop(idRow.rowData.key)
+                            }
+                        }
+                    }
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 2; spacing: 10
+                    SpecBtn {
+                        visible: importDialog.stage === "start" && importDialog.trayCount > 0
+                        objectName: "importTrayBtn"
+                        label: "LOOK AT THEM"
+                        onClicked: importDialog.reviewTray()
+                    }
+                    SpecBtn {
+                        objectName: "importCancelBtn"
+                        label: importDialog.stage === "review" && importDialog.rows.length > 0 ? "NOT NOW"
+                             : (importDialog.stage === "start" || importDialog.running) ? "CANCEL" : "DONE"
+                        onClicked: importDialog.stage === "review" ? importDialog.discard() : importDialog.close()
+                    }
+                    SpecBtn {
+                        visible: importDialog.stage === "start"
+                        objectName: "importStartBtn"
+                        primary: true; label: "START"
+                        onClicked: importDialog.start()
+                    }
+                    SpecBtn {
+                        visible: importDialog.stage === "review" && importDialog.rows.length > 0
+                        objectName: "importConfirmBtn"
+                        primary: true; enabled: importDialog.pickCount > 0
+                        opacity: enabled ? 1 : 0.4
+                        label: "FOLLOW " + importDialog.pickCount + (importDialog.pickCount === 1 ? " ARTIST" : " ARTISTS")
+                        onClicked: importDialog.confirm()
+                    }
+                }
+            }
+        }
+    }
+    Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open; onActivated: importDialog.close() }
 
     // Exit warning: the window close was vetoed (onClosing) because downloads
     // are still running. KEEP DOWNLOADING cancels the exit; EXIT ANYWAY
@@ -19257,7 +24775,7 @@ ApplicationWindow {
         visible: open
         property bool open: false
         // Lets the EXIT ANYWAY re-close pass the onClosing veto. Reset when
-        // the gate opens so a cancelled exit re-arms the warning.
+        // the gate opens so a canceled exit re-arms the warning.
         property bool confirmed: false
         onOpenChanged: if (open) { confirmed = false; exitSkip.checked = false }
         color: "#cc06070e"
@@ -19321,7 +24839,7 @@ ApplicationWindow {
                     }
                 }
                 Row {
-                    // "Don't warn me again" row: catDlGate grammar, centred to
+                    // "Don't warn me again" row: catDlGate grammar, centered to
                     // match this card's centered text; below the buttons so the
                     // choice reads first and the escape hatch last.
                     Layout.alignment: Qt.AlignHCenter
@@ -19343,7 +24861,7 @@ ApplicationWindow {
 
     // ==== Open-water launch sequence ("Z FILL", picked in the boot lab) ====
     // The app opens on its own water video, bright (scrim held at 0.55) with
-    // the WAVES wordmark centred and the running version tucked at its
+    // the WAVES wordmark centered and the running version tucked at its
     // bottom-right. Once the session resolves and the landing has content
     // (2s cap), a progress bar completes over the version and drains away,
     // then the wordmark zooms toward the viewer as the water dims to its
@@ -19519,7 +25037,7 @@ ApplicationWindow {
             scale: bootTitle.zoom
             // One Text per glyph, tracked by Row spacing rather than
             // font.letterSpacing: no trailing space means centerIn really
-            // centres the glyph run, and the W (which the mono face
+            // centers the glyph run, and the W (which the mono face
             // compresses to fit its fixed cell) can be stretched back out
             // on its own without touching its advance.
             Row {
@@ -19576,6 +25094,21 @@ ApplicationWindow {
             opacity: 0.85 * shown
         }
 
+        // ---- v0.2.0 launch fireworks ---------------------------------------
+        // A one-release flourish: bit fireworks burst around the version while
+        // it is up, and burn out as it drains. Keyed to the exact version
+        // so the next release launches plain again; every launch of this one
+        // plays them, so they fit in a hold only 0.1 s past the usual one.
+        BitFireworks {
+            id: bootFx
+            readonly property bool celebrate: waves.appVersion === "0.2.0"
+            visible: celebrate
+            width: 680; height: 320
+            x: bootVer.x + bootVer.width / 2 - width / 2
+            y: bootVer.y + bootVer.height / 2 - height / 2 + 20
+            colors: [root.accent, root.textHi, root.gold, root.cyan]
+        }
+
         // The version's exit, built on the progress bars' cells: a bar
         // completes over the text, drains to dim, then empties out.
         Timer {
@@ -19630,6 +25163,10 @@ ApplicationWindow {
                 target: bootVer; property: "shown"; from: 0; to: 1
                 duration: 900; easing.type: Easing.OutCubic
             }
+            SequentialAnimation {
+                PauseAnimation { duration: 300 }
+                ScriptAction { script: { if (bootFx.celebrate) bootFx.fire() } }
+            }
             // A first landing that arrived mid-fade waits here (see
             // onBrowseLoaded): applying it during the fade cost the fade its
             // frames. The composed mark is now still, so the async build gets
@@ -19652,7 +25189,10 @@ ApplicationWindow {
             // decision, 2026-08-27, reversing a briefly shipped 1.1s warm
             // hold); only waits BEYOND this minimum are load-dependent (the
             // handover gate below).
-            PauseAnimation { duration: 1900 }   // hold the opening frame; the water fades in under it
+            // The v0.2.0 fireworks: the version starts draining just after the last
+            // shell bursts, so its sparks burn out over the drain instead of
+            // the launch waiting on them (bootZoom fades whatever is left).
+            PauseAnimation { duration: bootFx.celebrate ? 2000 : 1900 }   // hold the opening frame; the water fades in under it
             // Any wait for the landing happens HERE, on the opening frame with
             // the wordmark and version still up, never after the version has
             // drained: that readout emptying out reads as "about to hand over"
@@ -19673,6 +25213,7 @@ ApplicationWindow {
         }
         SequentialAnimation {
             id: bootZoom
+            onStarted: bootFx.release()
             // Tight zoom: the wordmark is gone in ~0.7s and the interface only
             // starts appearing once the title is mostly faded, so text never
             // lingers over visible UI.

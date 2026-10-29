@@ -1,8 +1,8 @@
 .pragma library
-// Footer easter-egg heart, a colour anatomical pixel heart that gibs when clicked.
+// Footer easter-egg heart, a color anatomical pixel heart that gibs when clicked.
 // Stateless helper:
 //   import "HeartGib.js" as HeartGib
-// Every cell is { c, r, color } (a hex) so the gibs inherit each pixel's real colour.
+// Every cell is { c, r, color } (a hex) so the gibs inherit each pixel's real color.
 
 // "Realistic" anatomical colorway (region → hex).
 var CW = {

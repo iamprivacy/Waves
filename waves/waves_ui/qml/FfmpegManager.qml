@@ -9,7 +9,7 @@ QtObject {
     id: mgr
 
     property var status: ({})        // last waves.ffmpegStatus()
-    property string lifeState: ""    // "" | downloading | verifying | installing | done | failed | cancelled
+    property string lifeState: ""    // "" | downloading | verifying | installing | done | failed | canceled
     property string message: ""      // last lifecycle message
     // What a "failed" lifeState failed at, as the failure line's lead-in: a
     // Remove that could not land is not an install failure.
