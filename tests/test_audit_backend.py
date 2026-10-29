@@ -39,7 +39,7 @@ class _Signal:
 
 class _Stub:
     """Bare stand-in for a WavesBridge, with the attributes the bound methods
-    read/write. Real behaviour comes from binding WavesBridge methods below."""
+    read/write. Real behavior comes from binding WavesBridge methods below."""
 
     def __init__(self):
         self._queue: list[dict] = []
@@ -411,9 +411,12 @@ def test_restore_ffmpeg_path_preserves_user_override():
 def _cache_stub(path, user_id):
     from threading import Lock
 
+    from waves.page_store import PageStore
+
     stub = _Stub()
     stub._logged_in = True
     stub._page_cache_path = str(path)
+    stub._page_store = PageStore(str(path.parent / "page_cache.sqlite3"))
     stub._page_cache_lock = Lock()
     stub._cache_user_id = lambda: user_id
     stub._browse_root_cache = None

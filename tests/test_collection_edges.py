@@ -11,7 +11,7 @@
 * An empty playlist reached the outcome tallies as (0, 0, 0), which is also
   what a free account's every-stream-refused run looks like, so the row went
   red "Failed: no tracks were downloaded" over a collection that had nothing to
-  do. The free-account verdict is settled behaviour and stays exactly as it is.
+  do. The free-account verdict is settled behavior and stays exactly as it is.
 * And a symlinked entry on a Windows mapped drive raised ValueError out of the
   relative-path computation (the drive resolves to its UNC spelling, so the two
   paths have different anchors), which the OSError handler did not catch: the

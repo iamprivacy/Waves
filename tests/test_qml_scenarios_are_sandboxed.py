@@ -19,7 +19,7 @@ HOW THIS STAYS FIXED
 --------------------
 Every test module that constructs a bridge behind a QML engine must hand
 its subprocess an ``XDG_CONFIG_HOME`` of its own. ``path_config_base()``
-honours that variable first on every platform, so a scenario given one
+honors that variable first on every platform, so a scenario given one
 can only ever touch a temporary directory.
 """
 

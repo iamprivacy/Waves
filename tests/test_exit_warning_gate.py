@@ -16,7 +16,7 @@ WHAT THIS FENCES OFF
    persist the "don't warn me again" checkbox.
 3. The mute flag lives in QSettings (the "setup" block), NOT waves.json.
 4. The gate re-arms per attempt: opening resets confirmed and the checkbox,
-   so a cancelled exit warns again next time.
+   so a canceled exit warns again next time.
 """
 
 from __future__ import annotations

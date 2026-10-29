@@ -222,7 +222,7 @@ def test_no_playlist_when_the_setting_is_off(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# The moment: after the pool, before the failure judgement, exactly where a
+# The moment: after the pool, before the failure judgment, exactly where a
 # plain album's playlist is written (items() writes it, then the bridge
 # raises _raise_download_incomplete for the shortfall).
 # --------------------------------------------------------------------------- #
@@ -269,7 +269,7 @@ def test_a_track_still_landing_when_cancel_is_seen_is_listed(tmp_path):
     past its own stop check when the cancel arrived, and went on to land,
     is in the playlist. Two workers: 1 and 2 both pass their stop check at
     once, 1 sets the cancel on its way out while 2 is still pausing, and 3
-    is refused by item()'s first line or cancelled before it starts. Track 1
+    is refused by item()'s first line or canceled before it starts. Track 1
     pauses a little itself so 2 has certainly started before the cancel."""
     abort = threading.Event()
     dl = _WritingDownload(tmp_path, _Settings(downloads_concurrent_max=2), pause={1: 0.15, 2: 0.4})
@@ -289,9 +289,9 @@ def test_a_track_still_landing_when_cancel_is_seen_is_listed(tmp_path):
 
 def test_a_cancelled_merge_leaves_the_playlist_for_what_landed(tmp_path):
     """items() writes the playlist after the pool whatever stopped it, and a
-    cancelled plain album keeps the m3u of what landed. The merge follows the
+    canceled plain album keeps the m3u of what landed. The merge follows the
     engine here rather than choosing for itself. Track 1 sets the cancel on
-    its way out; whether 2 and 3 are then cancelled by the loop or refused by
+    its way out; whether 2 and 3 are then canceled by the loop or refused by
     item()'s own first line, neither lands, and the playlist says so."""
     abort = threading.Event()
     dl = _WritingDownload(tmp_path, _Settings(downloads_concurrent_max=1))
@@ -364,7 +364,7 @@ def test_the_sort_decision_reads_the_same_on_the_raw_and_the_collection_template
 
 def test_landed_paths_keep_submission_order_and_skip_what_landed_nothing():
     """The engine's own collection rule, now callable on its own: submission
-    order; cancelled and crashed futures skipped; an empty path skipped; a
+    order; canceled and crashed futures skipped; an empty path skipped; a
     failed item's aimed-for path skipped (nothing was written there)."""
     from concurrent.futures import Future
 

@@ -7,9 +7,10 @@ left edge of the percentage Text, so the Text's width IS the matrix's right
 edge. That Text was unbounded, so every digit the readout gained (…→ 5%, 9% →
 10%, 99% → 100%) narrowed the matrix beside it.
 
-DotMatrix answers a width change by holding its old column count for 300ms (its
-``_settledWidth``, which exists so dragging the queue drawer's edge doesn't
-rebuild every dot per mouse move). For those 300ms the matrix laid its last
+DotMatrix used to answer a width change by holding its old column count for
+300ms (a settled width, there so dragging the queue drawer's edge didn't
+rebuild every dot per mouse move; its columns follow the live width now). For
+those 300ms the matrix laid its last
 columns out past its own new width, so a download visibly LOST its last two
 columns of dots exactly as it reached 100%, then popped them back when the
 settle timer fired. Measured on a 25fps screen capture: the lit dot area fell
@@ -40,9 +41,9 @@ same cascade, while the button is still the narrow width. DotMatrix used to
 latch its settled width in Component.onCompleted, i.e. mid-cascade, so the
 bar opened two columns too wide for the settle interval and then shed them
 (a livetest report: "an extra set of blocks that quickly disappear"). The
-settle binding now rides through the creating turn. The card scenario reads
-the matrix 60ms into the run, inside the settle, and requires its columns
-to fit from the first frame.
+columns follow the live width now, so there is no latch left to go stale. The
+card scenario still reads the matrix 60ms into the run and requires its
+columns to fit from the first frame.
 
 Runs in a SUBPROCESS like the other Main.qml scenarios: building the bridge
 installs process-global handlers that must not leak into the suite.
@@ -282,7 +283,7 @@ def _run_card_scenario() -> int:
                 "(function(){" + _CARD_WALKERS + " var b = walkBtn(browseDrill); if (!b) return 'shape:button';"
                 " var m = walkMx(b); if (!m) return 'shape:matrix';"
                 " function r2(v){ return Math.round(v * 100) / 100 }"
-                " return 'mx:' + [r2(m.width), m.cols, m.dot, m.gap, r2(m._settledWidth)].join(',');"
+                " return 'mx:' + [r2(m.width), m.cols, m.dot, m.gap].join(',');"
                 "})()"
             )
             or ""
@@ -306,20 +307,18 @@ def _run_card_scenario() -> int:
             return _EXIT_PRECONDITION
     parsed = {}
     for tag, rep in (("first", first), ("settled", later)):
-        width, cols, dot, gap, settled = (float(v) for v in rep[len("mx:") :].split(","))
-        parsed[tag] = (width, int(cols), dot, gap, settled)
+        width, cols, dot, gap = (float(v) for v in rep[len("mx:") :].split(","))
+        parsed[tag] = (width, int(cols), dot, gap)
 
     failures: list[str] = []
-    width, cols, dot, gap, settled = parsed["first"]
+    width, cols, dot, gap = parsed["first"]
     extent = cols * (dot + gap) - gap
     if extent > width + 0.5:
         failures.append(
             f"  {_STEP_SETTLE_MS}ms into the run: {cols} columns need {round(extent, 2)}px but the "
-            f"matrix is {width}px wide (settled width {settled}px), so the bar opens with "
+            f"matrix is {width}px wide, so the bar opens with "
             f"{max(1, int((extent - width) / (dot + gap)) + 1)} stale column(s)"
         )
-    if abs(settled - width) > 0.5:
-        failures.append(f"  {_STEP_SETTLE_MS}ms into the run: settled width {settled}px lags the real {width}px")
     if parsed["settled"][1] != cols:
         failures.append(f"  the column count moved after the settle: {cols} -> {parsed['settled'][1]}")
     if failures:

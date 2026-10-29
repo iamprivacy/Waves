@@ -1,6 +1,6 @@
 """The console-style Browse landing must reach the playlists-only view.
 
-Browse ships two landing styles. The art style closes the page with colour-tile
+Browse ships two landing styles. The art style closes the page with color-tile
 cloud shelves whose headlines are links: "All Playlists ›" opens the folder-view
 root, and each cloud headline opens that cloud as a full grid. The console style
 leads with the same clouds as chip rows, and its headlines were plain text.

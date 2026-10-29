@@ -79,16 +79,16 @@ class TestDownloadCancellation:
 
             # Assert that we stopped.
             # If started with 4 urls.
-            # We expected 2 to finish (triggered stop), causing remaining to be cancelled.
+            # We expected 2 to finish (triggered stop), causing remaining to be canceled.
             # So results count should be less than 4?
             # Depends on concurrency. If all 4 submitted immediately to threaded executor.
             # But we can assert that event_stop.is_set() is True.
             assert event_stop.is_set()
 
             # Also, the return value `result` (success boolean) might depend on whether all segments completed?
-            # If cancelled, it checks `if self.event_abort.is_set() or (event_stop and event_stop.is_set()): return False`?
+            # If canceled, it checks `if self.event_abort.is_set() or (event_stop and event_stop.is_set()): return False`?
             # I need to verify what I returned in _download_segments.
-            # Assuming I returned False if cancelled.
+            # Assuming I returned False if canceled.
             assert result is False
 
     def test_download_segments_global_abort(self, download_instance):

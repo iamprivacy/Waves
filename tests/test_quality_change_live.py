@@ -44,6 +44,8 @@ def _apply_stub():
     stub._restore_ffmpeg_path = lambda: None
     stub._ffmpeg_source_label = lambda: "system"
     stub._waves_pref_bool = lambda key: False
+    # The master switch reads False above, so the armed check is a no-op.
+    stub._notify_master_armed = WavesBridge._notify_master_armed.__get__(stub, type(stub))
     stub.ownershipChanged = _signal()
     stub.targetTierChanged = _signal()  # the DEFAULT mark in a badge's quality menu (issue #36)
     stub.editionMergeChanged = _signal()

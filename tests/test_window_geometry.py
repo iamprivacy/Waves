@@ -190,7 +190,7 @@ def test_maximized_state_persists(tmp_path):
 
 
 def test_zero_size_does_not_clobber_a_good_save(tmp_path):
-    """A 0x0 frame (a teardown artefact) must be ignored, never overwrite a
+    """A 0x0 frame (a teardown artifact) must be ignored, never overwrite a
     previously saved frame."""
     stub = _PrefsStub(tmp_path)
     stub.windowSaveGeometry(50, 60, 1100, 850, False)

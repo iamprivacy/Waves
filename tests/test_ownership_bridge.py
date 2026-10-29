@@ -80,7 +80,7 @@ class _BridgeStub:
         # queue row (so a collapsed row can state its delivered tier). These
         # tests drive it with no queue at all, which is a real shape: an event
         # can arrive for a row already cleared. An empty index makes _queue_item
-        # answer None, the rollup no-ops, and the ownership behaviour under test
+        # answer None, the rollup no-ops, and the ownership behavior under test
         # is unaffected either way. The registry is seeded the way a started
         # job seeds it, which is what marks these events as a running job's
         # own (an event that would CREATE state for a row that has gone

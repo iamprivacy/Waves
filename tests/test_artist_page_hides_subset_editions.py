@@ -111,9 +111,10 @@ def test_the_setting_sits_under_its_master_in_the_schema():
     with open(src, encoding="utf-8") as fh:
         text = fh.read()
     assert '"artist_page_all_editions": False' in text
-    i = text.index('"key": "artist_page_all_editions"')
-    assert text.index('"key": "collapse_editions"') < i
-    assert 'elif key == "artist_page_all_editions":' in text
+    # It rides inside the 'Most-complete edition only' tile as its nested
+    # checkbox, shown only while that switch is on.
+    i = text.index('if key == "collapse_editions":')
+    assert text.index('f["child_key"] = "artist_page_all_editions"') > i
 
 
 def test_a_second_visit_costs_no_track_fetch():

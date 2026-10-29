@@ -24,7 +24,7 @@ from waves.waves_ui.backend import WavesBridge
 
 
 class _Cover:
-    """A tidalapi-shaped media object whose image() honours EVERY size it is
+    """A tidalapi-shaped media object whose image() honors EVERY size it is
     asked for, so a header that asked for 480 would actually get a 480 URL
     (tidalapi rejects 480 for albums, which used to hide the bug there)."""
 

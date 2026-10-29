@@ -89,7 +89,7 @@ def test_pooled_session_defaults_fail_fast():
 
 def test_cert_verify_falls_back_for_custom_verify(tmp_path):
     """A custom CA bundle path must still go through the stock requests
-    behaviour (correctness beats the fast path)."""
+    behavior (correctness beats the fast path)."""
     import certifi
 
     adapter = Download._shared_http().get_adapter("https://example.com")

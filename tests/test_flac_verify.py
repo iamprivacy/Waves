@@ -870,7 +870,7 @@ def test_a_decode_sharing_the_link_gets_that_many_times_as_long(tmp_path, monkey
 @pytest.mark.skipif(os.name == "nt", reason="the stand-in decoder is a shell script")
 def test_cancel_reaches_a_decode_that_is_not_producing_output(tmp_path):
     """The read loop only asks between chunks; a decoder stuck before its
-    first chunk is stopped by the watchdog, and the row says cancelled."""
+    first chunk is stopped by the watchdog, and the row says canceled."""
     path = _whole_frames_file(tmp_path)
     before = path.read_bytes()
     deadline = time.monotonic() + 0.5
@@ -970,7 +970,7 @@ def test_fix_rows_cancel_leaves_the_rest_unset_for_next_time(tmp_path):
     # The first file's decode was interrupted (the budget ran out inside it),
     # the rest were never reached: all stay UNSET, so a later fix sees them.
     assert [r.status for r in out] == [fv.UNSET] * 3
-    assert {r.detail for r in out} == {"not reached, the run was cancelled"}
+    assert {r.detail for r in out} == {"not reached, the run was canceled"}
     for b, p in zip(before, paths, strict=True):
         assert p.read_bytes() == b
     assert [r.status for r in fv.fix_rows(out, FFMPEG, settle_seconds=0.0)] == [fv.SEALED] * 3

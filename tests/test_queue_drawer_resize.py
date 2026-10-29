@@ -219,12 +219,12 @@ def _run_scenario() -> int:
     QTest.mouseMove(root, QPoint(grip_x - 50, 700))
     settle(40)
     QTest.mouseRelease(root, Qt.LeftButton, Qt.NoModifier, QPoint(grip_x - 50, 700))
-    # Mid-collapse and settled: the light stays centred on the hand throughout.
+    # Mid-collapse and settled: the light stays centered on the hand throughout.
     for ms in (120, 260, 500):
         settle(ms if ms == 120 else ms - 120)
-        centre = float(q("gripGlow.y + gripGlow.height / 2"))
-        if abs(centre - 700) > 25:
-            bad.append(f"{ms}ms after letting go the glow sat at {centre:.0f}, not on the hand at 700")
+        center = float(q("gripGlow.y + gripGlow.height / 2"))
+        if abs(center - 700) > 25:
+            bad.append(f"{ms}ms after letting go the glow sat at {center:.0f}, not on the hand at 700")
     if abs(float(q("gripGlow.height")) - 190) > 1:
         bad.append(f"the glow did not settle back to its resting height: {float(q('gripGlow.height')):.0f}")
 

@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import pathlib
 import threading
+import time
 from unittest.mock import MagicMock
+
+import requests
 
 from waves.download import Download
 from waves.model.downloader import DownloadSegmentResult
@@ -182,3 +185,175 @@ def test_merge_missing_required_tail_is_real_failure(tmp_path):
     b, path_file, results = _merge_fixture(tmp_path)
 
     assert Download._segments_merge(b, path_file, results, 0) is False
+
+
+# ---------------------------------------------------------------------------
+# A segment whose BODY read breaks off is fetched again (download.py
+# _download_segment). The pooled session's Retry covers the connect and the
+# headers only; with stream=True a connection the CDN drops mid-body raises in
+# our own iter_content loop, which used to fail the track on the spot and, by
+# advancing the progress bar for the failed fetch, pushed its row to 100
+# percent so it read FINISHING in the instant before it went red.
+# ---------------------------------------------------------------------------
+
+
+class _Response:
+    """A streamed response whose body either arrives or breaks off."""
+
+    def __init__(self, chunks: list[bytes] | None, error: Exception | None = None, status: int = 200) -> None:
+        self._chunks = chunks or []
+        self._error = error
+        self.status_code = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            err = requests.exceptions.HTTPError(response=self)
+            raise err
+
+    def iter_content(self, chunk_size=None):
+        yield from self._chunks
+        if self._error is not None:
+            raise self._error
+
+
+def _segment_bridge(responses: list[_Response], tmp_path: pathlib.Path) -> tuple[Download, int, MagicMock]:
+    b, p_task = _bridge(total=10)
+    http = MagicMock()
+    http.get.side_effect = responses
+    b._http = http
+    b.event_run = threading.Event()
+    b.event_run.set()
+    b.progress_gui = MagicMock()
+    # No real waits in a unit test; the helper's abort/stop answer is kept.
+    b._retry_wait = lambda seconds, event_stop=None: bool(
+        b.event_abort.is_set() or (event_stop is not None and event_stop.is_set())
+    )
+    return b, p_task, http
+
+
+def _fetch(b: Download, p_task: int, tmp_path: pathlib.Path, event_stop=None) -> DownloadSegmentResult:
+    return Download._download_segment(b, "https://cdn.test/seg_0003.m4s", tmp_path, None, p_task, False, event_stop)
+
+
+def test_segment_body_drop_is_fetched_again(tmp_path):
+    """The first attempt breaks off mid-body, the second lands: the segment
+    succeeds, holds ONLY the second body, and the drop was logged as a warning."""
+    broken = _Response([b"part"], requests.exceptions.ChunkedEncodingError("dropped"))
+    whole = _Response([b"whole", b"-body"])
+    b, p_task, http = _segment_bridge([broken, whole], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is True
+    assert r.id_segment == 3
+    assert r.path_segment.read_bytes() == b"whole-body"
+    assert http.get.call_count == 2
+    assert b.fn_logger.warning.call_count == 1
+    b.fn_logger.error.assert_not_called()
+
+
+def test_segment_that_keeps_dropping_fails_without_faking_progress(tmp_path):
+    """Every attempt breaks off: the fetch gives up after the fixed number of
+    attempts, reports False, logs one error naming the class only, and the
+    progress bar is left where it was (a failed track must not read 100%)."""
+    drops = [_Response([b"x"], requests.exceptions.ConnectionError("reset")) for _ in range(Download._SEGMENT_ATTEMPTS)]
+    b, p_task, http = _segment_bridge(drops, tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is False
+    assert http.get.call_count == Download._SEGMENT_ATTEMPTS
+    assert b.fn_logger.error.call_count == 1
+    message = b.fn_logger.error.call_args.args[0]
+    assert "ConnectionError" in message
+    assert "cdn.test" not in message and "reset" not in message
+    # Each attempt's byte moved the bar while it streamed, and each failed
+    # attempt took its step back, so the bar ends where it started.
+    assert b.progress.tasks[p_task].completed == 0
+
+
+def test_segment_retry_rewinds_the_failed_attempt_on_the_bar(tmp_path):
+    """A single-URL track advances the bar per block. A drop at 8 of 10 blocks
+    then a full retry must end at 10, not 18: the row would otherwise reach
+    100 percent (FINISHING) a fifth of the way into the retry. Steps another
+    segment of the same track already added are left alone."""
+    broken = _Response([b"b"] * 8, requests.exceptions.ChunkedEncodingError("dropped"))
+    whole = _Response([b"b"] * 10)
+    b, p_task, _http = _segment_bridge([broken, whole], tmp_path)
+    b.progress.advance(p_task, 3)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is True
+    assert b.progress.tasks[p_task].completed == 13
+
+
+def test_segment_fetch_failure_does_not_advance_progress(tmp_path):
+    """A fetch that fails before any byte arrives leaves the bar untouched."""
+    b, p_task, _http = _segment_bridge(
+        [_Response([], requests.exceptions.ReadTimeout("slow")) for _ in range(Download._SEGMENT_ATTEMPTS)], tmp_path
+    )
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is False
+    assert b.progress.tasks[p_task].completed == 0
+
+
+def test_segment_stop_between_attempts_gives_up_quietly(tmp_path):
+    """A STOP that lands while the first attempt is failing ends the fetch
+    after that one attempt, with no error logged: a stop is not a failure."""
+    event_stop = threading.Event()
+
+    class _StopsThenDrops(_Response):
+        def iter_content(self, chunk_size=None):
+            event_stop.set()
+            raise requests.exceptions.ConnectionError("reset")
+
+    b, p_task, http = _segment_bridge([_StopsThenDrops([]), _Response([b"never"])], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path, event_stop)
+
+    assert r.result is False
+    assert http.get.call_count == 1
+    b.fn_logger.error.assert_not_called()
+
+
+def test_segment_4xx_is_not_retried(tmp_path):
+    """An expired or forbidden link is the CDN's answer about the link itself;
+    asking again changes nothing, so one attempt it is."""
+    b, p_task, http = _segment_bridge([_Response([], status=403), _Response([b"never"])], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is False
+    assert http.get.call_count == 1
+    assert isinstance(r.error, requests.exceptions.HTTPError)
+    assert b.fn_logger.error.call_count == 1
+
+
+def test_segment_5xx_is_retried(tmp_path):
+    """A server-side status can pass on the next try, and does here."""
+    b, p_task, http = _segment_bridge([_Response([], status=503), _Response([b"ok"])], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is True
+    assert http.get.call_count == 2
+
+
+def test_retry_wait_wakes_on_stop():
+    """The real wait helper returns True at once when the item is stopped."""
+    b, _p = _bridge(total=1)
+    event_stop = threading.Event()
+    event_stop.set()
+    t0 = time.monotonic()
+
+    assert Download._retry_wait(b, 5.0, event_stop) is True
+    assert time.monotonic() - t0 < 1.0

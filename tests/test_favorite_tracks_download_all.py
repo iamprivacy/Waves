@@ -1,7 +1,7 @@
-"""My Tidal > Tracks DOWNLOAD ALL queues every favourite track (issue #43).
+"""My Tidal > Tracks DOWNLOAD ALL queues every favorite track (issue #43).
 
 ``downloadFavoriteTracks`` is the Tracks tab's bulk download. It pages the
-whole favourites list (a short window must never truncate it), applies the
+whole favorites list (a short window must never truncate it), applies the
 library claim like every other bulk action, registers a folder-style rollup
 under the fixed ``fav:tracks`` id so the header button and its badge follow
 the queued / running / done / failed lifecycle, and hands the keys to the GUI
@@ -50,7 +50,7 @@ class _InlinePool:
 
 
 class _Favorites:
-    """Serves favourites a window at a time, the way the endpoint does."""
+    """Serves favorites a window at a time, the way the endpoint does."""
 
     def __init__(self, tracks, fail_page: int | None = None, count_fails: bool = False):
         self._tracks = tracks
@@ -203,7 +203,7 @@ def test_a_stop_mid_scan_queues_nothing(monkeypatch):
 def test_a_bulk_scan_without_a_count_refuses_rather_than_guessing():
     """A short window is not the end of the list (tidalapi drops delisted
     items inside it). Without a count the id cache may stop there; the bulk
-    download must not, or the rest of the favourites are quietly left out."""
+    download must not, or the rest of the favorites are quietly left out."""
     stub = _Stub(_Favorites(_tracks(_LIBRARY_PAGE * 2), count_fails=True))
     stub.downloadFavoriteTracks()
     assert stub._tracksQueued.emits == []
@@ -211,11 +211,11 @@ def test_a_bulk_scan_without_a_count_refuses_rather_than_guessing():
     assert any("try again" in s for s in stub.statuses)
 
 
-def test_zero_favourites_says_so():
+def test_zero_favorites_says_so():
     stub = _Stub(_Favorites([]))
     stub.resolveFavoriteTracks()
     assert stub.favoriteTracksResolved.emits == [0]
-    assert stub.statuses[-1] == "No favourite tracks yet"
+    assert stub.statuses[-1] == "No favorite tracks yet"
 
 
 def test_a_folder_nudge_stashes_the_retry_and_publishes_no_group():

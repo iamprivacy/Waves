@@ -3,7 +3,7 @@
 WHAT THIS FENCES OFF
 --------------------
 The artist and browse sub-page back bars render the navHistory as a crumb
-trail. Four behaviours make that trail livable and must not regress:
+trail. Four behaviors make that trail livable and must not regress:
 
 1. SECTION-SCOPED: the trail is the drill-in you are inside, never the tabs
    you crossed to get here. Switching tab starts a fresh trail; drilling

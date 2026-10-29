@@ -255,7 +255,7 @@ def test_appimage_env_alone_is_not_trusted(monkeypatch):
     assert updater_mod._running_appimage() == "", "this process does not run out of that mount"
 
 
-def test_appimage_claim_honoured_when_running_from_the_mount(monkeypatch):
+def test_appimage_claim_honored_when_running_from_the_mount(monkeypatch):
     monkeypatch.setenv("APPIMAGE", "/home/u/Waves.AppImage")
     monkeypatch.setenv("APPDIR", str(pathlib.Path(sys.executable).parent))
     assert updater_mod._running_appimage() == "/home/u/Waves.AppImage"
@@ -488,7 +488,7 @@ def test_a_failed_edition_scan_leaves_the_album_rescannable():
 
 
 def test_an_incomplete_sibling_scan_does_not_claim_no_richer_edition():
-    # One artist bucket failed, so the scan never saw the whole catalogue. It
+    # One artist bucket failed, so the scan never saw the whole catalog. It
     # must fail visibly like a partial discography does, not report the absence
     # of something it did not look for.
     stub = _BestOfBothStub(scan_complete=False)

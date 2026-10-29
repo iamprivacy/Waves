@@ -1,7 +1,7 @@
 """A pointer resting on a video result actually starts its preview.
 
 The grid thumbnails restart their dwell when the pointer MOVES, so a cursor
-travelling across the results never fires a preview. Rest has to be measured
+traveling across the results never fires a preview. Rest has to be measured
 from the pointer's own travel, not from raw point updates: hover effects move
 the thumbnail under a still cursor, which re-delivers hover events every
 frame, and restarting on those held the dwell off forever (the preview simply
@@ -120,7 +120,7 @@ def _run_scenario() -> int:
     q("root.searchVideosExpanded = true")
     settle(700)
 
-    centre = q(
+    center = q(
         "(function(){"
         " var cell = videoGrid.children[0];"
         " if (!cell || !cell.item) return '';"
@@ -130,10 +130,10 @@ def _run_scenario() -> int:
         " return '' + Math.round(p.x) + ',' + Math.round(p.y);"
         "})()"
     )
-    if not centre:
+    if not center:
         print("no video thumbnail in the grid to hover", file=sys.stderr)
         return _EXIT_PRECONDITION
-    x, y = (int(n) for n in str(centre).split(","))
+    x, y = (int(n) for n in str(center).split(","))
 
     QTest.mouseMove(root, QPoint(x - 30, y - 30))
     settle(120)

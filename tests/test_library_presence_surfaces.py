@@ -295,9 +295,9 @@ def _run_scenario() -> int:  # (a linear boot -> drive -> measure scenario)
         return _EXIT_PRECONDITION
     a_held, a_absent = artists["a-held"], artists["a-absent"]
     if a_held["name"] != ARTIST or a_absent["name"] != "Nobody At All":
-        bad.append(f"artist button: the button does not know whose catalogue it offers ({artists!r})")
+        bad.append(f"artist button: the button does not know whose catalog it offers ({artists!r})")
     # A discography has no completeness axis, so the rollup can only ever reach
-    # the partial face: a live button, coloured and worded to say part of this
+    # the partial face: a live button, colored and worded to say part of this
     # is already here. An inert DOWNLOADED here would be a claim nobody can make.
     if not a_held["partial"] or a_held["words"] != "PARTIALLY IN LIBRARY":
         bad.append(f"artist button: an artist on disk read {a_held!r}, wanted the partial face")

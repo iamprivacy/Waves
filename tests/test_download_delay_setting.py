@@ -107,6 +107,7 @@ class _Stub:
         self.downloadProgress = _Signal()
         self.dl = _RecordingDownload()
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        self._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
         arm_dispatch(self)
 
     def _download_gate(self) -> str:

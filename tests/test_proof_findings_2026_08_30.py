@@ -2,7 +2,7 @@
 
 Every fix on the branch was proven to hold and nothing regressed, but driving
 the fixed app for real surfaced fourteen NEW problems the fixes had introduced
-or left open. These are the guards for the behavioural half of them; the
+or left open. These are the guards for the behavioral half of them; the
 guard-shaped ones (a test that could not fail) live beside the tests they
 fence, and the updater/path/redactor ones with their own subjects.
 

@@ -1,4 +1,4 @@
-"""The FLAC signature card (Settings, Advanced) and its confirmation gate.
+"""The FLAC signature card (Settings, FFmpeg & FLAC) and its confirmation gate.
 
 Static checks over the QML, in the shape of test_settings_diagnostics_card:
 the card may only ever read state and ask (scan, cancel, reveal); the two
@@ -40,14 +40,15 @@ def _block(source: str, anchor: str) -> str:
     raise AssertionError("unbalanced block")
 
 
-def test_the_card_sits_in_the_advanced_section_above_the_reset_row():
+def test_the_card_sits_with_ffmpeg_and_the_reset_row_ends_diagnostics():
     source = _code(SETTINGS)
     assert "id: flacCardComp" in source
     loaders = [m.start() for m in re.finditer(r"sourceComponent: (flacCardComp|resetRowComp)", source)]
     assert len(loaders) == 2
     flac_loader = source.rindex("Loader {", 0, source.index("sourceComponent: flacCardComp"))
-    assert 'active: card.modelData.id === "advanced"' in source[flac_loader : flac_loader + 400]
-    assert source.index("sourceComponent: flacCardComp") < source.index("sourceComponent: resetRowComp")
+    assert 'active: card.modelData.id === "processing"' in source[flac_loader : flac_loader + 400]
+    reset_loader = source.rindex("Loader {", 0, source.index("sourceComponent: resetRowComp"))
+    assert 'active: card.modelData.id === "diagnostics"' in source[reset_loader : reset_loader + 400]
 
 
 def test_the_settings_page_never_calls_the_writing_slot():
@@ -266,7 +267,7 @@ def test_jumping_to_the_card_disarms_once_the_section_has_opened():
     assert "page.pendingY === page.flacJumpY" in timer, "only the jump's own target is disarmed"
     assert timer.index("page._restoreScroll()") < timer.index("page.pendingY = -1")
     assert "if (flacJumpSettle.running) flacJumpSettle.restart()" in source
-    assert "ScrollBar.vertical: ScrollBar { onPressedChanged: if (pressed) page.pendingY = -1 }" in source
+    assert "ScrollBar.vertical: WavesScrollBar { onPressedChanged: if (pressed) page.pendingY = -1 }" in source
     restore = re.search(r"function _restoreScroll\(\) \{.*?\n    \}", source, re.S).group(0)
     assert restore.index("restoringScroll = true") < restore.index("settingsFlick.contentY =")
     assert restore.index("settingsFlick.contentY =") < restore.index("restoringScroll = false")

@@ -233,7 +233,7 @@ def test_a_symlink_left_behind_does_fill_its_folder(tmp_path):
 
 @pytest.mark.parametrize("existing", [_M3U8, _M3U_LEGACY])
 def test_the_writer_still_replaces_its_own_playlist_when_the_run_filled_the_folder(tmp_path, existing):
-    """The behaviour being fenced is the SCOPE, not the replace: a folder this
+    """The behavior being fenced is the SCOPE, not the replace: a folder this
     run filled still gets its playlist rewritten, old spelling and all."""
     folder = tmp_path / "Marina" / "[2010] Album X"
     folder.mkdir(parents=True)

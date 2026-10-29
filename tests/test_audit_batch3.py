@@ -10,6 +10,7 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
+from _dispatch_stub import arm_notify
 from tidalapi.album import Album
 
 from waves.waves_ui.backend import _LIBRARY_PAGE, WavesBridge
@@ -112,6 +113,8 @@ class _DismissStub:
         self.bumps: list = []
         self._bump_download_groups = lambda mid, pct, state: self.bumps.append((mid, pct, state))
         self._reap_stranded_groups = lambda: None
+        # A dropped hold can be what an idle queue still waited on.
+        arm_notify(self)
 
 
 def test_dismissing_the_nudge_clears_stashed_buttons():
@@ -299,7 +302,7 @@ def test_a_successful_album_track_fetch_still_records_membership():
     assert stub.cached == ["alb1"]
 
 
-# ---- findings 19+20: favourites pagination and failure caching --------------
+# ---- findings 19+20: favorites pagination and failure caching --------------
 
 
 class _Favorites:
@@ -336,8 +339,8 @@ def _fav_items(ids):
     return [SimpleNamespace(id=i) for i in ids]
 
 
-def test_a_short_window_does_not_truncate_the_favourites_set():
-    # 150 favourites, but the first window comes back short (unavailable items
+def test_a_short_window_does_not_truncate_the_favorites_set():
+    # 150 favorites, but the first window comes back short (unavailable items
     # dropped): completion must come from the count, not the window length.
     windows = {
         0: _fav_items(range(0, 90)),
@@ -348,7 +351,7 @@ def test_a_short_window_does_not_truncate_the_favourites_set():
     assert len(ids) == 140 and "149" in ids, "the second window must still be fetched"
 
 
-def test_a_failed_first_favourites_load_is_not_cached():
+def test_a_failed_first_favorites_load_is_not_cached():
     stub = _FavStub(_Favorites({}, fail=True))
     assert stub._favorite_ids("albums") == set()
     assert stub._fav_ids == {}, "an empty partial set must not sit behind the TTL"

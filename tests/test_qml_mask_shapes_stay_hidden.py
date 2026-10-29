@@ -10,7 +10,7 @@ reads the item whether or not the scene draws it, so the mask itself must stay
 ``visible: false``.
 
 ``diGridMask`` lost that line in 11ec500 (a boot-shield fix that flipped a
-neighbouring ``visible: false`` to ``visible: enabled`` as collateral). Since
+neighboring ``visible: false`` to ``visible: enabled`` as collateral). Since
 ``enabled`` reads back the *effective* enabled state, which is true for every
 button a user can press, the white rectangle was painted edge to edge inside
 every enabled track download button: a white tile with a green arrow on it,

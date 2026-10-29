@@ -20,7 +20,7 @@ on. Two things about doing the work early:
 2. The dressing is one library lookup and one ownership lookup per card, so a
    page of fifty is a real span of time after the caller's own staleness
    check. A sign-out and sign-in inside it painted the previous account's
-   personalised rows over the new account's page.
+   personalized rows over the new account's page.
 """
 
 from __future__ import annotations

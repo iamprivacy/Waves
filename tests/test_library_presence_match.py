@@ -75,7 +75,7 @@ def test_canon_folds_punctuation(raw, expected):
 
 
 def test_canon_nfkc_composed_vs_decomposed():
-    # Built from escapes, not literals: a file save can silently normalise two
+    # Built from escapes, not literals: a file save can silently normalize two
     # visually identical literals to one codepoint sequence.
     composed = "Beyonc\u00e9"  # e-acute as one codepoint
     decomposed = "Beyonce\u0301"  # e + combining acute
@@ -145,7 +145,7 @@ def test_empty_index_hidden():
 
 
 def test_same_title_same_artist_different_year_rejected():
-    # The Weezer colour LPs: identical (title, artist), separated only by year.
+    # The Weezer color LPs: identical (title, artist), separated only by year.
     idx = _index(
         ("Weezer", "Weezer", "1994", 10, "blue"),
         ("Weezer", "Weezer", "2001", 10, "green"),
@@ -153,7 +153,7 @@ def test_same_title_same_artist_different_year_rejected():
     )
     assert _decide_presence("Weezer", "Weezer", "2008", 10, idx)["local_album_id"] == "red"
     assert _decide_presence("Weezer", "Weezer", "1994", 10, idx)["local_album_id"] == "blue"
-    # a colour we don't own (2016) matches none of the three
+    # a color we don't own (2016) matches none of the three
     assert _decide_presence("Weezer", "Weezer", "2016", 10, idx)["present"] is False
 
 
@@ -238,9 +238,9 @@ def test_unknown_tidal_track_count_is_present_but_never_complete():
 
 def test_undated_local_folder_is_present_but_never_complete():
     # An untagged folder survives the year filter against EVERY same-titled
-    # album, so all four Weezer colour LPs matched one folder. It may light the
+    # album, so all four Weezer color LPs matched one folder. It may light the
     # pill; it may never gate.
-    idx = _index(("Weezer", "Weezer", "", 10, "colour"))
+    idx = _index(("Weezer", "Weezer", "", 10, "color"))
     for tidal_year in ("1994", "2001", "2008", "2016"):
         r = _decide_presence("Weezer", "Weezer", tidal_year, 10, idx)
         assert r["present"] and r["partial"] is True
@@ -816,7 +816,7 @@ def test_a_proven_copy_outranks_a_better_sounding_stranger():
 # spelling of ONE edition: measured against a real 11k-album library, "Deluxe" /
 # "Deluxe Edition" / "Deluxe Version" were 274 rows of the same thing, and
 # "(2011 Remaster)" and "(Remastered 2011)" the same master twice. same_edition
-# folds recognised edition vocabulary into a tag set so those spellings agree,
+# folds recognized edition vocabulary into a tag set so those spellings agree,
 # and refuses everything else: an unknown word keeps the whole tail literal,
 # classes never collapse into each other, and remaster years must agree when
 # both sides carry one. Every widening here is a synonym, never an edition.
@@ -1001,7 +1001,7 @@ def test_year_still_rejects_when_no_length_vouches():
 
 
 def test_wrong_length_never_vouches_past_the_year():
-    # The colour-LP case with durations on record: disagreeing year AND seconds
+    # The color-LP case with durations on record: disagreeing year AND seconds
     # whole songs apart is a different album, hidden as before; an ambiguous
     # length (past the proof bar) does not vouch either.
     idx = _didx(("Weezer", "Weezer", "1994", 10, "blue", 2495))
@@ -1042,10 +1042,10 @@ def test_a_multi_disc_set_without_durations_keeps_the_year_veto():
 
 
 def test_punctuation_only_titles_never_cross_claim():
-    # Every title made solely of strippable punctuation normalises to "" and
+    # Every title made solely of strippable punctuation normalizes to "" and
     # shares one artist-only key AND an empty gate_title, so a local "-" could
     # fully claim a screen "...": two different releases. The album side now
-    # refuses an empty-normalised title outright, like the track side always
+    # refuses an empty-normalized title outright, like the track side always
     # has. (A title with any surviving character, XXXTENTACION's "?", still
     # matches normally.)
     idx = _index(("-", "Artist", "2019", 10, "fp"))

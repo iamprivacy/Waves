@@ -17,7 +17,7 @@ itself on cells that carry no progress and the first real block lights two
 columns in, where the fade is at 36% (the next at 60%). Rows are NOT padded
 and no more columns are: four pad columns plus pad rows (design Q) shipped and
 was reverted the same day because the fill visibly started several blocks in
-from the start of the bar. A pad mirrors its nearest real neighbour, so a full
+from the start of the bar. A pad mirrors its nearest real neighbor, so a full
 bar's ends still light and fade exactly as before, and a pad never carries the
 pulse.
 

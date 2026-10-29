@@ -143,7 +143,7 @@ class TestTheM3uNeverShrinks:
     """The order this run knows may REORDER the folder, never shorten it.
 
     A run reports back only what it actually fetched. A re-download skips the
-    tracks you already have, a cancelled run stops partway, an item can fail.
+    tracks you already have, a canceled run stops partway, an item can fail.
     Writing only those over an existing playlist replaced a complete m3u with a
     one-line one, which for the file is the same as losing the playlist.
     """
@@ -181,7 +181,7 @@ class TestTheM3uNeverShrinks:
             "My List",
             is_album=False,
             sort_alphabetically=True,
-            paths_ordered=[tmp_path / "A.flac"],  # cancelled after the first
+            paths_ordered=[tmp_path / "A.flac"],  # canceled after the first
         )
 
         assert written[0].read_text(encoding="utf-8").splitlines() == ["A.flac", "B.flac", "C.flac"]
@@ -216,7 +216,7 @@ class TestTheCollectorPreservesSubmissionOrder:
     def test_an_abort_collects_the_landed_work_and_skips_the_cancelled(self, tmp_path):
         # CTRL+C mid-list: the loop cancels the not-yet-started tail and
         # breaks. The landed prefix must still come back (the m3u of a partial
-        # download lists what landed), and a cancelled future must be skipped,
+        # download lists what landed), and a canceled future must be skipped,
         # not asked for a result it will never have.
         dl = _make_download(tmp_path)
         dl.event_abort.set()

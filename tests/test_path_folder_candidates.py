@@ -2,7 +2,7 @@
 folder_name_candidates), for the library scan's probe by name.
 
 The probe stats each spelling in turn and stops at the first hit, so the
-order is the likelihood order: raw (a library another tool organised), then
+order is the likelihood order: raw (a library another tool organized), then
 what this install writes, then older spellings. Duplicates by comparison key
 would cost a wasted stat on a case-folding filesystem, and a spelling with a
 separator in it can never be one folder.

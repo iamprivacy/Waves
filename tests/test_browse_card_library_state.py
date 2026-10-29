@@ -13,7 +13,7 @@ Two things answer it now, and they answer different questions:
 
 * the library PILL sits on the artwork and does not wait for a hover, so a
   shelf reads at a glance (this is the half a hover-gated control cannot do);
-* the strip's download HALF carries the verdict in the same four colours the
+* the strip's download HALF carries the verdict in the same four colors the
   full button uses, so what the click will do is never a surprise.
 
 Both are pinned here, along with the two ways they must stay quiet: a

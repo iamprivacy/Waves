@@ -283,8 +283,8 @@ def _run_scenario() -> int:
             )
     by_id = {r["id"]: r for r in rows}
     # Identity is what separates the two claims, and only the proven one may
-    # say so. Colour follows this flag, so getting it wrong paints a guess in
-    # the fact colour.
+    # say so. Color follows this flag, so getting it wrong paints a guess in
+    # the fact color.
     if not by_id["t-proven"]["sure"]:
         bad.append("t-proven: identity was not proven by its holding folder")
     if by_id["t-unproven"]["sure"]:

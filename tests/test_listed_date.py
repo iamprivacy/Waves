@@ -4,7 +4,7 @@ TIDAL gives a reissue two dates that disagree: ``releaseDate`` is the
 ORIGINAL album's (Sabaton's *The Last Stand (10th Anniversary Edition)* reads
 2016-08-19) and ``streamStartDate`` is the day the listing went live
 (2026-09-11). Neither can simply win: the first buries a new reissue among
-decade-old albums, the second is a re-ingest event for the back catalogue (a
+decade-old albums, the second is a re-ingest event for the back catalog (a
 2012 album reads 2022, three unrelated albums share one 2019 day).
 
 The rule is deterministic and reads only the row itself, so a search row and
@@ -24,6 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from waves.page_store import PageStore
 from waves.waves_ui import backend
 from waves.waves_ui.backend import WavesBridge
 
@@ -248,6 +249,7 @@ class _CacheStub:
     def __init__(self, path):
         self._page_cache_lock = Lock()
         self._page_cache_path = str(path)
+        self._page_store = PageStore(str(path.parent / "page_cache.sqlite3"))
         self._browse_root_cache = None
         self._browse_pages = {}
         self._artist_cache = {}
@@ -260,6 +262,8 @@ class _CacheStub:
 
 
 def test_a_snapshot_from_before_listed_dates_is_discarded(tmp_path):
+    """Written as the JSON an earlier build kept: the first load imports a
+    current-layout file into the page store and drops an older one."""
     path = tmp_path / "page_cache.json"
     page = {"id": "3616281", "albums": [{"id": "1"}]}
     path.write_text(json.dumps({"version": 3, "user": "u1", "artists": {"3616281": page}}))

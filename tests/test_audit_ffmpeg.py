@@ -82,7 +82,7 @@ def _session_for(payload: bytes, url: str = "https://example.test/ffmpeg.zip") -
 def test_failed_smoketest_leaves_existing_binary_untouched(tmp_path, monkeypatch):
     # First install a working managed copy.
     rel, session = _session_for(_zip_bytes({"ffmpeg": b"GOODBINARY"}))
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8.1.1")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8.1.1")
     mgr = fm.FfmpegManager(tmp_path)
     monkeypatch.setattr(mgr, "os_key", "linux", raising=False)  # avoid macOS codesign path
     mgr.install(release=rel, session=session)
@@ -95,7 +95,7 @@ def test_failed_smoketest_leaves_existing_binary_untouched(tmp_path, monkeypatch
     rel2 = fm.Release(
         source="martin-riedl", version="999_9.9", label="9.9", url=rel2.url, sha256_url=rel2.url + ".sha256"
     )
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "")  # staged binary is non-runnable
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "")  # staged binary is non-runnable
 
     with pytest.raises(RuntimeError, match="version"):
         mgr.install(release=rel2, session=session2)
@@ -111,7 +111,7 @@ def test_failed_smoketest_writes_no_manifest_when_nothing_installed(tmp_path, mo
     # Fresh install (no prior binary) whose download won't run: nothing lands,
     # and status() must not report managed/green off a stale manifest.
     rel, session = _session_for(_zip_bytes({"ffmpeg": b"BADBINARY"}))
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "")
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "")
     mgr = fm.FfmpegManager(tmp_path)
     monkeypatch.setattr(mgr, "os_key", "linux", raising=False)
@@ -128,7 +128,7 @@ def test_failed_smoketest_writes_no_manifest_when_nothing_installed(tmp_path, mo
 def test_successful_install_still_promotes_and_writes_manifest(tmp_path, monkeypatch):
     # The reordering must not break the happy path.
     rel, session = _session_for(_zip_bytes({"ffmpeg": b"OKBINARY"}))
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8.1.1")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8.1.1")
     mgr = fm.FfmpegManager(tmp_path)
     monkeypatch.setattr(mgr, "os_key", "linux", raising=False)
     st = mgr.install(release=rel, session=session)

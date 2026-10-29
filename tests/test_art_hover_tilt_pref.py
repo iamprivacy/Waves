@@ -1,9 +1,9 @@
-"""The "Cover art tilts on hover" escape hatch (Settings > Advanced).
+"""The "Cover art tilts on hover" escape hatch (Settings > Appearance).
 
 Album and artist artwork tilts toward the cursor and lifts once the pointer
 rests on it. Anyone who does not want the movement can turn it off and get
 flat, still covers back. This pins the three things that make the toggle real:
-it ships on by default, it is offered as a labelled bool in the Advanced
+it ships on by default, it is offered as a labeled bool in the Appearance
 section, and flipping it notifies the QML, which re-reads the pref on that
 signal and swings root.artFxVariant between "tilt" and "none" (the switch the
 Art component, the track discs and the Browse hero cards all already hang off).
@@ -37,11 +37,11 @@ def test_art_hover_tilt_defaults_on():
     assert _prefs_stub()._waves_prefs["art_hover_tilt"] is True
 
 
-def test_toggle_is_offered_in_the_advanced_section():
+def test_toggle_is_offered_in_the_appearance_section():
     schema = WavesBridge.settingsSchema(_schema_stub())
-    advanced = next(s for s in schema if s["id"] == "advanced")
-    field = next((f for f in advanced["fields"] if f["key"] == "art_hover_tilt"), None)
-    assert field is not None, "the toggle must be reachable from Settings > Advanced"
+    appearance = next(s for s in schema if s["id"] == "appearance")
+    field = next((f for f in appearance["fields"] if f["key"] == "art_hover_tilt"), None)
+    assert field is not None, "the toggle must be reachable from Settings > Appearance"
     assert field["type"] == "bool"
     assert field["value"] is True
     # A power-user knob still has to explain itself.

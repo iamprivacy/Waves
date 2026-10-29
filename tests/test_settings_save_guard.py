@@ -5,7 +5,7 @@ THE BUG
 ``Download`` force-disables ``video_convert_mp4`` and ``extract_flac`` **in
 memory** when ffmpeg is absent, and ``_resolve_ffmpeg`` injects the managed
 binary path into ``path_binary_ffmpeg``. ``Settings`` is a singleton and
-``save()`` serialises the whole dataclass, so any bare ``settings.save()``
+``save()`` serializes the whole dataclass, so any bare ``settings.save()``
 writes those transient values to disk.
 
 ``applySettings`` and ``setVideoQuality`` knew this and restored first. Three
@@ -177,7 +177,7 @@ def test_the_save_leaves_the_live_settings_alone():
 def test_two_saves_at_once_cannot_strand_a_copy():
     """Saves fire from the GUI thread, from download workers (a share's first
     landing) and from the keep-warm daemon. Two overlapping swaps that restored
-    each other's copy would leave the singleton holding a sanitised one for
+    each other's copy would leave the singleton holding a sanitized one for
     good, which is the original bug by another route."""
     import threading
 
@@ -283,6 +283,7 @@ def _apply_bridge(save_hook=None):
         "_ffmpeg_source_label",
         "_user_ffmpeg_path",
         "_waves_pref_bool",
+        "_notify_master_armed",
         "_save_settings",
         "_submit_settings_write",
         "applySettings",
@@ -317,7 +318,7 @@ def test_apply_settings_waits_for_a_worker_save_before_it_restores():
     _save_settings, so it has to take the same lock. Held elsewhere, it must
     wait: its restore and its write are separate statements, and a worker save
     completing between them re-borrows the managed path (its finally puts the
-    borrowed value back), which this write would then serialise."""
+    borrowed value back), which this write would then serialize."""
     import threading
 
     wrote = threading.Event()
@@ -346,7 +347,7 @@ def test_a_worker_write_back_cannot_reach_the_apply_settings_write():
     """THE LEAK, forced end to end. _save_settings borrows the live values for
     the length of one write and puts them back in a finally. Order it worker
     borrow, worker write, GUI restore, worker put-back, GUI write and the GUI's
-    save serialises the managed ffmpeg path: an absolute path carrying the
+    save serializes the managed ffmpeg path: an absolute path carrying the
     account name, into the file a diagnostics bundle ships, with both ffmpeg
     flags written False against a real preference of True.
 

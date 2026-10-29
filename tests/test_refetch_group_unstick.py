@@ -101,7 +101,7 @@ def test_only_tidals_own_not_found_says_the_item_is_gone():
 
 def test_a_stop_while_the_click_waits_on_its_metadata_cancels_the_click():
     """STOP bumps _scan_gen; a fetch that lands after it must not start the
-    download the user just cancelled: the button goes back to idle."""
+    download the user just canceled: the button goes back to idle."""
     stub = _stub(lambda _vid: SimpleNamespace(id=9))
     real_video = stub.tidal.session.video
 

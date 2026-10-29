@@ -1,6 +1,6 @@
 """Settings help text keeps its commas.
 
-A blanket em-dash sweep once rewrote the normaliser itself from `" — "` to
+A blanket em-dash sweep once rewrote the normalizer itself from `" — "` to
 `", "`, so every description on the settings page had its commas turned into
 semicolons: "16 Bit, 44,1 kHz" rendered as "16 Bit; 44,1 kHz", and the artist
 delimiter fields advertised a default of "; " while actually shipping ", ".

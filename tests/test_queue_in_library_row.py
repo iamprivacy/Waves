@@ -3,7 +3,7 @@
 WHAT THIS FENCES OFF
 --------------------
 The queue design lab (scratchpad/queue_design_lab) showed a skipped track with
-the tier of the copy you already hold beside a coloured IN LIBRARY word, and
+the tier of the copy you already hold beside a colored IN LIBRARY word, and
 its notes said the bridge did not put that on the wire yet: _emit_skip sent
 "status": "skipped", full stop. Shipped that way, the ledger drew IN LIBRARY
 with a blank tier cell.
@@ -12,7 +12,7 @@ Now the skip event carries the owned copy's tier (from the ownership ledger's
 record, or the library scan's local class) plus HOW it was found, and the row:
 
 * keeps the tier in its column at full strength (it is what the file IS);
-* colours IN LIBRARY green when Waves wrote that exact file (a fact) and gold
+* colors IN LIBRARY green when Waves wrote that exact file (a fact) and gold
   when the library scan matched it by tags (a guess), the download button's
   own two voices.
 """
@@ -86,7 +86,7 @@ def test_the_registry_keeps_the_owned_copy_and_how_it_was_found():
     assert (rows[0]["owned"], rows[0]["quality"]) == ("claim", "")
 
 
-def test_drawer_row_keeps_the_tier_and_colours_the_word():
+def test_drawer_row_keeps_the_tier_and_colors_the_word():
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     sandbox = tempfile.mkdtemp(prefix="waves-queue-inlib-")

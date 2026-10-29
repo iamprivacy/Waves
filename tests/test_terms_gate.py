@@ -141,7 +141,7 @@ def test_an_older_accepted_version_re_prompts():
     )
     assert m, "termsCurrentAccepted must AND the flag with a stored-version match"
     # Every gate that sequences around the terms must key on the same test, or
-    # a revision re-prompt stacks with (or is masked by) its neighbours.
+    # a revision re-prompt stacks with (or is masked by) its neighbors.
     assert (
         src.count("root.termsCurrentAccepted") >= 3
     ), "the terms gate, the ffmpeg gate and the update opt-in card must all read termsCurrentAccepted"

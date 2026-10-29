@@ -86,7 +86,7 @@ def test_a_track_with_no_album_at_all_lands_in_the_artist_folder():
 def test_an_unknown_track_count_still_pads_to_the_users_minimum():
     """The count is what the padding is normally read from; without it the
     track's own number is, so the user's minimum still holds and the number
-    never comes out unpadded next to its neighbours."""
+    never comes out unpadded next to its neighbors."""
     out = format_path_media("{album_track_num}", _track(_summary_album(), track_num=7), album_track_num_pad_min=3)
 
     assert out == "007"

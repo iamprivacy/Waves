@@ -24,7 +24,7 @@ ANYWAY. Two halves of that are pinned here, and both matter:
   record of a download Waves made, so it stays inert and opens nothing.
 
 Also pinned here: the verdict's two axes as the user reads them. Identity
-("sure") picks the words and colour: a proven complete copy wears the green
+("sure") picks the words and color: a proven complete copy wears the green
 fact wording with its media noun (ALBUM DOWNLOADED / ALBUM IN LIBRARY), an
 unproven one hedges in gold MAYBE IN LIBRARY, and the badge's "?" follows the
 same axis. Coverage ("full") picks the shape: a short copy stays a live cyan
@@ -336,7 +336,7 @@ def _run_scenario() -> int:
         "partial_stays_live": states.get("partial") == "live",
         "one_short_stays_live": states.get("oneshort") == "live",
         # A complete copy is done-shaped even when identity is unproven: the
-        # hedge is carried by the words and colour, never by a live button
+        # hedge is carried by the words and color, never by a live button
         # that would re-download an album the user probably has.
         "undated_reads_done": states.get("undated") == "done",
     }

@@ -13,6 +13,8 @@ from __future__ import annotations
 from threading import Lock
 from types import SimpleNamespace
 
+from _dispatch_stub import arm_notify
+
 from waves.waves_ui.backend import WavesBridge
 
 
@@ -66,6 +68,8 @@ def _stub():
     # drive the index with nothing held.
     stub._pending_downloads = []
     stub._pending_lock = Lock()
+    # RETRY ALL takes a counted failure back out of the run's banner.
+    arm_notify(stub)
     # The job in flight, so a clear that drops its row can abort it. These
     # tests drive the index with nothing running.
     stub._running_qid = None
@@ -132,7 +136,7 @@ def test_remove_reindexes():
 def test_each_section_clear_takes_only_its_own_section():
     # Every section clears itself and nothing else, and none of them ever
     # touches a running row: stopping a live transfer is the row's own control.
-    # A cancelled row is one STOP ended; it files under its own Stopped
+    # A canceled row is one STOP ended; it files under its own Stopped
     # section, whose CLEAR is the only one that takes it (issue #27).
     for slot, gone in (
         ("clearFinished", {"done"}),  # the Completed section
@@ -248,7 +252,7 @@ def test_settled_rows_past_the_cap_go_oldest_first():
 
 
 def test_a_stopped_row_is_never_trimmed_either():
-    # A cancelled row is one STOP ended and kept for RETRY (issue #27): the
+    # A canceled row is one STOP ended and kept for RETRY (issue #27): the
     # same record a failed row is, so the cap passes over it the same way.
     stub = _stub()
     qids = _settled_queue(stub, done=stub._QUEUE_HISTORY_MAX + 1)

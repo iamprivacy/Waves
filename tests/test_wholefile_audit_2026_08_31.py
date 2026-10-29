@@ -2,7 +2,7 @@
 
 The pre-release whole-file review re-reads a fixed list of functions end to end
 whether or not they changed, because the worst defects this app has shipped
-were silent: no crash, no error, just wrong behaviour repeating forever. This
+were silent: no crash, no error, just wrong behavior repeating forever. This
 round found eight, and every one of them is fenced off here.
 
 Each test states the user-visible sequence it prevents, and each was checked
@@ -590,6 +590,7 @@ class _GateStub:
         self.downloadProgress = _Sig()
         self.bumps: list = []
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        self._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
         arm_dispatch(self)
         self._emit_queue = lambda: None
         for n in ("_remove_rows_where", "_remove_row", "_reindex_queue"):

@@ -195,7 +195,7 @@ def _install_fixture(tmp_path, monkeypatch, exe="ffmpeg"):
     )
     rel = fm.Release(source="martin-riedl", version="123_8.1.1", label="8.1.1", url=url, sha256_url=url + ".sha256")
     # The dummy binary can't actually run, so fake the smoke test.
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8.1.1")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8.1.1")
     return rel, session
 
 
@@ -228,7 +228,7 @@ def test_install_rejects_bad_checksum(tmp_path, monkeypatch):
         }
     )
     rel = fm.Release(source="martin-riedl", version="1_1.0", label="1.0", url=url, sha256_url=url + ".sha256")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8")
     mgr = fm.FfmpegManager(tmp_path)
     with pytest.raises(ValueError, match="checksum mismatch"):
         mgr.install(release=rel, session=session)
@@ -247,7 +247,7 @@ def test_install_rejects_missing_checksum(tmp_path, monkeypatch):
         }
     )
     rel = fm.Release(source="martin-riedl", version="1_1.0", label="1.0", url=url, sha256_url=url + ".sha256")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8")
     mgr = fm.FfmpegManager(tmp_path)
     with pytest.raises(ValueError, match="no checksum"):
         mgr.install(release=rel, session=session)
@@ -344,7 +344,7 @@ def test_a_failed_install_leaves_no_download_temp(tmp_path, monkeypatch):
         }
     )
     rel = fm.Release(source="martin-riedl", version="1_1.0", label="1.0", url=url, sha256_url=url + ".sha256")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n8")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n8")
     mgr = fm.FfmpegManager(tmp_path)
 
     for _ in range(3):
@@ -379,7 +379,7 @@ def test_status_missing(tmp_path, monkeypatch):
 
 def test_status_on_path(tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n7.1")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n7.1")
     mgr = fm.FfmpegManager(tmp_path)
     st = mgr.status()
     assert st["state"] == "path" and st["path"] == "/usr/bin/ffmpeg" and st["version"] == "n7.1"
@@ -393,7 +393,7 @@ def test_status_custom_path_used_when_unmanaged(tmp_path, monkeypatch):
     custom = tmp_path / "my-ffmpeg"
     custom.write_bytes(b"#!/bin/true\n")
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "")  # nothing on PATH
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n9.9" if p == str(custom) else "")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n9.9" if p == str(custom) else "")
     mgr = fm.FfmpegManager(tmp_path)
     st = mgr.status(str(custom))
     assert st["state"] == "path"
@@ -407,7 +407,7 @@ def test_status_custom_path_invalid_is_not_available(tmp_path, monkeypatch):
     custom = tmp_path / "broken-ffmpeg"
     custom.write_bytes(b"not a real binary")
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "")  # won't run
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "")  # won't run
     mgr = fm.FfmpegManager(tmp_path)
     st = mgr.status(str(custom))
     assert st["state"] == "missing" and st["available"] is False
@@ -417,7 +417,7 @@ def test_status_custom_path_nonexistent_is_ignored(tmp_path, monkeypatch):
     # A stale/typo'd path (file gone) is ignored without even probing it.
     probed: list[str] = []
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: probed.append(p) or "")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: probed.append(p) or "")
     mgr = fm.FfmpegManager(tmp_path)
     st = mgr.status("/no/such/ffmpeg")
     assert st["state"] == "missing" and st["available"] is False
@@ -438,7 +438,7 @@ def test_status_managed_takes_precedence_over_custom(tmp_path, monkeypatch):
 def test_status_default_custom_path_is_backwards_compatible(tmp_path, monkeypatch):
     # Calling status() with no custom path behaves exactly as before.
     monkeypatch.setattr(fm, "_which_ffmpeg", lambda os_key: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(fm, "_probe_version", lambda p: "n7.1")
+    monkeypatch.setattr(fm, "_probe_version", lambda p, **kw: "n7.1")
     mgr = fm.FfmpegManager(tmp_path)
     st = mgr.status()
     assert st["state"] == "path" and st["managed"] is False and st["custom"] is False

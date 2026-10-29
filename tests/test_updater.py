@@ -506,7 +506,7 @@ def test_apply_windows_tree_refuses_a_staged_tree_without_the_exe(tmp_path, monk
 def test_apply_windows_tree_helper_never_deletes_the_last_good_copy(tmp_path, monkeypatch):
     """The helper may delete the .old backup only after the mirrored folder
     holds the executable (robocopy exits 0 for 'source empty, nothing copied'),
-    and every failure path restores the backup on its own labelled branch. The
+    and every failure path restores the backup on its own labeled branch. The
     old one-line `if ... & move & start & exit` chain bound the restore INTO the
     `if exist`, so a mirror that created no folder fell through to deleting the
     backup: that is the empty install folder seen in the field."""
@@ -1078,7 +1078,7 @@ def test_select_old_updater_name_sort_stays_on_regular():
         assets = [{"name": n, "browser_download_url": n} for n in (regular_name, legacy_name)]
         assert (
             u._select_asset(assets, "macos", arch, want_legacy=True)[0] == legacy_name
-        ), f"{names[legacy]} carries no token _select_asset recognises: macOS 12-14 would get nothing"
+        ), f"{names[legacy]} carries no token _select_asset recognizes: macOS 12-14 would get nothing"
         assert (
             u._select_asset(assets, "macos", arch, want_legacy=False)[0] == regular_name
         ), f"{names[regular]} reads as a legacy asset: macOS 15+ would be downgraded"
@@ -1635,7 +1635,7 @@ def test_managed_upgrade_abort_cancels(monkeypatch):
     from threading import Event as _Event
 
     abort = _Event()
-    abort.set()  # cancelled before/while output streams
+    abort.set()  # canceled before/while output streams
     proc = _FakeProc(["==> Downloading waves"], code=1)
     up = _managed_up(monkeypatch, proc)
     with pytest.raises(u.UpdateCancelled):
@@ -1694,7 +1694,7 @@ def test_apply_targets_the_appimage_file(monkeypatch, tmp_path):
     appimage_path = tmp_path / "Waves.AppImage"
     appimage_path.write_bytes(b"OLD")
     monkeypatch.setenv("APPIMAGE", str(appimage_path))
-    # The AppImage claim is only honoured when this process runs out of the
+    # The AppImage claim is only honored when this process runs out of the
     # advertised mount (see _running_appimage), so point APPDIR at ourselves.
     monkeypatch.setenv("APPDIR", str(pathlib.Path(sys.executable).parent))
     up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")

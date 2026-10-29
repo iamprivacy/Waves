@@ -117,7 +117,7 @@ def test_every_surface_that_shows_a_release_date_wears_the_mark() -> None:
     assert got == WEARERS, (
         f"the NEW mark is placed on {got}, expected exactly one on each of {WEARERS}. "
         "A surface that shows a release date without it, or a second copy of it, "
-        "reads differently from its neighbours."
+        "reads differently from its neighbors."
     )
 
 
@@ -617,12 +617,12 @@ def _run_scenario() -> int:
         if kind_of(key) != "album":
             continue
 
-        # The header's capitals sit on the title's, not its box centre.
+        # The header's capitals sit on the title's, not its box center.
         gap = float(q(_HEADER_CAP_GAP))
         if gap < 0 or gap > 1.0:
             failures.append(f"the album header's NEW sits {gap}px off the title's capitals (negative: not found)")
 
-        # One track lands: its mark stays, steady; its neighbours keep breathing.
+        # One track lands: its mark stays, steady; its neighbors keep breathing.
         def breaths() -> dict:
             return dict(json.loads(q(_PULSE_BY_OWNER)))
 

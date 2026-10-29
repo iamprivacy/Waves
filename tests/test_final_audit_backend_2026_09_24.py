@@ -1,5 +1,5 @@
 """Pins for the final audit of 2026-09-24, backend and QML half (report in
-notes/, private). Behavioural where the harness allows; the QML rows are
+notes/, private). Behavioral where the harness allows; the QML rows are
 text pins, the way the max-age timers are pinned."""
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from tidalapi.media import Quality, Track
 
 from waves import config as config_mod
 from waves.ownership import OwnershipStore
+from waves.page_store import PageStore
 from waves.waves_ui import backend
 from waves.waves_ui.backend import (
     WavesBridge,
@@ -340,8 +341,10 @@ def test_the_stream_capture_records_whether_the_track_is_atmos_only():
 
 
 # ---- C54: a file the engine adopts off the disk is recorded, tier unknown ---
-def test_a_tierless_audio_record_is_not_current_but_a_video_record_is():
-    assert _copy_is_current({"path": "/m/x.flac", "quality_rank": -1}, 2, False) is False
+def test_a_tierless_record_is_current_audio_and_video_alike():
+    # Issue #55: an adopted audio file used to read as stale, so the next run
+    # overwrote it in place, hand-edited tags and all.
+    assert _copy_is_current({"path": "/m/x.flac", "quality_rank": -1}, 2, False) is True
     assert _copy_is_current({"path": "/m/x.mp4", "quality_rank": -1}, 2, False) is True
     assert _copy_is_current({"path": "/m/x.flac", "quality_tier": "LOSSLESS", "quality_rank": -1}, 2, False) is True
 
@@ -416,6 +419,7 @@ def test_a_sign_out_during_the_serialize_leaves_no_snapshot_behind(tmp_path):
         _search_cache={},
         _page_cache_path=str(tmp_path / "page_cache.json"),
         _search_cache_path=str(tmp_path / "search_cache.json"),
+        _page_store=PageStore(str(tmp_path / "page_cache.sqlite3")),
         tidal=SimpleNamespace(session=SimpleNamespace(user=SimpleNamespace(id="u"))),
     )
 
@@ -430,6 +434,7 @@ def test_a_sign_out_during_the_serialize_leaves_no_snapshot_behind(tmp_path):
     _bind(stub, "_save_page_cache", "_cache_user_id")
     stub._save_page_cache()
     assert not (tmp_path / "page_cache.json").exists() and not (tmp_path / "search_cache.json").exists()
+    assert not (tmp_path / "page_cache.sqlite3").exists()
 
 
 # ---- L09: the JSON caches survive a transient Windows lock -------------------

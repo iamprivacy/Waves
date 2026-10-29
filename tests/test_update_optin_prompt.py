@@ -147,7 +147,7 @@ def test_accept_passes_the_real_startup_throttle():
     stub._updater = SimpleNamespace(is_configured=lambda: True)
     stub._real_checks = 0
 
-    def _check():
+    def _check(manual=False, auto=False):
         stub._real_checks += 1
 
     stub.checkAppUpdate = _check

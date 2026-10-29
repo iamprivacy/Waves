@@ -107,7 +107,7 @@ def _queue_stub(statuses, *, running_qid=None):
 # The gate stashes a replay BEFORE it returns False, so a press that lands
 # while the worker is inside the reachability probe (seconds, against a
 # sleeping share) was recorded as an abort nothing on the held path ever read.
-# The album the user cancelled came back on its own when the share woke, into a
+# The album the user canceled came back on its own when the share woke, into a
 # queue with no row left to stop it a second time.
 # --------------------------------------------------------------------------- #
 def test_a_clear_takes_the_held_replay_with_the_row():
@@ -185,6 +185,7 @@ class _JobStub:
         self.downloadProgress = _Sig()
         self.statuses: list = []
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        self._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
         self._merge_plan_arg = merge_plan
         from _dispatch_stub import arm_dispatch
 
@@ -235,7 +236,7 @@ class _JobStub:
     def _gate_reachability(self, retry, media_id) -> bool:
         """The folder does not answer, so the gate stashes the replay and the
         job body withdraws the row. The press lands mid-probe: "clear" takes
-        the row away as CLEAR ALL and CANCEL do, "stop" marks it cancelled and
+        the row away as CLEAR ALL and CANCEL do, "stop" marks it canceled and
         leaves it in the Stopped section as STOP does. Both set the abort."""
         if self._press == "clear":
             self._queue.clear()

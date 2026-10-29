@@ -266,7 +266,7 @@ def _run_scenario() -> int:
                 return it
         return None
 
-    def centre_of(it):
+    def center_of(it):
         p = it.mapToScene(it.boundingRect().center())
         return QPoint(int(p.x()), int(p.y()))
 
@@ -290,7 +290,7 @@ def _run_scenario() -> int:
             file=sys.stderr,
         )
         return _EXIT_PRECONDITION
-    c = centre_of(first)
+    c = center_of(first)
 
     # 1. Hover and hold: the dwell must reach the backend and come back.
     QTest.mouseMove(root, QPoint(c.x() - 40, c.y() - 40))
@@ -380,7 +380,7 @@ def _run_scenario() -> int:
     if slow is None:
         print("the slow card is not on the shelf", file=sys.stderr)
         return _EXIT_PRECONDITION
-    sc = centre_of(slow)
+    sc = center_of(slow)
     QTest.mouseMove(root, QPoint(sc.x() - 40, sc.y() - 40))
     settle(30)
     QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, sc)
@@ -413,7 +413,7 @@ def _run_scenario() -> int:
     # 4. A page whose row covers cannot resolve: the discs must SAY so. While
     #    the retries run they wear the prompt mark, a disc with no cover at
     #    all wears the wave glyph, and once the retries are spent the mark
-    #    turns red. None of them may sit as a plain grey hole.
+    #    turns red. None of them may sit as a plain gray hole.
     q("navBack()")
     if not pump(lambda: q("browsePageKey") == "", 2000):
         print("Back did not return to the landing (before the disc page)", file=sys.stderr)
@@ -423,7 +423,7 @@ def _run_scenario() -> int:
     if dcard is None:
         print("the disc-state card is not on the shelf", file=sys.stderr)
         return _EXIT_PRECONDITION
-    QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, centre_of(dcard))
+    QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center_of(dcard))
     if not pump(lambda: q("browsePageKey") == "item:playlist:discs" and q("browsePageLoading") is False, 3000):
         print(f"the disc page never opened (key={q('browsePageKey')})", file=sys.stderr)
         return _EXIT_FAIL
@@ -436,7 +436,7 @@ def _run_scenario() -> int:
         print(f"a retrying disc must read as loading, not failed: {disc_states()}", file=sys.stderr)
         return _EXIT_FAIL
     if "none" not in disc_states():
-        print(f"a track with no cover must say so, not sit grey: {disc_states()}", file=sys.stderr)
+        print(f"a track with no cover must say so, not sit gray: {disc_states()}", file=sys.stderr)
         return _EXIT_FAIL
     grab("4-disc-loading-mark")
     # Retries spent (600ms x 3): the mark turns red rather than retrying forever.
@@ -453,13 +453,13 @@ def _run_scenario() -> int:
         "(function () {"
         ' var a = { kind: "album", id: "al9", art: "" }, b = { kind: "album", id: "al9", art: "" };'
         " root.hoverPrefetch(b, 5000);"  # the entered row armed first
-        " root.hoverPrefetchCancel(a);"  # then the left row cancelled
+        " root.hoverPrefetchCancel(a);"  # then the left row canceled
         " var after_foreign = root._hoverPrefetchKey;"
         " root.hoverPrefetchCancel(b);"  # the owner leaves
         " return after_foreign + '|' + root._hoverPrefetchKey; })()"
     )
     if keys != "album:al9|":
-        print(f"a neighbouring row of the same album cancelled the arm it did not own (keys={keys!r})", file=sys.stderr)
+        print(f"a neighboring row of the same album cancelled the arm it did not own (keys={keys!r})", file=sys.stderr)
         return _EXIT_FAIL
     print("hover prefetch + skeleton header + disc states OK", flush=True)
     return _EXIT_OK

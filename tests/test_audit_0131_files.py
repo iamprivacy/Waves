@@ -107,5 +107,7 @@ def test_the_readme_states_both_ffmpeg_check_cadences():
     """#29: the Privacy section promised at most one FFmpeg check a day, but
     the "Every launch" cadence asks on every launch."""
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    line = next(ln for ln in readme.splitlines() if "FFmpeg's automatic update check" in ln)
+    # The promise lives in the fine-print list under the privacy table (the
+    # table keeps to short cells), on the line naming FFmpeg's update check.
+    line = next(ln for ln in readme.splitlines() if "FFmpeg's update check" in ln and "automatic" not in ln)
     assert "every launch" in line and "at most once a day" in line, line

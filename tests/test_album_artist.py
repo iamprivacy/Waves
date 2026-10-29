@@ -53,7 +53,7 @@ def test_clean_album_artists(names, expected):
     assert _clean_album_artists(names) == expected
 
 
-# ---- the installed wrapper honours the flag --------------------------------
+# ---- the installed wrapper honors the flag --------------------------------
 def test_wrapper_is_installed_on_download_module():
     assert _waves_download.get_album_artists is _album_artists_for_metadata
 

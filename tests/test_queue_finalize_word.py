@@ -243,3 +243,19 @@ def test_delivery_is_announced_before_the_post_processing_delay(tmp_path):
 
 def test_a_failed_download_is_never_announced_delivered(tmp_path):
     assert _run_item(tmp_path, success=False) == ["download", "post"]
+
+
+def test_the_row_rolls_its_finish_steps_up_for_the_header():
+    """The header's QUEUE button paces its finishing disk map to the real work,
+    so the row carries one fraction over its tracks: a settled track counts
+    whole, a running one by its finish steps, one not started as nothing.
+    It is emitted only when it moves."""
+    b = _LifecycleStub()
+    b.queueItemFinish = _Signal()
+    b._roll_up_finish = backend.WavesBridge._roll_up_finish.__get__(b, _LifecycleStub)
+    b._track_lifecycle(1, {"id": "a", "status": "skipped"})
+    b._track_lifecycle(1, {"id": "b", "status": "running"})
+    b._track_lifecycle(1, {"id": "c", "status": "pending"})
+    b._track_lifecycle(1, {"id": "b", "status": "running", "fpct": 50.0})
+    b._track_lifecycle(1, {"id": "b", "status": "running", "fpct": 50.0})
+    assert [c[1] for c in b.queueItemFinish.calls] == [1.0, 0.5, round(1 / 3, 4), 0.5]

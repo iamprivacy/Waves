@@ -406,7 +406,7 @@ def _strip_string_literals(expr: str) -> str:
                     i += 1
                 i += 1
             i += 1  # skip the closing quote
-            out.append(" ")  # placeholder, so neighbours don't fuse
+            out.append(" ")  # placeholder, so neighbors don't fuse
         else:
             out.append(c)
             i += 1

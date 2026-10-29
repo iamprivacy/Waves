@@ -8,7 +8,7 @@ starting a job: against a stale network mount (an SMB share this app's users
 live on) it costs seconds, remounts, and probes again. Nothing looked at the
 abort gate afterwards.
 
-So STOP pressed in that window marked the row cancelled, cleared the button
+So STOP pressed in that window marked the row canceled, cleared the button
 and said "Downloads stopped", and then the job came out of the probe and set
 the very same row back to running: the button re-lit at 0% and the status line
 read "Downloading ..." again, for as long as it took to enumerate the whole
@@ -81,6 +81,7 @@ class _Stub:
         self.downloadProgress = _Signal()
         self.statuses: list[str] = []
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        self._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
         arm_dispatch(self)
 
     # The row's status, recorded rather than delivered.
@@ -117,7 +118,7 @@ class _Stub:
 
     def _gate_reachability(self, retry, media_id) -> bool:
         """The probe. STOP lands while it is running, exactly as stopAll
-        does: every row is marked cancelled and every job's abort is set."""
+        does: every row is marked canceled and every job's abort is set."""
         if self._stop_during_the_probe:
             self._queue[0]["status"] = "cancelled"
             self._job_aborts[1].set()

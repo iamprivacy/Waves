@@ -91,11 +91,49 @@ def arm_queue(stub) -> None:
         if not hasattr(stub, name):
             setattr(stub, name, getattr(WavesBridge, name).__get__(stub, type(stub)))
     _arm_rollups(stub)
+    arm_notify(stub)
+
+
+def arm_notify(stub) -> None:
+    """The download-banner state the queue slots now touch: STOP drops the
+    run's counts, RETRY takes a counted failure back out, and a resume or a
+    dropped hold checks whether the queue just went idle. The notifier
+    itself is a recorder, so a stand-in never reaches a real OS banner."""
+    for field, default in (
+        ("_dl_notify_done", list),
+        ("_dl_notify_failed", list),
+        ("_dl_notify_done_n", int),
+        ("_dl_notify_failed_n", int),
+        ("_dl_queue_done", int),
+        ("_dl_queue_failed", int),
+        ("_dl_queue_failed_qids", set),
+        ("_waves_prefs", dict),
+        ("_paused", bool),
+        ("_scans_in_flight", int),
+        ("_pending_downloads", list),
+        ("_running_qid", lambda: None),
+    ):
+        if not hasattr(stub, field):
+            setattr(stub, field, default())
+    if not hasattr(stub, "_notify_send"):
+        stub._notify_send = lambda *a, **k: None
+    if not hasattr(stub, "_dl_notify_timer"):
+        stub._dl_notify_timer = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+    for name in (
+        "_waves_pref_bool",
+        "_notify_job_ended",
+        "_notify_queue_idle",
+        "_maybe_notify_idle",
+        "_notify_forget_retried",
+        "_notify_forget_run",
+    ):
+        if not hasattr(stub, name):
+            setattr(stub, name, getattr(WavesBridge, name).__get__(stub, type(stub)))
 
 
 def _arm_rollups(stub) -> None:
     """The rollup fields and methods the withdrawal slots now touch (issue
-    #32: a cleared or cancelled queued row credits its discography/folder
+    #32: a cleared or canceled queued row credits its discography/folder
     rollups, and every slot sweeps for stranded groups afterwards). Stubs
     with their own richer versions keep them."""
     from threading import Lock as _Lock
@@ -136,6 +174,8 @@ def arm_dispatch(stub) -> None:
     stub._pct_last = getattr(stub, "_pct_last", {})
     if not hasattr(stub, "_track_poll"):
         stub._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+    if not hasattr(stub, "_speed_poll"):
+        stub._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
     if not hasattr(stub, "_queue_item"):
         # A stand-in whose _enqueue returns a bare qid keeps no rows; the
         # pump re-validates the row, so answer "still queued" as a real row

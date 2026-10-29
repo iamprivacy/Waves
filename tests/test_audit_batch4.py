@@ -18,7 +18,8 @@ from pathvalidate.error import ErrorReason, ValidationError
 
 from waves.download import Download
 from waves.helper.path import _shorten_to_valid_length, path_file_sanitize
-from waves.waves_ui.backend import WavesBridge
+from waves.page_store import PageStore
+from waves.waves_ui.backend import _PAGE_CACHE_VERSION, WavesBridge
 
 
 def _downloader(tmp_path: pathlib.Path) -> Download:
@@ -209,6 +210,7 @@ class _SaveStub:
         self._search_cache = {}
         self._page_cache_lock = threading.Lock()
         self._page_cache_path = str(path)
+        self._page_store = PageStore(str(path.parent / "page_cache.sqlite3"))
 
     def _cache_user_id(self):
         return "u"
@@ -217,14 +219,14 @@ class _SaveStub:
 def test_a_cache_mutating_mid_save_never_escapes_the_worker(tmp_path: pathlib.Path) -> None:
     stub = _SaveStub(tmp_path / "page_cache.json", lib=_RacingDict())
     stub._save_page_cache()  # must not raise: an escape latches the busy spinner on
-    assert not (tmp_path / "page_cache.json").exists(), "a torn snapshot is never written"
+    assert not (tmp_path / "page_cache.sqlite3").exists(), "a torn snapshot is never written"
 
 
 def test_a_normal_save_still_writes_valid_json(tmp_path: pathlib.Path) -> None:
     stub = _SaveStub(tmp_path / "page_cache.json")
     stub._save_page_cache()
-    data = json.loads((tmp_path / "page_cache.json").read_text(encoding="utf-8"))
-    assert data["library"]["albums"]["items"] == [{"id": "a1"}]
+    rows = PageStore(str(tmp_path / "page_cache.sqlite3")).load(_PAGE_CACHE_VERSION, "u", ("library",))
+    assert json.loads(dict(rows["library"])["albums"])["items"] == [{"id": "a1"}]
 
 
 def test_the_save_serializes_one_shot_never_incrementally(tmp_path: pathlib.Path) -> None:
@@ -234,7 +236,7 @@ def test_the_save_serializes_one_shot_never_incrementally(tmp_path: pathlib.Path
     stub = _SaveStub(tmp_path / "page_cache.json")
     with patch("waves.waves_ui.backend.json.dump", side_effect=AssertionError("dump() must not be used")):
         stub._save_page_cache()
-    assert (tmp_path / "page_cache.json").exists()
+    assert (tmp_path / "page_cache.sqlite3").exists()
 
 
 def test_factory_reset_pattern_cannot_match_a_user_file() -> None:

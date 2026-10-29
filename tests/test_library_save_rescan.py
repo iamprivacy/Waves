@@ -25,6 +25,8 @@ class _Stub:
     """Bare object the real applySettings and setWavesPref get bound onto."""
 
     _waves_pref_bool = WavesBridge._waves_pref_bool
+    # No notify_enabled in these prefs, so the armed check is a no-op.
+    _notify_master_armed = WavesBridge._notify_master_armed
     setWavesPref = WavesBridge.setWavesPref
 
     def _library_root(self) -> str:

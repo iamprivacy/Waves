@@ -63,7 +63,7 @@ class _Album:
             if t.rank is None:
                 t.rank = rank
             t.audio_quality = _QUALITY_OF.get(t.rank)
-        # Titles go through the production normaliser, not a shortcut, so a
+        # Titles go through the production normalizer, not a shortcut, so a
         # degenerate title behaves here exactly as it does in recs_of.
         self.recs = [_MergeRec(t, _merge_rec_title(t), t.duration, _track_isrc(t), t.explicit) for t in tracks]
 
@@ -85,7 +85,7 @@ def _bridge_capped_at(quality):
     return bridge
 
 
-# ---- _track_isrc normalisation ---------------------------------------------
+# ---- _track_isrc normalization ---------------------------------------------
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -525,7 +525,7 @@ def test_an_upgrade_above_the_user_cap_does_not_merge():
     assert (capped(standard.recs[0].obj), uncapped(standard.recs[0].obj)) == (3, 4)
 
 
-# ---- a track whose title normalises away is still a track -------------------
+# ---- a track whose title normalizes away is still a track -------------------
 @pytest.mark.parametrize("raw", [None, "", "   ", "(Live)", "(Mono Version)"])
 def test_merge_rec_title_is_never_empty(raw):
     # An empty key would be dropped by the old filter, or (worse) compare equal
@@ -619,7 +619,7 @@ def test_duplicate_isrc_pairs_by_closest_recording():
 def test_a_merged_member_is_filed_under_the_identity_id():
     # download.py stamps an item id into the file and compares it back to decide
     # whether a destination holds Waves' own copy. Writing the SOURCE edition's
-    # id meant a later plain job asked with the identity id, failed to recognise
+    # id meant a later plain job asked with the identity id, failed to recognize
     # the file, and wrote a _01 duplicate beside it instead of replacing it.
     from waves.download import _waves_item_id, _waves_owned_ids
 

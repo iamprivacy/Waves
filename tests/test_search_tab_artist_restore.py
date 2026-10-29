@@ -36,7 +36,7 @@ from pathlib import Path
 
 _EXIT_OK = 0  # the restored page is one artist through and through
 _EXIT_REGRESSED = 1  # header and sections belong to different artists
-_EXIT_REGRESSED_SCOPED = 2  # the full page came back holding the favourites subset
+_EXIT_REGRESSED_SCOPED = 2  # the full page came back holding the favorites subset
 _EXIT_NO_QT = 77
 _EXIT_PRECONDITION = 78
 
@@ -64,7 +64,7 @@ def test_the_search_tab_restores_the_artist_it_saved():
     if proc.returncode == _EXIT_PRECONDITION:
         pytest.skip(f"could not set up the two artist pages in this environment:\n{tail}")
     assert proc.returncode != _EXIT_REGRESSED_SCOPED, (
-        "the restored Search view kept the library-scoped page's favourites: the same artist "
+        "the restored Search view kept the library-scoped page's favorites: the same artist "
         "opened from My Tidal fills the same four models with a subset, and matching ids alone "
         f"let the restore skip its refill. Scenario:\n{tail}"
     )
@@ -121,7 +121,7 @@ def _artist(tag: str) -> dict:
 
 def _scoped_artist(tag: str) -> dict:
     """The page My Tidal opens: the same artist, the same signal, the same id,
-    holding only what the user favourited, and no videos at all."""
+    holding only what the user favorited, and no videos at all."""
     payload = _artist(tag)
     payload["albums"] = payload["albums"][:1]
     payload["eps"] = []
@@ -236,7 +236,7 @@ def _run_scenario() -> int:
 
     # 4. The same artist again, this time the LIBRARY-SCOPED page My Tidal
     # opens: same id, same signal, same four models, but only what the user
-    # favourited and no videos at all. An id-only check reads this as "the
+    # favorited and no videos at all. An id-only check reads this as "the
     # page is already loaded" and leaves the subset standing under the full
     # page's header and its DOWNLOAD DISCOGRAPHY button.
     q("openLibrary()")

@@ -93,7 +93,7 @@ def test_no_modes_at_all_is_a_normal_fetch():
 
 def test_an_atmos_request_answered_in_stereo_is_logged(caplog):
     """Issue #45: a diagnostic report has to tell "TIDAL is not granting Atmos
-    here" apart from an Atmos copy that was only labelled wrong (TIDAL files
+    here" apart from an Atmos copy that was only labeled wrong (TIDAL files
     every Atmos stream under LOW). The engine says so when the answer to an
     Atmos request is not Atmos, and stays quiet when it is."""
 

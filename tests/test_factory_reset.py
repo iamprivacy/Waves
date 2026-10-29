@@ -51,7 +51,7 @@ def _values_stub():
                 {"key": "cover_album_file", "child_key": "cover_single_track_file"},
                 # The library composite: its marker key is not a pref, its
                 # backing prefs ride enabled_key / file_key / child_key /
-                # bulk_key / mb_key.
+                # bulk_key / mb_key / follow_key / min_tracks_key.
                 {
                     "key": "library",
                     "enabled_key": "library_enabled",
@@ -59,6 +59,9 @@ def _values_stub():
                     "child_key": "library_folder",
                     "bulk_key": "library_bulk_skip",
                     "mb_key": "library_mb_arbiter",
+                    "lookup_key": "library_mb_lookup",
+                    "follow_key": "releases_auto_import",
+                    "min_tracks_key": "releases_import_min_tracks",
                 },
                 {"key": "not_a_real_key"},
             ],
@@ -87,8 +90,31 @@ def test_factory_defaults_cover_schema_keys_in_apply_shape():
     assert values["library_bulk_skip"] is True
     # The MusicBrainz opt-in resets to OFF (no-data-by-default).
     assert values["library_mb_arbiter"] is False
+    assert values["library_mb_lookup"] is False
+    # Following the library's artists in Releases resets to ON, its default.
+    assert values["releases_auto_import"] is True
     # Unknown keys are skipped, not invented.
     assert "not_a_real_key" not in values
+
+
+def test_factory_defaults_reach_the_steppers_inside_a_range_row():
+    # Speed & Pacing folds the delay min/max and the batch pause into range
+    # rows (lo/hi); a reset must still put each half back under its own key.
+    stub = _values_stub()
+    keys = (
+        "download_delay",
+        "download_delay_sec_min",
+        "download_delay_sec_max",
+        "api_rate_limit_batch_size",
+        "api_rate_limit_delay_sec",
+    )
+    rows = backend_mod._pair_pacing_rows([{"key": k} for k in keys])
+    assert {r["key"] for r in rows} == {"download_delay", "api_rate_limit_batch_size"}
+    stub.settingsSchema = lambda: [{"group": "Speed & Pacing", "fields": rows}]
+    values = _bind(stub, "_factory_default_values")()
+    stock = backend_mod.ModelSettings()
+    for k in keys:
+        assert values[k] == _FIRST_RUN_OVERRIDES.get(k, getattr(stock, k)), k
 
 
 def test_factory_defaults_leave_housekeeping_alone():
@@ -135,8 +161,17 @@ def _run_factory_reset(base, monkeypatch):
     stub = _Stub()
     stub._factory_reset = False
     stub._ownership = _FakeOwnership()
+    stub._releases = _FakeOwnership()
+    stub._mb_service = _FakeOwnership()
+    stub._mb_arbiter = object()
+    stub._rel_mb_client = object()
+    stub._catalog = _FakeOwnership()
     original_store = stub._ownership
+    original_releases = stub._releases
+    original_mb = stub._mb_service
     _bind(stub, "factoryReset")()
+    stub._original_releases = original_releases
+    stub._original_mb = original_mb
     return stub, original_store
 
 
@@ -159,6 +194,15 @@ def test_factory_reset_wipes_waves_files_and_keeps_install_channel(tmp_path, mon
         "library.sqlite3",
         "library-0123456789ab.sqlite3",
         "library-0123456789ab.sqlite3-wal",
+        # The follow list and release feed behind the Releases pane: which
+        # artists the user follows is an activity trace like the rest.
+        "releases.sqlite3",
+        "releases.sqlite3-wal",
+        "releases.sqlite3-shm",
+        "musicbrainz.sqlite3",
+        "musicbrainz.sqlite3-wal",
+        "musicbrainz.sqlite3-shm",
+        # The arbiter's own cache from before the shared MusicBrainz file.
         "mbarbiter.sqlite3",
         "mbarbiter.sqlite3-wal",
         "mbarbiter.sqlite3-shm",
@@ -182,6 +226,15 @@ def test_factory_reset_wipes_waves_files_and_keeps_install_channel(tmp_path, mon
     assert stub._factory_reset is True, "persistence freeze must latch"
     assert original_store.closed, "the on-disk ownership store is closed first"
     assert stub._ownership is not original_store, "queries after the wipe hit a throwaway store"
+    assert stub._original_releases.closed, "the on-disk follows store is closed first"
+    assert stub._releases is not stub._original_releases, "follow queries after the wipe hit a throwaway store"
+    # The shared MusicBrainz service is closed before its file goes, and the
+    # arbiter and the Releases client are rebuilt over a stand-in that keeps
+    # nothing on disk.
+    assert stub._original_mb.closed, "the MusicBrainz file is closed first"
+    assert stub._mb_service is not stub._original_mb and stub._mb_service._path is None
+    assert stub._mb_arbiter is None and stub._rel_mb_client is None
+    assert stub._catalog.closed, "the catalog stops reading before the files go"
     assert sorted(os.listdir(base)) == ["install_channel"], "every Waves file (and empty subdir) is gone"
     assert (base / "install_channel").read_text() == "homebrew"
     assert _FakeQSettings.cleared, "the QML setup flags are cleared too"

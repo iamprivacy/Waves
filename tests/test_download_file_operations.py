@@ -463,7 +463,7 @@ def test_downsample_audio_real_ffmpeg_writes_a_sound_flac(
     assert info.md5_signature == int.from_bytes(hashlib.md5(pcm).digest(), "big")  # noqa: S324
     assert info.total_samples == len(pcm) // (2 * (target.bit_depth // 8))
 
-    # A build without soxr was recognised by its own error and remembered.
+    # A build without soxr was recognized by its own error and remembered.
     has_soxr = b"libsoxr" in run("-hide_banner", "-buildconf")
     assert download_mod._soxr_known_missing(ffmpeg) is not has_soxr
 
@@ -673,7 +673,7 @@ def test_stop_during_the_seal_lands_nothing(download_instance: Download, tmp_pat
     dst = tmp_path / "song.flac"
 
     def extract(path, stop=None):
-        # The stop arrives while the seal decodes; the seal reports CANCELLED.
+        # The stop arrives while the seal decodes; the seal reports CANCELED.
         if stopper == "item":
             event_stop.set()
         elif stopper == "abort":

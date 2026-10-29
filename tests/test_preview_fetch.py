@@ -96,7 +96,7 @@ def test_the_local_playlist_lists_every_fetched_segment_on_disk(tmp_path, http):
     paths = [ln for ln in body.splitlines() if not ln.startswith("#")]
     assert len(paths) == 3
     assert all(pathlib.Path(p).exists() for p in paths), "ffmpeg reads these off disk"
-    assert "https://" not in body, "a localised playlist must need no network protocols"
+    assert "https://" not in body, "a localized playlist must need no network protocols"
     assert body.startswith("#EXTM3U") and "#EXT-X-ENDLIST" in body
 
 
@@ -139,7 +139,7 @@ def test_an_fmp4_init_segment_comes_along(tmp_path, http):
 @pytest.mark.parametrize(
     ("playlist", "why"),
     [
-        (_playlist(0), "an empty playlist has nothing to localise"),
+        (_playlist(0), "an empty playlist has nothing to localize"),
         (_playlist(2, base="seg"), "relative URIs need the playlist's own base URL"),
         (
             _playlist(2, extra='#EXT-X-KEY:METHOD=AES-128,URI="https://cdn/k"'),

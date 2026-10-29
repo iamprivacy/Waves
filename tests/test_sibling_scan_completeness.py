@@ -31,7 +31,7 @@ WHAT IS PINNED HERE
   though the artist's own bucket hands it back too;
 * a failing bucket is still incomplete with whatever the working buckets did
   find, whether it is the first bucket or the last one (pre-existing
-  behaviour, pinned here as well, and pinned at both ends: "I already found
+  behavior, pinned here as well, and pinned at both ends: "I already found
   something, so call it a finished scan" is the same lie in a smaller coat);
 * an artist that answered every bucket and simply has no other edition is
   complete, so this fix cannot turn a genuinely single-edition album into a
@@ -287,7 +287,7 @@ def test_a_clean_scan_is_complete_and_finds_every_sibling_edition():
     ids=["the_first_bucket_failed", "the_last_bucket_failed_holding_a_sibling"],
 )
 def test_one_failing_bucket_still_reports_incomplete_with_what_was_found(failing, kept):
-    """Pre-existing behaviour, pinned here too: two buckets answered, one did
+    """Pre-existing behavior, pinned here too: two buckets answered, one did
     not, so the scan keeps what it found and still says it is short.
 
     Both ends of the walk are pinned on purpose. When the bucket that gets rate

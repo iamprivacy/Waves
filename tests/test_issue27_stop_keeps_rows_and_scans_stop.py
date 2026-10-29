@@ -15,7 +15,7 @@ over a stub carcass (the same pattern as test_discography_video_source.py):
 
 2. STOP keeps the rows. stopAll used to empty the queue, so a press over one
    wrong item cost every other row and left no record of what was in flight.
-   Now every queued and running row stays, marked cancelled, in a Stopped
+   Now every queued and running row stays, marked canceled, in a Stopped
    section of its own with the same RETRY, RETRY ALL and CLEAR as Failed.
 
 3. The sweep with 'Most-complete edition only' OFF downloads every edition
@@ -141,7 +141,7 @@ def test_stop_during_a_guest_track_fetch_queues_nothing():
 
 def test_stop_before_a_parked_scan_starts_queues_nothing():
     # The scan was ordered, then STOP pressed while it still waited behind
-    # another scan on the serialised pool.
+    # another scan on the serialized pool.
     stub = _StopMidScanStub("never")
     pool = _HoldingPool()
     stub._scan_pool = pool
@@ -373,7 +373,7 @@ class _QueueStub:
 def test_stop_marks_queued_and_running_rows_stopped_and_keeps_every_row():
     stub = _QueueStub(["done", "failed", "running", "queued", "queued"])
     stub.stopAll()
-    # Every row is still there; the live ones read cancelled, the settled
+    # Every row is still there; the live ones read canceled, the settled
     # ones are untouched.
     assert stub.by_status() == ["done", "failed", "cancelled", "cancelled", "cancelled"]
     # The transfers themselves are still ended.
@@ -390,7 +390,7 @@ def test_stop_marks_queued_and_running_rows_stopped_and_keeps_every_row():
 
 def test_the_aborted_workers_later_mark_is_the_same_status_and_emits_nothing():
     # stopAll marked the rows in one pass; each aborted Worker reaching its
-    # own cancelled mark afterwards must not re-marshal the queue per row.
+    # own canceled mark afterwards must not re-marshal the queue per row.
     stub = _QueueStub(["running", "queued"])
     stub.stopAll()
     before = stub.emits
@@ -628,9 +628,9 @@ def test_the_help_says_the_sweep_follows_the_switch():
     fields = {f["key"]: f for s in WavesBridge.settingsSchema(_schema_stub()) for f in s["fields"]}
     conflict = fields["edition_conflict"]["help"]
     collapse = fields["collapse_editions"]["help"]
-    assert "'Best of both' included, only" in conflict
-    assert "takes effect when 'Most-complete edition only' is on" in conflict
-    assert "With this off, every edition is downloaded as it is." in collapse
+    # "any of these" is every choice, 'Best of both' included.
+    assert "'Download full albums' use any of these only while 'Most-complete edition only' is on" in conflict
+    assert "Discography and 'Download full albums' keep the fullest edition" in collapse
     # 550c7e1 put a playlist's full-albums sweep behind the same switch; both
     # helps name it.
     assert "'Download full albums'" in conflict and "'Download full albums'" in collapse

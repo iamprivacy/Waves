@@ -59,7 +59,7 @@ def test_encrypted_track_fails_the_download(downloader: Download, tmp_path: path
 
 
 def test_encrypted_track_writes_no_extra_file(downloader: Download, tmp_path: pathlib.Path) -> None:
-    """The refusal must not leave a second, decrypted-looking artefact behind."""
+    """The refusal must not leave a second, decrypted-looking artifact behind."""
     path_file = tmp_path / "song.flac"
     path_file.write_bytes(b"scrambled-payload")
     media = MagicMock(spec=Track)

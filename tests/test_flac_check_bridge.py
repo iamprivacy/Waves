@@ -646,7 +646,9 @@ def test_report_names_are_what_the_factory_wipe_knows(tmp_path):
     entry = next(e for e in _FACTORY_WIPE_SUBDIRS if e[0] == bridge_flac.REPORTS_DIR)
     _, exact, patterns = entry
     assert exact == ()
-    assert len(patterns) == 1
+    # The queue's missing-tracks reports share the folder (their own test is
+    # tests/test_missing_tracks_export.py); the FLAC check's is the first.
+    assert len(patterns) == 2
     pat = patterns[0]
     assert pat.match(fv.report_name("scan", 0))
     assert pat.match(fv.report_name("fix", 1_700_000_000))
@@ -662,7 +664,7 @@ def test_report_names_are_what_the_factory_wipe_knows(tmp_path):
         "flac-check-scan-20260101-010101-2-2.csv",
         "notes.txt",
     ):
-        assert not pat.match(foreign), foreign
+        assert not any(p.match(foreign) for p in patterns), foreign
 
 
 # ---- what earlier scans found -------------------------------------------------------

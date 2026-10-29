@@ -1,6 +1,6 @@
 """AppleDouble (._*) hygiene: strip xattrs after moves, keep ghosts out of playlists.
 
-On WebDAV-backed destinations macOS materialises every xattr as a hidden 4 KB
+On WebDAV-backed destinations macOS materializes every xattr as a hidden 4 KB
 ``._<name>`` sibling. These tests pin the two defenses: the post-move cleanup
 hook and the dotfile filter in playlist generation.
 """

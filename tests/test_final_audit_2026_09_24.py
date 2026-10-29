@@ -239,13 +239,14 @@ def test_the_ntfs_recycle_bin_is_never_walked():
 
 def test_the_max_age_timers_stop_while_the_window_is_minimized():
     """Final audit C35: four 5-minute revalidation timers kept hitting TIDAL
-    from a minimized window."""
+    from a minimized window. The Releases feed's is the fifth, held to the
+    same rule."""
     main = (pathlib.Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "Main.qml").read_text(
         encoding="utf-8"
     )
     # windowUp, not onScreen: onScreen also drops on a presentation stall,
     # which every app switch trips, and would restart the countdown each time.
-    assert main.count("running: root.signedIn && root.windowUp &&") == 4
+    assert main.count("running: root.signedIn && root.windowUp &&") == 5
     assert "readonly property bool windowUp: visibility !== Window.Hidden && visibility !== Window.Minimized" in main
 
 

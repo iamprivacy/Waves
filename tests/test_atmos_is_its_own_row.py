@@ -90,7 +90,7 @@ def test_atmos_only_means_atmos_and_nothing_else():
     assert not backend._atmos_only(SimpleNamespace())
 
 
-def test_an_atmos_only_release_is_labelled_atmos_not_its_container_tier():
+def test_an_atmos_only_release_is_labeled_atmos_not_its_container_tier():
     """TIDAL reports LOSSLESS for the Atmos edition's container. There is no
     stereo stream at that tier, so the pill says what the row IS."""
     assert backend._quality_label(_album("1", "A", [ATMOS], quality=Quality.high_lossless)) == backend.ATMOS_WORD

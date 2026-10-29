@@ -689,7 +689,7 @@ def test_first_scan_stamps_the_full_scan_baseline(tmp_path):
 
 def test_launch_falls_back_to_full_scan_once_the_baseline_ages(tmp_path):
     # A change an unreliable mount hides from mtimes is only caught by a full
-    # re-list; ageing the baseline past the threshold is what makes the launch
+    # re-list; aging the baseline past the threshold is what makes the launch
     # check ask for one.
     lib = _mk(tmp_path, "lib", [])
     d = _mk(tmp_path, "lib/A/One", ["1.flac"])
@@ -2162,10 +2162,10 @@ def test_a_quit_stops_the_backfill_instead_of_outliving_the_app(tmp_path):
 
 def test_the_sqlite_artist_rollup_refuses_various_artists_keys(tmp_path):
     """The whole-library pass this replaced dropped Various-Artists buckets on
-    the NORMALISED key, and the raw-tag refusal in _album_keys cannot stand in
+    the NORMALIZED key, and the raw-tag refusal in _album_keys cannot stand in
     for it: that one runs before norm_artist, so a tag reading "The Various"
     (the leading "the " is dropped) or "V.A.; Some DJ" (split at the ";")
-    walks past it and only normalises into a compilation afterwards. Both nets
+    walks past it and only normalizes into a compilation afterwards. Both nets
     were deliberate. Without this one a compilation credit is rolled up as a
     real artist, badge and tally included."""
     from waves.waves_ui.bridge_library import SqlArtistRollup
@@ -2186,7 +2186,7 @@ def test_the_sqlite_artist_rollup_refuses_various_artists_keys(tmp_path):
     assert rollup.get(matching.norm_artist(matching.canon("Lorna Shore"))), "a real artist still rolls up"
     for placeholder in ("The Various", "V.A.; Some DJ", "Various Artists"):
         key = matching.norm_artist(matching.canon(placeholder))
-        assert rollup.get(key) is None, f"{placeholder!r} normalises to {key!r} and must not roll up"
+        assert rollup.get(key) is None, f"{placeholder!r} normalizes to {key!r} and must not roll up"
         assert key not in rollup
 
 

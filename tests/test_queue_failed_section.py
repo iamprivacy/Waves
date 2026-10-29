@@ -159,7 +159,7 @@ def _run_scenario() -> int:
     # section labels the list actually instantiated. The Stopped header is
     # the soft red (a step under Failed's hot red), bold, and counts its own
     # rows; nothing else in the suite ever rendered a section header, so
-    # the label chain and the colour chain were unpinned.
+    # the label chain and the color chain were unpinned.
     from PySide6.QtCore import QObject
 
     q(f"reconcileQueue([{rows}])")

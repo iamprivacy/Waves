@@ -11,7 +11,7 @@ every queued row to match.
 
 Now each row records the quality it was queued at (``askQuality``) and its job
 carries that quality (``_TrackedDownload._pinned_quality``), written onto the
-session inside ``tidal.stream_lock``, the lock that already serialises every
+session inside ``tidal.stream_lock``, the lock that already serializes every
 stream fetch in the process. A change in Settings therefore applies to what is
 queued NEXT; what is queued or running keeps its quality, and the drawer keeps
 stating it (test_queue_expected_tier.py).

@@ -1,6 +1,6 @@
 """Pins for the presence findings of the final audit of 2026-09-24 (report in
 notes/, private): C19/C36 (clean vs explicit), C20/C21/C48/L25 (disc joins and
-track totals), C23 (album artist from a lone file), L26 (key normaliser
+track totals), C23 (album artist from a lone file), L26 (key normalizer
 version) and L04 (reveal, do not open).
 
 Every test drives the real functions: the matcher on hand-built indexes, the
@@ -428,7 +428,7 @@ def test_a_cache_from_before_the_advisory_fact_rereads_once(tmp_path):
     assert not reads, "once read, the fact rests like every other column"
 
 
-# ---- L26: the key normaliser version -----------------------------------------
+# ---- L26: the key normalizer version -----------------------------------------
 
 
 def test_keys_derived_by_another_normaliser_are_rebuilt_once(tmp_path):
@@ -443,7 +443,7 @@ def test_keys_derived_by_another_normaliser_are_rebuilt_once(tmp_path):
 
     conn = sqlite3.connect(db)
     conn.execute("UPDATE meta SET value = 'stale' WHERE key = 'key_normaliser_version'")
-    # A key the running normaliser would never derive, standing in for one
+    # A key the running normalizer would never derive, standing in for one
     # an older release stored.
     conn.execute("UPDATE albums SET pkey_title = 'old-title-key'")
     conn.commit()

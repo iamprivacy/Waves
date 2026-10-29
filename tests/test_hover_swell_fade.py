@@ -130,7 +130,7 @@ def _run_scenario() -> int:
         return _EXIT_PRECONDITION
 
     def fade_ms(to_on: bool) -> float:
-        """Wall-clock time for the opacity to finish travelling."""
+        """Wall-clock time for the opacity to finish traveling."""
         target = 1.0 if to_on else 0.0
         swell.setProperty("on", to_on)
         started = time.monotonic()

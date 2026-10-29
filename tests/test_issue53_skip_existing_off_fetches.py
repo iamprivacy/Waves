@@ -201,6 +201,7 @@ class _Stub:
         self.downloadState = _Signal()
         self.downloadProgress = _Signal()
         self._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+        self._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
         arm_dispatch(self)
         self.built: list[dict] = []
 

@@ -70,7 +70,7 @@ def test_the_atmos_edition_is_left_out_beside_its_stereo_twin():
 
 def test_a_dolby_atmos_suffixed_twin_still_pairs_with_its_stereo_edition():
     """TIDAL sometimes titles the spatial edition "(Dolby Atmos)". The pairing
-    key strips edition qualifiers, so the suffixed twin is still recognised."""
+    key strips edition qualifiers, so the suffixed twin is still recognized."""
     stereo = _album("s", "Album", ["STEREO"])
     atmos = _album("a", "Album (Dolby Atmos)", [ATMOS])
     own, _, dropped = _drop_spatial_editions([stereo, atmos], [])

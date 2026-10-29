@@ -221,6 +221,78 @@ def test_add_falsy_ids_are_skipped(tmp_path):
     assert store.members_of("album1") == ["1"]
 
 
+def _on_fresh_thread(fn):
+    """Run ``fn`` on a new thread (so it opens its own reader) and return its
+    result, or the exception it raised."""
+    out = {}
+
+    def run():
+        try:
+            out["r"] = fn()
+        except Exception as e:
+            out["r"] = e
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join()
+    return out["r"]
+
+
+def test_cold_reader_works_under_an_awkward_folder_name(tmp_path, caplog):
+    """The per-thread reader opens the file by URI, so a space or a '#' in the
+    config folder's path must not push it onto the fallback."""
+    folder = tmp_path / "Waves site #1"
+    folder.mkdir()
+    store = OwnershipStore(str(folder / "ownership.sqlite3"))
+    store.record_members_replace("album1", ["1", "2"])
+    with caplog.at_level("WARNING", logger="waves.ownership"):
+        assert sorted(_on_fresh_thread(lambda: store.members_of("album1"))) == ["1", "2"]
+    assert "shared connection" not in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to remove a file sqlite holds open")
+def test_cold_reader_survives_the_file_being_replaced(tmp_path):
+    """The file swapped for an empty one while the app runs: a thread whose
+    first read comes after that used to open the empty file and raise "no such
+    table" out of collectionOwnership on every card. It now reads what the
+    store was opened on, the file every write still goes to."""
+    path = tmp_path / "ownership.sqlite3"
+    store = OwnershipStore(str(path))
+    store.record_members_replace("album1", ["1", "2"])
+    os.remove(path)
+    open(path, "wb").close()
+    assert sorted(_on_fresh_thread(lambda: store.members_of("album1"))) == ["1", "2"]
+    # And once one reader has failed, every thread reads the same way.
+    assert sorted(_on_fresh_thread(lambda: store.members_of("album1"))) == ["1", "2"]
+    assert sorted(store.members_of("album1")) == ["1", "2"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to remove a file sqlite holds open")
+def test_cold_reader_never_creates_a_missing_file(tmp_path):
+    path = tmp_path / "ownership.sqlite3"
+    store = OwnershipStore(str(path))
+    store.record_members_replace("album1", ["1"])
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(str(path) + suffix):
+            os.remove(str(path) + suffix)
+    assert _on_fresh_thread(lambda: store.members_of("album1")) == ["1"]
+    assert not path.exists()
+
+
+def test_members_of_reads_as_unknown_when_the_store_cannot_answer(tmp_path):
+    """Broken under the shared connection too: members_of is called from a
+    Slot, so it answers None ("never observed") instead of raising."""
+    path = tmp_path / "ownership.sqlite3"
+    store = OwnershipStore(str(path))
+    store.record_members_replace("album1", ["1"])
+    con = sqlite3.connect(str(path))
+    con.execute("DROP TABLE collection_members")
+    con.commit()
+    con.close()
+    assert store.members_of("album1") is None
+    assert _on_fresh_thread(lambda: store.members_of("album1")) is None
+
+
 def test_folder_names_under_lists_the_artist_folders_it_wrote(tmp_path):
     """The seed list for a share whose directory listing is broken: these are
     the exact folder names Waves wrote, so they can be looked up by name even

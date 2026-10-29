@@ -14,7 +14,7 @@ permanent child of Main.qml whose Repeater delegates outlive a close/reopen
 followed by CANCEL left the box displaying the shipped default for the rest of
 the session while the persisted setting, and every download, still used the
 user's custom value. The link beside it still read "Restore default" (its own
-binding was alive and re-evaluated against the real value), and SAVE was greyed
+binding was alive and re-evaluated against the real value), and SAVE was grayed
 out, so the page showed a contradiction the user could not resolve.
 
 ``Qt.binding`` does both jobs: it shows the default immediately AND repairs a

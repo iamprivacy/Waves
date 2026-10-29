@@ -230,8 +230,9 @@ def test_icon_debug_lines_before_diagnostics_reach_the_file(tmp_path, monkeypatc
 
 
 def test_a_failed_qml_load_shuts_the_bridge_down_and_the_exit_flushes_the_log():
-    fail = _block(APP, "if not root_objects:", "return 1")
+    assert "return _failed_qml_load(bridge, owns_app)" in _block(APP, "if not root_objects:", "\n\n")
+    fail = _block(APP, "def _failed_qml_load(", "return 1")
     assert "bridge.shutdown()" in fail
-    assert "diagnostics.flush_disk_log()" in fail
+    assert fail.index("diagnostics.flush_disk_log()") < fail.index("os._exit(1)")
     tail = _block(APP, "rc = app.exec()", "return rc")
     assert tail.index("diagnostics.flush_disk_log()") < tail.index("os._exit(rc)")

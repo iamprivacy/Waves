@@ -584,6 +584,7 @@ def _body_stub(fail=False):
     s.downloadProgress = _Sig()
     s.dl = _BodyDownload(fail=fail)
     s._track_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
+    s._speed_poll = SimpleNamespace(isActive=lambda: True, start=lambda *a: None)
     arm_dispatch(s)
     s._reap_stranded_groups = lambda: None
     s._download = _bind(s, "_download")
@@ -758,7 +759,7 @@ def test_the_first_member_that_really_starts_still_flips_it_to_running():
 
 
 def test_a_member_that_landed_counts_as_started_for_the_rest_of_the_batch():
-    """A three-member batch where one finished and one was then cancelled:
+    """A three-member batch where one finished and one was then canceled:
     the batch really is under way, so it must not fall back to QUEUED."""
     s = _StartedStub(keys=("m1", "m2", "m3"))
 
@@ -774,8 +775,8 @@ def test_cancelling_a_rollup_reaches_its_held_members_too():
     QUEUE, so the hold was invisible to it and survived the cancel. The share
     came back, the replay fired, and an album the user had called off
     downloaded itself, with its group already popped so it could never report
-    anything. Cancelling a whole rollup has to reach the stash the way
-    cancelling one row does."""
+    anything. Canceling a whole rollup has to reach the stash the way
+    canceling one row does."""
     s = _queue_stub(["queued", "queued"])
     # A third member of the same discography, held rather than queued.
     s._artist_groups["art1"]["keys"].add("m3")

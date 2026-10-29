@@ -244,7 +244,7 @@ def test_the_merge_survives_a_clean_twin_that_carries_its_own_codes():
     assert _plan(group, recs, ranks)[2] == "not_superset", "the clean twin still kills it unsplit"
 
     kept, dropped = _split_explicit_editions(group, recs, True)
-    assert dropped == [clean], "the twin was not recognised, so the merge below cannot happen"
+    assert dropped == [clean], "the twin was not recognized, so the merge below cannot happen"
     identity, plan, reason = _plan(kept, recs, ranks)
     assert reason == "" and identity is deluxe
     assert [e.src.id for e in plan] == ["s1", "d2", "d3"], "the merge did not take the better shared track"

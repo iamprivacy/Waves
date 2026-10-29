@@ -1,4 +1,4 @@
-"""The setting-to-behaviour path for the 'best of both' edition merge.
+"""The setting-to-behavior path for the 'best of both' edition merge.
 
 Nothing pinned this before: the shipped defaults, the gate that decides whether a
 plain album click runs an edition scan, and the one-shot exemption that keeps the
@@ -52,7 +52,7 @@ def test_best_of_both_is_on_by_default():
 
 
 def test_the_merge_no_longer_depends_on_the_collapse_toggle():
-    # It used to require collapse_editions as well, which is labelled (and
+    # It used to require collapse_editions as well, which is labeled (and
     # documented) as a discography setting and HID this control when off, so
     # turning it off silently stopped every single-album merge.
     stub = _AlbumStub({"collapse_editions": False})

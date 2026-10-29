@@ -359,9 +359,10 @@ def test_the_max_age_timers_catch_up_after_a_long_absence():
     assert "if (away < browseLandingFreshTimer.interval) return" in hook
     assert "Qt.callLater(" in hook
     assert "browseLandingFreshTimer, browseItemFreshTimer, artistFreshTimer, libraryFreshTimer" in hook
+    assert "releasesFreshTimer]" in hook
     assert "if (timers[i].running) timers[i].triggered()" in hook
-    # The timers still run on windowUp, not onScreen.
-    assert MAIN.count("running: root.signedIn && root.windowUp && ") == 4
+    # The timers still run on windowUp, not onScreen (the Releases feed's too).
+    assert MAIN.count("running: root.signedIn && root.windowUp && ") == 5
 
 
 @pytest.mark.parametrize("away_min,fired", [(10, ["land", "lib"]), (2, [])])
@@ -377,7 +378,8 @@ def test_a_re_show_fires_each_running_timer_once_after_a_long_absence(away_min, 
         "function timer(name, running) { return { interval: 300000, running: running,"
         " triggered: function () { fired.push(name) } } }"
         "var browseLandingFreshTimer = timer('land', true), browseItemFreshTimer = timer('item', false),"
-        " artistFreshTimer = timer('artist', false), libraryFreshTimer = timer('lib', true);"
+        " artistFreshTimer = timer('artist', false), libraryFreshTimer = timer('lib', true),"
+        " releasesFreshTimer = timer('rel', false);"
         "var Qt = { callLater: function (f) { f() } };"
         f"var root = {{ windowUp: true, freshDownAt: Date.now() - {away_min} * 60000 }};"
         + hook

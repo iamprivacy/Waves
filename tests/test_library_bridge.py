@@ -127,7 +127,7 @@ def _make(
     # The bridge's real _open_library_index resolves one cache file per root
     # (cache_file_for_root) and is re-invoked on a root change; mirror that
     # here with the test's fake tag reader kept across reopens, so the glue
-    # tests exercise the per-root file behaviour without mutagen.
+    # tests exercise the per-root file behavior without mutagen.
     def _reopen():
         return LibraryIndex(
             cache_file_for_root(str(tmp_path), s._library_root()),
@@ -169,7 +169,7 @@ def _make(
     s.librarySourceChanged = _Signal()
     # The change-of-source path tears down the file watcher and persists prefs;
     # both are Qt/disk side effects out of scope for this glue test, so stub them
-    # to no-ops. _logged_in is False so nothing re-initialises Download.
+    # to no-ops. _logged_in is False so nothing re-initializes Download.
     s._teardown_library_watch = lambda: None
     s._library_poll_in_flight = False
     s._save_waves_prefs = lambda: None
@@ -396,7 +396,7 @@ def test_download_folder_change_reindexes_when_library_follows_it(tmp_path):
     assert s.libraryAlbumPresence("B", "Two", "2001", 1)["present"]
 
 
-def test_scan_status_surfaced_and_signalled(tmp_path):
+def test_scan_status_surfaced_and_signaled(tmp_path):
     lib = str(tmp_path / "lib")
     os.makedirs(lib, exist_ok=True)
     d = _album(lib, "A/Alb", ["1.flac"])
@@ -404,7 +404,7 @@ def test_scan_status_surfaced_and_signalled(tmp_path):
     s._rebuild_library_index()
     assert s._library_scan_status == "ok"
     assert s._library_scan_progress.get("indexed") == 1
-    # Signalled at least at scan start ("scanning" appears) and end (it clears).
+    # Signaled at least at scan start ("scanning" appears) and end (it clears).
     assert len(s.libraryScanStatusChanged.emits) >= 2
     # An absent folder reports "missing" and re-signals.
     before = len(s.libraryScanStatusChanged.emits)
@@ -707,7 +707,7 @@ def test_artist_rollup_counts_albums_and_tracks(tmp_path):
 def test_artist_rollup_dedups_editions(tmp_path):
     lib = str(tmp_path / "lib")
     os.makedirs(lib, exist_ok=True)
-    # Two folders that normalise to the same album key (a deluxe reissue) count
+    # Two folders that normalize to the same album key (a deluxe reissue) count
     # once, at the best (max) track count, never as two separate albums.
     d1 = _album(lib, "A/Alb", ["1.flac", "2.flac"])
     d2 = _album(lib, "A/Alb Deluxe", ["1.flac", "2.flac", "3.flac"])

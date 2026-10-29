@@ -9,10 +9,10 @@ and playlist pages, artist pages, the Browse cards' pill) used to be a
 four-row dot matrix stopping 12px in from either end, with a "NN%" readout
 to its right in a slot reserved for "100%": a two-character hole beside a
 short number for most of a run, and a bar that sat a pixel low on retina
-displays (centred to a logical pixel; 19px in 28px is a 4.5px offset).
+displays (centered to a logical pixel; 19px in 28px is a 4.5px offset).
 
 Now the matrix is a dense grid filling the button (round 6: SEVEN rows of
-3px cells with 1px gaps, 1px inside the outline at every edge), centred to
+3px cells with 1px gaps, 1px inside the outline at every edge), centered to
 the DEVICE pixel, with no readout beside it, and its outer cells fade toward
 every edge on the shelf edge fades' curve (26px at the ends, 8px top and
 bottom: DotMatrix.edgeFadeW / edgeFadeH) so the field sits in a soft frame
@@ -34,8 +34,8 @@ Two things about the number were livetested and changed on 2026-08-17:
     (progress pill lab round 8);
   * the zone was a FIXED four glyphs with the word right-aligned in it, so
     that 9 -> 10 and 99 -> 100 moved nothing. That hung every ordinary
-    reading two to four columns right of centre. The zone is now the word's
-    own width, centred, for one, two or three digits alike.
+    reading two to four columns right of center. The zone is now the word's
+    own width, centered, for one, two or three digits alike.
 
 HOW THIS STAYS FIXED
 --------------------
@@ -44,12 +44,12 @@ building the bridge installs process-global handlers). A search-result album
 button is put into "running" at 37% and the scenario reads the matrix that
 the Loader built:
 
-  * seven rows, no readout sibling, its width the whole face, its y centred,
-    the fade lengths set, an outermost column all but gone, the centre at
+  * seven rows, no readout sibling, its width the whole face, its y centered,
+    the fade lengths set, an outermost column all but gone, the center at
     full strength, and the fade the same at both ends and both edges;
   * at rest (wordHover false) every cell shows its bar state (times its own
     static edge fade);
-  * hovered, the word cells spell exactly "37%" in the font, centred (the
+  * hovered, the word cells spell exactly "37%" in the font, centered (the
     field left of the number and right of it match within a cell), each
     stroke is fully lit (1.0) and each plate cell around them is 0.04, both
     regardless of the bar under them;
@@ -241,7 +241,7 @@ def _run_carved_scenario() -> int:
     s = json.loads(rep)
     failures: list[str] = []
 
-    # --- geometry: seven rows, to the outline, no readout, centred to the device pixel
+    # --- geometry: seven rows, to the outline, no readout, centered to the device pixel
     if s["rows"] != 7 or s["dot"] != 3 or s["gap"] != 1:
         failures.append(
             f"  the running face is not the dense seven-row grid: rows {s['rows']} dot {s['dot']} gap {s['gap']}"
@@ -257,7 +257,7 @@ def _run_carved_scenario() -> int:
     true_y = (s["faceH"] - s["ih"]) / 2
     dpr = s["dpr"] or 1
     if abs(s["y"] - true_y) > 0.5 / dpr + 1e-6:
-        failures.append(f"  matrix y {s['y']} is off the centre {true_y} by more than a device pixel (dpr {dpr})")
+        failures.append(f"  matrix y {s['y']} is off the center {true_y} by more than a device pixel (dpr {dpr})")
     if s["word"] != "37%":
         failures.append(f"  the word is {s['word']!r}, expected '37%'")
 
@@ -272,7 +272,7 @@ def _run_carved_scenario() -> int:
                 f"wordCell {wc}, plateCell {pl}"
             )
             break
-    # --- the conveyor fade: outermost column all but gone, centre untouched,
+    # --- the conveyor fade: outermost column all but gone, center untouched,
     # symmetric end to end and top to bottom, the outer rows dimmed too
     mul = {(c, r): m for c, r, _l, _w, _o, _b, m, _p in rest_cells}
     cols_n, rows_n = s["cols"], s["rows"]
@@ -280,7 +280,7 @@ def _run_carved_scenario() -> int:
     if mul[(0, mid_r)] > 0.1 or mul[(cols_n - 1, mid_r)] > 0.1:
         failures.append(f"  the outermost columns are not faded out: {mul[(0, mid_r)]} / {mul[(cols_n - 1, mid_r)]}")
     if mul[(mid_c, mid_r)] != 1:
-        failures.append(f"  the centre cell is faded ({mul[(mid_c, mid_r)]}); the fade must stay at the edges")
+        failures.append(f"  the center cell is faded ({mul[(mid_c, mid_r)]}); the fade must stay at the edges")
     if not (mul[(mid_c, 0)] < 1 and abs(mul[(mid_c, 0)] - mul[(mid_c, rows_n - 1)]) < 0.001):
         failures.append(
             f"  top/bottom rows: {mul[(mid_c, 0)]} vs {mul[(mid_c, rows_n - 1)]} (dimmed and equal expected)"
@@ -290,7 +290,7 @@ def _run_carved_scenario() -> int:
             failures.append(f"  the fade is not the same at both ends at column {k}")
             break
     if not all(mul[(k, mid_r)] < mul[(k + 1, mid_r)] for k in range(5)):
-        failures.append("  the end fade does not rise monotonically toward the centre")
+        failures.append("  the end fade does not rise monotonically toward the center")
 
     # --- hovered: the reveal animates (not a snap) and lands at 1
     q("(function(){" + _WALKERS + " walkBtn(contentCol).wordHover = true; return 1 })()")
@@ -306,13 +306,13 @@ def _run_carved_scenario() -> int:
     # --- hovered: the word cells spell 37% and read the inverse of the bar
     cells = json.loads(read_cells())
     cols = s2["cols"]
-    # The zone is the word's own width now, centred (JS Math.round, hence the
+    # The zone is the word's own width now, centered (JS Math.round, hence the
     # + 0.5 floor rather than Python's banker's rounding).
     zone_w = len("37%") * 4 - 1
     zone_start = math.floor((cols - zone_w) / 2 + 0.5)
     if abs(zone_start - (cols - zone_start - zone_w)) > 1:
         failures.append(
-            f"  the number is not centred: {zone_start} column(s) of field to its left, "
+            f"  the number is not centered: {zone_start} column(s) of field to its left, "
             f"{cols - zone_start - zone_w} to its right"
         )
     got_rows = ["" for _ in range(5)]

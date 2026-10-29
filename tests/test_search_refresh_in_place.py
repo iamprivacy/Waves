@@ -171,7 +171,7 @@ def _run_scenario() -> int:
     first = [_album("al1", "One"), _album("al2", "Two"), _album("al3", "Three")]
     bridge.searchResults.emit(_payload(first, [_artist("ar1", "Alpha"), _artist("ar2", "Beta")], refresh=False))
     settle(500)
-    # Realise the page: without a layout the rows are never built and this
+    # Realize the page: without a layout the rows are never built and this
     # scenario would pass against a reconcile that does nothing at all.
     q("results.contentHeight")
     settle(150)

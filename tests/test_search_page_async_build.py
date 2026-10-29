@@ -345,7 +345,7 @@ def _run_scenario() -> int:
     check(built("artistGridRep", 0), "the grid's first card is on screen but was not built in the click")
     check(not built("artistGridRep", 39), "the grid built its last card, far below the screen, in the click")
     check(
-        q("artistGridRep.itemAt(0).height") == q("artistFlow.cardW") + 119,
+        q("artistGridRep.itemAt(0).height") == q("artistFlow.cardW") + 115,
         "the grid's reserved card height is not the built card's",
     )
     # Card 0 has no popularity yet, card 1 has: the same height either way,

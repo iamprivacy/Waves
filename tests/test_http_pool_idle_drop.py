@@ -242,7 +242,7 @@ def test_a_worker_waiting_on_the_blocking_pool_is_served_an_empty_slot(monkeypat
 def test_the_idle_gap_reads_the_wall_clock():
     """time.monotonic() does not advance while a Mac sleeps, so the gap that
     matters most would read as zero on it; the idle gap is wall time, and the
-    monotonic clock serves only to recognise the sleep."""
+    monotonic clock serves only to recognize the sleep."""
     import inspect
 
     src = inspect.getsource(IdleDropAdapter._stale_since)

@@ -40,6 +40,11 @@ class GateHost:
     _stash_pending_download = WavesBridge._stash_pending_download
     _run_pending_downloads = WavesBridge._run_pending_downloads
     _probe_download_base = WavesBridge._probe_download_base
+
+    def _maybe_notify_idle(self):
+        # The replay's trailing idle check (the drain banner): no queue here.
+        pass
+
     _probe_folder_verdict = staticmethod(WavesBridge._probe_folder_verdict)
     # Proof of life records the share's origin, and a dead probe may try a
     # remount: real methods, real state (no origins recorded and no mount to

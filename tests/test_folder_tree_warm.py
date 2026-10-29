@@ -136,7 +136,7 @@ def test_a_folder_that_is_really_gone_still_reports_empty_once():
     assert stub.playlistFolderLoaded.calls == [("nope", [], "")]
 
 
-def test_signed_out_keeps_the_old_behaviour():
+def test_signed_out_keeps_the_old_behavior():
     stub = _WarmStub(_tree(), logged_in=False)
     stub.openPlaylistFolder("f1")
 

@@ -8,7 +8,7 @@ THREE BUGS FENCED OFF HERE
    it never cleared: the dismissal Timer only arms for "done".
 
 2. ODOMETER LATCHING A STALE DIGIT. OdoDigit returned early on
-   `value === shown` without cancelling the roll in flight, so the running
+   `value === shown` without canceling the roll in flight, so the running
    animation's ScriptAction latched the abandoned _pending. LibList pools
    delegates (reuseItems, cacheBuffer 800), so a fast flick rebinds one
    delegate A -> B -> A well inside the 220ms roll and a folder ends up wearing
@@ -81,7 +81,7 @@ def test_folder_badge_states_and_crumb_labels():
         pytest.skip("PySide6 / offscreen Qt unavailable")
     if proc.returncode == _EXIT_PRECONDITION:
         pytest.skip(f"could not set up the scenario in this environment:\n{tail}")
-    assert proc.returncode == _EXIT_OK, f"badge or crumb labelling regressed. Scenario exit={proc.returncode}:\n{tail}"
+    assert proc.returncode == _EXIT_OK, f"badge or crumb labeling regressed. Scenario exit={proc.returncode}:\n{tail}"
 
 
 def _folder_row() -> list:
@@ -245,7 +245,7 @@ def _run_scenario() -> int:
     if q("browseTitleHint") != "" or q("currentNavLabel") != "Browse":
         return fail(f"the landing kept a stale hint: {q('browseTitleHint')!r} / {q('currentNavLabel')!r}")
 
-    print("badge and crumb labelling OK", flush=True)
+    print("badge and crumb labeling OK", flush=True)
     return _EXIT_OK
 
 

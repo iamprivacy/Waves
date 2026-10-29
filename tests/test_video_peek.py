@@ -1,4 +1,4 @@
-"""The hover peek's stream picker favours instant start.
+"""The hover peek's stream picker favors instant start.
 
 _pick_peek_stream always chooses the smallest variant (the card is
 thumbnail scale, so resolution is invisible and start-up speed is

@@ -87,7 +87,7 @@ def test_bullets_are_never_wrapped_across_lines():
     assert not wrapped, "write each bullet on one line, unwrapped:\n" + "\n".join(wrapped)
 
 
-def test_issue_references_are_labelled_links():
+def test_issue_references_are_labeled_links():
     """No bare '#12' anywhere: an issue is named and linked, or not cited."""
     bare = []
     for lineno, raw in enumerate(CHANGELOG.read_text(encoding="utf-8").splitlines(), 1):

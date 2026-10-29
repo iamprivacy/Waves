@@ -85,10 +85,10 @@ class _FavStub:
         return [SimpleNamespace(id="a1")]
 
 
-def test_favourite_ids_fetched_across_a_sign_out_are_not_cached():
+def test_favorite_ids_fetched_across_a_sign_out_are_not_cached():
     stub = _FavStub()
     assert stub._favorite_ids("albums") == {"a1"}
-    assert stub._fav_ids == {}, "the previous account's favourites would filter the next account's pages for 10 minutes"
+    assert stub._fav_ids == {}, "the previous account's favorites would filter the next account's pages for 10 minutes"
 
 
 def test_logout_drops_the_queues_kept_objects_and_the_merge_plans():
@@ -130,7 +130,7 @@ class _WarmStub:
     downloadState = property(lambda self: SimpleNamespace(emit=lambda mid, st: self.states.append((mid, st))))
 
 
-def test_a_click_parked_behind_the_folder_warm_honours_a_stop_pressed_meanwhile():
+def test_a_click_parked_behind_the_folder_warm_honors_a_stop_pressed_meanwhile():
     stub = _WarmStub()
     ran = []
     stub._warm_folder_tree(lambda: ran.append("cat"), "cat:pages/mood")
@@ -247,7 +247,7 @@ def test_a_failed_album_track_fetch_sets_a_status_only_for_an_open_panel():
 
 
 def test_a_failed_home_load_and_scroll_page_say_so():
-    assert "Could not load your recent favourites" in inspect.getsource(WavesBridge.loadHome)
+    assert "Could not load your recent favorites" in inspect.getsource(WavesBridge.loadHome)
     assert "Could not load more, scroll again to retry" in inspect.getsource(WavesBridge.loadMoreLibrary)
 
 
@@ -301,7 +301,7 @@ def test_a_worker_that_outlived_the_bridge_is_not_a_crash(caplog):
 
 
 # ---- files on disk ---------------------------------------------------------
-@pytest.mark.skipif(sys.platform != "darwin", reason="normalisation folding is a macOS volume rule")
+@pytest.mark.skipif(sys.platform != "darwin", reason="normalization folding is a macOS volume rule")
 def test_path_under_folds_composition_on_macos(tmp_path):
     nfc = str(tmp_path / "Música")
     nfd = str(tmp_path / "Música")

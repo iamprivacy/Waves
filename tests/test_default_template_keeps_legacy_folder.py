@@ -256,7 +256,7 @@ class TestTheFolderTestReadsTheProbes:
 
     def test_a_probe_list_of_the_wrong_length_is_ignored(self, tmp_path):
         # A caller that cannot supply one probe per spelling gets the older
-        # behaviour rather than a mismatched comparison.
+        # behavior rather than a mismatched comparison.
         dl = _make_download(tmp_path, _DEFAULT_ALBUM_TEMPLATE)
         tidy = f"{_ARTIST}/{_TIDY_DIR}/{{track_title}}"
         legacy = f"{_ARTIST}/{_LEGACY_DIR}/{{track_title}}"

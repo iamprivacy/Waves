@@ -708,7 +708,7 @@ def test_probe_progress_never_goes_backwards(tmp_path, monkeypatch):
 class _Entry:
     """A directory entry that reports one name while pointing somewhere else.
 
-    This machine's filesystem folds both case and normalisation, so two folders
+    This machine's filesystem folds both case and normalization, so two folders
     whose names differ only that way cannot be created here at all: `Blur` and
     `blur` are one inode. A case-sensitive share holds them as two. Pointing a
     listed entry at a folder that really is separate reproduces the only thing

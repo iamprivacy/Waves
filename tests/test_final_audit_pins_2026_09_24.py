@@ -1,4 +1,4 @@
-"""Behavioural pins for the final audit of 2026-09-24 (C06, C08, C09, C10,
+"""Behavioral pins for the final audit of 2026-09-24 (C06, C08, C09, C10,
 C43). Each test drives the real method through a harness and fails when
 the fix it fences off is reverted; the earlier source-text or helper-only
 pins stayed green through such a revert.
@@ -283,9 +283,9 @@ def _run_own_max_age_scenario() -> int:
     return _EXIT_OK if not misses else _EXIT_REGRESSED
 
 
-def test_the_ownership_max_age_timer_is_running_and_ticks_the_ageing():
+def test_the_ownership_max_age_timer_is_running_and_ticks_the_aging():
     """The four lines that make a parked page re-ask (a file deleted in
-    Finder stops reading as DOWNLOADED) have no other check: the ageing
+    Finder stops reading as DOWNLOADED) have no other check: the aging
     method is tested by hand, the timer that calls it never was."""
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"

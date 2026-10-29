@@ -1,9 +1,9 @@
-"""The "Hover controls slide in" escape hatch (Settings > Advanced).
+"""The "Hover controls slide in" escape hatch (Settings > Appearance).
 
 Hover controls rise in with a bounce by default; anyone who finds the motion
 distracting can turn it off and get the plain fade back. This pins the three
 things that make the toggle real: it ships on by default, it is offered as a
-labelled bool in the Advanced section, and flipping it notifies the QML (which
+labeled bool in the Appearance section, and flipping it notifies the QML (which
 re-reads the pref on that signal, see Main.qml's hoverMotion).
 """
 
@@ -32,11 +32,11 @@ def test_hover_control_motion_defaults_on():
     assert _prefs_stub()._waves_prefs["hover_control_motion"] is True
 
 
-def test_toggle_is_offered_in_the_advanced_section():
+def test_toggle_is_offered_in_the_appearance_section():
     schema = WavesBridge.settingsSchema(_schema_stub())
-    advanced = next(s for s in schema if s["id"] == "advanced")
-    field = next((f for f in advanced["fields"] if f["key"] == "hover_control_motion"), None)
-    assert field is not None, "the toggle must be reachable from Settings > Advanced"
+    appearance = next(s for s in schema if s["id"] == "appearance")
+    field = next((f for f in appearance["fields"] if f["key"] == "hover_control_motion"), None)
+    assert field is not None, "the toggle must be reachable from Settings > Appearance"
     assert field["type"] == "bool"
     assert field["value"] is True
     # A power-user knob still has to explain itself.

@@ -188,7 +188,7 @@ def test_a_member_owned_in_the_truncated_folder_is_owned_at_the_destination(tmp_
 
 
 def test_a_member_owned_in_the_truncated_folder_gets_a_verdict(tmp_path):
-    """The user-visible half: with the folder recognised, the gate answers
+    """The user-visible half: with the folder recognized, the gate answers
     'skip' at the run's quality and 'force' below it, instead of (None, None),
     which would re-fetch the song into the very folder it already sits in."""
     member = _member()
@@ -209,7 +209,7 @@ def test_a_member_owned_in_the_truncated_folder_gets_a_verdict(tmp_path):
 
 def test_the_placement_the_write_used_still_resolves_the_truncated_folder(tmp_path):
     """The gate is handed item()'s own placement; the folder does not depend
-    on the list position here, so the recognised folder must be the same."""
+    on the list position here, so the recognized folder must be the same."""
     member = _member()
     written = _written(tmp_path, member)
     rec = {"path": str(written), "quality_rank": 2}

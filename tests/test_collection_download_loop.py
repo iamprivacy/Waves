@@ -90,7 +90,7 @@ def test_a_failed_single_url_track_does_not_respin_the_collection():
 
 
 def test_a_fully_successful_collection_still_runs_once():
-    """Control: with no stuck task the behaviour is unchanged."""
+    """Control: with no stuck task the behavior is unchanged."""
     items = ["t1", "t2", "t3"]
     b, progress, progress_task = _bridge(len(items))
 

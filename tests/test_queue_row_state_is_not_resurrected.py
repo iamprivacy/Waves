@@ -7,7 +7,7 @@ prunes all of it.
 
 Three writers could put it straight back. A track event, an owned-marks
 prediction and a fetched track list all arrive over a queued connection, so
-each can land after the row it belongs to has been cleared or cancelled, and
+each can land after the row it belongs to has been cleared or canceled, and
 each created its qid's entry unconditionally. qids are never reused, so what
 they re-created was never freed again: expand a 500-track playlist row and
 press CLEAR before the fetch returns, and both sides of the bridge keep five
@@ -55,6 +55,7 @@ class _Stub:
         self._job_dls: dict = {}
         self._pct_last: dict = {}
         self._track_poll = SimpleNamespace(stop=lambda: None, isActive=lambda: True, start=lambda: None)
+        self._speed_poll = SimpleNamespace(stop=lambda: None, isActive=lambda: True, start=lambda: None)
         self.queueTrackState = _Signal()
         self.queueTracksLoaded = _Signal()
         self._emit_queue = lambda: None

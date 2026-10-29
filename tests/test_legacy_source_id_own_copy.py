@@ -8,7 +8,7 @@ of merged tracks tagged with an id the current build no longer files them under.
 
 With skipping off (overwrite mode, or a quality upgrade), the engine asks
 ``_is_own_copy`` whether the file at the destination is this item's own to
-replace. Recognising ONLY the identity id would call the old copy a stranger,
+replace. Recognizing ONLY the identity id would call the old copy a stranger,
 step around it, and write a ``_01`` duplicate beside it: forever, since the app
 never deletes a user-visible file. ``_waves_owned_ids`` widens "its own" to
 both ids, and this file pins that the widening reaches the disk decision.
@@ -193,7 +193,7 @@ class _ClaimSpy(Download):
 class TestTheLiveDownloadPathPassesEveryOwnedId:
     def test_the_download_path_claims_with_both_ids(self, tmp_path):
         # The real path a track download takes: _perform_actual_download must
-        # hand the claim BOTH ids, or the unit behaviour above never reaches
+        # hand the claim BOTH ids, or the unit behavior above never reaches
         # a user's disk.
         dl = _make_download(tmp_path, skip_existing=False, cls=_ClaimSpy)
         member = _merge_member()

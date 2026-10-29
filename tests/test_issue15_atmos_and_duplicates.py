@@ -59,7 +59,7 @@ def _track(track_id: int, audio_modes) -> Track:
 class TestAtmosOnlyTracksAlwaysDownload:
     """The toggle prefers stereo where there is a choice. An Atmos-only track
     has no choice, so it downloads under either setting (2026-08-18); the old
-    behaviour skipped it and left a hole in the album."""
+    behavior skipped it and left a hole in the album."""
 
     def _run_item(self, dl, media):
         with (

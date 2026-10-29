@@ -1,10 +1,10 @@
-"""The "Videos preview on hover" escape hatch (Settings > Advanced).
+"""The "Videos preview on hover" escape hatch (Settings > Appearance).
 
 Resting the pointer on a video thumbnail grows a sound-on live preview card
 (the hover peek). Anyone who does not want video and audio starting from a
 mere hover can turn it off: thumbnails then stay still and videos play only on
 click. This pins the three things that make the toggle real: it ships on by
-default, it is offered as a labelled bool in the Advanced section, and
+default, it is offered as a labeled bool in the Appearance section, and
 flipping it notifies the QML, which re-reads the pref on that signal and gates
 root.peekOpen (the single entry point every thumbnail's dwell timer funnels
 into, so one check silences them all).
@@ -39,11 +39,11 @@ def test_video_hover_peek_defaults_on():
     assert _prefs_stub()._waves_prefs["video_hover_peek"] is True
 
 
-def test_toggle_is_offered_in_the_advanced_section():
+def test_toggle_is_offered_in_the_appearance_section():
     schema = WavesBridge.settingsSchema(_schema_stub())
-    advanced = next(s for s in schema if s["id"] == "advanced")
-    field = next((f for f in advanced["fields"] if f["key"] == "video_hover_peek"), None)
-    assert field is not None, "the toggle must be reachable from Settings > Advanced"
+    appearance = next(s for s in schema if s["id"] == "appearance")
+    field = next((f for f in appearance["fields"] if f["key"] == "video_hover_peek"), None)
+    assert field is not None, "the toggle must be reachable from Settings > Appearance"
     assert field["type"] == "bool"
     assert field["value"] is True
     # A power-user knob still has to explain itself.

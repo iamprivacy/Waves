@@ -466,7 +466,7 @@ def _api_retry(session):
     return session.request_session.get_adapter(_API_URL).max_retries
 
 
-def test_the_catalog_session_retries_reads_and_honours_retry_after():
+def test_the_catalog_session_retries_reads_and_honors_retry_after():
     retry = _api_retry(_hardened_session())
     assert retry.total >= 1
     assert 429 in retry.status_forcelist
@@ -479,7 +479,7 @@ def test_the_catalog_session_retries_reads_and_honours_retry_after():
 
 
 def test_a_retry_after_header_can_hold_a_call_but_not_park_it():
-    """urllib3 honours Retry-After verbatim and caps nothing, so one answer
+    """urllib3 honors Retry-After verbatim and caps nothing, so one answer
     could park a download worker, and the queue behind it, for as long as it
     says."""
     retry = _api_retry(_hardened_session())
@@ -572,7 +572,7 @@ def test_a_retry_wait_off_a_download_thread_is_the_plain_wait_it_always_was():
     assert slept == [7]
 
 
-def test_a_retry_wait_honours_retry_after_over_the_backoff():
+def test_a_retry_wait_honors_retry_after_over_the_backoff():
     """Same durations and the same order as urllib3's own sleep; only what is
     waited ON changed."""
     retry = _api_retry(_hardened_session())

@@ -16,7 +16,7 @@ reachable.
 
 Proved on the real Main.qml (subprocess, like its siblings): a playlist whose
 running order repeats an id, one state event for that id, and both rows are
-expected to carry the new status and quality while the untouched neighbour is
+expected to carry the new status and quality while the untouched neighbor is
 left alone.
 """
 

@@ -189,7 +189,7 @@ def _run_scenario() -> int:
     if bad:
         print("\n".join(bad), file=sys.stderr)
         return _EXIT_REGRESSED
-    print("ok: a delisted track says UNAVAILABLE, and says it in its own colour")
+    print("ok: a delisted track says UNAVAILABLE, and says it in its own color")
     return _EXIT_OK
 
 

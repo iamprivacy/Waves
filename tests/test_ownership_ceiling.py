@@ -376,7 +376,7 @@ def test_a_post_stream_skip_drops_the_captured_quality(monkeypatch):
         # Above it (the ceiling was under-advertised): still converged.
         ({"quality_rank": 3, "requested_rank": 3, "ceiling_rank": 2}, 3, None, True),
         # An unknown stored ceiling (-1) judges nothing: legacy rows and Atmos
-        # fetches keep the behaviour they had.
+        # fetches keep the behavior they had.
         ({"quality_rank": 1, "requested_rank": 3, "ceiling_rank": -1}, 3, None, True),
         ({"quality_rank": 0, "requested_rank": 3}, 3, None, True),
     ],
@@ -455,7 +455,7 @@ def test_a_delivery_that_reaches_the_ceiling_clears_the_count(tmp_path):
 
 def test_a_pre_count_row_reads_as_never_degraded(tmp_path):
     """Rows written before the column existed default to zero, so an install
-    upgrading into this keeps exactly the behaviour it had."""
+    upgrading into this keeps exactly the behavior it had."""
     store = OwnershipStore(str(tmp_path / "ownership.db"))
     landed = _file(tmp_path, "Song.flac")
     store.record("101", landed, quality_tier="HIGH", requested_rank=3, ceiling_rank=2)

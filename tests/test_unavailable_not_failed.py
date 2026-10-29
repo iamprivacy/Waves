@@ -95,8 +95,8 @@ def _stub_name_builders():
 # --- the refusal classifier reads TIDAL's own words --------------------------
 
 
-def test_asset_refusal_is_recognised():
-    # The real body observed for tracks greyed out in the official apps.
+def test_asset_refusal_is_recognized():
+    # The real body observed for tracks grayed out in the official apps.
     err = _http_error(401, {"status": 401, "subStatus": 4005, "userMessage": "Asset is not ready for playback"})
     assert _tidal_refuses_asset(err) == "Asset is not ready for playback"
 

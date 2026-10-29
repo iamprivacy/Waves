@@ -13,6 +13,7 @@ import json
 from threading import Lock
 from unittest.mock import MagicMock
 
+from waves.page_store import PageStore
 from waves.waves_ui import backend
 from waves.waves_ui.backend import WavesBridge
 
@@ -103,7 +104,7 @@ def test_remember_search_evicts_oldest_beyond_cap():
     assert "needle0" not in b._search_cache
 
 
-def test_pop_cached_honours_ttl():
+def test_pop_cached_honors_ttl():
     import time
 
     b = WavesBridge.__new__(WavesBridge)
@@ -114,7 +115,7 @@ def test_pop_cached_honours_ttl():
     assert b._pop_cached("a1") == -1  # expired entries read as absent
 
 
-# ----- favourite-id sets TTL ---------------------------------------------------
+# ----- favorite-id sets TTL ---------------------------------------------------
 
 
 def _fav_bridge(ids_per_call):
@@ -189,6 +190,7 @@ def _cache_bridge(tmp_path):
     b._search_cache = {}
     b._home_cache = None
     b._page_cache_path = str(tmp_path / "page_cache.json")
+    b._page_store = PageStore(str(tmp_path / "page_cache.sqlite3"))
     b._page_cache_lock = Lock()
     b.tidal = MagicMock()
     b.tidal.session.user.id = "42"
@@ -200,8 +202,8 @@ def test_home_landing_round_trips_through_page_cache(tmp_path):
     saver = _cache_bridge(tmp_path)
     saver._home_cache = shelves
     saver._save_page_cache()
-    with open(saver._page_cache_path) as fh:
-        assert json.load(fh)["home"] == shelves
+    rows = PageStore(str(tmp_path / "page_cache.sqlite3")).load(backend._PAGE_CACHE_VERSION, "42", ("home",))
+    assert json.loads(rows["home"][0][1]) == shelves
 
     loader = _cache_bridge(tmp_path)
     loader._load_page_cache()

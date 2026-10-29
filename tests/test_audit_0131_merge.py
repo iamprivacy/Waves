@@ -13,6 +13,7 @@ from threading import Event, Lock, local
 from types import SimpleNamespace
 
 import pytest
+from _dispatch_stub import arm_notify
 from tidalapi.exceptions import ObjectNotFound
 from tidalapi.media import Quality, Track
 
@@ -63,6 +64,7 @@ class _RetryAllStub:
         self._queue_batch = contextlib.nullcontext
         self._remove_rows_where = lambda pred: self.removed.extend(q["qid"] for q in self._queue if pred(q))
         self._set_status = lambda text: None
+        arm_notify(self)  # RETRY takes a counted failure back out of the run
         _bind(self, "_retry_all_with_status")
 
 

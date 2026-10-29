@@ -1,8 +1,8 @@
 """Every My Tidal tab gets DOWNLOAD ALL, like Tracks (issue #43).
 
-``downloadFavoriteAlbums`` pages every favourite album and runs the sweep the
+``downloadFavoriteAlbums`` pages every favorite album and runs the sweep the
 playlist page's "Download full albums" runs, then queues one batch under the
-``fav:albums`` rollup. ``downloadFavoriteArtists`` pages every favourite
+``fav:albums`` rollup. ``downloadFavoriteArtists`` pages every favorite
 artist and starts each one's own discography download; its ``fav:artists``
 rollup counts whole artists (members keyed ``artist:<id>`` so an artist id is
 never mistaken for an album or track id), settling each as its discography
@@ -480,7 +480,7 @@ def test_mixes_queue_each_mix_and_a_stale_batch_starts_nothing():
     assert stub.started == []
 
 
-def test_videos_page_every_favourite_video():
+def test_videos_page_every_favorite_video():
     count = _LIBRARY_PAGE + 3
     stub = _Stub(_Favorites(videos=[SimpleNamespace(id=f"v{i}") for i in range(count)]))
     stub.downloadFavoriteVideos()

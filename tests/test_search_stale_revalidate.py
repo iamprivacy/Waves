@@ -17,8 +17,9 @@ from unittest.mock import MagicMock
 
 from conftest import _InlinePool, _Signal
 
+from waves.page_store import PageStore
 from waves.waves_ui import backend
-from waves.waves_ui.backend import _SEARCH_DISK_MAX, _STALE_STAMP, WavesBridge, _search_same
+from waves.waves_ui.backend import _PAGE_CACHE_VERSION, _SEARCH_DISK_MAX, _STALE_STAMP, WavesBridge, _search_same
 
 
 class _Stub:
@@ -202,6 +203,7 @@ def _cache_bridge(tmp_path):
     b._home_cache = None
     b._page_cache_path = str(tmp_path / "page_cache.json")
     b._search_cache_path = str(tmp_path / "search_cache.json")
+    b._page_store = PageStore(str(tmp_path / "page_cache.sqlite3"))
     b._page_cache_lock = Lock()
     b.tidal = MagicMock()
     b.tidal.session.user.id = "42"
@@ -213,11 +215,9 @@ def test_the_newest_searches_outlive_the_process_and_come_back_stale(tmp_path):
     for i in range(_SEARCH_DISK_MAX + 3):
         saver._search_cache[f"needle {i}"] = (float(i), _payload((f"al{i}",)))
     saver._save_page_cache()
-    # Their own file: the launch-time page cache load must not pay for them.
-    with open(saver._page_cache_path) as fh:
-        assert "searches" not in json.load(fh)
-    with open(saver._search_cache_path) as fh:
-        on_disk = json.load(fh)["searches"]
+    # Their own kind: the launch-time page cache load must not pay for them.
+    rows = PageStore(str(tmp_path / "page_cache.sqlite3")).load(_PAGE_CACHE_VERSION, "42", ("searches",))
+    on_disk = {key: json.loads(body) for key, body in rows["searches"]}
     assert len(on_disk) == _SEARCH_DISK_MAX and "needle 0" not in on_disk and "needle 14" in on_disk
     assert on_disk["needle 14"] == _payload(("al14",)), "the payload alone, no stamp"
 

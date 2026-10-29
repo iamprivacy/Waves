@@ -18,8 +18,10 @@ across ticks and each row re-evaluates its own snapshot (``td``) in place, so
 a tick only repaints the texts that changed.
 
 The count now arrives through an int property on the row rather than inline on
-the model line, because it is also where the ledger's ceiling is applied (see
-test_queue_ledger_cap.py). That is the same shape, so this guard checks it
+the model line, because it is also where the MISSING view narrows it, and the
+Repeater is now a ListView that scrolls (see test_queue_ledger_scroll.py); a
+ListView's delegates rebuild on a model change just the same. That is the same
+shape, so this guard checks it
 structurally rather than by matching one expression: whatever the ledger's
 model names must be declared an int, and anything deriving a count from
 ``root.queueTracks`` must take ``.length`` rather than carrying the array.
@@ -63,6 +65,15 @@ def test_the_ledger_model_is_a_count_not_the_array():
             f"reads as the hover-peek sliver vibrating. Offending line: {line}"
         )
         return
+
+    # A ListModel of empty slots kept in step with a count (grown and shrunk
+    # at its end, so a scrolled list keeps its place) is a count too: it must
+    # be fed from an int, never carry the rows.
+    if re.match(r"^model:\s*ListModel\b", line):
+        head = src[: src.index(LEDGER_ROW_MARKER)]
+        feeds = re.findall(r"^\s*readonly property int wantRows:\s*(?:\w+\.)?(\w+)\s*$", head, re.M)
+        assert feeds, "the ledger's ListModel is not kept in step with an int count (wantRows)"
+        line = f"model: {feeds[-1]}"
 
     m = re.match(r"^model:\s*(?:\w+\.)?(\w+)\s*$", line)
     assert m, (

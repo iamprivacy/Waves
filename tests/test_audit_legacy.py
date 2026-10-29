@@ -3,7 +3,7 @@
 Covers the audited update-check bugs in ``waves.__init__``:
 
 * A failed check (no network / bad response) must report **no** update
-  available, instead of the previous behaviour where ``update_available()``
+  available, instead of the previous behavior where ``update_available()``
   returned ``True`` for any non-``v0.0.0`` current version and surfaced a bogus
   ``v0.0.0`` "update" that linked to the raw GitHub API URL.
 * ``latest_version_information()`` must not leak the raw API URL on failure (the

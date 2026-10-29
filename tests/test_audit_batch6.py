@@ -128,6 +128,13 @@ def test_logout_flips_the_flag_before_deleting_the_snapshot():
     ), "a worker mid-save must already see logged_in False when the file goes"
 
 
+def test_logout_wipes_the_page_store_after_the_flag():
+    stub = _LogoutStub()
+    stub._page_store = SimpleNamespace(wipe=lambda: stub.events.append(("wipe",)))
+    stub.logout()
+    assert stub.events.index(("logged_in", False)) < stub.events.index(("wipe",))
+
+
 # Finding 42: capped-cache eviction is serialized (two workers evicting
 # concurrently raced dict iteration).
 
@@ -172,7 +179,7 @@ def test_remember_capped_evicts_oldest():
     assert len(d) == 40 and "0" not in d and "44" in d
 
 
-# Finding 45: the tile-art memory cache honours the 7-day TTL.
+# Finding 45: the tile-art memory cache honors the 7-day TTL.
 
 
 class _TileArtStub:
@@ -530,7 +537,7 @@ def test_shutdown_drains_the_ownership_pool_before_closing_the_store():
 # leaves no extracted app copy behind.
 
 
-def test_install_cancel_after_extraction_is_honoured_and_staging_swept(monkeypatch, tmp_path):
+def test_install_cancel_after_extraction_is_honored_and_staging_swept(monkeypatch, tmp_path):
     from threading import Event
 
     pub, priv = signing.keygen()
@@ -542,7 +549,7 @@ def test_install_cancel_after_extraction_is_honoured_and_staging_swept(monkeypat
 
     def cancelling_apply(self, p, rel, log, abort=None):
         # The user clicks Cancel while the apply phase runs: only a forwarded
-        # abort can be honoured here (pre-setting it would trip the earlier
+        # abort can be honored here (pre-setting it would trip the earlier
         # install() checks and never reach this phase at all).
         staged = self.staging_dir / "staged"
         staged.mkdir(parents=True, exist_ok=True)

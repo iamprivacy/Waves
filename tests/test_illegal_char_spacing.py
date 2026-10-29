@@ -31,7 +31,7 @@ def _track(album_title: str = _SLASHED, title: str = "Song", explicit: bool = Fa
     t.name = title
     t.version = None
     # tidalapi resolves a track's display title through full_name; a stub
-    # built with __new__ never runs the property's initialisation.
+    # built with __new__ never runs the property's initialization.
     t.full_name = title
     t.explicit = explicit
     t.track_num = 1

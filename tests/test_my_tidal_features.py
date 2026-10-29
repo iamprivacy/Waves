@@ -141,7 +141,7 @@ def test_reveal_download_path_opens_nearest_existing(tmp_path, monkeypatch):
 # ----- My Tidal sort -> tidalapi order enums -------------------------------
 
 
-@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favourites")
+@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favorites")
 def test_lib_order_kwargs_maps_per_category():
     # self is unused by the method, so calling it unbound is fine.
     ka = WavesBridge._lib_order_kwargs(None, "albums", ("date", "desc"))
@@ -155,7 +155,7 @@ def test_lib_order_kwargs_maps_per_category():
     assert WavesBridge._lib_order_kwargs(None, "albums", ("release", "asc"))["order"] is backend.AlbumOrder.ReleaseDate
 
 
-@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favourites")
+@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favorites")
 def test_lib_order_kwargs_unsupported_is_empty():
     # An order key a category doesn't offer, or no spec at all -> no kwargs
     # (falls back to the API's default order).
@@ -164,7 +164,7 @@ def test_lib_order_kwargs_unsupported_is_empty():
     assert WavesBridge._lib_order_kwargs(None, "nonsense", ("date", "desc")) == {}
 
 
-@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favourites")
+@pytest.mark.skipif(backend.OrderDirection is None, reason="tidalapi has no ordered favorites")
 def test_library_page_default_sort_is_date_desc():
     # A category with no explicit sort must still ASK tidalapi for date-added
     # descending. tidalapi's raw default is not date-added, so leaving it unset
@@ -192,7 +192,7 @@ def test_library_page_default_sort_is_date_desc():
 def test_want_cover_file_scope_matrix():
     # Master toggle off -> never write cover.jpg, whatever the scope.
     assert Download._want_cover_file(False, True, True) is False
-    # Album/collection download always writes when saving is on (today's behaviour).
+    # Album/collection download always writes when saving is on (today's behavior).
     assert Download._want_cover_file(True, True, False) is True
     # A lone single track: off by default, on only when the user opts in.
     assert Download._want_cover_file(True, False, False) is False

@@ -27,7 +27,7 @@ The answer now reaches the GUI thread on every SUCCESSFUL lookup, an empty one
 included. A lookup that RAISED still says nothing: it knows nothing either way,
 so it leaves whatever is on screen alone. Both halves are pinned here.
 
-Two neighbouring promises are pinned with them, because an "un-say" that keeps
+Two neighboring promises are pinned with them, because an "un-say" that keeps
 every assertion above can still be built wrong in either direction: the empty
 answer must un-say marks for the row it is about and no other queued row, and
 the lookup must stay the SECOND pass, so a slow drive delays the marks and never

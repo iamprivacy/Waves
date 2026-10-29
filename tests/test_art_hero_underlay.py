@@ -2,7 +2,7 @@
 keyed, and a hovered card has its page warmed before the click.
 
 Source-level pins on Main.qml for the plumbing a headless load cannot see
-fail: the art hint travelling beside the title hint, the Art stand-in layer
+fail: the art hint traveling beside the title hint, the Art stand-in layer
 gating the "art: GET" box, the skeleton header, and the hover prefetch wiring.
 """
 
@@ -241,21 +241,19 @@ def test_the_disc_shows_the_house_marks_on_a_still_plate():
     assert "id: paMask" in pa[wrap:], "paMask is the mask's sourceItem and belongs with the Image"
     term = pa[pa.index("id: paTerm") :]
     assert 'color: "#04140a"' in term and 'pa.artState === "failed" ? root.red : root.accentDim' in term
-    assert 'text: ">"' in term and 'text: "x"' in term
+    assert "sourceComponent: ArtDots {" in term and "round: true" in term
+    assert 'failed: pa.artState === "failed"' in term
     assert 'opacity: ((pa.artState === "loading" && pa.artWaited) || pa.artState === "failed") ? 1 : 0' in term
     assert 'text: "≈"' in pa and 'visible: pa.artState === "none"' in pa, "a track with no cover says so"
 
 
-def test_the_disc_blinks_off_the_shared_clock_and_fades_on_the_wrap():
-    assert "readonly property real termBlink: (marchTick % 20) < 10 ? 1 : 0" in MAIN_QML
+def test_the_disc_mark_is_built_only_while_shown_and_fades_on_the_wrap():
     pa = _component("PreviewArt")
-    assert (
-        "opacity: paTerm.visible ? root.termBlink : 1" in pa
-    ), "the visible test goes first, so a settled disc never reads the 20Hz tick"
-    # (The vinyl spin is a SequentialAnimation too, but only one disc buffers
-    # at a time; a blink would run on every loading disc on the page.)
     mark = pa[pa.index("id: paTerm") : pa.index("id: coverWrap")]
-    assert "SequentialAnimation" not in mark, "one blink animation per disc is the per-vsync repaint trap"
+    assert "active: paTerm.visible" in mark, "a settled disc must hold no grid and read no clock"
+    # (The vinyl spin is a SequentialAnimation too, but only one disc buffers
+    # at a time; an animation per mark would run on every loading disc.)
+    assert "SequentialAnimation" not in mark, "one animation per disc is the per-vsync repaint trap"
     # The fade rides coverWrap, never the layered Image (whose texture would
     # re-render every frame, times every disc on the page).
     wrap = pa[pa.index("id: coverWrap") :]
@@ -265,3 +263,20 @@ def test_the_disc_blinks_off_the_shared_clock_and_fades_on_the_wrap():
     assert "visible: status === Image.Ready" in img
     assert "opacity:" not in img.split("layer.enabled", 1)[0], "no opacity animation on the layered Image"
     assert "sourceSize.width: root.discDecode" in img
+
+
+def test_cover_box_mark_is_the_led_grid_on_the_shared_clock():
+    art = _component("Art")
+    term = art[art.index("id: artTerm") :]
+    assert "active: artTerm.visible" in term and "sourceComponent: ArtDots {" in term
+    assert "SequentialAnimation" not in term.split("// Gloss variant", 1)[0]
+    dots = _component("ArtDots")
+    # Motion reads only the shared 20 Hz values, never an animation of its own.
+    assert "Animation" not in dots
+    assert "root.marchTick" in dots and "root.ledPulse" in dots and "root.shimmerPhase" in dots
+    # The cells never read the clock: only the group Items do.
+    cell = _component("ArtDotCell")
+    for clock in ("marchTick", "ledPulse", "shimmerPhase", "settle", "ringR"):
+        assert clock not in cell, f"a per-cell {clock} binding costs every cell a tick"
+    # A failed mark plays one 3 s ripple, then settles into the twinkle.
+    assert "ft >= 60 ? -1e4" in dots and "(ft - 60) / 20" in dots

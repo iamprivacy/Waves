@@ -4,7 +4,7 @@ WHAT THIS FENCES OFF
 --------------------
 The strip is sized by its own words (each half hugs its label), and nothing
 capped it against the card it rides on. The artwork clips, and the pill is
-centred, so a strip wider than the cover was cut off at BOTH ends: the pill
+centered, so a strip wider than the cover was cut off at BOTH ends: the pill
 lost its rounded corners and the words lost their first and last letters.
 
 It was never a corner case. Measured with the real UI font at the real 10px,

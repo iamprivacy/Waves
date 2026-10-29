@@ -138,7 +138,7 @@ class TestTheModeGateInTheClaim:
 
     def test_an_unknown_fetch_mode_keeps_the_historical_answer(self, tmp_path):
         # fetch_is_atmos=None means the caller cannot say; the gate must stand
-        # down rather than guess, or every legacy call path changes behaviour.
+        # down rather than guess, or every legacy call path changes behavior.
         dl = _make_download(tmp_path, skip_existing=False)
         base = tmp_path / "Song.m4a"
         _occupy(base, "123", atmos=True)

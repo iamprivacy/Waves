@@ -211,7 +211,7 @@ class TestTheSettingsBoxRefusesIllegalCharacters:
         assert "invalid: page.sanitizeDirty(modelData)" in src
         assert "waves.sanitizeFilenameReplacement(String(val(f)))" in src
 
-    def test_a_red_field_greys_out_save_instead_of_correcting_it(self):
+    def test_a_red_field_grays_out_save_instead_of_correcting_it(self):
         # Correcting the value on save flashed "changes saved" over a silent
         # rewrite. The button is held instead, leaving the bad character on
         # screen to be fixed.

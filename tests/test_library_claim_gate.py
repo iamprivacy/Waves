@@ -15,7 +15,7 @@ even more than the duplicate-recording gate's:
   to a skip by a tag match.
 * Never inside a "best of both" merge. A merge assembles one complete folder,
   and the claim points at the library, not this job's destination. A merge
-  member is recognised by ``waves_identity_id``.
+  member is recognized by ``waves_identity_id``.
 * A claim lookup failure never gates: downloading twice beats not
   downloading at all.
 

@@ -257,6 +257,9 @@ class TestSavingStandInsAnswersTheOfferToo:
         stub._submit_settings_write = lambda: stub.settings.save()
         stub._ffmpeg_source_label = lambda: "system"
         stub._waves_pref_bool = lambda key: False
+        # The master switch is off here (_waves_pref_bool above), so the
+        # armed check is a no-op; applySettings still calls it.
+        stub._notify_master_armed = _bind(stub, "_notify_master_armed")
         stub._set_status = lambda text: None
         stub._logged_in = False
         stub._init_download = lambda: None

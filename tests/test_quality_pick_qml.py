@@ -494,7 +494,7 @@ def _run_scenario() -> int:  # noqa: C901 (one straight scenario)
         and abs(float(q("root._qp['t3/'].ghostOp"))) < 0.01,
         "the swap did not park: the pill is left mid-change",
     )
-    # Colour alone, no dip: claiming the tier a plain pill already states only
+    # Color alone, no dip: claiming the tier a plain pill already states only
     # tints its ground, and blanking letters that are not changing would be a
     # blink of nothing.
     bridge.setQualityOverride("t3", "")

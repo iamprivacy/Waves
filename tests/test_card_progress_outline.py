@@ -19,7 +19,7 @@ Drives the real Main.qml: a fake Browse landing with one playlist card, put into
 a running download, then the card is grabbed to an image and its bar's left
 edge is probed one pixel inside the pill. That pixel must be the outline green
 (clearly brighter than the fill), and the property side is checked too: the
-bare button's colour is fully transparent and the pill's colour is the button's
+bare button's color is fully transparent and the pill's color is the button's
 fill.
 
 Runs in a SUBPROCESS like the other Main.qml scenarios.
@@ -149,7 +149,7 @@ def _run_scenario() -> int:
     settle(1200)
     q("root.browseBuilding = false")
     q("(function(){ var h = root.dlHolder('pl-outline'); h.st = 'running'; h.pct = 42; return 1 })()")
-    settle(900)  # past the roll (230ms) and the colour fade (420ms)
+    settle(900)  # past the roll (230ms) and the color fade (420ms)
 
     shape = q(
         "(function(){" + _WALK + " var b = btn(); if (!b) return 'no button';"
@@ -167,7 +167,7 @@ def _run_scenario() -> int:
     if float(ba) > 0.001:
         failures.append(f"a bare download button still paints its own fill (alpha {ba})")
     if abs(float(pr) - float(fr)) > 0.02 or abs(float(pg) - float(fg)) > 0.02 or abs(float(pb) - float(fb)) > 0.02:
-        failures.append(f"the pill's colour {pr},{pg},{pb} is not the button's fill {fr},{fg},{fb}")
+        failures.append(f"the pill's color {pr},{pg},{pb} is not the button's fill {fr},{fg},{fb}")
 
     # Pixel probe: grab the card, look at the bar's left edge, one pixel in.
     png = os.path.join(tempfile.mkdtemp(prefix="waves-card-outline-"), "card.png")

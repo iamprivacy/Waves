@@ -6,7 +6,7 @@ rate-limit pause that quietly stops holding the run back. Each test states the
 user-visible sequence it prevents, and each was checked against the unfixed code
 first: reverting its fix turns the test red.
 
-  1  the late skip only recognised a twin tagged on the BASE name, so a twin at
+  1  the late skip only recognized a twin tagged on the BASE name, so a twin at
      a numbered variant, and a twin whose file carries no id at all, each got a
      byte-identical second copy that nothing ever removes
   2  the loser of two in-flight twins was refused at the move and reported as a
@@ -146,7 +146,7 @@ def _run_to_the_end(dl: Download, dst: pathlib.Path, media) -> tuple[bool, pathl
 
 
 # --------------------------------------------------------------------------- #
-# 1. The late skip recognises every twin THIS RUN wrote, not just a tagged one
+# 1. The late skip recognizes every twin THIS RUN wrote, not just a tagged one
 #    sitting on the base name.
 #
 # A playlist or a mix may name one song twice. Both occurrences pass every

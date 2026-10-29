@@ -268,7 +268,7 @@ def test_screen_duration_must_agree_when_tidal_offered_it(tmp_path):
 
 def test_an_empty_search_answer_expires_and_is_reasked(tmp_path):
     # The search endpoint says not-found as HTTP 200 with an empty releases
-    # array. Caching that body forever meant an album MusicBrainz catalogued
+    # array. Caching that body forever meant an album MusicBrainz cataloged
     # next month could never upgrade its badge for the life of the file; it
     # must expire exactly like the negative statuses do.
     from waves.mb_arbiter import NEGATIVE_TTL_SEC
