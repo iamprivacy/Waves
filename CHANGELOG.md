@@ -22,6 +22,29 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.1 (2026-11-03)
+
+### ✨ Added
+
+- ⚡ Tracks are tagged and moved to the library in the background while the next ones download, so downloads keep their speed; the button reads FINALIZING meanwhile. Speed & Pacing sets how many finish at once (3 by default, 0 turns it off).
+- 🔊 Pick the audio output in Settings or from the player bar, including Bluetooth, AirPlay and Miracast speakers; the bar's output chip turns green while sound plays, and if the output disconnects, Waves goes back to the system default ([issue #57](https://github.com/iamprivacy/Waves/issues/57)).
+- 🆕 New releases gather in a Just in section at the top of the Releases feed and stay until you open them or press MARK AS SEEN; Settings > Releases sets how long.
+- 👥 The player bar shows as many of a track's artists as fit; the rest are a click away on a +N chip.
+
+### 🔧 Changed
+
+- 🎚️ The player bar's seek is the track's waveform, drawn from its loudness in the playing cover's colors, with the time played and left at its ends: click or drag it to seek.
+- 🧩 Settings > Appearance has a Player bar choice: Full (the default) or Mini, which gives the track's name and artists more of the bar.
+- 🖼️ Covers have rounded corners, and the playing track's cover glows in its own colors.
+- 📝 Titles and credits on the Releases tab and Browse wrap instead of being cut off (titles up to three lines, credits up to two).
+- 📅 Each Releases section lists its newest releases first.
+
+### 🐛 Fixed
+
+- 🗂️ A network share that dropped off is remounted right away instead of showing "Download folder isn't reachable".
+- 👆 Links lower on a scrolled page show the pointing hand again.
+- 🖥️ The Dock icon on macOS shows its whole green outline; it was cut off at the sides.
+
 ## 🗂️ v0.2.0 (2026-10-28)
 
 Waves v0.2 is here, and with it come a lot of changes I have been quietly working on since v0.1 launched a few months ago. This is by far the largest update to Waves, which is why I am bumping the version number. As always, I did my best to test everything before release, but I still expect there to be bugs. The best way you can help me is by reporting them in the [issues](https://github.com/iamprivacy/Waves/issues) with as much detail as possible.
