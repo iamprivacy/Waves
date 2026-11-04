@@ -134,7 +134,7 @@ def test_the_roll_arm_walk_waits_for_the_height_to_settle():
 
 
 def test_metric_rows_hold_no_vector_shapes():
-    for row in ("dbMetric", "dbMetricDone", "dbMetricLib", "dbMetricLibTrack"):
+    for row in ("dbMetric", "dbMetricDone", "dbMetricDoneLib", "dbMetricLib", "dbMetricLibTrack"):
         block = _block(MAIN, f"id: {row}\n", "        }\n")
         assert "Ico {" not in block, row
 
@@ -236,3 +236,15 @@ def test_a_failed_qml_load_shuts_the_bridge_down_and_the_exit_flushes_the_log():
     assert fail.index("diagnostics.flush_disk_log()") < fail.index("os._exit(1)")
     tail = _block(APP, "rc = app.exec()", "return rc")
     assert tail.index("diagnostics.flush_disk_log()") < tail.index("os._exit(rc)")
+
+
+def test_the_download_button_measures_both_done_words():
+    """An in-library row says IN LIBRARY and an idle row says DOWNLOADED;
+    sizing each button by its own word left the in-library row's button
+    narrower, so its quality tag, date and time fell out of line."""
+    btn = _block(MAIN, "component DownloadButton:", "id: dbMetricDone\n")
+    width = btn[btn.index("implicitWidth: Math.max(dbRow.implicitWidth") :]
+    width = width[: width.index("root.btnPadH * 2")]
+    assert "dbMetricDone.implicitWidth" in width and "dbMetricDoneLib.implicitWidth" in width
+    assert '+ "DOWNLOADED"' in _block(MAIN, "id: dbMetricDone\n", "        }\n")
+    assert '+ "IN LIBRARY"' in _block(MAIN, "id: dbMetricDoneLib\n", "        }\n")

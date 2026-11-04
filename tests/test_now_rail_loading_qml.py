@@ -182,6 +182,16 @@ def _run_scenario() -> int:
     q("nowRail.calm = 0")
     check(not q("nowRail.bars"), "a calmed wait still draws the ghost")
 
+    # No cover (previewNowArt is empty here): the rail wears the app's own
+    # pair, the accent for the played part and the plain gray for the rest,
+    # never the gray tinted toward the accent.
+    check(q("nowRail.pal") is None, "a track with no cover still found a palette")
+    acc = q("[Math.round(root.accent.r * 255), Math.round(root.accent.g * 255), Math.round(root.accent.b * 255)]")
+    played = q("nowRail.fillRgb(true, 0).map(Math.round)")
+    rest = q("nowRail.fillRgb(false, 0).map(Math.round)")
+    check(played == acc, f"the played part is not the accent: {played} vs {acc}")
+    check(rest == [70, 76, 87], f"the rest is not the plain gray: {rest}")
+
     # A stale answer for another track is ignored.
     begin("t4")
     settle(80)

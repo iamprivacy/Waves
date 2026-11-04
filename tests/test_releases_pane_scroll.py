@@ -459,10 +459,20 @@ def _run_scenario() -> int:  # noqa: C901
                 }
                 // The ghost's cover asks for exactly what Art pinned: same
                 // url, square decode at twice the card's width.
-                var art = null, card = it.cards[0] || ({})
-                var cell = g && g.item ? g.item.children[0] : null
-                if (cell) for (var c = 0; c < cell.children.length; c++)
-                    if (cell.children[c].objectName === "relGhostArt") art = cell.children[c]
+                // Found by name anywhere under the cell: the cover sits
+                // inside the rounded face's Item, not on the cell itself.
+                function findArt(item) {
+                    if (!item) return null
+                    var ch = item.children || []
+                    for (var c = 0; c < ch.length; c++) {
+                        if (ch[c].objectName === "relGhostArt") return ch[c]
+                        var deeper = findArt(ch[c])
+                        if (deeper) return deeper
+                    }
+                    return null
+                }
+                var card = it.cards[0] || ({})
+                var art = g && g.item ? findArt(g.item.children[0]) : null
                 var want = (card.kind === "video" ? relVideoW : relCardW) * 2
                 return JSON.stringify({ghost: !!(g && g.active), status: l ? l.status : -1,
                                        drawn: g && g.item ? Math.round(g.item.width) : 0,
