@@ -46,6 +46,9 @@ ApplicationWindow {
     // pointing at a thumbnail no longer grows the sound-on preview card; a
     // click still plays the video in full. An open peek closes on the flip.
     property bool videoHoverPeek: waves.wavesPref("video_hover_peek") !== false
+    // Settings > Appearance > "Player bar": the waveform in the bottom bar is
+    // 200 px wide in full and 130 px in mini.
+    property string playerSize: waves.wavesPref("player_size") === "mini" ? "mini" : "full"
     // Whether the library scan is on (saved state). The green done-state
     // button reads IN LIBRARY instead of DOWNLOADED while it is: with a
     // library in the picture "you have this" is the claim that matters, and
@@ -97,6 +100,9 @@ ApplicationWindow {
         function onArtHoverTiltChanged() {
             root.artHoverTilt = waves.wavesPref("art_hover_tilt") !== false
         }
+        function onPlayerSizeChanged() {
+            root.playerSize = waves.wavesPref("player_size") === "mini" ? "mini" : "full"
+        }
         function onVideoHoverPeekChanged() {
             root.videoHoverPeek = waves.wavesPref("video_hover_peek") !== false
             if (!root.videoHoverPeek && root.peekNow) root.peekClose()
@@ -128,11 +134,37 @@ ApplicationWindow {
     // Raise and shadow are deliberately small; this is a hierarchy cue, not
     // an animation. Values chosen in scratchpad/playing_raise_lab against
     // the real Browse page.
+    // A card cover's corner as a share of its side (16 px on 200, 22 on
+    // 280): 12 px read as barely rounded at all on a 200 px cover.
+    property real artCornerK: 0.08
+    function artCorner(side) { return Math.round(side * artCornerK) }
     property real artPlayLift: 1.02          // resting swell while it plays
-    property real artPlayShadowY: 10         // shadow drop while raised, px
     property real artPlayShadowBlur: 0.75    // MultiEffect blur, 0..1
     property real artPlayShadowA: 0.55       // shadow alpha at full depth
-    property real artPlayBreath: 0.22        // paused: how far the breath relaxes
+    // While it plays, the shadow gives way to a rim in the cover's own
+    // colors, blended through it (shaders/cover_blend.frag, colors from
+    // cover_palette.py): a tight, even halo all round, only the colors
+    // inside it drifting. Its states ease into one another: buffering
+    // pulses it, playing drifts the colors, pausing dims it to a slow
+    // breath, and a stop fades it out at once, pointer or no pointer.
+    // Values chosen in notes/playing_glow_lab (E2, then round 5's W2).
+    property real artPlayBlendA: 0.65        // the rim's strength
+    property real artPlayBlendW: 0.02        // its falloff, as a share of the cover's side (4 px on a 200 px cover)
+    property real artPlayGlowMax: 3.5        // and never past the lab's 3.5 px, however big the cover
+    property real artPlayBlendSpeed: 1.61    // how fast its colors drift
+    property int  artPlayBlendStopMs: 700    // paused: the colors ease to a stop
+    property int  artPlayGlowInMs: 420       // the rim comes up with the first live state
+    property int  artPlayGlowOutMs: 420      // and goes the moment the preview ends
+    property int  artPlayBufferMs: 520       // buffering: one half of the pulse, the [buffering] word's beat
+    property real artPlayBufferLo: 0.35      // buffering: the pulse's floor and ceiling, as shares of the strength
+    property real artPlayBufferHi: 0.8
+    property real artPlayPauseK: 0.55        // paused: the rim's level, as a share of the strength
+    // How far past a cover the rim can be seen, px, at the largest cover
+    // (three falloffs on a 280 px hero, raised, and a little over). The
+    // shelves and the feed keep this much room on every side so no edge
+    // cuts it.
+    readonly property int artGlowPad: 22
+    property real artPlayBreath: 0.2         // paused: how far the breath swings around the level
     property int  artPlayBreathMs: 2400      // paused: one half-breath
 
     // ---- Console palette (phosphor-green CRT, dark only) ----------------
@@ -488,6 +520,9 @@ ApplicationWindow {
         readonly property real fX: live ? (btt.width, flick.width, flick.mapToItem(btt, 0, 0).x) : 0
         readonly property real fW: live ? flick.width : 0
         readonly property real fBottom: live ? fTop + flick.height : 0
+        // A list whose content paints past its own sides (fadeBleed px, in
+        // a wider clip) has the fades reach that far too.
+        readonly property real bleed: live && flick.fadeBleed !== undefined ? flick.fadeBleed : 0
         // A scrollbar inside the list's own width keeps its column clear of
         // the fades (one moved out beside the list is past them already).
         readonly property real barGutter: {
@@ -505,7 +540,7 @@ ApplicationWindow {
         // page arrives, and a page too short to scroll shows no fades at all.
         readonly property real fadeH: 34
         Rectangle {
-            x: btt.fX; y: btt.fTop; width: btt.fW - btt.barGutter; height: btt.fadeH
+            x: btt.fX - btt.bleed; y: btt.fTop; width: btt.fW + 2 * btt.bleed - btt.barGutter; height: btt.fadeH
             visible: btt.live && opacity > 0
             opacity: btt.live ? Math.min(1, Math.max(0, btt.flick.contentY) / btt.fadeH) : 0
             gradient: Gradient {
@@ -516,7 +551,7 @@ ApplicationWindow {
             }
         }
         Rectangle {
-            x: btt.fX; y: btt.fBottom - btt.fadeH; width: btt.fW - btt.barGutter; height: btt.fadeH
+            x: btt.fX - btt.bleed; y: btt.fBottom - btt.fadeH; width: btt.fW + 2 * btt.bleed - btt.barGutter; height: btt.fadeH
             visible: btt.live && opacity > 0
             opacity: btt.live ? Math.min(1, Math.max(0,
                          btt.flick.contentHeight - btt.flick.height - btt.flick.contentY) / btt.fadeH) : 0
@@ -867,6 +902,16 @@ ApplicationWindow {
             // hover motion off everything snaps.
             property real shownPct: -1
             property int rampMs: 0
+            // How far the final steps have come, 0 to 1: the queue row's
+            // queueItemFinish, copied here so a download button (dlFin) can
+            // fill FINALIZING without walking the queue. Not reset by pct: an
+            // album's finished tracks advance it while the rest still stream.
+            // -1 (every stroke lit) until the row's first fraction lands: a
+            // rollup button (an artist's, a folder's) sums rows and never
+            // gets one, so FINALIZING there must not sit dim for the whole
+            // finish. A new run (queued or started again) opens it at -1.
+            property real fin: -1
+            onStChanged: if (st === "queued" || st === "running") fin = -1
             onPctChanged: {
                 var d = pct - shownPct
                 rampMs = (root.hoverMotion && shownPct >= 0 && d > 3) ? Math.min(1500, 200 + d * 22) : 0
@@ -894,6 +939,12 @@ ApplicationWindow {
     // and the player's own position clock is ignored, so exactly one real seek
     // fires (on release) instead of one per press/drag tick.
     property bool   previewScrubbing: false
+    // Loudness buckets 0..1 across the active preview (previewPeaks from the
+    // bridge, about a second after playback starts). Empty until then; the
+    // now-playing rail shows a breathing ghost while previewPeaksPending (the
+    // bridge has not answered yet) and the plain line once it answers empty.
+    property var    previewPeaks: []
+    property bool   previewPeaksPending: false
     property string previewNowTitle: ""
     property string previewNowArtist: ""
     property string previewNowArt: ""
@@ -905,6 +956,18 @@ ApplicationWindow {
     // Full credit list [{name, id}] so each collaborator in the now-playing bar
     // is separately clickable; falls back to the single primary artist.
     property var previewNowArtists: []
+    // The now-playing credits, one entry per artist with its own id, so each
+    // name opens its own page. A source that sent no list falls back to the
+    // joined line split apart; only the first of those has an id to link.
+    readonly property var nowCredits: (previewNowArtists && previewNowArtists.length > 0) ? previewNowArtists
+        : previewNowArtist === "" ? []
+        : previewNowArtist.split(/\s*,\s*|\s+&\s+|\s+(?:feat|ft)\.?\s+/i).filter(function (x) { return x !== "" })
+            .map(function (x, i) { return { name: x, id: i === 0 ? previewNowArtistId : "" } })
+    // The featured artists card above the bar, opened by the "+N" chip that
+    // stands for the names the bar has no room for. A new track closes it.
+    property bool nowCardOpen: false
+    property Item nowCardAnchor: null
+    onNowCreditsChanged: nowCardOpen = false
     // "kind:id" of the preview whose resolve just failed, flashes the button red
     // briefly (previewErrorTimer clears it), so a failed preview isn't silent.
     property string previewError: ""
@@ -2110,10 +2173,8 @@ ApplicationWindow {
         property color metaColor: root.textHi
         // The card says you have it (see NewTag.settled).
         property bool settled: false
-        // The Releases feed shows the date as its own chip.
-        property bool hideDate: false
         readonly property string lead: root.cardSubLead(card)
-        readonly property string meta: hideDate ? "" : root.cardSubMeta(card)
+        readonly property string meta: root.cardSubMeta(card)
         readonly property string fallback: lead === "" && meta === "" ? root.cardSubtitle(card) : ""
         // Albums test the date their caption shows; a track card shows none,
         // so the mark is its only recency cue.
@@ -2258,6 +2319,7 @@ ApplicationWindow {
     }
     function dlPct(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.shownPct : -1 }
     function dlSt(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.st : "" }
+    function dlFin(id) { var g = dlHoldersGen; var h = dlHolders[id]; return h !== undefined ? h.fin : -1 }
     // A quality choice landed on these ids (the item and, for an album, its
     // known tracks). A button reading DOWNLOADED because THIS session fetched
     // the item holds that word in its holder, past what ownership says; hand
@@ -2337,6 +2399,7 @@ ApplicationWindow {
         videoLoading = true; videoError = false; videoSwitching = false
         _videoSwapDone()
         waves.playVideo("" + id)
+        root.releasesSaw("v:" + id)
     }
     function closeVideo() {
         videoPlayer.stop(); videoPlayer.source = ""
@@ -2535,7 +2598,7 @@ ApplicationWindow {
         previewPlayer.stop(); previewPlayer.source = ""
         previewKind = kind; previewId = id
         previewLoading = true; previewPlaying = false
-        previewPosition = 0; previewDuration = 0
+        previewPosition = 0; previewDuration = 0; previewPeaks = []; previewPeaksPending = true
         // Clear the now-playing metadata up front: it only refreshes when the
         // backend emits previewMeta after a multi-second resolve, so without this
         // the bar would keep showing the previous track (and open its artist).
@@ -2590,7 +2653,7 @@ ApplicationWindow {
         previewPlayer.stop(); previewPlayer.source = ""
         previewPlaying = false; previewLoading = false
         previewKind = ""; previewId = ""
-        previewPosition = 0; previewDuration = 0
+        previewPosition = 0; previewDuration = 0; previewPeaks = []; previewPeaksPending = false
         previewNowTitle = ""; previewNowArtist = ""; previewNowArt = ""
         previewNowArtistId = ""; previewNowAlbumId = ""; previewNowTrackId = ""; previewNowArtists = []
     }
@@ -3074,7 +3137,11 @@ ApplicationWindow {
     property bool _relFeedMore: false         // _relBuilt holds cards not shown yet
     property bool _relRevealWait: false       // a reveal is not laid out yet
     property int releasesShown: 0             // rows left after the filter
-    property var releasesFreshIds: ({})       // this visit's new arrivals: id (a video's "v:" id) -> true
+    // The arrivals still marked in the feed: id (a video's "v:" id) -> true.
+    // Kept by the store across visits until each is opened or all are marked
+    // seen (or, set to go after a visit, until the tab is left).
+    property var releasesFreshIds: ({})
+    property bool _relInVisit: false          // releasesSeen ran since the tab was entered
     property var releasesFollowedRows: []
     property bool releasesFollowedHave: false
     // The FOLLOWING grid shows a page of the follows at a time and grows by
@@ -3472,8 +3539,196 @@ ApplicationWindow {
     readonly property int relCardW: 200
     readonly property int relCardGap: 16
     readonly property int relVideoW: 356    // a music video: 16:9 at the cover's height
-    readonly property int relCardH: 268     // ArtCard (200 + 46) + the chip row
     readonly property int relHeadH: 76      // a feed section head, text at its foot
+    // A video's words share its width with the download beside them.
+    readonly property int relVideoTextW: relVideoW - 10 - Math.ceil(relDlMeasure.implicitWidth)
+    DownloadButton { id: relDlMeasure; visible: false; label: "Download"; noun: "video" }
+    // A card arrived since it was last seen (a video's id carries its "v:"
+    // mark: an album can share the number).
+    function relIsFresh(c) { return !!root.releasesFreshIds[((c && c.kind) === "video" ? "v:" : "") + ((c && c.id) || "")] }
+    // How many of a section's cards are arrivals (key = "today", "week", "2026-10").
+    function relFreshIn(key) {
+        var cards = root._relBuilt.cards, n = 0
+        for (var uid in cards) {
+            if (uid.indexOf("r:" + key + ":") !== 0) continue
+            var ch = cards[uid]
+            for (var i = 0; i < ch.length; i++) if (root.relIsFresh(ch[i])) n++
+        }
+        return n
+    }
+    // The day the oldest arrival on show came in, "" for none known.
+    property string relNewSince: ""
+    function relHeadCountText(uid, cnt) {
+        if (uid !== "h:new") return cnt + (cnt === 1 ? " release" : " releases")
+        if (root.relNewSince === "") return cnt + " just in"
+        if (root.relNewSince === root.todayIso) return cnt + " arrived today"
+        return cnt + " arrived since " + root.dateText(root.relNewSince)
+    }
+    // The mono line over a card's title, as its parts: the mark (JUST IN for
+    // an arrival, NEW for an album out lately), then the kind with its E.
+    function relKickParts(c) {
+        var out = []
+        if (root.relIsFresh(c)) out.push({ t: "JUST IN", hi: true })
+        else if (c && c.kind === "album" && root.isNewRelease(c.listed || c.date)) out.push({ t: "NEW", hi: true })
+        var kind = ("" + ((c && c.rtype) || "")).toUpperCase()
+        var e = c && c.explicit === true
+        if (kind !== "" || e) out.push({ t: kind + (kind !== "" && e ? " \u00b7 " : "") + (e ? "E" : ""), hi: false })
+        return out
+    }
+    // How tall a card's ReleaseText is at width `w`, worked out before any
+    // card is built, so each feed row is laid out at its tallest card's
+    // height from the start (a row that grew as its cards loaded would push
+    // everything under it about). It lays the words out as ReleaseText and
+    // ArtistFlow do, measured with the same fonts.
+    property var _relTextHKept: ({})
+    property int _relTextHN: 0
+    function relTextH(c, w) {
+        var parts = root.relKickParts(c)
+        var date = root.releasesDateLabel(root.releaseDay(c), root.todayIso)
+        var names = []
+        var artists = root.cardLeadArtists(c)
+        for (var a = 0; a < artists.length; a++) names.push("" + (artists[a].name || ""))
+        var words = []
+        for (var q = 0; q < parts.length; q++) words.push(parts[q].t)
+        var key = w + "|" + words.join("/") + "|" + date + "|" + (c.title || "") + "|" + names.join("\u0001")
+        var kept = root._relTextHKept[key]
+        if (kept !== undefined) return kept
+        // The mono line: its parts flow in what the date leaves.
+        relMeasMono.text = date
+        var dateW = relMeasMono.implicitWidth, monoH = relMeasMono.height
+        relMeasMono.text = " \u00b7 "
+        var sepW = relMeasMono.implicitWidth
+        var kickW = w - dateW - 8, x = 0, lines = 0
+        for (var i = 0; i < parts.length; i++) {
+            relMeasMono.text = parts[i].t
+            var pw = relMeasMono.implicitWidth + (i < parts.length - 1 ? sepW : 0)
+            if (lines === 0 || (x > 0 && x + pw > kickW)) { lines++; x = 0 }
+            x += pw
+        }
+        var h = Math.max(lines * monoH, monoH) + 3
+        relMeasTitle.width = w
+        relMeasTitle.text = "" + (c.title || "")
+        h += relMeasTitle.height + 2
+        h += root.artistFit(names, w, root.relArtistLines).h
+        if (++root._relTextHN > 4000) { root._relTextHKept = ({}); root._relTextHN = 1 }
+        root._relTextHKept[key] = h
+        return h
+    }
+    // How tall an art card's words run at width `w`, worked out before the
+    // card is built, so a shelf or grid of them is laid out at its tallest
+    // card from the start. An album's words are the feed's own
+    // (ReleaseText); any other card's are its title, capped as the feed's,
+    // over its caption line (CardCaption, one 11 px line when it says
+    // anything).
+    function artCardTextH(c, w) {
+        if (c.kind === "album") return root.relTextH(c, w)
+        relMeasTitle.width = w
+        relMeasTitle.text = "" + (c.title || "")
+        relMeasName.text = "Ag"
+        var said = root.cardSubLead(c) !== "" || root.cardSubMeta(c) !== "" || root.cardSubtitle(c) !== ""
+        return relMeasTitle.height + 2 + (said ? relMeasName.height : 0)
+    }
+    function artCardsTextH(cards, w) {
+        var h = 0
+        for (var i = 0; i < (cards ? cards.length : 0); i++) h = Math.max(h, root.artCardTextH(cards[i] || ({}), w))
+        return Math.ceil(h)
+    }
+    Text { id: relMeasMono; visible: false; textFormat: Text.PlainText; font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.6 }
+    Text { id: relMeasTitle; visible: false; textFormat: Text.PlainText; wrapMode: Text.Wrap; maximumLineCount: root.relTitleLines; elide: Text.ElideRight; font.pixelSize: 13; font.bold: true }
+    Text { id: relMeasName; visible: false; textFormat: Text.PlainText; font.pixelSize: 11 }
+    Text { id: relMeasNameWrap; visible: false; textFormat: Text.PlainText; wrapMode: Text.Wrap; elide: Text.ElideRight; font.pixelSize: 11 }
+    // A feed card's text wraps in full up to these many lines, so a title or
+    // a credit list that runs to a sentence or two cannot stretch its whole
+    // row: the title ends in an ellipsis, the names past the last line fold
+    // into "+N more", and hovering either shows it all (fullTip).
+    readonly property int relTitleLines: 3
+    readonly property int relArtistLines: 2
+    // Which of `names` an ArtistFlow at width `w` (11 px names) shows within
+    // `lines` lines: every whole name that fits, then "+N more" for the rest.
+    // Returns { shown, more, nameLines, h }: a name is capped at `nameLines`
+    // lines of its own, and h is the flow's height. The feed's row measure
+    // and the card call the same function, so the two always agree.
+    function artistFit(names, w, lines) {
+        relMeasName.text = ", "
+        var commaW = relMeasName.implicitWidth, lineH = relMeasName.height
+        function sim(k, nameLines, more) {
+            var x = 0, rowH = 0, total = 0
+            relMeasNameWrap.maximumLineCount = nameLines
+            var items = []
+            for (var i = 0; i < k; i++) {
+                relMeasName.text = names[i]
+                var nw = Math.min(relMeasName.implicitWidth, w - commaW)
+                relMeasNameWrap.width = nw
+                relMeasNameWrap.text = names[i]
+                items.push({ w: nw + (i < k - 1 || more > 0 ? commaW : 0), h: relMeasNameWrap.height })
+            }
+            if (more > 0) {
+                relMeasName.text = "+" + more + " more"
+                items.push({ w: relMeasName.implicitWidth, h: lineH })
+            }
+            for (var j = 0; j < items.length; j++) {
+                if (x > 0 && x + items[j].w > w) { total += rowH; rowH = 0; x = 0 }
+                x += items[j].w
+                rowH = Math.max(rowH, items[j].h)
+            }
+            return total + rowH
+        }
+        var n = names.length, cap = lines * lineH + 0.5
+        if (n === 0) return { shown: 0, more: 0, nameLines: lines, h: 0 }
+        var h = sim(n, lines, 0)
+        if (h <= cap || n === 1) return { shown: n, more: 0, nameLines: lines, h: h }
+        for (var k = n - 1; k >= 1; k--) {
+            h = sim(k, lines, n - k)
+            if (h <= cap) return { shown: k, more: n - k, nameLines: lines, h: h }
+        }
+        // Even the first name and the fold do not fit: the name gives up a line.
+        var nl = Math.max(1, lines - 1)
+        return { shown: 1, more: n - 1, nameLines: nl, h: sim(1, nl, n - 1) }
+    }
+    // The one hover bubble for text a card had to cut short: the full title,
+    // a full artist name, or the whole credit list behind "+N more". It lives
+    // in the window's overlay, so no row clips it or draws over it.
+    property Item fullTipOwner: null
+    property string fullTipText: ""
+    function fullTipFor(item, text) { root.fullTipOwner = item; root.fullTipText = text; fullTipDelay.restart() }
+    // An owner that died under the pointer (a refetch rebuilt its card)
+    // reads null: whoever leaves next closes its bubble.
+    function fullTipOff(item) {
+        if (root.fullTipOwner !== item && root.fullTipOwner !== null) return
+        fullTipDelay.stop(); fullTip.close(); root.fullTipOwner = null
+    }
+    Timer {
+        id: fullTipDelay
+        interval: 450
+        onTriggered: {
+            var o = root.fullTipOwner
+            if (!o || !o.visible) return
+            var p = o.mapToItem(null, 0, 0)
+            fullTip.x = Math.max(8, Math.min(root.width - fullTip.width - 8, p.x))
+            var below = p.y + o.height + 6
+            fullTip.y = below + fullTip.height <= root.height - 8 ? below : Math.max(8, p.y - fullTip.height - 6)
+            fullTip.open()
+        }
+    }
+    TextMetrics { id: fullTipTm; font.pixelSize: 12; text: root.fullTipText }
+    Popup {
+        id: fullTip
+        objectName: "fullTip"
+        parent: Overlay.overlay
+        width: Math.min(320, Math.ceil(fullTipTm.advanceWidth) + 1 + 20)
+        padding: 10; topPadding: 7; bottomPadding: 7
+        modal: false; focus: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle { radius: 8; color: root.surface2; border.color: root.outline }
+        contentItem: Text {
+            objectName: "fullTipText"
+            textFormat: Text.PlainText; wrapMode: Text.Wrap
+            text: root.fullTipText
+            color: root.textHi; font.pixelSize: 12
+        }
+        enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.hoverMotion ? 120 : 0 } }
+        exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: root.hoverMotion ? 90 : 0 } }
+    }
     readonly property var _relMonths: ["January", "February", "March", "April", "May", "June", "July",
                                        "August", "September", "October", "November", "December"]
     function releaseDay(r) { return ("" + ((r && (r.listed || r.date)) || "")).slice(0, 10) }
@@ -3520,7 +3775,11 @@ ApplicationWindow {
     }
     // [{key, label, rows}], newest first, Upcoming soonest first. The
     // "upcoming" filter is every release dated ahead, of any kind; every
-    // other filter, All included, leaves those out.
+    // other filter, All included, leaves those out. Within a section the
+    // cards run newest first, top to bottom and left to right: by release
+    // day, then (same day) the latest found first, then by title. On the
+    // feed itself the arrivals still marked lead in a Just in section of
+    // their own; a search or Upcoming keeps them in their dates.
     function releasesSectionsOf(rows, today, filter, byYear) {
         var keep = []
         var ahead = filter === "upcoming"
@@ -3532,12 +3791,28 @@ ApplicationWindow {
             keep.push({ r: r, day: day, at: i })
         }
         keep.sort(function (a, b) { return a.day < b.day ? 1 : a.day > b.day ? -1 : a.at - b.at })
+        var arrived = []
+        if (!byYear && !ahead) {
+            arrived = keep.filter(function (e) { return root.relIsFresh(e.r) })
+            keep = keep.filter(function (e) { return !root.relIsFresh(e.r) })
+        }
         var out = [], byKey = {}
         for (var k = 0; k < keep.length; k++) {
             var b = root.releasesBucketOf(keep[k].day, today, byYear)
             var s = byKey[b.key]
             if (!s) { s = { key: b.key, label: b.label, rows: [] }; byKey[b.key] = s; out.push(s) }
             s.rows.push(keep[k].r)
+        }
+        if (arrived.length > 0) out.unshift({ key: "new", label: "Just in", rows: arrived.map(function (e) { return e.r }) })
+        for (var o = 0; o < out.length; o++) {
+            if (out[o].key === "upcoming") continue
+            var seq = out[o].rows.map(function (r, at) {
+                return { r: r, at: at, d: root.releaseDay(r), t: +(r.detected_at || 0), n: ("" + (r.title || "")).toLowerCase() }
+            })
+            seq.sort(function (a, b) {
+                return (a.d < b.d ? 1 : a.d > b.d ? -1 : 0) || (b.t - a.t) || a.n.localeCompare(b.n) || (a.at - b.at)
+            })
+            out[o].rows = seq.map(function (e) { return e.r })
         }
         if (byKey.upcoming) byKey.upcoming.rows.reverse()
         return out
@@ -3550,7 +3825,7 @@ ApplicationWindow {
         var rowW = cols * root.relCardW + (cols - 1) * root.relCardGap
         for (var i = 0; i < sections.length; i++) {
             var s = sections[i]
-            items.push({ uid: "h:" + s.key, rowKind: "head", label: s.label, cnt: s.rows.length,
+            items.push({ uid: "h:" + s.key, rowKind: "head", label: s.label, cnt: s.rows.length, th: 0,
                          sig: s.label + "|" + s.rows.length })
             // A video is wider than a cover, so a row that cannot take the
             // next card still fills its last slot with a later cover from
@@ -3571,11 +3846,15 @@ ApplicationWindow {
             if (cur.length > 0) chunks.push(cur)
             for (var k = 0; k < chunks.length; k++) {
                 var chunk = chunks[k]
-                var ids = []
-                for (var j = 0; j < chunk.length; j++)
+                var ids = [], th = 0
+                for (var j = 0; j < chunk.length; j++) {
                     ids.push(chunk[j].id + "/" + (chunk[j].rtype || "") + "/" + root.releaseDay(chunk[j]))
+                    th = Math.max(th, root.relTextH(chunk[j], chunk[j].kind === "video" ? root.relVideoTextW : root.relCardW))
+                }
+                th = Math.ceil(th)
                 var uid = "r:" + s.key + ":" + k
-                items.push({ uid: uid, rowKind: "row", label: "", cnt: chunk.length, sig: cols + "|" + ids.join(",") })
+                items.push({ uid: uid, rowKind: "row", label: "", cnt: chunk.length, th: th,
+                             sig: cols + "|" + ids.join(",") + "|" + th })
                 cards[uid] = chunk
             }
         }
@@ -3588,8 +3867,14 @@ ApplicationWindow {
         var secs = root.releasesFinding
             ? root.releasesSectionsOf(root.relFindRows, root.todayIso, root.releasesFilter, true)
             : root.releasesSectionsOf(root.releasesRows, root.todayIso, root.releasesFilter, false)
-        var n = 0
+        var n = 0, since = 0
         for (var i = 0; i < secs.length; i++) n += secs[i].rows.length
+        if (secs.length > 0 && secs[0].key === "new")
+            for (var a = 0; a < secs[0].rows.length; a++) {
+                var t = +(secs[0].rows[a].detected_at || 0)
+                if (t > 0 && (since === 0 || t < since)) since = t
+            }
+        root.relNewSince = since > 0 ? root._isoDay(new Date(since * 1000)) : ""
         root.releasesShown = n
         root._relBuilt = root.releasesItemsOf(secs, Math.max(1, root._relCols))
         root.releasesReveal()
@@ -3706,16 +3991,36 @@ ApplicationWindow {
         root.releasesImportNotice = waves.artistImportNoticeNow()
     }
     // The pane is being looked at: whatever arrived is seen now (the badge
-    // clears), but its cards keep a dot for the rest of the visit.
+    // clears), and the store keeps it marked as an arrival until it is
+    // opened or MARK AS SEEN is pressed. Set to go after a visit, what a
+    // visit left marked (one ended by quitting) goes as the next one starts.
     function releasesSeen() {
-        var ids = waves.acknowledgeAllReleases()
-        if (ids && ids.length) {
-            var f = Object.assign({}, root.releasesFreshIds)
-            for (var i = 0; i < ids.length; i++) f["" + ids[i]] = true
-            root.releasesFreshIds = f
-        }
+        if (!root._relInVisit && root.relArrivalsByVisit()) waves.markArrivalsSeen()
+        root._relInVisit = true
+        waves.acknowledgeAllReleases()
+        var ids = waves.releaseArrivals() || [], f = {}
+        for (var i = 0; i < ids.length; i++) f["" + ids[i]] = true
+        var was = Object.keys(root.releasesFreshIds)
+        var now = Object.keys(f)
+        if (now.length !== was.length || now.some(function (k) { return !root.releasesFreshIds[k] })) root.releasesFreshIds = f
         root.releasesCounts()
     }
+    function relArrivalsByVisit() { return waves.wavesPref("releases_arrivals") === "visit" }
+    // An arrival opened (its album page, its video) is seen, from anywhere.
+    function releasesSaw(id) {
+        if (!id) return
+        if (root.releasesFreshIds[id]) {
+            var f = Object.assign({}, root.releasesFreshIds)
+            delete f[id]
+            root.releasesFreshIds = f
+        }
+        waves.markArrivalSeen(id)
+    }
+    function releasesMarkAllSeen() {
+        waves.markArrivalsSeen()
+        root.releasesFreshIds = ({})
+    }
+    onReleasesFreshIdsChanged: root.releasesApply()
     function releasesEnter() {
         root.releasesSeen()
         if (root.releasesView === "manage") {
@@ -3799,13 +4104,17 @@ ApplicationWindow {
         root.releasesFeedLimit = root.releasesFeedPage
         root.releasesApply()
     }
-    // The dots are for this visit to the tab: drilling into a release and
-    // coming back keeps them, switching tab ends the visit.
-    // The visit also ends the pages scrolled into: the next one starts at the
-    // top of the first page.
+    // Switching tab ends the visit (drilling into a release and coming back
+    // does not): arrivals set to go after a visit go now. The visit also
+    // ends the pages scrolled into: the next one starts at the top of the
+    // first page.
     onNavOriginChanged: {
         if (root.navOrigin === "releases") return
-        root.releasesFreshIds = ({})
+        if (root._relInVisit && root.relArrivalsByVisit()) {
+            waves.markArrivalsSeen()
+            root.releasesFreshIds = ({})
+        }
+        root._relInVisit = false
         root.releasesRewind()
     }
     ListModel { id: releasesModel }
@@ -4431,6 +4740,7 @@ ApplicationWindow {
     // `art` is the opener's own cover URL (a card's, a row's): the hero
     // paints it at once, before the payload, see browseArtHint.
     function openBrowseItem(kind, id, highlight, title, art) {
+        if (kind === "album") root.releasesSaw("" + id)
         if (browsePageKey === "item:" + kind + ":" + id) {
             // Already keyed to this page, nothing to fetch. But the key
             // survives leaving Browse via the nav tabs, so "already there"
@@ -4561,11 +4871,819 @@ ApplicationWindow {
         root.artistsById = m
     }
 
+    // ---- Audio output ---------------------------------------------------
+    // Every AudioOutput plays through outDevice: the saved pick while the OS
+    // lists it, else the system default. Re-resolved whenever the outputs or
+    // the pick change, so following the default never rests on a backend
+    // quietly tracking it.
+    property var outDevice: waves.audioOutputDevice()
+    property string outLive: waves.audioOutputLive()
+    property bool outMissing: waves.audioOutputMissing()
+    function outRefresh() {
+        outDevice = waves.audioOutputDevice()
+        outLive = waves.audioOutputLive()
+        outMissing = waves.audioOutputMissing()
+    }
+    Connections {
+        target: waves
+        function onAudioOutputChanged() { root.outRefresh() }
+        function onAudioOutputsChanged() { root.outRefresh() }
+    }
+    function outMenuToggle(item) {
+        if (outMenu.visible) { outMenu.close(); return }
+        // The press that closed it (outside the popup) was on this control.
+        if (Date.now() - outMenu.closedAt < 250) return
+        outMenu.anchorItem = item
+        outMenu.open()
+    }
+    // The bar's output menu, opened from the output chip: pill rows like the
+    // quality pick's, the live pick checked on a faint bar. A row applies at
+    // once; the check beams over to it, then the menu closes.
+    Popup {
+        id: outMenu
+        objectName: "outMenu"
+        parent: Overlay.overlay
+        property Item anchorItem: null
+        property double closedAt: 0
+        property var opts: []
+        property string pick: ""
+        // The chip's top center, read on every open: a binding over
+        // mapToItem never sees the chip move (a resize, the now-playing row
+        // shifting), and reopening from the same chip would not re-run it.
+        property point at: Qt.point(0, 0)
+        width: 286; padding: 4
+        x: Math.max(8, Math.min(root.width - width - 8, at.x - width / 2))
+        y: Math.max(8, Math.min(root.height - height - 8, at.y - height - 10))
+        modal: false; focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onAboutToShow: {
+            at = anchorItem ? anchorItem.mapToItem(null, anchorItem.width / 2, 0) : Qt.point(0, 0)
+            opts = waves.audioOutputs()
+            pick = String(waves.wavesPref("audio_output") || "")
+            outMenuList.reset()
+        }
+        onClosed: closedAt = Date.now()
+        transformOrigin: Item.Bottom
+        background: Rectangle { radius: 8; color: root.surface2; border.color: root.outline }
+        contentItem: Column {
+            spacing: 2
+            Text {
+                leftPadding: 8; topPadding: 3; bottomPadding: 3
+                textFormat: Text.PlainText; text: "AUDIO OUTPUT"
+                color: root.textDim; font.family: root.mono; font.pixelSize: 9; font.bold: true
+            }
+            // Ten rows at most; a longer list scrolls inside the menu. One
+            // highlight index (hi) is read off the list itself, so the 2 px
+            // gap between two rows never drops it, and the arrow keys move it.
+            ListView {
+                id: outMenuList
+                objectName: "outMenuList"
+                width: outMenu.width - 8
+                height: Math.min(count, 10) * 26 - 2
+                spacing: 2; clip: true
+                interactive: count > 10
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: WavesScrollBar {}
+                model: outMenu.opts
+                focus: true
+                property int hi: -1
+                // A beam in flight: the pick it leaves, the one it lands on,
+                // and whether it has landed (the dot and faint bar follow it).
+                property bool moving: false
+                property bool landed: false
+                property int fromIdx: -1
+                property int toIdx: -1
+                readonly property real rowW: width - (interactive ? 10 : 0)
+                readonly property real markX: rowW - 18
+                readonly property int curIdx: {
+                    for (var i = 0; i < outMenu.opts.length; i++)
+                        if (String(outMenu.opts[i].value) === outMenu.pick) return i
+                    return -1
+                }
+                function reset() {
+                    beamSeq.stop()
+                    hi = -1; moving = false; landed = false
+                }
+                function step(d) {
+                    var from = hi >= 0 ? hi : (curIdx >= 0 ? curIdx : (d > 0 ? -1 : count))
+                    hi = Math.max(0, Math.min(count - 1, from + d))
+                    positionViewAtIndex(hi, ListView.Contain)
+                }
+                function choose(i) {
+                    if (i < 0 || i >= count || moving) return
+                    var was = curIdx
+                    outMenu.pick = String(outMenu.opts[i].value)
+                    waves.setWavesPref("audio_output", outMenu.opts[i].value)
+                    if (!root.hoverMotion || was < 0 || was === i) { outMenu.close(); return }
+                    fromIdx = was; toIdx = i; landed = false
+                    beamMark.y = was * 26 + 7; beamMark.ck = 1
+                    beamDot.d = 0
+                    beam.a = was * 26 + 12; beam.b = beam.a; beam.opacity = 0
+                    moving = true
+                    beamSeq.restart()
+                }
+                // With no row highlighted there is nothing new to pick, so
+                // the menu just closes on the pick it has.
+                function enter() { if (hi >= 0) choose(hi); else outMenu.close() }
+                Keys.onUpPressed: step(-1)
+                Keys.onDownPressed: step(1)
+                Keys.onReturnPressed: enter()
+                Keys.onEnterPressed: enter()
+                Keys.onSpacePressed: enter()
+                // Declared in a ListView, the handler sits on its contentItem,
+                // so the point is already in content coordinates.
+                HoverHandler {
+                    cursorShape: Qt.PointingHandCursor
+                    onPointChanged: {
+                        var i = outMenuList.indexAt(point.position.x, point.position.y)
+                        if (i >= 0) outMenuList.hi = i
+                    }
+                    onHoveredChanged: if (!hovered) outMenuList.hi = -1
+                }
+                // The beam: the check shrinks to a dot, a thin line shoots to
+                // the new row and pulls in after itself, the check opens there.
+                // Both ride the contentItem, so their row y values hold in a
+                // scrolled list.
+                Item {
+                    id: beamMark
+                    parent: outMenuList.contentItem
+                    z: 2
+                    visible: outMenuList.moving
+                    x: outMenuList.markX; width: 10; height: 10
+                    // The check's own scale; the item's would shrink the dot too.
+                    property real ck: 1
+                    Ico { name: "check"; color: root.accent; size: 10; bold: 8; scale: beamMark.ck }
+                    Rectangle {
+                        id: beamDot
+                        property real d: 0
+                        x: (10 - d) / 2; y: (10 - d) / 2; width: d; height: d; radius: d / 2
+                        color: root.accent
+                    }
+                }
+                Rectangle {
+                    id: beam
+                    parent: outMenuList.contentItem
+                    z: 2
+                    property real a: 0
+                    property real b: 0
+                    visible: outMenuList.moving
+                    x: outMenuList.markX + 4; width: 2; radius: 1
+                    y: Math.min(a, b) - 1; height: Math.abs(b - a) + 2
+                    color: root.accent
+                }
+                SequentialAnimation {
+                    id: beamSeq
+                    ParallelAnimation {
+                        NumberAnimation { target: beamMark; property: "ck"; to: 0; duration: 70; easing.type: Easing.InQuad }
+                        NumberAnimation { target: beamDot; property: "d"; to: 4; duration: 70 }
+                    }
+                    PropertyAction { target: beamDot; property: "d"; value: 0 }
+                    PropertyAction { target: beam; property: "opacity"; value: 1 }
+                    NumberAnimation { target: beam; property: "b"; to: outMenuList.toIdx * 26 + 12; duration: 80; easing.type: Easing.OutQuad }
+                    PropertyAction { target: beamMark; property: "y"; value: outMenuList.toIdx * 26 + 7 }
+                    NumberAnimation { target: beam; property: "a"; to: outMenuList.toIdx * 26 + 12; duration: 80; easing.type: Easing.InQuad }
+                    PropertyAction { target: beam; property: "opacity"; value: 0 }
+                    PropertyAction { target: outMenuList; property: "landed"; value: true }
+                    NumberAnimation { target: beamMark; property: "ck"; to: 1; duration: 170; easing.type: Easing.OutBack }
+                    PauseAnimation { duration: 120 }
+                    ScriptAction { script: { outMenuList.moving = false; outMenu.close() } }
+                }
+                delegate: Item {
+                    id: orow
+                    z: 1
+                    required property var modelData
+                    required property int index
+                    readonly property bool cur: String(modelData.value) === outMenu.pick
+                    // While the check is on its way, the dot and the faint
+                    // bar stay on the row it left and hand over when it lands.
+                    readonly property bool shown: outMenuList.moving
+                        ? index === (outMenuList.landed ? outMenuList.toIdx : outMenuList.fromIdx) : cur
+                    readonly property bool hot: outMenuList.hi === index
+                    readonly property bool lit: hot || shown
+                    width: outMenuList.rowW; height: 24
+                    // The live pick's faint bar; the row under the pointer
+                    // gets the bright one, on at once.
+                    Rectangle {
+                        anchors.fill: parent; radius: 4
+                        visible: orow.shown && !orow.hot
+                        color: root.accentCont; opacity: 0.55
+                    }
+                    Rectangle {
+                        anchors.fill: parent; radius: 4
+                        visible: orow.hot
+                        color: root.accentCont; border.color: root.accentDim
+                    }
+                    Rectangle {
+                        id: orowDot
+                        x: 8; anchors.verticalCenter: parent.verticalCenter; width: 6; height: 6; radius: 3
+                        color: orow.modelData.missing ? root.gold : orow.shown ? root.accent : root.outline
+                    }
+                    Text {
+                        x: orowDot.x + 12; anchors.verticalCenter: parent.verticalCenter
+                        width: orowTail.x - x - 8; elide: Text.ElideRight
+                        textFormat: Text.PlainText; text: orow.modelData.label
+                        color: orow.modelData.missing ? root.textDim : orow.lit ? root.accentContTx : root.textHi
+                        font.family: root.mono; font.pixelSize: 10; font.bold: true
+                    }
+                    // NOT CONNECTED on a saved pick that is gone, DEFAULT on
+                    // the OS default, and the device System default resolves to.
+                    Row {
+                        id: orowTail
+                        anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            readonly property string tag: orow.modelData.missing ? "NOT CONNECTED"
+                                : orow.modelData["default"] ? "DEFAULT"
+                                : orow.modelData.value === "" ? orow.modelData.sub : ""
+                            visible: tag !== ""
+                            width: Math.min(implicitWidth, 118); elide: Text.ElideRight
+                            textFormat: Text.PlainText; text: tag
+                            color: orow.modelData.missing ? root.gold : orow.lit ? root.textHi : root.textLo
+                            font.family: root.mono; font.pixelSize: 9
+                        }
+                        // The check keeps its slot on every row, so a tag
+                        // never jumps sideways when the pick moves.
+                        Ico {
+                            opacity: orow.cur && !outMenuList.moving ? 1 : 0
+                            anchors.verticalCenter: parent.verticalCenter; name: "check"; color: root.accent; size: 10; bold: 8
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: outMenuList.choose(orow.index)
+                    }
+                }
+            }
+        }
+        // The quality menu's pop.
+        enter: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.hoverMotion ? 120 : 0 }
+                NumberAnimation { property: "scale"; from: 0.8; to: 1; duration: root.hoverMotion ? 260 : 0; easing.type: Easing.OutBack }
+            }
+        }
+        exit: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "opacity"; from: 1; to: 0; duration: root.hoverMotion ? 110 : 0 }
+                NumberAnimation { property: "scale"; from: 1; to: 0.9; duration: root.hoverMotion ? 110 : 0; easing.type: Easing.InQuad }
+            }
+        }
+    }
+
+    // The sound sign inside the output chip: four rounded pills. While sound
+    // plays they pulse, tallest in the middle (their own rhythm, not the
+    // track's loudness); at rest they hold a low dim hump and never move.
+    // The clock runs only while the pills move, so a still chip costs no
+    // repaints.
+    component OutWave: Item {
+        id: ow
+        // 1 while sound plays, 0 at rest; the chip eases it between.
+        property real lv: 0
+        property color col: root.textDim
+        property real t: 0
+        readonly property bool moving: clock.running
+        readonly property int n: 4
+        readonly property real cellW: 2.5
+        readonly property real gap: 2
+        readonly property var freq: [5.7, 8.0, 6.7, 9.2]
+        readonly property real dpr: Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1
+        implicitWidth: n * cellW + (n - 1) * gap
+        implicitHeight: 14
+        width: implicitWidth; height: 14
+        FrameAnimation {
+            id: clock
+            running: ow.visible && ow.lv > 0 && root.hoverMotion
+            onTriggered: ow.t += frameTime
+        }
+        Repeater {
+            model: ow.n
+            delegate: Rectangle {
+                required property int index
+                readonly property real hump: Math.sin(Math.PI * (index + 0.5) / ow.n)
+                readonly property real rest: 0.1 + 0.2 * hump
+                readonly property real play: (0.45 + 0.55 * hump)
+                    * (0.55 + 0.45 * Math.sin(ow.t * ow.freq[index] + Math.abs(index - (ow.n - 1) / 2) * 1.3))
+                readonly property real v: rest + (play - rest) * ow.lv
+                x: index * (ow.cellW + ow.gap); width: ow.cellW; radius: width / 2
+                // An even count of device pixels, centered: a free height
+                // lands its odd pixel at the bottom and the row looks sloped.
+                height: Math.max(2, 2 * Math.round(Math.max(width, 2 + v * 10) * ow.dpr / 2)) / ow.dpr
+                y: (ow.height - height) / 2
+                color: ow.col
+                opacity: 0.5 + 0.5 * ow.lv
+            }
+        }
+    }
+
+    // The now-playing rail: the bar's seek control, a 120px member of the
+    // now-playing row after the artist (seek-rail lab A3 W1 G0 T1 S2). It
+    // replaced the seek band on the bar's bottom edge, whose press zone sat
+    // under the row (declared first, so the 20px row won their overlap) and
+    // left only a 4px strip on the window's resize-grab edge. Here the hit
+    // box is the rail's own 20px, mid-bar, nowhere near that edge.
+    //   Rest: the waveform, 2px bars with 1px gaps mirrored around the
+    //   center, played bars green. While the clip's loudness is read (about
+    //   a second) a ghost of made-up bars breathes with a mint glint passing
+    //   over it, and the real bars sweep in left to right, each overshooting
+    //   a touch and settling (wave-load lab G4 + E4). No waveform at all (a
+    //   stream, a failed decode) leaves a 1px hairline with a breathing spark
+    //   at the playhead, and so does a wait past 8 s, the ghost calming down.
+    //   Hover: the line thickens to 3px (bars brighten), a hairline marks
+    //   the aim and a time flag floats above the bar. The flag sits fully
+    //   above the bar on purpose: straddling its top edge puts it under the
+    //   page's bottom edge fade, half dimmed.
+    //   Press/drag move the fill locally and the single real seek fires on
+    //   release (the PreviewBar discipline: a mid-drag seek pops).
+    component NowRail: Item {
+        id: nr
+        // Elapsed at the left end and remaining at the right ("0:00" plus a
+        // gap each), the rail between them: 200 px, or 130 in the mini
+        // player (Settings > Appearance).
+        TextMetrics { id: nrTm; font.family: root.mono; font.pixelSize: 10; text: "0" }
+        readonly property real tw: Math.ceil(nrTm.advanceWidth * 5 + 8)
+        readonly property int rw: root.playerSize === "mini" ? 130 : 200
+        width: rw + 2 * tw; height: 20
+        readonly property real lineY: 10
+        readonly property real waveH: 16
+        readonly property bool wave: root.previewPeaks.length > 0
+        readonly property real frac: root.pvFrac(root.previewKind, root.previewId)
+        readonly property bool hot: nrMa.containsMouse || nrMa.scrubbing
+        readonly property real aim: nrMa.frac(nrMa.mouseX)
+        property real w: hot ? 3 : 1
+        Behavior on w { enabled: root.hoverMotion; NumberAnimation { duration: 120 } }
+        readonly property bool waiting: root.previewKind !== "" && root.previewPeaksPending && !wave
+        // 1 while the wait is fresh; falls to 0 if the bridge never answers,
+        // and the rail settles on its plain line.
+        property real calm: 1
+        property real t: 0
+        // The arrival's progress, 0..1 across the sweep.
+        property real grow: 1
+        readonly property bool bars: wave || (waiting && calm > 0.01)
+        FrameAnimation {
+            running: root.hoverMotion && nr.visible && ((nr.waiting && nr.calm > 0.01) || (nr.wave && nr.grow < 1))
+            onTriggered: nr.t += frameTime
+        }
+        NumberAnimation { id: nrGrow; target: nr; property: "grow"; from: 0; to: 1; duration: 640 }
+        Timer {
+            interval: 8000
+            running: nr.waiting && !root.previewLoading && nr.calm === 1
+            onTriggered: nrCalm.restart()
+        }
+        NumberAnimation { id: nrCalm; target: nr; property: "calm"; to: 0; duration: 700; easing.type: Easing.InOutQuad }
+        onWaitingChanged: if (waiting) { nrCalm.stop(); calm = 1 }
+        onWaveChanged: {
+            if (!wave) { nrGrow.stop(); grow = 0; return }
+            if (root.hoverMotion && visible) nrGrow.restart(); else { nrGrow.stop(); grow = 1 }
+        }
+        // Column c's share of its real height: a left-to-right sweep, each
+        // bar easing out with a small overshoot (may pass 1).
+        function arrive(c, cols) {
+            if (!wave) return 0
+            var spread = 0.4
+            var k = Math.max(0, Math.min(1, (grow * (1 + spread) - c / Math.max(1, cols - 1)) / spread))
+            var o = 2.2
+            return 1 + (o + 1) * Math.pow(k - 1, 3) + o * Math.pow(k - 1, 2)
+        }
+        // A fixed, music-ish outline for the ghost (no data, just believable).
+        function ghost(c) {
+            return 0.5 + 0.5 * (0.5 * Math.sin(c * 0.91) + 0.3 * Math.sin(c * 0.37 + 1.3) + 0.2 * Math.sin(c * 2.13 + 0.4))
+        }
+        // The ghost's height (px) and mint glow (0..1) for column c at x.
+        function waitH(c, x) {
+            if (!waiting) return [2, 0]
+            var amp = 0.3 + 0.12 * Math.sin(2 * Math.PI * t / 1.8)
+            var gx = ((t / 1.6) % 1) * (width + 80) - 40
+            var sheen = Math.exp(-Math.pow((x - gx) / 16, 2))
+            var h = 2 + ghost(c) * (amp + 0.08 * sheen) * waveH
+            return [2 + (h - 2) * calm, (0.12 + 0.6 * sheen) * calm]
+        }
+        function rgb(a, b, k) {
+            k = Math.max(0, Math.min(1, k))
+            return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * k) + "," + Math.round(a[1] + (b[1] - a[1]) * k) + "," + Math.round(a[2] + (b[2] - a[2]) * k) + ")"
+        }
+        // The rail's colors are the playing cover's own (the playing glow's
+        // palette, read from the small cover in the bar): the played part in
+        // the cover's first color, the rest in its second, dimmed to sit
+        // back. A cover with no colors to give keeps the accent.
+        readonly property var pal: npArt.fxPal && npArt.fxPal.c.length > 0 ? npArt.fxPal : null
+        readonly property color palMain: pal ? pal.c[0] : root.accent
+        readonly property color palTwo: pal && pal.c.length > 1 ? pal.c[1] : palMain
+        readonly property color softColor: pal ? Qt.lighter(palMain, 1.35) : root.accentSoft
+        function fillRgb(played, tone) {
+            if (!played) {
+                var d = hot ? [91, 98, 110] : [70, 76, 87]
+                return [d[0] + (palTwo.r * 255 - d[0]) * 0.55, d[1] + (palTwo.g * 255 - d[1]) * 0.55, d[2] + (palTwo.b * 255 - d[2]) * 0.55]
+            }
+            var c = tone ? softColor : palMain
+            return [c.r * 255, c.g * 255, c.b * 255]
+        }
+        // Column heights 0..1 from the loudness buckets (preview_peaks): the
+        // mean loudness per column in dB, the quiet tenth at a fifth of the
+        // height and the loudest at full (never less than 12 dB across the
+        // rail), two thirds of it, plus a third of each column's rank among
+        // the others, so even a dense song keeps some rise and fall.
+        function columns(cols) {
+            var src = root.previewPeaks, n = src.length, out = []
+            if (!n) { for (var c0 = 0; c0 < cols; c0++) out.push(0); return out }
+            for (var c = 0; c < cols; c++) {
+                var a = Math.floor(c * n / cols), b = Math.max(a + 1, Math.floor((c + 1) * n / cols))
+                var sm = 0
+                for (var i = a; i < b; i++) sm += src[i]
+                out.push(sm / (b - a))
+            }
+            var d = [], sorted = []
+            for (var k = 0; k < cols; k++) { var dv = 20 * Math.log(Math.max(out[k], 1e-6)) / Math.LN10; d.push(dv); sorted.push(dv) }
+            sorted.sort(function(p, q) { return p - q })
+            var hi = sorted[cols - 1], lo = Math.min(sorted[Math.floor(0.1 * (cols - 1))], hi - 12)
+            var order = []
+            for (var k2 = 0; k2 < cols; k2++) order.push(k2)
+            order.sort(function(p, q) { return d[p] - d[q] })
+            var rank = []
+            for (var k3 = 0; k3 < cols; k3++) rank[order[k3]] = k3 / Math.max(1, cols - 1)
+            for (var k4 = 0; k4 < cols; k4++) {
+                var st = Math.max(0.04, Math.min(1, 0.2 + 0.8 * (d[k4] - lo) / (hi - lo)))
+                out[k4] = st * 0.65 + (0.2 + 0.8 * rank[k4]) * 0.35
+            }
+            return out
+        }
+        // One filled shape through the column tops in 2 px steps with hard
+        // edges, mirrored about the middle.
+        function envelope(ctx, hs, barW, w) {
+            ctx.beginPath()
+            ctx.moveTo(0, lineY)
+            for (var a = 0; a < hs.length; a++) { ctx.lineTo(hs[a][0], lineY - hs[a][1] / 2); ctx.lineTo(hs[a][0] + barW, lineY - hs[a][1] / 2) }
+            ctx.lineTo(w, lineY)
+            for (var b = hs.length - 1; b >= 0; b--) { ctx.lineTo(hs[b][0] + barW, lineY + hs[b][1] / 2); ctx.lineTo(hs[b][0], lineY + hs[b][1] / 2) }
+            ctx.closePath()
+            ctx.fill()
+        }
+        Text {
+            x: 0; width: nr.tw - 8; horizontalAlignment: Text.AlignRight
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: root.fmtMs(root.previewPosition)
+            color: root.textLo; font.family: root.mono; font.pixelSize: 10
+        }
+        Text {
+            x: nr.tw + nr.rw + 8; width: nr.tw - 8
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: "-" + root.fmtMs(Math.max(0, root.previewDuration - root.previewPosition))
+            color: root.textDim; font.family: root.mono; font.pixelSize: 10
+        }
+        // Plain line (no waveform, none coming or the wait ran long).
+        Rectangle {
+            visible: !nr.bars
+            x: nr.tw; y: nr.lineY - nr.w / 2; width: nr.rw; height: nr.w
+            color: root.outline
+        }
+        Rectangle {
+            id: nrFill
+            visible: !nr.bars
+            x: nr.tw; y: nr.lineY - nr.w / 2; width: nr.rw * nr.frac; height: nr.w
+            color: root.accent
+        }
+        Rectangle {
+            visible: !nr.bars
+            x: nr.tw + nrFill.width - width / 2; y: nr.lineY - height / 2
+            width: 5; height: 5; radius: 1
+            color: root.accentSoft
+            opacity: 0.35 + 0.65 * root.ledPulse
+        }
+        Rectangle {
+            visible: nr.hot && !nr.bars
+            x: nr.tw + nr.rw * nr.aim - width / 2; y: nr.lineY - height / 2
+            width: 5; height: 5; radius: 1
+            color: "transparent"; border.color: root.accentSoft; border.width: 1
+            opacity: 0.9
+        }
+        // The waveform (or the ghost): the whole shape painted twice, once
+        // dim and once in the played color, the played copy clipped at the
+        // exact position, and a soft spill of the lighter tone ahead of its
+        // edge as the playhead. Nothing repaints on a position tick, so the
+        // fill and the playhead cannot drift apart; only the shape, the
+        // hover, the ghost and the arrival repaint.
+        Item {
+            id: nrWave
+            visible: nr.bars
+            x: nr.tw; width: nr.rw; height: parent.height
+            readonly property real playedX: width * nr.frac
+            RailCanvas { rail: nr; played: false; width: nrWave.width; height: nrWave.height }
+            Item {
+                clip: true; width: nrWave.playedX; height: parent.height
+                RailCanvas { rail: nr; played: true; width: nrWave.width; height: nrWave.height }
+            }
+            Repeater {
+                model: 3
+                delegate: Item {
+                    required property int index
+                    clip: true; x: nrWave.playedX + index * 3; width: 3; height: nrWave.height
+                    opacity: [0.5, 0.28, 0.12][index]
+                    RailCanvas { rail: nr; played: true; tone: 1; x: -parent.x; width: nrWave.width; height: nrWave.height }
+                }
+            }
+        }
+        Rectangle {
+            visible: nr.hot && nr.bars
+            x: nr.tw + Math.round(nr.rw * nr.aim); y: nr.lineY - nr.waveH / 2
+            width: 1; height: nr.waveH
+            color: nr.softColor; opacity: 0.7
+        }
+        // The would-seek time floats above the bar from nowOverlay: drawn
+        // here, half of it sat under the page's bottom fade and read dim.
+        MouseArea {
+            id: nrMa
+            anchors.fill: parent; anchors.leftMargin: nr.tw; anchors.rightMargin: nr.tw
+            hoverEnabled: true; preventStealing: true
+            cursorShape: Qt.PointingHandCursor
+            property bool scrubbing: false
+            function frac(mx) { return width > 0 ? Math.max(0, Math.min(1, mx / width)) : 0 }
+            onPressed: function(m){ m.accepted = true; scrubbing = true; root.previewScrubbing = true; root.scrubPreviewVisual(frac(m.x)) }
+            onPositionChanged: function(m){ if (scrubbing) root.scrubPreviewVisual(frac(m.x)) }
+            onReleased: function(m){ if (scrubbing) { scrubbing = false; root.previewScrubbing = false; root.seekPreview(frac(m.x)) } }
+            onCanceled: { scrubbing = false; root.previewScrubbing = false }
+        }
+    }
+    // One painted copy of the rail's shape, dim or in the played color (tone
+    // 1: the lighter edge tone). Repainted on the loudness, the hover, the
+    // cover's colors and every frame of the ghost or the arrival, never on a
+    // position tick.
+    component RailCanvas: Canvas {
+        id: rc
+        property var rail
+        property bool played: false
+        property int tone: 0
+        readonly property var pk: root.previewPeaks
+        readonly property bool lit: rail.hot
+        readonly property var pal: rail.pal
+        onPkChanged: requestPaint()
+        onLitChanged: requestPaint()
+        onPalChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+        Connections {
+            target: rc.rail
+            function onTChanged() { if (rc.rail.bars) rc.requestPaint() }
+            function onGrowChanged() { rc.requestPaint() }
+            function onCalmChanged() { rc.requestPaint() }
+        }
+        onPaint: {
+            var ctx = getContext("2d"); ctx.reset()
+            var r = rail
+            var barW = 2
+            var cols = Math.floor(width / barW)
+            var base = r.fillRgb(played, tone)
+            var sc = r.softColor
+            var soft = [sc.r * 255, sc.g * 255, sc.b * 255]
+            var vals = r.columns(cols)
+            var hs = []
+            for (var c = 0; c < cols; c++) {
+                var x = c * barW
+                var real = r.wave ? Math.max(2, vals[c] * r.waveH) : 0
+                var wt = r.waitH(c, x)
+                var g = r.arrive(c, cols)
+                var h = wt[0] + (real - wt[0]) * g
+                h = Math.max(2, Math.min(height, Math.round(h)))
+                if (h % 2) h += 1   // the mirrored shape stays on whole pixels
+                hs.push([x, h])
+            }
+            ctx.fillStyle = r.rgb(base, soft, played ? 0.05 : 0)
+            ctx.globalAlpha = tone ? 1 : (played ? 0.94 : 0.6)
+            r.envelope(ctx, hs, barW, width)
+            ctx.globalAlpha = 1
+        }
+    }
+
+    // One now-playing credit: green, clickable to that artist's page (not
+    // while that page is already open). Elides only when a single name is
+    // wider than the room the bar gives the credits.
+    component NowName: Text {
+        id: nn
+        property var who: ({})
+        property real maxW: 100000
+        readonly property bool linkable: !!who.id && who.id !== "" && !root.onArtistPage(who.id)
+        width: Math.min(implicitWidth, maxW); elide: Text.ElideRight
+        textFormat: Text.PlainText; text: who.name || ""
+        color: root.accent
+        font.family: root.mono; font.pixelSize: 11
+        font.underline: nnMa.containsMouse && linkable
+        MouseArea {
+            id: nnMa
+            anchors.fill: parent; anchors.topMargin: -6; anchors.bottomMargin: -6
+            hoverEnabled: true
+            cursorShape: nn.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: if (nn.linkable) { waves.loadArtist(nn.who.id); root.nowCardOpen = false }
+            // Resting on the name: build the page before the click.
+            readonly property var prefetchCard: ({ kind: "artist", id: "" + (nn.who.id || "") })
+            onContainsMouseChanged: containsMouse && nn.linkable ? root.hoverPrefetch(prefetchCard)
+                                                                 : root.hoverPrefetchCancel(prefetchCard)
+        }
+    }
+    // The "+N" chip after the names that fit: opens the featured artists card.
+    // Green at rest like the names; hovered (or open) it fills, and a mint
+    // glint crosses it once as the pointer arrives.
+    component NowMore: Rectangle {
+        id: nm
+        property int n: 0
+        readonly property bool open: root.nowCardOpen && root.nowCardAnchor === nm
+        readonly property bool hovered: nmMa.containsMouse
+        readonly property bool lit: open || hovered
+        width: nmTx.implicitWidth + 10; height: 16; radius: 4
+        color: lit ? root.accentCont : "transparent"
+        border.color: lit ? root.accent : root.accentDim
+        Behavior on color { enabled: root.hoverMotion; ColorAnimation { duration: 140 } }
+        Behavior on border.color { enabled: root.hoverMotion; ColorAnimation { duration: 140 } }
+        Item {
+            x: 2; y: 2; width: parent.width - 4; height: parent.height - 4; clip: true
+            Rectangle {
+                id: nmGlint
+                x: -width; width: 8; height: parent.height
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0; color: "transparent" }
+                    GradientStop { position: 0.5; color: root.accentSoft }
+                    GradientStop { position: 1; color: "transparent" }
+                }
+                opacity: 0.55
+            }
+        }
+        NumberAnimation { id: nmGlintRun; target: nmGlint; property: "x"; from: -nmGlint.width; to: nm.width; duration: 360; easing.type: Easing.InOutQuad }
+        onHoveredChanged: if (hovered && root.hoverMotion) nmGlintRun.restart()
+        Text {
+            id: nmTx; anchors.centerIn: parent; textFormat: Text.PlainText
+            text: "+" + nm.n
+            color: nm.lit ? root.accentContTx : root.accent
+            font.family: root.mono; font.pixelSize: 10; font.bold: true
+        }
+        MouseArea {
+            id: nmMa; anchors.fill: parent; anchors.margins: -3
+            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: { root.nowCardAnchor = nm; root.nowCardOpen = !nm.open }
+        }
+    }
+    // One row of the featured artists card: an unlit socket, then the name.
+    // Hover lights the socket with the card's one light (it rides a rail
+    // between the sockets, see nowCard) and bolds the name, which stays
+    // green; pressed dims it a step. The artist whose page is open is marked
+    // "here" and does not link.
+    component NowCardRow: Item {
+        id: ncr
+        required property var modelData
+        required property int index
+        readonly property var who: modelData
+        readonly property bool here: !!who.id && who.id !== "" && root.onArtistPage(who.id)
+        readonly property bool linkable: !!who.id && who.id !== "" && !here
+        readonly property bool hot: ncrMa.containsMouse && linkable
+        readonly property bool down: ncrMa.pressed && hot
+        // Entering the card the light appears at the row; it glides only
+        // from one row to the next.
+        onHotChanged: if (hot) { nowCard.glide = nowCard.hotRow >= 0; nowCard.hotRow = index }
+        height: 26
+        Rectangle {
+            x: 9; width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter
+            color: "transparent"; border.color: root.outline
+        }
+        Text {
+            x: 24; anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, parent.width - x - 44); elide: Text.ElideRight
+            textFormat: Text.PlainText; text: ncr.who.name || ""
+            font.family: root.mono; font.pixelSize: 11; font.bold: ncr.hot
+            color: ncr.here || ncr.down ? root.accentDim : root.accent
+        }
+        Text {
+            visible: ncr.here
+            anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: "here"
+            color: root.textDim; font.family: root.mono; font.pixelSize: 9
+        }
+        MouseArea {
+            id: ncrMa
+            anchors.fill: parent; hoverEnabled: true
+            cursorShape: ncr.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: if (ncr.linkable) nowCard.pick(ncr.who.id, ncr.index)
+            readonly property var prefetchCard: ({ kind: "artist", id: "" + (ncr.who.id || "") })
+            onContainsMouseChanged: containsMouse && ncr.linkable ? root.hoverPrefetch(prefetchCard)
+                                                                  : root.hoverPrefetchCancel(prefetchCard)
+        }
+    }
+
+    // The live output's name in the status bar, a hairline chip led by the
+    // sound sign: click it for the output menu. Green with the pills moving
+    // while sound plays, grey and still otherwise (paused included). A new
+    // name crossfades in and lands green, fading back over a second. Gold
+    // while the saved pick is unplugged (sound then goes to the system
+    // default).
+    component OutName: Item {
+        id: on
+        property bool divR: false
+        property alias wave: wv
+        // 1 while sound plays, 0 stopped or paused, eased between.
+        property real lv: root.previewPlaying && root.previewKind !== "" ? 1 : 0
+        Behavior on lv { enabled: root.hoverMotion; NumberAnimation { duration: 380; easing.type: Easing.InOutSine } }
+        readonly property string name: root.outLive
+        readonly property bool selfHot: onMa.containsMouse || (outMenu.visible && outMenu.anchorItem === on)
+        readonly property real capW: 160
+        readonly property real padX: 7
+        // What the chip shows. A change keeps the old name in prev and runs
+        // p from 0 to 1 (the crossfade).
+        property string cur: ""
+        property string prev: ""
+        property real p: 1
+        property real glow: 0
+        property bool ready: false
+        // Seeded once, not bound: a binding here would loop through the
+        // change handler that assigns it.
+        Component.onCompleted: { cur = name; ready = true }
+        // The menu rides this chip: a preview ending hides the playing row's
+        // chip, and the menu must not float over the bar with no anchor.
+        onVisibleChanged: if (!visible && outMenu.visible && outMenu.anchorItem === on) outMenu.close()
+        readonly property real curW: Math.min(Math.ceil(tmCur.advanceWidth), capW)
+        readonly property real prevW: Math.min(Math.ceil(tmPrev.advanceWidth), capW)
+        TextMetrics { id: tmCur; font.family: root.mono; font.pixelSize: 11; text: on.cur }
+        TextMetrics { id: tmPrev; font.family: root.mono; font.pixelSize: 11; text: on.prev }
+        onNameChanged: {
+            if (!ready) return
+            prev = cur
+            cur = name
+            chg.stop()
+            if (!visible || prev === cur || !root.hoverMotion) { p = 1; return }
+            p = 0
+            chg.restart()
+        }
+        NumberAnimation {
+            id: chg
+            target: on; property: "p"; from: 0; to: 1; duration: 280; easing.type: Easing.InOutSine
+            onFinished: glowAnim.restart()
+        }
+        SequentialAnimation {
+            id: glowAnim
+            PropertyAction { target: on; property: "glow"; value: 1 }
+            PauseAnimation { duration: 260 }
+            NumberAnimation { target: on; property: "glow"; to: 0; duration: 1100; easing.type: Easing.InQuad }
+        }
+        function mix(a, b, t) { return Qt.tint(a, Qt.rgba(b.r, b.g, b.b, t)) }
+        readonly property color restCol: root.outMissing ? root.gold : selfHot ? root.accentContTx : mix(root.textLo, root.accent, lv)
+        readonly property color nameCol: glow > 0 ? Qt.tint(restCol, Qt.rgba(0.24, 1, 0.43, glow)) : restCol
+        readonly property color waveCol: root.outMissing ? root.gold : mix(selfHot ? root.textLo : root.textDim, root.accent, lv)
+        implicitWidth: onRow.width; implicitHeight: 20
+        width: onRow.width; height: 20
+        Row {
+            id: onRow
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 9
+            Item {
+                id: body
+                anchors.verticalCenter: parent.verticalCenter
+                width: box.width + 2 * on.padX + wv.width + 5; height: 20
+                Rectangle {
+                    anchors.centerIn: parent; width: parent.width; height: 18; radius: 5
+                    color: on.selfHot ? root.accentCont : "transparent"
+                    border.color: on.selfHot ? root.accentDim : root.outline
+                    Behavior on color { ColorAnimation { duration: root.hoverMotion ? 110 : 0 } }
+                }
+                OutWave {
+                    id: wv
+                    x: on.padX; anchors.verticalCenter: parent.verticalCenter
+                    lv: on.lv; col: on.waveCol
+                }
+                Item {
+                    id: box
+                    x: on.padX + wv.width + 5; anchors.verticalCenter: parent.verticalCenter
+                    height: 20; clip: true
+                    width: on.curW
+                    Behavior on width { enabled: root.hoverMotion; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Text {
+                        visible: on.p < 1
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: on.prevW; elide: Text.ElideRight
+                        opacity: 1 - on.p
+                        textFormat: Text.PlainText; text: on.prev
+                        color: on.nameCol; font.family: root.mono; font.pixelSize: 11
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.min(implicitWidth, on.capW); elide: Text.ElideRight
+                        opacity: on.p
+                        textFormat: Text.PlainText; text: on.cur
+                        color: on.nameCol; font.family: root.mono; font.pixelSize: 11
+                    }
+                }
+            }
+            Rectangle { visible: on.divR; anchors.verticalCenter: parent.verticalCenter; width: 1; height: 12; color: root.outline }
+        }
+        MouseArea {
+            id: onMa
+            x: body.x - 4; y: -4; width: body.width + 8; height: parent.height + 8
+            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: root.outMenuToggle(on)
+        }
+    }
+
     // The one and only audio player. Every preview button drives this single
     // instance, so starting a new preview structurally replaces the old one.
     MediaPlayer {
         id: previewPlayer
-        audioOutput: AudioOutput { id: previewOut }
+        audioOutput: AudioOutput { id: previewOut; device: root.outDevice }
         // Optional stop: previewStopMs > 0 caps the clip (default 30s); 0 lets
         // the whole track play. Both leave the same idle state via stopPreview.
         onPositionChanged: {
@@ -4702,7 +5820,7 @@ ApplicationWindow {
     MediaPlayer {
         id: videoPlayer
         videoOutput: vsA
-        audioOutput: AudioOutput { id: videoOut }
+        audioOutput: AudioOutput { id: videoOut; device: root.outDevice }
         onPositionChanged: {
             // Lift the freeze-frame only once playback has actually reached the
             // restored spot, the blank/black gap stays hidden the whole time.
@@ -4732,6 +5850,8 @@ ApplicationWindow {
         id: peekPlayer
         videoOutput: peekSurface
         audioOutput: AudioOutput {
+            id: peekOut
+            device: root.outDevice
             volume: root.peekReady ? 1 : 0
             Behavior on volume { NumberAnimation { duration: 420 } }
         }
@@ -5104,6 +6224,12 @@ ApplicationWindow {
         if (drop > 0) warmArtModel.remove(0, drop)
     }
     ListModel { id: warmArtModel }
+    // Which scene graph is drawing, read once for every cover: on the
+    // Software backend (offscreen runs, a machine with no GPU) a ShaderEffect
+    // draws nothing, so Art paints its plain Images there instead of its
+    // rounded faces (see ArtFace).
+    Item { id: gfxProbe; readonly property bool software: GraphicsInfo.api === GraphicsInfo.Software }
+    readonly property bool roundFaces: !gfxProbe.software
     Item {
         visible: false
         Repeater {
@@ -5427,6 +6553,29 @@ ApplicationWindow {
         width: modelData.w; height: modelData.h; radius: 0   // sharp LED cells
         opacity: modelData.e
     }
+    // A cover's face with rounded corners: the Image's own texture, cropped
+    // as PreserveAspectCrop crops it and cut to the cover's radius by
+    // shaders/cover_round.frag. Qt clips children to an item's box, never
+    // to its radius, so the Images in Art always showed square corners.
+    // The Image stays (loaded, cached, pinned in the warm pool, grabbed for
+    // the palette) and only stops painting; the face samples it straight
+    // from its texture, so no cover renders to a layer for this.
+    // Shown only once the Image is ready: a face with no texture warns.
+    component ArtFace: ShaderEffect {
+        id: face
+        required property Image src
+        property real radius: 0
+        // A shade darkening the face's bottom shadeH px, to shadeA at the
+        // edge (the hero caption's scrim), drawn in the face so it has no
+        // edge of its own.
+        property real shadeH: 0
+        property real shadeA: 0
+        anchors.fill: parent
+        visible: root.roundFaces && src.status === Image.Ready && opacity > 0
+        readonly property vector2d size: Qt.vector2d(width, height)
+        readonly property vector2d tex: Qt.vector2d(Math.max(1, src.implicitWidth), Math.max(1, src.implicitHeight))
+        fragmentShader: "shaders/cover_round.frag.qsb"
+    }
     component Art: Rectangle {
         id: artRoot
         property string url: ""
@@ -5451,8 +6600,11 @@ ApplicationWindow {
         // the placeholder and fade-in are only for covers that made us wait.
         property bool artWaited: false
         // Recycled delegates keep component state, a new cover starts its
-        // own grace window instead of inheriting the previous one's verdict.
-        onUrlChanged: artWaited = false
+        // own grace window instead of inheriting the previous one's verdict
+        // (and its own glow colors).
+        // A cached cover keeps its Image Ready across the swap, so no
+        // artState change would ask for the new colors: ask here.
+        onUrlChanged: { artWaited = false; fxPal = null; Qt.callLater(function() { artRoot._fxPalFetch() }) }
         // Never fetch a cover the user has never been shown. Rows hidden
         // behind a section cap (search's first-5) still instantiate, and
         // their fetches used to queue ahead of the on-screen art on the six
@@ -5488,11 +6640,29 @@ ApplicationWindow {
         }
         onWidthChanged: _seedDecode()
         Component.onCompleted: { _seedDecode(); if (visible) everShown = true }
-        color: surface3
+        // Under a rounded face the Rectangle paints nothing: its own
+        // antialiased edge does not coincide with the face's, and where the
+        // two differ its hairline showed through the face's edge as a light,
+        // stepped fringe. One edge, the face's, against the page.
+        readonly property bool faceUp: root.roundFaces && (artT > 0.999 || underReady)
+        color: faceUp ? "transparent" : surface3
         radius: 6
         border.color: border1
-        border.width: 1
+        border.width: faceUp ? 0 : 1
         clip: true
+        // A green frame (an arrival's, in the Releases feed), this many px
+        // wide, cut to the cover's corner. Inside the cover, so it rides the
+        // lift, the tilt and the raise with the art and is drawn through the
+        // same layer: it softens and catches the glow with the cover.
+        property int ring: 0
+        Rectangle {
+            objectName: "releaseFrame"
+            visible: artRoot.ring > 0
+            anchors.fill: parent; z: 100
+            radius: artRoot.faceRadius
+            antialiasing: true
+            color: "transparent"; border.color: root.accent; border.width: artRoot.ring
+        }
         // Album-art hover tilt (from BGT's CoverArt.qml): opt-in per call
         // site. The whole cover (art, border, anything anchored on it)
         // tilts toward the cursor and lifts slightly, springing back on
@@ -5604,11 +6774,72 @@ ApplicationWindow {
             NumberAnimation { target: artRoot; property: "fxBreath"; to: 0
                               duration: root.artPlayBreathMs; easing.type: Easing.InOutSine }
         }
-        // Resuming stops the loop wherever it happens to be; the amplitude is
-        // shallow enough that settling back to full depth is not a visible step.
-        onFxPausedChanged: if (!fxPaused) fxBreath = 0
-        readonly property real fxBreathK: 1 - root.artPlayBreath * fxBreath
-        readonly property real fxShadowDepth: fxShadow * fxBreathK
+        // Resuming stops the loop wherever it happens to be and leaves it
+        // there: the rim's paused weight (fxPauseW) eases out over it, so
+        // snapping the breath back would be the one step in the resume.
+        // The breath is the rim's alone now: the shadow has given way to
+        // the rim by the time a preview can pause.
+        readonly property real fxShadowDepth: fxShadow
+        // The rim's own dials (see artPlayBlendA), every one eased, all
+        // multiplied into one strength, so no state steps into the next.
+        // Presence rides the preview's state alone, never the raise: the
+        // raise is held while the pointer stays (fxHoldRaise), and the rim
+        // used to stay with it, so a stopped preview kept glowing until
+        // the pointer left. Loading counts: the rim is up while it buffers.
+        property real fxGlowT: fxPlayRaised ? 1 : 0
+        Behavior on fxGlowT {
+            id: fxGlowB
+            NumberAnimation {
+                duration: fxGlowB.targetValue > 0.5 ? root.artPlayGlowInMs : root.artPlayGlowOutMs
+                easing.type: fxGlowB.targetValue > 0.5 ? Easing.OutCubic : Easing.InOutQuad
+            }
+        }
+        // Buffering: the rim pulses on the [buffering] word's own beat
+        // (PreviewBar breathes its text at the same period), colors held.
+        property real fxBufW: fxPlaySt === "loading" ? 1 : 0
+        Behavior on fxBufW { NumberAnimation { duration: 450; easing.type: Easing.InOutSine } }
+        property real fxPulse: 1
+        SequentialAnimation {
+            running: artRoot.fxPlaySt === "loading" && artRoot.visible && root.onScreen
+            loops: Animation.Infinite
+            NumberAnimation { target: artRoot; property: "fxPulse"; to: 0; duration: root.artPlayBufferMs; easing.type: Easing.InOutSine }
+            NumberAnimation { target: artRoot; property: "fxPulse"; to: 1; duration: root.artPlayBufferMs; easing.type: Easing.InOutSine }
+        }
+        // Paused: down to the paused level, then the slow breath around it.
+        property real fxPauseW: fxPaused ? 1 : 0
+        Behavior on fxPauseW { NumberAnimation { duration: 600; easing.type: Easing.InOutSine } }
+        readonly property real fxPausedK: root.artPlayPauseK + root.artPlayBreath * (0.5 - fxBreath)
+        readonly property real fxGlowK: (1 + (fxPausedK - 1) * fxPauseW) * (1 - fxBufW)
+                                        + (root.artPlayBufferLo + (root.artPlayBufferHi - root.artPlayBufferLo) * fxPulse) * fxBufW
+        // The colors' reach: drifting while playing, easing to a stop on
+        // pause, held while buffering. A stop leaves it as it was, so the
+        // fade-out never freezes the colors mid-drift.
+        property real fxAmp: 0
+        onFxPlayStChanged: if (fxPlayRaised) fxAmp = fxPlaySt === "playing" ? 1 : 0
+        Behavior on fxAmp { NumberAnimation { duration: root.artPlayBlendStopMs; easing.type: Easing.InOutSine } }
+        // The playing glow's colors (see artPlayBlendA): this cover's own,
+        // read once from a small grab of the cover already on screen and
+        // kept by URL, so no cover is fetched or decoded twice. Asked only
+        // when the cover is raised, so a page of idle covers grabs nothing.
+        property var fxPal: null
+        // A cover that wants its colors without being raised (the bar's).
+        property bool palWanted: false
+        onPalWantedChanged: _fxPalFetch()
+        function _fxPalFetch() {
+            if ((!fxRaised && !palWanted) || fxPal !== null || artState !== "ready") return
+            var key = url
+            var known = waves.coverPalette(key, null)
+            if (known) { fxPal = known; return }
+            artImg.grabToImage(function(r) {
+                if (artRoot.url === key) artRoot.fxPal = waves.coverPalette(key, r.image)
+            }, Qt.size(40, 40))
+        }
+        onFxRaisedChanged: _fxPalFetch()
+        onArtStateChanged: _fxPalFetch()
+        // The glow waits for its colors rather than flashing green first;
+        // a cover with none to give (no art, a failed load, all black)
+        // glows in the accent.
+        readonly property bool fxPalSettled: fxPal !== null || artState === "failed" || artState === "none"
         // A raised cover sits above its neighbors, so neither the swell nor
         // the shadow is sliced by the next sibling's background.
         // Held for the whole descent, not just while raised: dropping back
@@ -5618,7 +6849,8 @@ ApplicationWindow {
         // casts a shadow too, and at z 0 the next sibling's background paints
         // over it, so the hover shadow never showed until preview raised the
         // card.
-        z: (fxRaiseT > 0.001 || fxShadowDepth > 0.004) ? 1 : 0
+        // And for the rim's whole fade-out, which outlasts the drop.
+        z: (fxRaiseT > 0.001 || fxShadowDepth > 0.004 || fxGlowT > 0.004) ? 1 : 0
         transform: [
             Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(1, 0, 0); angle: artRoot.fxRx },
             Rotation { origin.x: artRoot.width / 2; origin.y: artRoot.height / 2; axis: Qt.vector3d(0, 1, 0); angle: artRoot.fxRy },
@@ -5645,6 +6877,22 @@ ApplicationWindow {
             // whole guard: an unarmed pass-through moves nothing.
             onPointChanged: if (artRoot.fxArmed) artRoot._fxAim(point.position)
         }
+        // Art fades in over the placeholder instead of popping: one dial
+        // for the cover's presence, read by its Image (on the Software
+        // backend, where the Image paints) and by its face.
+        property real artT: artState === "ready" ? 1 : 0
+        Behavior on artT { enabled: artRoot.artWaited; NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
+        // The corner the faces cut to: the Rectangle's own, within reason.
+        readonly property real faceRadius: Math.min(radius, width / 2, height / 2)
+        // A bottom shade on the rounded face (see ArtFace), eased.
+        property real shadeH: 0
+        property real shadeA: 0
+        Behavior on shadeA { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
+        // The two Images keep loading, caching and pinning exactly as before;
+        // with the scene graph drawing rounded faces (ArtFace, below) they
+        // are drawn at opacity 0: still painted as far as Qt is concerned,
+        // so their textures stay current for the faces, but costing no
+        // pixels. On the Software backend they paint as they always did.
         Image {
             // The stand-in (see underUrl). Declared before artImg so it paints
             // beneath; gone once the cover above it is fully opaque.
@@ -5654,7 +6902,8 @@ ApplicationWindow {
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: true
-            visible: status === Image.Ready && artImg.opacity < 1
+            visible: status === Image.Ready && artRoot.artT < 1
+            opacity: root.roundFaces ? 0 : 1
             // Same decode size as the cover: one pool key, one pixmap when
             // the URLs coincide.
             sourceSize.width: artRoot.decodeW
@@ -5668,10 +6917,8 @@ ApplicationWindow {
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: true
-            // Art fades in over the placeholder instead of popping.
-            opacity: artRoot.artState === "ready" ? 1 : 0
-            visible: opacity > 0
-            Behavior on opacity { enabled: artRoot.artWaited; NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
+            opacity: root.roundFaces ? 0 : artRoot.artT
+            visible: artRoot.artT > 0
             // Decode at (roughly) display resolution instead of the full 320-480px
             // source (each tiny thumbnail would otherwise keep a full-size bitmap and
             // burn decode time). Art is square, so one decode dimension covers both,
@@ -5682,6 +6929,9 @@ ApplicationWindow {
             // page that shows it (or a revisit) paints without a re-decode.
             onStatusChanged: if (status === Image.Ready) root.warmArt("" + source, sourceSize.width, sourceSize.height)
         }
+        // The faces, in the Images' order: the stand-in's beneath the cover's.
+        ArtFace { src: underImg; radius: artRoot.faceRadius; shadeH: artRoot.shadeH; shadeA: artRoot.shadeA; opacity: artRoot.artT < 1 ? 1 : 0 }
+        ArtFace { src: artImg; radius: artRoot.faceRadius; shadeH: artRoot.shadeH; shadeA: artRoot.shadeA; opacity: artRoot.artT }
         Text {
             anchors.centerIn: parent
             // A stand-in on its way (url still empty while the page payload
@@ -5737,9 +6987,14 @@ ApplicationWindow {
                 clip: true
                 opacity: artRoot.fxHovering ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                // The highlight's sheet is the cover's rounded face, so it
+                // never pokes out of a corner.
+                readonly property real r: artRoot.faceRadius
                 Shape {
+                    id: glossSheet
                     anchors.fill: parent
                     antialiasing: true
+                    preferredRendererType: Shape.CurveRenderer
                     ShapePath {
                         strokeColor: "transparent"
                         fillGradient: RadialGradient {
@@ -5749,31 +7004,89 @@ ApplicationWindow {
                             GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, 0.42) }
                             GradientStop { position: 0.45; color: Qt.rgba(1, 1, 1, 0.0) }
                         }
-                        startX: 0; startY: 0
-                        PathLine { x: artRoot.width; y: 0 }
-                        PathLine { x: artRoot.width; y: artRoot.height }
-                        PathLine { x: 0;             y: artRoot.height }
-                        PathLine { x: 0;             y: 0 }
+                        startX: glossSheet.parent.r; startY: 0
+                        PathLine { x: artRoot.width - glossSheet.parent.r; y: 0 }
+                        PathArc  { x: artRoot.width; y: glossSheet.parent.r; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
+                        PathLine { x: artRoot.width; y: artRoot.height - glossSheet.parent.r }
+                        PathArc  { x: artRoot.width - glossSheet.parent.r; y: artRoot.height; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
+                        PathLine { x: glossSheet.parent.r; y: artRoot.height }
+                        PathArc  { x: 0; y: artRoot.height - glossSheet.parent.r; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
+                        PathLine { x: 0; y: glossSheet.parent.r }
+                        PathArc  { x: glossSheet.parent.r; y: 0; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
                     }
                 }
             }
         }
         // Offset depth shadow (BGT tilt_shadow: sx=-px*14, sy=-py*14+6). While
-        // hovered it leans away from the tilt; while raised it sits straight
-        // down at artPlayShadowY, and fxRaiseT crosses between the two, so the
-        // shadow never jumps as a hovered cover becomes a playing one. Gated
+        // hovered it leans away from the tilt; while raised it gives way to
+        // the playing glow (below) on fxRaiseT, so nothing jumps as a hovered
+        // cover becomes a playing one. Gated
         // on fxShadowDepth, not on a state boolean: the layer exists slightly
         // before and after the shadow is visible, which is what makes the fade
         // seamless. Idle covers still never pay the layer FBO, and the 90 ms
         // rest-arming means a scrolling list cannot mint one per row.
-        layer.enabled: artRoot.fxShadowDepth > 0.004
-        layer.effect: MultiEffect {
-            shadowEnabled: true
-            shadowColor: Qt.rgba(0, 0, 0, root.artPlayShadowA * artRoot.fxShadowDepth)
-            shadowBlur: root.artPlayShadowBlur
-            shadowHorizontalOffset: -(artRoot.fxRy / root.artFxTilt) * 14 * (1 - artRoot.fxRaiseT)
-            shadowVerticalOffset: ((artRoot.fxRx / root.artFxTilt) * 14 + 6) * (1 - artRoot.fxRaiseT)
-                                  + root.artPlayShadowY * artRoot.fxRaiseT * artRoot.fxBreathK
+        // Raising crosses from the hover's dark shadow to the playing glow
+        // on the same fxRaiseT, so a hovered cover that starts playing takes
+        // on its colors under the pointer rather than swapping one effect
+        // for another, and nothing dark pools over the words under the card.
+        // The glow draws in the layer's effect, which may reach past the
+        // cover's bounds (the shadow always has), so no call site has to
+        // carry a sibling for it.
+        // The rim keeps the layer up for its whole fade-out: the shadow's
+        // depth drops in 260 ms and the rim takes longer to go.
+        layer.enabled: artRoot.fxShadowDepth > 0.004 || artRoot.fxGlowT > 0.004
+        // The layer is drawn tilted and swelled: sampled bilinearly, or its
+        // rounded edge comes out stair-stepped.
+        layer.smooth: true
+        layer.effect: Item {
+            id: fxFx
+            property var source
+            readonly property real glowA: root.artPlayBlendA * artRoot.fxGlowT * artRoot.fxGlowK * palT
+            property real palT: artRoot.fxPalSettled ? 1 : 0
+            Behavior on palT { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+            // The colors' clock, in seconds at artPlayBlendSpeed, run as far
+            // as fxAmp reaches. Starts anywhere, so two plays of one cover
+            // don't open alike.
+            property real clock: Math.random() * 600
+            FrameAnimation {
+                running: artRoot.fxAmp > 0.001 && glow.visible && root.onScreen
+                onTriggered: fxFx.clock += frameTime * artRoot.fxAmp * root.artPlayBlendSpeed
+            }
+            readonly property var pal: artRoot.fxPal && artRoot.fxPal.c.length > 0 ? artRoot.fxPal
+                                       : { c: ["" + root.accent], w: [1] }
+            function col(i) { return pal.c[Math.min(i, pal.c.length - 1)] }
+            function share(i) { return pal.w[i] || 0 }
+            ShaderEffect {
+                id: glow
+                visible: fxFx.glowA > 0.002
+                readonly property real pad: 4 * spread + 6
+                x: -pad; y: -pad
+                width: artRoot.width + 2 * pad; height: artRoot.height + 2 * pad
+                opacity: fxFx.glowA
+                property real time: fxFx.clock
+                property real spread: Math.max(2.5, Math.min(root.artPlayGlowMax, Math.min(artRoot.width, artRoot.height) * root.artPlayBlendW))
+                property vector2d size: Qt.vector2d(width, height)
+                property vector2d cover: Qt.vector2d(artRoot.width, artRoot.height)
+                property real radius: Math.min(artRoot.radius, artRoot.width / 2, artRoot.height / 2)
+                property real count: Math.min(5, fxFx.pal.c.length)
+                property color c0: fxFx.col(0)
+                property color c1: fxFx.col(1)
+                property color c2: fxFx.col(2)
+                property color c3: fxFx.col(3)
+                property color c4: fxFx.col(4)
+                property vector4d w: Qt.vector4d(fxFx.share(0), fxFx.share(1), fxFx.share(2), fxFx.share(3))
+                property real w4: fxFx.share(4)
+                fragmentShader: "shaders/cover_blend.frag.qsb"
+            }
+            MultiEffect {
+                anchors.fill: parent
+                source: fxFx.source
+                shadowEnabled: true
+                shadowColor: Qt.rgba(0, 0, 0, root.artPlayShadowA * artRoot.fxShadowDepth * (1 - artRoot.fxRaiseT))
+                shadowBlur: root.artPlayShadowBlur
+                shadowHorizontalOffset: -(artRoot.fxRy / root.artFxTilt) * 14
+                shadowVerticalOffset: (artRoot.fxRx / root.artFxTilt) * 14 + 6
+            }
         }
     }
 
@@ -6899,9 +8212,11 @@ ApplicationWindow {
         property string artistName: ""
         property var presence: null
         // Draw as the strip on artwork. The caller sets the width and parents
-        // it inside the Art, which clips, so the strip takes the cover's tilt
-        // and rounded corners with it. The page form sizes itself to its text.
+        // it inside the Art, which clips to its box, so the strip takes the
+        // cover's tilt with it; its scrim takes the cover's corner (radius)
+        // itself, the clip being square. The page form sizes itself to its text.
         property bool bar: false
+        property real radius: 0
         // Two lines, the shape the hero card's caption already uses over
         // artwork: a spaced cap line over counts set big enough to survive a
         // photograph, which one rail-height line could never give them.
@@ -7013,6 +8328,9 @@ ApplicationWindow {
                 // fade. The overflow is drawn inside the Art, which clips, so
                 // it can reach as far up the cover as it needs to.
                 height: parent.height * 2.1
+                // The cover's corner at the bottom; the top corners round
+                // too, invisibly, the gradient being transparent up there.
+                radius: arb.radius
                 // Weighted so the words' own band is already dark and only the
                 // reach above it is doing the fading: a linear ramp puts its
                 // midpoint under the text, which is where a bright cover wins.
@@ -8700,6 +10018,32 @@ ApplicationWindow {
             opacity: db.st === "running" ? db.rollIn : (db.matrixRollOut ? db.rollOut : 0)
             transform: Translate { y: db.st === "running" ? 10 * (1 - db.rollIn) : -10 * (1 - db.rollOut) }
             sourceComponent: Item {
+                id: dbFace
+                // The word: the percent while the stream runs, FINALIZING once
+                // the bar is full and only the final steps are left (the "100%"
+                // it used to sit on said nothing was happening). pct is -1
+                // until the first progress event: no word then (the bar alone
+                // says "starting"; the readout used to show DownIcon's "…").
+                readonly property string want: db.pct >= 99.9 ? "FINALIZING" : db.pct >= 0 ? Math.round(db.pct) + "%" : ""
+                // A tick of the percent is written straight in; a change
+                // between the percent and FINALIZING dissolves out and back
+                // in on the reveal's own 460ms (finalizing lab, pick C), so
+                // the new word condenses out of the bar like the first one.
+                property string shown: want
+                property real swapK: 1
+                function sync() {
+                    if (dbSwap.running) return
+                    if ((want === "FINALIZING") === (shown === "FINALIZING")) shown = want
+                    else dbSwap.restart()
+                }
+                onWantChanged: sync()
+                SequentialAnimation {
+                    id: dbSwap
+                    NumberAnimation { target: dbFace; property: "swapK"; to: 0; duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine }
+                    ScriptAction { script: dbFace.shown = dbFace.want }
+                    NumberAnimation { target: dbFace; property: "swapK"; to: 1; duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine }
+                    onFinished: dbFace.sync()
+                }
                 // Nothing beside the matrix any more: its width IS the item's,
                 // so no digit landing can ever reflow it (the case the
                 // stable-width test guards).
@@ -8733,16 +10077,16 @@ ApplicationWindow {
                     // final steps are still in flight: twinkle in step with the
                     // queue row for the same item.
                     finishing: db.pct >= 99.9
-                    // pct is -1 until the first progress event: no word then
-                    // (the bar alone says "starting"; the readout used to show
-                    // DownIcon's "…" here).
-                    word: db.pct >= 0 ? Math.round(db.pct) + "%" : ""
+                    word: dbFace.shown
+                    // FINALIZING lights left to right as the final steps land.
+                    wordFill: dbFace.shown === "FINALIZING" ? root.dlFin(db.mediaId) : -1
                     // 460ms both ways (the dissolve wants longer than a plain
                     // fade to read as one), instant with motion off. One value
                     // drives every cell, so leaving mid-reveal reverses from
-                    // wherever it is.
-                    wordReveal: db.wordHover ? 1 : 0
-                    Behavior on wordReveal { NumberAnimation { duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine } }
+                    // wherever it is. The swap rides on top of it.
+                    property real hoverReveal: db.wordHover ? 1 : 0
+                    Behavior on hoverReveal { NumberAnimation { duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine } }
+                    wordReveal: hoverReveal * dbFace.swapK
                 }
             }
         }
@@ -9758,78 +11102,69 @@ ApplicationWindow {
 
         MouseArea { id: navMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: nt.clicked() }
 
-        // A count in the corner (the Releases tab's unseen arrivals). It
-        // overhangs the tab instead of widening it, so the row never shifts.
-        // It flares in white hot and cools to green, counts through every
-        // number on the way up (each step bumps it), counts back down when
-        // the count clears, then shrinks away. Everything keys off the count,
-        // never off the badge's own visible.
-        Item {
+        // A count in the corner (the Releases tab's unseen arrivals), drawn
+        // like the QUEUE button's: LED dots on the page's own color, cut into
+        // the corner. It overhangs the tab instead of widening it, so the row
+        // never shifts. It pops in, counts through every number on the way
+        // up (each step rolls the digits), counts back down when the count
+        // clears, then shrinks away still showing the last number. Everything
+        // keys off the count, never off the badge's own visible.
+        Rectangle {
             id: ntBadge
             objectName: "navTabBadge"
             z: 2
             property int disp: 0      // the number shown, stepping toward nt.badge
             property int last: 1      // the last nonzero number, held while it shrinks
-            property real sc: 0
-            property real heat: 0     // 1 = white hot
+            property int dir: 1
+            property real t: 1
             readonly property bool on: nt.badge > 0 || disp > 0
-            height: 16; width: Math.max(16, ntBadgeT.implicitWidth + 8)
-            Behavior on width { NumberAnimation { duration: 90 } }
-            x: nt.width - width + 6; y: -6
-            visible: sc > 0.01 && opacity > 0.01
-            transform: Scale { origin.x: ntBadge.width / 2; origin.y: ntBadge.height / 2; xScale: ntBadge.sc; yScale: ntBadge.sc }
-            Component.onCompleted: { disp = nt.badge; last = Math.max(1, nt.badge); sc = on ? 1 : 0 }
-            onOnChanged: {
-                ntBadgeIn.stop(); ntBadgeOut.stop()
-                if (on) ntBadgeIn.restart(); else ntBadgeOut.restart()
+            property real sc: on ? 1 : 0
+            Behavior on sc { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 2.2 } }
+            radius: 4; color: root.bg; clip: true
+            height: 13; width: Math.max(13, ntNew.text.length * 6.4 + 5)
+            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            x: nt.width - width + 5; y: -5
+            visible: sc > 0.01
+            transform: Scale { origin.x: ntBadge.width / 2; origin.y: 6.5; xScale: ntBadge.sc; yScale: ntBadge.sc }
+            function fmt(v) { return v > 99 ? "99+" : "" + v }
+            Component.onCompleted: { disp = nt.badge; last = Math.max(1, nt.badge); ntNew.text = fmt(last) }
+            // A fresh arrival pops in reading 1, not rolling from the number it last held.
+            onOnChanged: if (on && disp === 0) { ntRoll.stop(); t = 1; ntOld.text = ""; ntNew.text = "1"; last = 1 }
+            onLastChanged: {
+                var was = ntNew.text
+                if (fmt(last) === was) return
+                dir = was === "" || last > parseInt(was) ? 1 : -1
+                ntOld.text = was; ntNew.text = fmt(last)
+                ntRoll.duration = disp !== nt.badge ? 85 : 300
+                ntRoll.restart()
             }
             Timer {
-                interval: 55; repeat: true; running: ntBadge.disp !== nt.badge
+                interval: 90; repeat: true; running: ntBadge.disp !== nt.badge
                 onTriggered: {
                     var d = nt.badge - ntBadge.disp
                     var step = Math.max(1, Math.ceil(Math.abs(d) / 6))
                     ntBadge.disp += d > 0 ? step : -step
                     if (ntBadge.disp > 0) ntBadge.last = ntBadge.disp
-                    if (d > 0) ntBadgeTick.restart()
                 }
             }
-            Rectangle {
-                anchors.centerIn: parent
-                width: parent.width + 10 * ntBadge.heat; height: parent.height + 10 * ntBadge.heat
-                radius: height / 2; color: root.accent; opacity: 0.45 * ntBadge.heat
+            NumberAnimation { id: ntRoll; target: ntBadge; property: "t"; from: 0; to: 1; duration: 300; easing.type: Easing.OutCubic }
+            Text {
+                id: ntOld
+                textFormat: Text.PlainText
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: (ntBadge.height - height) / 2 - ntBadge.dir * ntBadge.t * ntBadge.height
+                visible: ntBadge.t < 1
+                color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; opacity: 0
             }
-            Item {
-                id: ntBadgeFace; anchors.fill: parent
-                transform: Scale { id: ntBadgeTs; origin.x: ntBadgeFace.width / 2; origin.y: ntBadgeFace.height / 2 }
-                Rectangle {
-                    anchors.fill: parent; radius: 8
-                    color: Qt.tint(root.accent, Qt.rgba(1, 1, 1, 0.8 * ntBadge.heat))
-                }
-                Text {
-                    id: ntBadgeT
-                    objectName: "navTabBadgeText"
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: ntBadge.last > 99 ? "99+" : ("" + ntBadge.last)
-                    color: root.accentText; font.family: root.mono; font.pixelSize: 10; font.bold: true
-                }
+            Text {
+                id: ntNew
+                objectName: "navTabBadgeText"
+                textFormat: Text.PlainText
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: (ntBadge.height - height) / 2 + ntBadge.dir * (1 - ntBadge.t) * ntBadge.height
+                color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; opacity: 0
             }
-            SequentialAnimation {
-                id: ntBadgeTick
-                NumberAnimation { target: ntBadgeTs; properties: "xScale,yScale"; to: 1.14; duration: 30 }
-                NumberAnimation { target: ntBadgeTs; properties: "xScale,yScale"; to: 1; duration: 120; easing.type: Easing.OutQuad }
-            }
-            ParallelAnimation {
-                id: ntBadgeIn
-                PropertyAction { target: ntBadge; property: "sc"; value: 1 }
-                NumberAnimation { target: ntBadge; property: "opacity"; from: 0; to: 1; duration: 120; easing.type: Easing.OutQuad }
-                NumberAnimation { target: ntBadge; property: "heat"; from: 1; to: 0; duration: 620; easing.type: Easing.OutCubic }
-            }
-            SequentialAnimation {
-                id: ntBadgeOut
-                NumberAnimation { target: ntBadge; property: "sc"; to: 0; duration: 200; easing.type: Easing.InBack; easing.overshoot: 2 }
-                ScriptAction { script: { ntBadge.heat = 0; ntBadge.opacity = 1 } }
-            }
+            LedCount { cur: ntNew.text; old: ntOld.text; t: ntBadge.t; dir: ntBadge.dir }
         }
 
         states: State { name: "on"; when: nt.active
@@ -10099,12 +11434,22 @@ ApplicationWindow {
         property string vArtist: ""
         property string vDuration: ""
         property string spec: ""
+        property int ring: 0
         readonly property bool peekable: videoId !== ""
         scale: peekable && bvtHover.hovered ? 1.03 : 1
         Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         z: bvtHover.hovered ? 4 : 0
         Art { anchors.fill: parent; radius: 8; url: bvt.urlBig !== "" ? bvt.urlBig : bvt.url }
         PlayBadge { radius: 8; lit: bvtHover.hovered }
+        // An arrival's frame (as Art.ring), over the scrim so it never dims,
+        // and inside the thumb's hover scale.
+        Rectangle {
+            objectName: "releaseFrame"
+            visible: bvt.ring > 0
+            anchors.fill: parent; z: 5
+            radius: 8   // the thumb's own corner
+            color: "transparent"; border.color: root.accent; border.width: bvt.ring
+        }
         // "You already downloaded this" rides the top-LEFT corner, across from
         // the resolution badge: same plate, same size, green (the on-disk
         // owned color). Videos never appear in the library scan (it only
@@ -10381,11 +11726,33 @@ ApplicationWindow {
             "4": ["101","101","111","001","001"], "5": ["111","100","111","001","111"],
             "6": ["111","100","111","101","111"], "7": ["111","001","001","001","001"],
             "8": ["111","101","111","101","111"], "9": ["111","101","111","001","111"],
-            "%": ["101","001","010","100","101"] })
+            "%": ["101","001","010","100","101"],
+            // FINALIZING, the word the download face shows once the bar is
+            // full and only the final steps run (finalizing lab, pick C,
+            // 2026-10-30). Packed so it fits a shrunk Browse card's pill (39
+            // columns): I is one column and N four, since a three-column N
+            // reads as an M. A glyph's width is its row length.
+            "A": ["010","101","111","101","101"], "F": ["111","100","110","100","100"],
+            "G": ["011","100","101","101","011"], "I": ["1","1","1","1","1"],
+            "L": ["100","100","100","100","111"], "N": ["1001","1101","1011","1001","1001"],
+            "Z": ["111","001","010","100","111"] })
+        // Each glyph's first column within the word, and the word's width:
+        // glyph, a column of gap, glyph, ... (digits are all three wide).
+        readonly property var wordLayout: {
+            var xs = [], x = 0
+            for (var i = 0; i < word.length; ++i) {
+                xs.push(x); var g = font3x5[word.charAt(i)]; x += (g ? g[0].length : 3) + 1
+            }
+            return { xs: xs, w: Math.max(0, x - 1) }
+        }
+        // The word as a progress readout of its own: -1 lights every stroke;
+        // 0..1 lights the strokes left of that fraction of the word and holds
+        // the rest at 0.3, so FINALIZING fills in as the final steps land.
+        property real wordFill: -1
         // A glyph is five rows tall; in a taller grid it sits on the middle
         // five (the seven-row download face carries it on rows 1..5).
         readonly property bool wordOn: rows >= 5 && word !== "" && wordReveal > 0
-        readonly property int wordZoneW: Math.max(0, word.length * 4 - 1)
+        readonly property int wordZoneW: wordLayout.w
         // Rounded, not floored: a cell is 4px and the ideal start lands on a
         // half cell whenever the leftover is odd, so rounding keeps the worst
         // case to half a cell either way instead of a whole one.
@@ -10403,11 +11770,16 @@ ApplicationWindow {
         }
         function wordOnAt(col, rowTop) {
             var z = col - wordZoneStart
-            if (z < 0 || z >= wordZoneW || z % 4 === 3) return false
+            if (z < 0 || z >= wordZoneW) return false
             var r = rowTop - wordRowTop
             if (r < 0 || r > 4) return false
-            var g = font3x5[word.charAt(Math.floor(z / 4))]
-            return g ? g[r].charAt(z % 4) === "1" : false
+            var xs = wordLayout.xs
+            for (var i = xs.length - 1; i >= 0; --i) {
+                if (z < xs[i]) continue
+                var g = font3x5[word.charAt(i)]
+                return g ? g[r].charAt(z - xs[i]) === "1" : false
+            }
+            return false
         }
         // Conveyor edge fade. Cells within edgeFadeW px of either end, or
         // edgeFadeH px of the top / bottom, fade out on the SAME curve as
@@ -10534,7 +11906,8 @@ ApplicationWindow {
                 // number reads identically at 4% and at 96%.
                 readonly property bool wordCell: dm.wordOn && dm.wordOnAt(col, rowTop)
                 readonly property bool plateCell: dm.wordOn && !wordCell && dm.wordPlateAt(col, rowTop)
-                readonly property real wordTo: wordCell ? 1.0 : dm.wordPlate
+                readonly property real wordTo: !wordCell ? dm.wordPlate
+                    : dm.wordFill < 0 || col - dm.wordZoneStart < dm.wordZoneW * dm.wordFill ? 1.0 : 0.3
                 readonly property real wordDelay: { var r = Math.sin(index * 78.233 + 1.7) * 43758.5453; return (r - Math.floor(r)) * 0.65 }
                 readonly property real wordT: Math.max(0, Math.min(1, (dm.wordReveal - wordDelay) / 0.35))
                 // Static per cell (its own position against the fade
@@ -10544,7 +11917,9 @@ ApplicationWindow {
                                                  dm.edgeVis((dm.gridW - x - dm.dot / 2) / dm.edgeFadeW)) : 1)
                   * (dm.edgeFadeH > 0 ? Math.min(dm.edgeVis((y + dm.dot / 2) / dm.edgeFadeH),
                                                  dm.edgeVis((dm.implicitHeight - y - dm.dot / 2) / dm.edgeFadeH)) : 1)
-                opacity: edgeMul * ((wordCell || plateCell) ? barOpacity + (wordTo - barOpacity) * wordT : barOpacity)
+                // A stroke skips the fade: FINALIZING runs into the fade zone
+                // on a shrunk card, and its end letters sank into it.
+                opacity: (wordCell ? 1 : edgeMul) * ((wordCell || plateCell) ? barOpacity + (wordTo - barOpacity) * wordT : barOpacity)
             }
         }
     }
@@ -12268,7 +13643,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 44; Layout.alignment: Qt.AlignVCenter
                     PreviewArt { visible: trow.kind !== "video"; anchors.fill: parent; kind: "track"; pid: tId; url: art }
                     Art { visible: trow.kind === "video"; anchors.fill: parent; url: art }
-                    PlayBadge { visible: trow.kind === "video"; lit: thumbMa.containsMouse; radius: 0 }
+                    PlayBadge { visible: trow.kind === "video"; lit: thumbMa.containsMouse; radius: 6 }
                     MouseArea {
                         id: thumbMa
                         anchors.fill: parent
@@ -12455,11 +13830,16 @@ ApplicationWindow {
         // single topmost item: a button's label sits above its MouseArea as a
         // sibling, so over the glyphs that found no cursor at all and the
         // hand flickered off.
+        // The handler lands on the page's content, so its position scrolls
+        // with the rows: the scene position is the one to search from (read
+        // as the page's own, the search ran a scroll's height below the
+        // pointer, and a name hovered and underlined further down the feed
+        // showed an arrow).
         property int under: Qt.ArrowCursor
         cursorShape: under
         HoverHandler {
             parent: guard.flick
-            onPointChanged: guard.track(point.position)
+            onPointChanged: guard.track(point.scenePosition)
             onHoveredChanged: if (!hovered) guard.under = Qt.ArrowCursor
         }
         function cursorUnder(item, px, py, depth) {
@@ -12480,9 +13860,9 @@ ApplicationWindow {
             }
             return -1
         }
-        function track(pos) {
+        function track(scenePos) {
             if (!flick) return
-            var it = flick.contentItem, p = flick.mapToItem(it, pos.x, pos.y)
+            var it = flick.contentItem, p = it.mapFromItem(null, scenePos.x, scenePos.y)
             var shape = cursorUnder(it, p.x, p.y, 0)
             under = shape >= 0 ? shape : Qt.ArrowCursor
         }
@@ -12545,7 +13925,17 @@ ApplicationWindow {
         property Flickable shelf: null
         property color tone: "#0d0f12"
         readonly property real fadeW: 34
+        // A shelf whose clip reaches past its visible sides (room for a
+        // playing cover's rim, see artGlowPad) has the fades reach that far
+        // out and run solid over the extra room, so the fade still starts
+        // at the visible edge and a card scrolled behind it never shows in
+        // the margin.
+        property real bleed: 0
+        readonly property real band: fadeW + bleed
+        readonly property real solid: bleed / band
+        function at(p) { return solid + p * (1 - solid) }
         anchors.fill: shelf
+        anchors.margins: -bleed
         z: 10
         Component.onCompleted: {
             var p = parent
@@ -12555,8 +13945,8 @@ ApplicationWindow {
             if (p) { sef.parent = p; sef.shelf = p }
         }
         Rectangle {
-            width: sef.height; height: sef.fadeW
-            x: (sef.fadeW - sef.height) / 2; y: (sef.height - sef.fadeW) / 2
+            width: sef.height; height: sef.band
+            x: (sef.band - sef.height) / 2; y: (sef.height - sef.band) / 2
             rotation: -90
             visible: sef.shelf !== null && opacity > 0
             // From the origin, not 0: a strip of mixed tile widths re-estimates
@@ -12564,22 +13954,24 @@ ApplicationWindow {
             opacity: sef.shelf ? Math.min(1, Math.max(0, sef.shelf.contentX - sef.shelf.originX) / sef.fadeW) : 0
             gradient: Gradient {
                 GradientStop { position: 0; color: sef.tone }
-                GradientStop { position: 0.25; color: Qt.alpha(sef.tone, 0.82) }
-                GradientStop { position: 0.6; color: Qt.alpha(sef.tone, 0.28) }
+                GradientStop { position: sef.at(0); color: sef.tone }
+                GradientStop { position: sef.at(0.25); color: Qt.alpha(sef.tone, 0.82) }
+                GradientStop { position: sef.at(0.6); color: Qt.alpha(sef.tone, 0.28) }
                 GradientStop { position: 1; color: Qt.alpha(sef.tone, 0) }
             }
         }
         Rectangle {
-            width: sef.height; height: sef.fadeW
-            x: sef.width - (sef.fadeW + sef.height) / 2; y: (sef.height - sef.fadeW) / 2
+            width: sef.height; height: sef.band
+            x: sef.width - (sef.band + sef.height) / 2; y: (sef.height - sef.band) / 2
             rotation: 90
             visible: sef.shelf !== null && opacity > 0
             opacity: sef.shelf ? Math.min(1, Math.max(0,
                          sef.shelf.originX + sef.shelf.contentWidth - sef.shelf.width - sef.shelf.contentX) / sef.fadeW) : 0
             gradient: Gradient {
                 GradientStop { position: 0; color: sef.tone }
-                GradientStop { position: 0.25; color: Qt.alpha(sef.tone, 0.82) }
-                GradientStop { position: 0.6; color: Qt.alpha(sef.tone, 0.28) }
+                GradientStop { position: sef.at(0); color: sef.tone }
+                GradientStop { position: sef.at(0.25); color: Qt.alpha(sef.tone, 0.82) }
+                GradientStop { position: sef.at(0.6); color: Qt.alpha(sef.tone, 0.28) }
                 GradientStop { position: 1; color: Qt.alpha(sef.tone, 0) }
             }
         }
@@ -12616,12 +14008,13 @@ ApplicationWindow {
                 // the cover's lower edge rather than a chip dropped in a
                 // corner: the one row of a search page that stayed silent about
                 // the library now answers, and no face is covered to say it. A
-                // child of the Art, so it takes the cover's tilt, hover lift
-                // and rounded clip for free.
+                // child of the Art, so it takes the cover's tilt and hover
+                // lift for free, and its corner by name.
                 ArtistBadges {
                     bar: true
                     width: parent.width
                     anchors.bottom: parent.bottom
+                    radius: parent.faceRadius
                     artistName: aName
                 }
             }
@@ -13115,6 +14508,7 @@ ApplicationWindow {
         // side can keep its own bindings and its own natural size.
         property Item idleItem: null
         property Item liveItem: null
+        property real pillRadius: root.btnRad
         property color idleColor: "#d90d0f12"
         property color idleBorder: root.accentDim
         property color liveColor: idleColor
@@ -13168,7 +14562,7 @@ ApplicationWindow {
         Rectangle {
             id: rswPill
             anchors.fill: parent
-            radius: root.btnRad
+            radius: rsw.pillRadius
             color: rsw._mix(rsw.idleColor, rsw.liveColor, rsw.t)
             border.width: root.btnBorderW
             border.color: rsw._mix(rsw.idleBorder, rsw.liveBorder, rsw.t)
@@ -13770,25 +15164,29 @@ ApplicationWindow {
             }
         }
     }
-    // One release in the Releases feed: the album card (cover, title, artist,
-    // library pill, hover download), then what the feed is about: when, what
-    // kind, explicit or not. The caption's own date is dropped for the date
-    // chip. A dot marks what arrived since the last visit, for this visit.
+    // One release in the Releases feed: its cover (the album card's, with
+    // its library pill and hover download) or its video, and its words
+    // under it (ReleaseText). An arrival still marked wears a green frame.
     component ReleaseCard: Item {
         id: rc
         property var card: ({})
         readonly property string day: root.releaseDay(card)
         readonly property bool upcoming: root.todayIso !== "" && day > root.todayIso
         readonly property bool video: card.kind === "video"
-        width: video ? root.relVideoW : root.relCardW; height: root.relCardH
+        readonly property bool fresh: root.relIsFresh(card)
+        width: video ? root.relVideoW : root.relCardW
+        height: root.relCardW + 8 + rcText.height
         // A music video is drawn 16:9 at the cover's height, so it reads as a
         // video at a glance and the feed rows keep their heights.
         Loader {
             id: rcCard
-            width: rc.width; height: root.relCardH - 22
+            width: rc.width; height: rc.height
             sourceComponent: rc.video ? relVideoBody : relAlbumBody
         }
-        Component { id: relAlbumBody; ArtCard { card: rc.card; hideDate: true } }
+        // A raised cover orders above the cards beside it in the row (see
+        // ArtCard.lift); a video body has no lift to take.
+        z: rcCard.item && rcCard.item.lift !== undefined ? rcCard.item.lift : 0
+        Component { id: relAlbumBody; ArtCard { card: rc.card; bare: true; ring: rc.fresh ? 2 : 0 } }
         Component {
             id: relVideoBody
             Item {
@@ -13800,34 +15198,11 @@ ApplicationWindow {
                     videoId: "" + (rc.card.id || ""); vTitle: rc.card.title || ""; vArtist: rc.card.artist || ""
                     vDuration: parent.secs > 0 ? Math.floor(parent.secs / 60) + ":" + ("0" + parent.secs % 60).slice(-2) : ""
                     spec: "" + (rc.card.quality || "")
+                    ring: rc.fresh ? 2 : 0
                 }
-                // Title and artist where a cover's are, the download beside
-                // them, as on the artist page's video cells.
-                Column {
-                    anchors.left: parent.left; anchors.right: rvDl.left; anchors.rightMargin: 10
-                    anchors.top: rvThumb.bottom; anchors.topMargin: 8
-                    spacing: 2
-                    Text {
-                        textFormat: Text.PlainText
-                        text: rc.card.title || ""
-                        color: root.textHi; font.pixelSize: 13; font.bold: true
-                        width: parent.width; elide: Text.ElideRight
-                        font.underline: rvTitleMa.containsMouse
-                        MouseArea {
-                            id: rvTitleMa
-                            anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left
-                            width: Math.min(parent.implicitWidth, parent.width)
-                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            onClicked: root.openBrowseCard(rc.card)
-                        }
-                    }
-                    ArtistLinks {
-                        artists: root.cardLeadArtists(rc.card); px: 11
-                        width: Math.min(implicitWidth, parent.width)
-                    }
-                }
+                // The download beside the words, as on the artist page's
+                // video cells.
                 DownloadButton {
-                    id: rvDl
                     anchors.right: parent.right
                     anchors.top: rvThumb.bottom; anchors.topMargin: 10
                     mediaId: "" + (rc.card.id || ""); ownedCheck: true; label: "Download"; noun: "video"
@@ -13835,27 +15210,156 @@ ApplicationWindow {
                 }
             }
         }
-        Row {
-            anchors.top: rcCard.bottom; anchors.topMargin: 6
-            height: 16; spacing: 6
-            Rectangle {
-                objectName: "releaseFreshDot"
-                // A video's id carries its "v:" mark (an album can share the number).
-                visible: !!root.releasesFreshIds[(rc.video ? "v:" : "") + (rc.card.id || "")]
-                width: 6; height: 6; radius: 3; color: root.accent
-                anchors.verticalCenter: parent.verticalCenter
+        ReleaseText {
+            id: rcText
+            y: root.relCardW + 8
+            width: rc.video ? root.relVideoTextW : rc.width
+            card: rc.card
+        }
+    }
+    // A release's words under its cover in the feed: a mono line over the
+    // title (JUST IN in green for an arrival, NEW for an album out lately,
+    // then the kind, set apart by dots) with the date set right, then the
+    // title and its artists, each wrapped in full (the feed cuts nothing
+    // short). relTextH works the height out ahead, so any change to how
+    // these are laid out goes there too.
+    component ReleaseText: Item {
+        id: rt
+        property var card: ({})
+        readonly property string day: root.releaseDay(card)
+        readonly property bool upcoming: root.todayIso !== "" && day > root.todayIso
+        height: rtArtists.y + rtArtists.height
+        Text {
+            id: rtDate
+            objectName: "releaseDate"
+            anchors.right: parent.right
+            textFormat: Text.PlainText
+            text: root.releasesDateLabel(rt.day, root.todayIso)
+            color: rt.upcoming ? root.accent : root.textLo
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.6
+        }
+        Flow {
+            id: rtKick
+            objectName: "releaseKick"
+            readonly property var parts: root.relKickParts(rt.card)
+            width: parent.width - rtDate.implicitWidth - 8
+            Repeater {
+                model: rtKick.parts
+                delegate: Row {
+                    required property var modelData
+                    required property int index
+                    Text {
+                        objectName: "releaseKickWord"
+                        textFormat: Text.PlainText; text: modelData.t
+                        color: modelData.hi ? root.accent : root.textLo
+                        font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.6
+                    }
+                    Text {
+                        visible: index < rtKick.parts.length - 1
+                        textFormat: Text.PlainText; text: " · "; color: root.textLo
+                        font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.6
+                    }
+                }
             }
-            RelChip {
-                objectName: "releaseDateChip"
-                text: root.releasesDateLabel(rc.day, root.todayIso); accent: rc.upcoming
-                anchors.verticalCenter: parent.verticalCenter
+        }
+        Text {
+            id: rtTitle
+            objectName: "releaseTitle"
+            y: Math.max(rtKick.height, rtDate.height) + 3
+            width: parent.width; wrapMode: Text.Wrap
+            maximumLineCount: root.relTitleLines; elide: Text.ElideRight
+            textFormat: Text.PlainText
+            text: rt.card.title || ""
+            color: root.textHi; font.pixelSize: 13; font.bold: true
+            font.underline: rtTitleMa.containsMouse
+            MouseArea {
+                id: rtTitleMa
+                anchors.fill: parent
+                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: root.openBrowseCard(rt.card)
+                onContainsMouseChanged: containsMouse && rtTitle.truncated ? root.fullTipFor(rtTitle, rtTitle.text)
+                                                                           : root.fullTipOff(rtTitle)
             }
-            RelChip {
-                objectName: "releaseKindChip"
-                text: ("" + (rc.card.rtype || "")).toUpperCase(); visible: text !== ""
-                anchors.verticalCenter: parent.verticalCenter
+        }
+        ArtistFlow {
+            id: rtArtists
+            anchors.top: rtTitle.bottom; anchors.topMargin: 2
+            width: parent.width
+            artists: root.cardLeadArtists(rt.card); px: 11
+            capLines: root.relArtistLines
+        }
+    }
+    // ArtistLinks that wraps: a long name, or a long list of them, runs on
+    // to the next line instead of being cut off. With `capLines` (11 px
+    // names only, see artistFit) it stops at that many lines: the names that
+    // do not fit fold into "+N more", and hovering it lists them all.
+    component ArtistFlow: Flow {
+        id: af
+        objectName: "artistFlow"
+        property var artists: []
+        property int px: 11
+        property int capLines: 0
+        readonly property var names: {
+            var out = []
+            for (var i = 0; i < af.artists.length; i++) out.push("" + (af.artists[i].name || ""))
+            return out
+        }
+        // Worked out in handlers, not a binding: artistFit drives shared
+        // measuring Texts, so a binding would wake every other card's.
+        property var fit: null
+        function refit() { af.fit = af.capLines > 0 && af.width > 0 ? root.artistFit(af.names, af.width, af.capLines) : null }
+        onWidthChanged: af.refit()
+        onNamesChanged: af.refit()
+        onCapLinesChanged: af.refit()
+        Component.onCompleted: af.refit()
+        readonly property int more: af.fit ? af.fit.more : 0
+        Repeater {
+            model: af.fit ? af.artists.slice(0, af.fit.shown) : af.artists
+            delegate: Row {
+                required property var modelData
+                required property int index
+                Text {
+                    id: afName
+                    readonly property bool linkable: modelData.id && modelData.id !== "" && !root.onArtistPage(modelData.id)
+                    width: Math.min(implicitWidth, af.width - afComma.implicitWidth)
+                    wrapMode: Text.Wrap
+                    maximumLineCount: af.fit ? af.fit.nameLines : 1000; elide: Text.ElideRight
+                    text: modelData.name; textFormat: Text.PlainText; color: root.accent; font.pixelSize: af.px
+                    font.underline: afMa.containsMouse && linkable
+                    MouseArea {
+                        id: afMa
+                        anchors.fill: parent; hoverEnabled: true
+                        cursorShape: afName.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: if (afName.linkable) waves.loadArtist(modelData.id)
+                        // As ArtistLinks: the page is built while the pointer rests.
+                        readonly property var prefetchCard: ({ kind: "artist", id: "" + (modelData.id || "") })
+                        onContainsMouseChanged: {
+                            if (containsMouse && afName.linkable) root.hoverPrefetch(prefetchCard)
+                            else root.hoverPrefetchCancel(prefetchCard)
+                            if (containsMouse && afName.truncated) root.fullTipFor(afName, afName.text)
+                            else root.fullTipOff(afName)
+                        }
+                    }
+                }
+                Text {
+                    id: afComma
+                    visible: af.fit ? index < af.fit.shown - 1 || af.more > 0 : index < af.artists.length - 1
+                    textFormat: Text.PlainText; text: af.fit && index === af.fit.shown - 1 ? " " : ", "; color: root.textLo; font.pixelSize: af.px
+                }
             }
-            ExplicitMark { visible: rc.card.explicit === true; anchors.verticalCenter: parent.verticalCenter }
+        }
+        Text {
+            id: afMore
+            objectName: "artistFlowMore"
+            visible: af.more > 0
+            textFormat: Text.PlainText; text: "+" + af.more + " more"
+            color: root.textLo; font.pixelSize: af.px
+            font.underline: afMoreMa.containsMouse
+            MouseArea {
+                id: afMoreMa
+                anchors.fill: parent; hoverEnabled: true
+                onContainsMouseChanged: containsMouse ? root.fullTipFor(afMore, af.names.join(", ")) : root.fullTipOff(afMore)
+            }
         }
     }
 
@@ -13863,7 +15367,8 @@ ApplicationWindow {
         id: ac
         property var card: ({})
         property bool hero: false
-        property bool hideDate: false   // see CardCaption.hideDate
+        property bool bare: false       // the cover alone: the Releases feed sets its own words under it
+        property int ring: 0            // an arrival's green frame, in px (see Art.ring)
         // The quality word for the cover's top-right mark, "" for none: the
         // release's best tier under the quality setting (releaseQualWord),
         // for the kinds that have an audio tier to state.
@@ -13871,7 +15376,11 @@ ApplicationWindow {
         readonly property string kind: card.kind || ""
         readonly property real artSize: hero ? 280 : 200
         width: artSize
-        height: hero ? artSize : artSize + 46
+        height: hero ? artSize : bare ? artSize + 46 : acWords.y + acWords.height
+        // 1 while the cover is raised or shadowed (Art's own z), for the
+        // delegate that holds this card to take as its z: the cover's rim
+        // reaches past the card, and a neighbor built later painted over it.
+        readonly property int lift: acArt.z
         readonly property bool openable: ac.kind !== "track" || !!ac.card.artist_id
         // Prefetch arms from the whole card, title and caption included, the
         // way BrowseCard's does. Its own handler: the artwork's acWrapHover
@@ -14011,12 +15520,17 @@ ApplicationWindow {
         Art {
             id: acArt
             width: ac.artSize; height: ac.artSize
-            radius: 12
+            radius: root.artCorner(ac.artSize)
+            // The hero caption's scrim, in the face itself on a rounded
+            // cover; it yields to the hover controls.
+            shadeH: ac.hero ? 96 : 0
+            shadeA: ac.hero && !acArt.controlsOn ? 0.9 : 0
             // Heroes tilt too: the landing's first shelf renders through the
             // hero card, and it sat flat while every card around it moved
             // (reported from livetesting). The on-art caption and scrim are
             // children of the art, so they ride the same tilt.
             hoverFx: true
+            ring: ac.ring
             // Videos have no audio-preview path, so they never take the raise.
             fxKind: ac.kind === "video" ? "" : ac.kind
             fxId: ac.kind === "video" ? "" : ("" + (ac.card.id || ""))
@@ -14028,15 +15542,17 @@ ApplicationWindow {
                 cursorShape: ac.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: root.openBrowseCard(ac.card)
             }
-            // hero caption rides ON the art over a bottom scrim (children are
-            // clipped to the rounded rect, so the scrim keeps the corners)
+            // hero caption rides ON the art over a bottom scrim. On a rounded
+            // face the face draws it (shadeA above): a Rectangle here laid a
+            // second edge on the face's and showed as a gray slab.
             Rectangle {
                 // scrim yields to the hover controls so they never overlap the caption
-                visible: ac.hero && opacity > 0
+                visible: ac.hero && !root.roundFaces && opacity > 0
                 opacity: acArt.controlsOn ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
                 height: 96
+                radius: acArt.faceRadius
                 gradient: Gradient {
                     GradientStop { position: 0; color: "transparent" }
                     GradientStop { position: 1; color: "#e60b0d10" }
@@ -14119,7 +15635,7 @@ ApplicationWindow {
                 id: acRiser
                 on: acArt.controlsOn
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                anchors.margins: 10
+                anchors.margins: 12
                 height: acSwap.implicitHeight
                 readonly property string acPvSt: root.pvSt(ac.kind, ac.card.id || "")
                 readonly property string acDlSt: root.dlSt(ac.card.id || "")
@@ -14138,6 +15654,9 @@ ApplicationWindow {
             RollSwap {
                 id: acSwap
                 anchors.horizontalCenter: parent.horizontalCenter
+                // Concentric with the cover's corner, so the pill's edge runs
+                // parallel to the curve instead of crowding into it.
+                pillRadius: Math.max(root.btnRad, acArt.faceRadius - 12)
                 live: acRiser.acPvSt !== "" || (acRiser.acDlSt !== "" && !acRiser.dlDone)
                 // The pill draws the live side's fill AND outline (a download
                 // button is a filled control, and a bare one paints neither):
@@ -14359,17 +15878,32 @@ ApplicationWindow {
             }
             }
         }
+        // The words under the cover, measured ahead by artCardTextH (a
+        // change to how they are laid out goes there too). An album says
+        // what the Releases feed says of it, in the feed's own words; any
+        // other card wraps its title to the feed's cap over its caption.
         Column {
-            visible: !ac.hero
+            id: acWords
+            objectName: "artCardWords"
+            visible: !ac.hero && !ac.bare
             anchors.left: parent.left; anchors.right: parent.right
             anchors.top: acArt.bottom; anchors.topMargin: 8
             spacing: 2
+            Loader {
+                active: ac.kind === "album" && acWords.visible
+                visible: active
+                width: parent.width
+                sourceComponent: ReleaseText { card: ac.card }
+            }
             Text {
                 id: acTitle
+                objectName: "artCardTitle"
+                visible: ac.kind !== "album"
                 textFormat: Text.PlainText
                 text: ac.card.title || ""
                 color: root.textHi; font.pixelSize: 13; font.bold: true
-                width: parent.width; elide: Text.ElideRight
+                width: parent.width; wrapMode: Text.Wrap
+                maximumLineCount: root.relTitleLines; elide: Text.ElideRight
                 horizontalAlignment: ac.kind === "artist" ? Text.AlignHCenter : Text.AlignLeft
                 font.underline: acTitleMa.containsMouse && ac.openable
                 MouseArea {
@@ -14381,9 +15915,14 @@ ApplicationWindow {
                     hoverEnabled: true
                     cursorShape: ac.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: root.openBrowseCard(ac.card)
+                    onContainsMouseChanged: containsMouse && acTitle.truncated ? root.fullTipFor(acTitle, acTitle.text)
+                                                                               : root.fullTipOff(acTitle)
                 }
             }
-            CardCaption { card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width; settled: ac.haveIt; hideDate: ac.hideDate }
+            CardCaption {
+                visible: ac.kind !== "album"
+                card: ac.card; px: 11; center: ac.kind === "artist"; width: parent.width; settled: ac.haveIt
+            }
         }
     }
 
@@ -14616,8 +16155,26 @@ ApplicationWindow {
             // remain keep their cards (a refresh rebinds them in place).
             if (_slotN > n) { bsecSlots.remove(n, _slotN - n); _slotN = n }
             while (_slotN < n) { bsecSlots.append({ slot: _slotN }); _slotN++ }
+            measureWords()
         }
         onItemsChanged: syncSlots()
+        // How tall each card's words run under a 200 px cover (artCardTextH),
+        // measured with the rows, so the art shelf and grid are laid out at
+        // their tallest cards before any is built. From a handler, never a
+        // binding: the measure drives shared Texts every card's would wake.
+        property var wordsHs: []
+        property int wordsMax: 38
+        function measureWords() {
+            if (sec.rowKind !== "cards" || hero) return
+            var hs = [], top = 0
+            for (var i = 0; i < items.length; i++) {
+                hs.push(Math.ceil(root.artCardTextH(items[i] || ({}), 200)))
+                top = Math.max(top, hs[i])
+            }
+            wordsHs = hs
+            wordsMax = Math.max(top, 0)
+        }
+        Connections { target: root; function onTodayIsoChanged() { bsec.measureWords() } }
         Component.onCompleted: {
             syncSlots()
             // A list view applies an insert on its next polish; applied now,
@@ -14673,6 +16230,22 @@ ApplicationWindow {
             readonly property real cardW: bsec.artStyle ? 200 : 156
             spacing: bsec.artStyle ? 14 : 12
             readonly property int cols: root.gridCols(cardW, spacing, bsec.items.length, parent.width)
+            // Art cards: each row as tall as its tallest card (the feed's
+            // rule), and where each row starts, from the measured words.
+            readonly property var rowHs: {
+                var out = [], hs = bsec.wordsHs, c = Math.max(1, cols)
+                for (var i = 0; i < hs.length; i++) {
+                    var r = Math.floor(i / c)
+                    out[r] = Math.max(out[r] || 0, 208 + hs[i])
+                }
+                return out
+            }
+            function rowH(r) { return bsec.artStyle ? (rowHs[r] || 246) : 236 }
+            function rowTop(r) {
+                var y = 0
+                for (var i = 0; i < r; i++) y += rowH(i) + spacing
+                return y
+            }
             width: cols * (cardW + spacing) - spacing
             x: Math.max(0, (parent.width - width) / 2)
             Repeater {
@@ -14685,12 +16258,12 @@ ApplicationWindow {
                     // The card's own size, held while it incubates, so the
                     // grid keeps its geometry (and the page its height).
                     width: bsec.artStyle ? 200 : 156
-                    height: bsec.artStyle ? 246 : 236
+                    readonly property int row: Math.floor(index / Math.max(1, bgridFlow.cols))
+                    height: bgridFlow.rowH(row)
                     // Where this card sits in the pane's scroll space, from
                     // the grid's own arithmetic (the Flow has not placed it
                     // when `asynchronous` is read).
-                    readonly property real cardTop: bsec.secTop + bgridFlow.y
-                        + Math.floor(index / Math.max(1, bgridFlow.cols)) * (height + bgridFlow.spacing)
+                    readonly property real cardTop: bsec.secTop + bgridFlow.y + bgridFlow.rowTop(row)
                     // Growth cards incubate (a 50-card fetch created inline
                     // is the freeze again), except the ones on the screen
                     // the page is shown at: a Back to a grown listing builds
@@ -14712,6 +16285,7 @@ ApplicationWindow {
                         id: bgridArt
                         ArtCard { card: bgridLd.card }
                     }
+                    z: item && item.lift !== undefined ? item.lift : 0
                     Component {
                         id: bgridConsole
                         BrowseCard { card: bgridLd.card }
@@ -14793,12 +16367,25 @@ ApplicationWindow {
             onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.sec)
         }
         // horizontal card shelf, art-first (unframed covers)
+        // The shelf is clipped by a box artGlowPad past its slot on every
+        // side, not by itself: a playing cover's rim (and a hero's raise)
+        // reaches past the cover, and the shelf's own clip cut it off on
+        // the first and last card and all along the top. The slot keeps
+        // the shelf's place in the column; the edge fades run solid over
+        // the extra room at the sides, so a card scrolled behind an edge
+        // never shows in it.
+        Item {
+            visible: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
+            width: parent.width; height: bsec.hero ? 284 : 212 + bsec.wordsMax
+        Item {
+            anchors.fill: parent; anchors.margins: -root.artGlowPad
+            clip: true
         ListView {
             id: bsecArtShelf
             visible: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
-            width: parent.width; height: bsec.hero ? 284 : 250
+            anchors.fill: parent; anchors.margins: root.artGlowPad
             orientation: ListView.Horizontal
-            spacing: 14; clip: true
+            spacing: 14; clip: false
             boundsBehavior: Flickable.StopAtBounds
             // Local terms, not `visible` (see the console shelf above).
             model: bsec.artStyle && !bsec.grid && bsec.sec.rowKind === "cards"
@@ -14818,7 +16405,11 @@ ApplicationWindow {
                 required property int slot   // never -1, unlike index on removal
                 readonly property var card: bsec.items[slot] || bsec._itemsHeld.prev[slot] || ({})
                 readonly property real artSize: bsec.hero ? 280 : 200
-                width: artSize; height: bsec.hero ? artSize : artSize + 46
+                width: artSize; height: bsec.hero ? artSize : artSize + 8 + bsec.wordsMax
+                // A raised cover orders above the cards beside it, not only
+                // above its own card's children, so its rim is never under
+                // a neighbor built after it.
+                z: item && item.lift !== undefined ? item.lift : 0
                 // While the landing, or a fresh drilled page, builds behind
                 // its veil, and in a section a refresh appended: a refresh
                 // of the rows already there rebinds them in place and
@@ -14835,8 +16426,10 @@ ApplicationWindow {
                 sourceComponent: ArtCard { card: acLd.card; hero: bsec.hero }
             }
             ShelfWheelRedirect { pane: bsec.pane }
-            ShelfEdgeFades {}
+            ShelfEdgeFades { bleed: root.artGlowPad }
             onAtXEndChanged: if (atXEnd && count > 0) root.browseGrow(bsec.sec)
+        }
+        }
         }
         // vertical track list (e.g. "New Tracks" on a genre page)
         Column {
@@ -16581,7 +18174,18 @@ ApplicationWindow {
             var i = root.queueRowIndexOf(qid)
             if (i >= 0) queueModel.setProperty(i, "progress", pct)
         }
-        function onQueueItemFinish(qid, frac) { if (root.queueRowIndexOf(qid) >= 0) root.queueFinish[qid] = frac }
+        function onQueueItemFinish(qid, frac) {
+            var i = root.queueRowIndexOf(qid)
+            if (i < 0) return
+            root.queueFinish[qid] = frac
+            // The row's download button fills FINALIZING from its holder.
+            // Only a holder that already exists: one is made when the run
+            // reports progress, and a button with none is not running.
+            // Never back: a merge plan's fallback pass can report a track
+            // running again, which would dim a letter that was lit.
+            var h = root.dlHolders[queueModel.get(i).media_id]
+            if (h !== undefined) h.fin = Math.max(h.fin, frac)
+        }
         // ---- queue-row album expansion: per-track snapshot + live updates ----
         // These three land per track EVENT (state changes, and a pct batch
         // twice a second while an album downloads), so the map is updated in
@@ -16653,6 +18257,11 @@ ApplicationWindow {
             if (kind !== root.previewKind || id !== root.previewId) return
             previewPlayer.source = url
             previewPlayer.play()
+        }
+        function onPreviewPeaks(kind, id, peaks) {
+            if (kind !== root.previewKind || id !== root.previewId) return
+            root.previewPeaks = peaks || []
+            root.previewPeaksPending = false
         }
         function onPreviewState(kind, id, st) {
             if (kind !== root.previewKind || id !== root.previewId) return
@@ -17442,7 +19051,7 @@ ApplicationWindow {
                             spacing: 24
                             Art {
                                 id: bihArt
-                                width: 180; height: 180; radius: 12
+                                width: 180; height: 180; radius: root.artCorner(180)
                                 hoverFx: true
                                 fxKind: browseItemHeader.hd ? ("" + (browseItemHeader.hd.kind || "")) : ""
                                 fxId: browseItemHeader.hd ? ("" + (browseItemHeader.hd.id || "")) : ""
@@ -18917,251 +20526,343 @@ ApplicationWindow {
                 // the shell nears the view and go when it is far, so a year
                 // of releases still costs only the rows around the viewport,
                 // and a flick never creates five cards in one frame.
-                Flickable {
-                    id: relFeedList
-                    objectName: "relFeedList"
-                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
+                // The clip runs wider than the list: the Just in panel
+                // reaches past the card rows on either side, and the list's
+                // own clip cut it (and the first and last frames) off at
+                // the rows' edges. It stops 12 px short of the area's sides,
+                // so the panel never runs under the scrollbar beside it.
+                Item {
+                    id: relFeedClip
+                    anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
                     visible: root.releasesView === "feed"
                     clip: true
-                    contentWidth: width; contentHeight: relFeedCol.height
-                    flickableDirection: Flickable.VerticalFlick
-                    boundsBehavior: Flickable.StopAtBounds
-                    // Dragged, the bar names the section at the top of the
-                    // view (read off its own position: the list follows it).
-                    ScrollBar.vertical: WavesScrollBar {
-                        outside: true
-                        function name() { section = root.relFeedSectionAt(position * relFeedList.contentHeight) }
-                        onPressedChanged: if (pressed) name()
-                        onPositionChanged: if (pressed) name()
-                    }
-                    onContentYChanged: root.releasesMaybeMore()
-                    onHeightChanged: relMoreCheck.restart()
-                    // A window just short of the next column would leave a
-                    // gutter either side as wide as a card: the rows then
-                    // take that column, drawn a little smaller to fit (down
-                    // to 0.9, never larger than a card's own size).
-                    readonly property int fullCols: root.gridCols(root.relCardW, root.relCardGap, 9999, width)
-                    readonly property int oneMoreW: (fullCols + 1) * root.relCardW + fullCols * root.relCardGap
-                    readonly property int liveCols: width / oneMoreW >= 0.9 ? fullCols + 1 : fullCols
-                    readonly property int liveRowW: liveCols * root.relCardW + (liveCols - 1) * root.relCardGap
-                    readonly property real liveFit: Math.min(1, width / liveRowW)
-                    // The columns and the fit the rows are drawn with follow
-                    // the live width only once it has held for a beat: a
-                    // window being dragged, or zoomed to full screen (macOS
-                    // animates that through many widths), would otherwise
-                    // re-chunk every row and redraw every card at a new size
-                    // on each frame along the way.
-                    property int cols: 1
-                    property real fit: 1
-                    readonly property int rowW: cols * root.relCardW + (cols - 1) * root.relCardGap
-                    readonly property int fitW: Math.round(rowW * fit)
-                    onLiveColsChanged: relFitSettle.restart()
-                    onLiveFitChanged: relFitSettle.restart()
-                    Timer {
-                        id: relFitSettle
-                        interval: 120
-                        onTriggered: { relFeedList.cols = relFeedList.liveCols; relFeedList.fit = relFeedList.liveFit }
-                    }
-                    onColsChanged: { root._relCols = cols; root.releasesApply() }
-                    Component.onCompleted: { cols = liveCols; fit = liveFit; root._relCols = cols }
-                    // The ListView calls the pane and its tests still make.
-                    function forceLayout() { relFeedCol.forceLayout() }
-                    function itemAtIndex(i) { return relFeedRows.itemAt(i) }
-                    Column {
-                        id: relFeedCol
-                        width: relFeedList.width
-                        // False from a shell's arrival until the column has
-                        // placed it: a new shell sits at y 0 until then, and
-                        // must not read as near the top of the view.
-                        property bool placed: true
-                        onPositioningComplete: placed = true
-                        Item { width: 1; height: 8 }
-                        Repeater {
-                            id: relFeedRows
-                            model: releasesModel
-                            onItemAdded: relFeedCol.placed = false
-                            delegate: Item {
-                                id: relItem
-                                required property int index
-                                required property string uid
-                                required property string rowKind
-                                required property string label
-                                required property int cnt
-                                required property string sig
-                                width: relFeedCol.width
-                                // The first head sits right under the bar; the
-                                // others take their air from the row above.
-                                height: rowKind === "head" ? (index === 0 ? root.relHeadH - 22 : root.relHeadH)
-                                                           : Math.round(root.relCardH * relFeedList.fit) + 22
-                                // Re-read only when this row's own content changed.
-                                readonly property var cards: {
-                                    var s = relItem.sig
-                                    return relItem.rowKind === "row" && s !== "" ? (root._relCards[relItem.uid] || []) : []
+                    Flickable {
+                        id: relFeedList
+                        objectName: "relFeedList"
+                        anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                        // The room past the rows inside the clip (the edge
+                        // fades cover it too). Ten, not artGlowPad: the bar
+                        // beside the area paints over anything further
+                        // right, and a playing cover's rim is at a few
+                        // percent of its peak ten pixels out.
+                        property real fadeBleed: 10
+                        visible: root.releasesView === "feed"
+                        contentWidth: width; contentHeight: relFeedCol.height
+                        flickableDirection: Flickable.VerticalFlick
+                        boundsBehavior: Flickable.StopAtBounds
+                        // Dragged, the bar names the section at the top of the
+                        // view (read off its own position: the list follows it).
+                        ScrollBar.vertical: WavesScrollBar {
+                            outside: true; beside: relArea
+                            function name() { section = root.relFeedSectionAt(position * relFeedList.contentHeight) }
+                            onPressedChanged: if (pressed) name()
+                            onPositionChanged: if (pressed) name()
+                        }
+                        onContentYChanged: root.releasesMaybeMore()
+                        onHeightChanged: relMoreCheck.restart()
+                        // A window just short of the next column would leave a
+                        // gutter either side as wide as a card: the rows then
+                        // take that column, drawn a little smaller to fit (down
+                        // to 0.9, never larger than a card's own size).
+                        readonly property int fullCols: root.gridCols(root.relCardW, root.relCardGap, 9999, width)
+                        readonly property int oneMoreW: (fullCols + 1) * root.relCardW + fullCols * root.relCardGap
+                        readonly property int liveCols: width / oneMoreW >= 0.9 ? fullCols + 1 : fullCols
+                        readonly property int liveRowW: liveCols * root.relCardW + (liveCols - 1) * root.relCardGap
+                        readonly property real liveFit: Math.min(1, width / liveRowW)
+                        // The columns and the fit the rows are drawn with follow
+                        // the live width only once it has held for a beat: a
+                        // window being dragged, or zoomed to full screen (macOS
+                        // animates that through many widths), would otherwise
+                        // re-chunk every row and redraw every card at a new size
+                        // on each frame along the way.
+                        property int cols: 1
+                        property real fit: 1
+                        readonly property int rowW: cols * root.relCardW + (cols - 1) * root.relCardGap
+                        readonly property int fitW: Math.round(rowW * fit)
+                        onLiveColsChanged: relFitSettle.restart()
+                        onLiveFitChanged: relFitSettle.restart()
+                        Timer {
+                            id: relFitSettle
+                            interval: 120
+                            onTriggered: { relFeedList.cols = relFeedList.liveCols; relFeedList.fit = relFeedList.liveFit }
+                        }
+                        onColsChanged: { root._relCols = cols; root.releasesApply() }
+                        Component.onCompleted: { cols = liveCols; fit = liveFit; root._relCols = cols }
+                        // The ListView calls the pane and its tests still make.
+                        function forceLayout() { relFeedCol.forceLayout() }
+                        function itemAtIndex(i) { return relFeedRows.itemAt(i) }
+                        // Just in sits on one tinted panel, from its head
+                        // down to its last row, under the column. One flat
+                        // slab: a piece per row came apart when the edge
+                        // roll tilted the head and not the rows below it.
+                        // Placed from the rows once the column has laid
+                        // them out (and again on any change to the list:
+                        // the arrivals can go while every row keeps its
+                        // height).
+                        Rectangle {
+                            id: relJustInPanel
+                            objectName: "relJustInPanel"
+                            property real spanTop: 0
+                            property real spanBottom: 0
+                            function place() {
+                                var head = relFeedRows.count > 0 ? relFeedRows.itemAt(0) : null
+                                var last = null
+                                for (var i = 1; head && head.uid === "h:new" && i < relFeedRows.count; i++) {
+                                    var it = relFeedRows.itemAt(i)
+                                    if (!it || it.rowKind !== "row") break
+                                    last = it
                                 }
-                                // Cards load within 1.5 viewports of the view
-                                // and unload beyond three: the gap between
-                                // keeps a flick from churning the same rows.
-                                readonly property real viewH: relFeedList.height
-                                readonly property real viewY: relFeedList.contentY
-                                readonly property bool near: relItem.rowKind === "row" && relFeedCol.placed
-                                                             && relItem.y + relItem.height > viewY - viewH * 1.5
-                                                             && relItem.y < viewY + viewH * 2.5
-                                readonly property bool far: relFeedCol.placed
-                                                            && (relItem.y + relItem.height < viewY - viewH * 3
-                                                                || relItem.y > viewY + viewH * 4)
-                                // Set only on the way in and out (never bound
-                                // to near), so the gap between holds for every
-                                // row, the first screen's too.
-                                property bool shown: false
-                                onNearChanged: if (near) shown = true
-                                onFarChanged: if (far) shown = false
-                                // A section head: the period, large, with its
-                                // count, and a rule from there to the end of
-                                // the card rows, run through the middle of the
-                                // count so the two read as one line.
-                                Item {
-                                    objectName: "releasesSection"
-                                    readonly property string label: relItem.label
-                                    readonly property int count: relItem.cnt
-                                    visible: relItem.rowKind === "head"
-                                    x: Math.max(0, (relItem.width - relFeedList.fitW) / 2)
-                                    width: Math.min(relItem.width, relFeedList.fitW); height: parent.height
-                                    // The period and its count sit centered
-                                    // over the rows (the art is centered too,
-                                    // and on a wide screen a head at the far
-                                    // left is a long look away), with the rule
-                                    // running out to both edges.
-                                    Text {
-                                        id: relHeadText
-                                        x: Math.round((parent.width - width - 12 - relHeadCount.width) / 2)
-                                        anchors.bottom: parent.bottom; anchors.bottomMargin: 18
-                                        textFormat: Text.PlainText
-                                        text: relItem.label
-                                        color: root.textHi; font.pixelSize: 26; font.bold: true; font.letterSpacing: -0.4
+                                visible = last !== null
+                                if (!last) return
+                                spanTop = relFeedCol.y + head.y + Math.max(8, head.height - 76)
+                                spanBottom = relFeedCol.y + last.y + last.height - 4
+                            }
+                            visible: false
+                            // Up to 18 px past the rows, as far as the clip
+                            // allows. Both edges come off one rounded gutter,
+                            // so a half-pixel one never widens the right side.
+                            readonly property real gutter: Math.round(Math.max(0, (relFeedList.width - relFeedList.fitW) / 2))
+                            readonly property real ear: Math.min(18, relFeedList.fadeBleed + gutter)
+                            x: gutter - ear
+                            width: relFeedList.width - 2 * gutter + 2 * ear
+                            y: spanTop; height: spanBottom - spanTop
+                            radius: 16; color: "#121c16"
+                            Connections {
+                                target: releasesModel
+                                function onDataChanged() { Qt.callLater(relJustInPanel.place) }
+                                function onRowsInserted() { Qt.callLater(relJustInPanel.place) }
+                                function onRowsRemoved() { Qt.callLater(relJustInPanel.place) }
+                                function onModelReset() { Qt.callLater(relJustInPanel.place) }
+                            }
+                        }
+                        Column {
+                            id: relFeedCol
+                            width: relFeedList.width
+                            // False from a shell's arrival until the column has
+                            // placed it: a new shell sits at y 0 until then, and
+                            // must not read as near the top of the view.
+                            property bool placed: true
+                            onPositioningComplete: { placed = true; relJustInPanel.place() }
+                            Item { width: 1; height: 8 }
+                            Repeater {
+                                id: relFeedRows
+                                model: releasesModel
+                                onItemAdded: relFeedCol.placed = false
+                                delegate: Item {
+                                    id: relItem
+                                    required property int index
+                                    required property string uid
+                                    required property string rowKind
+                                    required property string label
+                                    required property int cnt
+                                    required property string sig
+                                    // The row's words height: its tallest card's
+                                    // (releasesItemsOf works it out ahead).
+                                    required property int th
+                                    width: relFeedCol.width
+                                    // The first head sits right under the bar; the
+                                    // others take their air from the row above.
+                                    height: rowKind === "head" ? (index === 0 ? root.relHeadH - 22 : root.relHeadH)
+                                                               : Math.round((root.relCardW + 8 + th) * relFeedList.fit) + 22
+                                    // Re-read only when this row's own content changed.
+                                    readonly property var cards: {
+                                        var s = relItem.sig
+                                        return relItem.rowKind === "row" && s !== "" ? (root._relCards[relItem.uid] || []) : []
                                     }
-                                    Text {
-                                        id: relHeadCount
-                                        anchors.left: relHeadText.right; anchors.leftMargin: 12
-                                        anchors.baseline: relHeadText.baseline
-                                        textFormat: Text.PlainText
-                                        text: relItem.cnt + (relItem.cnt === 1 ? " release" : " releases")
-                                        color: root.textDim; font.family: root.mono; font.pixelSize: 12; font.letterSpacing: 0.6
+                                    // Cards load within 1.5 viewports of the view
+                                    // and unload beyond three: the gap between
+                                    // keeps a flick from churning the same rows.
+                                    readonly property real viewH: relFeedList.height
+                                    readonly property real viewY: relFeedList.contentY
+                                    readonly property bool near: relItem.rowKind === "row" && relFeedCol.placed
+                                                                 && relItem.y + relItem.height > viewY - viewH * 1.5
+                                                                 && relItem.y < viewY + viewH * 2.5
+                                    readonly property bool far: relFeedCol.placed
+                                                                && (relItem.y + relItem.height < viewY - viewH * 3
+                                                                    || relItem.y > viewY + viewH * 4)
+                                    // Set only on the way in and out (never bound
+                                    // to near), so the gap between holds for every
+                                    // row, the first screen's too.
+                                    property bool shown: false
+                                    onNearChanged: if (near) shown = true
+                                    onFarChanged: if (far) shown = false
+                                    // A section head: the period, large, with its
+                                    // count, and a rule from there to the end of
+                                    // the card rows, run through the middle of the
+                                    // count so the two read as one line.
+                                    Item {
+                                        objectName: "releasesSection"
+                                        readonly property string label: relItem.label
+                                        readonly property int count: relItem.cnt
+                                        visible: relItem.rowKind === "head"
+                                        x: Math.max(0, (relItem.width - relFeedList.fitW) / 2)
+                                        width: Math.min(relItem.width, relFeedList.fitW); height: parent.height
+                                        // The period and its count sit centered
+                                        // over the rows (the art is centered too,
+                                        // and on a wide screen a head at the far
+                                        // left is a long look away), with the rule
+                                        // running out to both edges.
+                                        Text {
+                                            id: relHeadText
+                                            x: Math.round((parent.width - width - 12 - relHeadCount.width - relHeadNew.width - (relHeadNew.n > 0 ? 8 : 0)) / 2)
+                                            anchors.bottom: parent.bottom; anchors.bottomMargin: 18
+                                            textFormat: Text.PlainText
+                                            text: relItem.label
+                                            color: root.textHi; font.pixelSize: 26; font.bold: true; font.letterSpacing: -0.4
+                                        }
+                                        Text {
+                                            id: relHeadCount
+                                            anchors.left: relHeadText.right; anchors.leftMargin: 12
+                                            anchors.baseline: relHeadText.baseline
+                                            textFormat: Text.PlainText
+                                            text: root.relHeadCountText(relItem.uid, relItem.cnt)
+                                            color: relItem.uid === "h:new" ? root.accent : root.textDim
+                                            font.family: root.mono; font.pixelSize: 12; font.letterSpacing: 0.6
+                                        }
+                                        // What arrived, after the count (a section
+                                        // with no Just in above it: a year, or
+                                        // what is coming).
+                                        Text {
+                                            id: relHeadNew
+                                            objectName: "relHeadNew"
+                                            readonly property int n: { root.releasesFreshIds; root._relBuilt; return relItem.uid === "h:new" ? 0 : root.relFreshIn(relItem.uid.slice(2)) }
+                                            anchors.left: relHeadCount.right; anchors.leftMargin: n > 0 ? 8 : 0
+                                            anchors.baseline: relHeadText.baseline
+                                            textFormat: Text.PlainText
+                                            text: n > 0 ? "\u00b7 " + n + " just in" : ""
+                                            color: root.accent; font.family: root.mono; font.pixelSize: 12; font.bold: true; font.letterSpacing: 0.6
+                                        }
+                                        // As heavy as the bar under Releases | Artists
+                                        // (rhBar), in the text color, centered on the
+                                        // count's lowercase letters, one piece either
+                                        // side of the words.
+                                        Rectangle {
+                                            objectName: "relHeadRuleLeft"
+                                            anchors.left: parent.left; anchors.right: relHeadText.left; anchors.rightMargin: 18
+                                            y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
+                                            height: 3; radius: 1.5; color: relItem.uid === "h:new" ? root.accent : root.textHi; opacity: 0.85
+                                        }
+                                        Rectangle {
+                                            objectName: "relHeadRule"
+                                            anchors.left: relHeadNew.right; anchors.leftMargin: 18; anchors.right: parent.right
+                                            anchors.rightMargin: relItem.uid === "h:new" ? relSeenBtn.width + 16 : 0
+                                            y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
+                                            height: 3; radius: 1.5; color: relItem.uid === "h:new" ? root.accent : root.textHi; opacity: 0.85
+                                        }
+                                        // Every arrival seen at once: they go back
+                                        // to their date sections.
+                                        SpecBtn {
+                                            id: relSeenBtn
+                                            objectName: "relSeenBtn"
+                                            visible: relItem.uid === "h:new"
+                                            anchors.right: parent.right
+                                            y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
+                                            label: "MARK AS SEEN"; primary: true; compact: true
+                                            onClicked: root.releasesMarkAllSeen()
+                                        }
+                                        FontMetrics { id: relHeadCountFm; font: relHeadCount.font }
                                     }
-                                    // As heavy as the bar under Releases | Artists
-                                    // (rhBar), in the text color, centered on the
-                                    // count's lowercase letters, one piece either
-                                    // side of the words.
-                                    Rectangle {
-                                        objectName: "relHeadRuleLeft"
-                                        anchors.left: parent.left; anchors.right: relHeadText.left; anchors.rightMargin: 18
-                                        y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
-                                        height: 3; radius: 1.5; color: root.textHi; opacity: 0.85
-                                    }
-                                    Rectangle {
-                                        objectName: "relHeadRule"
-                                        anchors.left: relHeadCount.right; anchors.leftMargin: 18; anchors.right: parent.right
-                                        y: Math.round(relHeadCount.y + relHeadCount.baselineOffset - relHeadCountFm.xHeight / 2 - height / 2)
-                                        height: 3; radius: 1.5; color: root.textHi; opacity: 0.85
-                                    }
-                                    FontMetrics { id: relHeadCountFm; font: relHeadCount.font }
-                                }
-                                // A shell whose cards are still being built
-                                // wears dim card-shaped stand-ins: a hard
-                                // flick outruns the asynchronous loaders, and
-                                // bare water where results just were reads as
-                                // the feed losing them (user report). Cheap
-                                // rectangles, loaded synchronously, held until
-                                // the real row has finished fading in over
-                                // them. A cover this row already showed is
-                                // painted too: the warm pool still holds its
-                                // pixels (same url, decode size and crop as
-                                // Art asks), so scrolling back to it finds
-                                // the art in place, never a blank box.
-                                Loader {
-                                    id: relRowGhost
-                                    objectName: "relRowGhost"
-                                    active: relItem.rowKind === "row" && relItem.shown
-                                            && (relRowLd.status !== Loader.Ready || relRowLd.opacity < 1)
-                                    x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
-                                    scale: relFeedList.fit; transformOrigin: Item.TopLeft
-                                    sourceComponent: Row {
-                                        spacing: root.relCardGap
-                                        Repeater {
-                                            model: relItem.cards
-                                            delegate: Item {
-                                                id: ghost
-                                                required property var modelData
-                                                width: (modelData.kind || "") === "video" ? root.relVideoW : root.relCardW
-                                                height: root.relCardH
-                                                Rectangle {
-                                                    width: ghost.width; height: root.relCardW
-                                                    radius: 12; color: root.surface2
-                                                    border.color: root.border1; border.width: 1
-                                                }
-                                                Image {
-                                                    objectName: "relGhostArt"
-                                                    width: ghost.width; height: root.relCardW
-                                                    source: ghost.modelData.art || ""
-                                                    fillMode: Image.PreserveAspectCrop
-                                                    asynchronous: true
-                                                    cache: true
-                                                    // Art decodes square at twice its width.
-                                                    sourceSize.width: ghost.width * 2
-                                                    sourceSize.height: ghost.width * 2
-                                                    visible: status === Image.Ready
-                                                }
-                                                Rectangle {
-                                                    y: root.relCardW + 10; width: Math.round(ghost.width * 0.7)
-                                                    height: 11; radius: 5.5; color: root.surface2
-                                                }
-                                                Rectangle {
-                                                    y: root.relCardW + 28; width: Math.round(ghost.width * 0.45)
-                                                    height: 9; radius: 4.5; color: root.surface2
+                                    // A shell whose cards are still being built
+                                    // wears dim card-shaped stand-ins: a hard
+                                    // flick outruns the asynchronous loaders, and
+                                    // bare water where results just were reads as
+                                    // the feed losing them (user report). Cheap
+                                    // rectangles, loaded synchronously, held until
+                                    // the real row has finished fading in over
+                                    // them. A cover this row already showed is
+                                    // painted too: the warm pool still holds its
+                                    // pixels (same url, decode size and crop as
+                                    // Art asks), so scrolling back to it finds
+                                    // the art in place, never a blank box. The
+                                    // words are the real ones (ReleaseText, at
+                                    // the same spot as the card's), so a cover
+                                    // never shows up ahead of its title: the row
+                                    // fades in over a twin of itself, and the
+                                    // eye sees the page open all at once.
+                                    Loader {
+                                        id: relRowGhost
+                                        objectName: "relRowGhost"
+                                        active: relItem.rowKind === "row" && relItem.shown
+                                                && (relRowLd.status !== Loader.Ready || relRowLd.opacity < 1)
+                                        x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
+                                        scale: relFeedList.fit; transformOrigin: Item.TopLeft
+                                        sourceComponent: Row {
+                                            spacing: root.relCardGap
+                                            Repeater {
+                                                model: relItem.cards
+                                                delegate: Item {
+                                                    id: ghost
+                                                    required property var modelData
+                                                    width: (modelData.kind || "") === "video" ? root.relVideoW : root.relCardW
+                                                    height: root.relCardW + 8 + relItem.th
+                                                    Rectangle {
+                                                        width: ghost.width; height: root.relCardW
+                                                        radius: 12; color: root.surface2
+                                                        border.color: root.border1; border.width: 1
+                                                    }
+                                                    Image {
+                                                        objectName: "relGhostArt"
+                                                        width: ghost.width; height: root.relCardW
+                                                        source: ghost.modelData.art || ""
+                                                        fillMode: Image.PreserveAspectCrop
+                                                        asynchronous: true
+                                                        cache: true
+                                                        // Art decodes square at twice its width.
+                                                        sourceSize.width: ghost.width * 2
+                                                        sourceSize.height: ghost.width * 2
+                                                        visible: status === Image.Ready
+                                                    }
+                                                    ReleaseText {
+                                                        objectName: "relGhostText"
+                                                        y: root.relCardW + 8
+                                                        width: (ghost.modelData.kind || "") === "video" ? root.relVideoTextW : ghost.width
+                                                        card: ghost.modelData
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                                Loader {
-                                    id: relRowLd
-                                    active: relItem.rowKind === "row" && relItem.shown
-                                    asynchronous: true
-                                    // Each row sits centered on its own
-                                    // width: one that packs fewer pixels
-                                    // than a full row (a video beside two
-                                    // covers) does not hang off the left.
-                                    x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
-                                    scale: relFeedList.fit; transformOrigin: Item.TopLeft
-                                    opacity: status === Loader.Ready ? 1 : 0
-                                    Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
-                                    sourceComponent: Row {
-                                        spacing: root.relCardGap
-                                        // Slots by count, cards by index: a
-                                        // window resize that re-chunks the
-                                        // rows rebinds the cards in place
-                                        // instead of rebuilding them all.
-                                        Repeater {
-                                            model: relItem.cards.length
-                                            delegate: ReleaseCard {
-                                                required property int index
-                                                card: relItem.cards[index] || ({})
+                                    Loader {
+                                        id: relRowLd
+                                        active: relItem.rowKind === "row" && relItem.shown
+                                        asynchronous: true
+                                        // Each row sits centered on its own
+                                        // width: one that packs fewer pixels
+                                        // than a full row (a video beside two
+                                        // covers) does not hang off the left.
+                                        x: Math.max(0, (relItem.width - width * relFeedList.fit) / 2); y: 4
+                                        scale: relFeedList.fit; transformOrigin: Item.TopLeft
+                                        opacity: status === Loader.Ready ? 1 : 0
+                                        Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                                        sourceComponent: Row {
+                                            spacing: root.relCardGap
+                                            // Slots by count, cards by index: a
+                                            // window resize that re-chunks the
+                                            // rows rebinds the cards in place
+                                            // instead of rebuilding them all.
+                                            Repeater {
+                                                model: relItem.cards.length
+                                                delegate: ReleaseCard {
+                                                    required property int index
+                                                    card: relItem.cards[index] || ({})
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        Item {
-                            // A search cut at its cap says so where it ends.
-                            readonly property bool capped: root.releasesFinding && root.relFindHave && root.relFindMore
-                            width: 1; height: root.releasesLoadingMore || capped ? 46 : 24
-                            Text {
-                                objectName: "relFindCapped"
-                                x: (relFeedCol.width - implicitWidth) / 2; anchors.verticalCenter: parent.verticalCenter
-                                visible: root.releasesLoadingMore || parent.capped
-                                textFormat: Text.PlainText
-                                text: parent.capped ? "SHOWING THE " + root.relFindRows.length + " NEWEST MATCHES" : "Loading more…"
-                                color: root.textDim; font.family: root.mono; font.pixelSize: 11
+                            Item {
+                                // A search cut at its cap says so where it ends.
+                                readonly property bool capped: root.releasesFinding && root.relFindHave && root.relFindMore
+                                width: 1; height: root.releasesLoadingMore || capped ? 46 : 24
+                                Text {
+                                    objectName: "relFindCapped"
+                                    x: (relFeedCol.width - implicitWidth) / 2; anchors.verticalCenter: parent.verticalCenter
+                                    visible: root.releasesLoadingMore || parent.capped
+                                    textFormat: Text.PlainText
+                                    text: parent.capped ? "SHOWING THE " + root.relFindRows.length + " NEWEST MATCHES" : "Loading more…"
+                                    color: root.textDim; font.family: root.mono; font.pixelSize: 11
+                                }
                             }
                         }
                     }
@@ -20442,6 +22143,7 @@ ApplicationWindow {
                 id: libArea
                 Layout.fillWidth: true; Layout.fillHeight: true
                 opacity: root.libraryReveal   // the My Tidal build veil
+                clip: true   // for homePane, which runs over the side margins (see it)
 
                 LibList {
                     id: libAlbumsList
@@ -20525,11 +22227,12 @@ ApplicationWindow {
                                         // follow should not be the one place that
                                         // cannot say what you already hold. A
                                         // child of the Art, so it takes the tilt
-                                        // and the rounded clip with it.
+                                        // with it, and its corner by name.
                                         ArtistBadges {
                                             bar: true
                                             width: parent.width
                                             anchors.bottom: parent.bottom
+                                            radius: parent.faceRadius
                                             artistName: "" + (model.name || "")
                                             libBaked: model.lib; libStamp: model.libStamp
                                         }
@@ -20614,7 +22317,10 @@ ApplicationWindow {
                     id: homePane
                     visible: root.libraryCategory === "home"
                     anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22
-                    clip: true
+                    // libArea clips instead (same top and bottom): a shelf's
+                    // first and last cover reach into the side margins when
+                    // raised, and a clip here cut their rim off there.
+                    clip: false
                     contentWidth: width; contentHeight: homeCol.height + 32
                     ScrollBar.vertical: WavesScrollBar { outside: true }
                     boundsBehavior: Flickable.StopAtBounds
@@ -20669,12 +22375,26 @@ ApplicationWindow {
                                         onClicked: root.openLibrarySorted(homeSec.target)
                                     }
                                 }
-                                // Card shelf (Recent albums preview).
-                                ListView {
+                                // Card shelf (Recent albums preview). Clipped
+                                // artGlowPad past its slot, as the Browse art
+                                // shelf is, so a playing cover's rim is whole.
+                                Item {
                                     visible: homeSec.modelData.rowKind === "cards"
-                                    width: parent.width; height: 250
+                                    width: parent.width; height: 212 + homeShelf.wordsMax
+                                Item {
+                                    anchors.fill: parent; anchors.margins: -root.artGlowPad
+                                    clip: true
+                                ListView {
+                                    id: homeShelf
+                                    visible: homeSec.modelData.rowKind === "cards"
+                                    // As tall as its tallest card (see bsec.wordsMax).
+                                    property int wordsMax: 38
+                                    function measureWords() { wordsMax = root.artCardsTextH(model, 200) }
+                                    onModelChanged: measureWords()
+                                    Component.onCompleted: measureWords()
+                                    anchors.fill: parent; anchors.margins: root.artGlowPad
                                     orientation: ListView.Horizontal
-                                    spacing: 14; clip: true
+                                    spacing: 14; clip: false
                                     boundsBehavior: Flickable.StopAtBounds
                                     // Local terms, not `visible` (effective visibility
                                     // tears cards down on tab leave, rebuilds them in
@@ -20683,9 +22403,13 @@ ApplicationWindow {
                                     delegate: ArtCard {
                                         required property var modelData
                                         card: modelData
+                                        z: lift
+                                        height: artSize + 8 + homeShelf.wordsMax
                                     }
                                     ShelfWheelRedirect { pane: homePane }
-                                    ShelfEdgeFades {}
+                                    ShelfEdgeFades { bleed: root.artGlowPad }
+                                }
+                                }
                                 }
                                 // Recent tracks (vertical list, reuses TrackRow).
                                 Column {
@@ -20854,50 +22578,6 @@ ApplicationWindow {
             id: statusBar
             Layout.fillWidth: true; implicitHeight: 28; color: root.surface0
             Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: root.border1 }
-            // Universal seek on the bottom playback line (seek-lab "spark"):
-            // no expansion, so casual mouse travel can't trigger anything by
-            // accident. The hit zone reaches 16px up from the edge so seeking
-            // never means aiming at the window's resize-grab strip; an aim
-            // tick + time flag ride the cursor and the single real seek fires
-            // on release. Declared FIRST among the bar's children so the
-            // status text and the mini player stack above it and keep their
-            // clicks; presses land here only where nothing else claims them.
-            Item {
-                visible: root.previewKind !== "" && root.previewDuration > 0
-                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                height: 16
-                MouseArea {
-                    id: bottomSeekMa
-                    anchors.fill: parent
-                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                    preventStealing: true
-                    property bool scrubbing: false
-                    function frac(mx) { return width > 0 ? Math.max(0, Math.min(1, mx / width)) : 0 }
-                    onPressed: function(m){ m.accepted = true; scrubbing = true; root.previewScrubbing = true; root.scrubPreviewVisual(frac(m.x)) }
-                    onPositionChanged: function(m){ if (scrubbing) root.scrubPreviewVisual(frac(m.x)) }
-                    onReleased: function(m){ if (scrubbing) { scrubbing = false; root.previewScrubbing = false; root.seekPreview(frac(m.x)) } }
-                    onCanceled: { scrubbing = false; root.previewScrubbing = false }
-                }
-                // aim tick + time flag under the cursor
-                Rectangle {
-                    visible: bottomSeekMa.containsMouse || bottomSeekMa.scrubbing
-                    x: bottomSeekMa.mouseX; anchors.bottom: parent.bottom
-                    width: 1; height: 10; color: root.accentSoft; opacity: 0.8
-                }
-                Rectangle {
-                    visible: bottomSeekMa.containsMouse || bottomSeekMa.scrubbing
-                    x: Math.max(4, Math.min(parent.width - width - 4, bottomSeekMa.mouseX - width / 2))
-                    anchors.bottom: parent.bottom; anchors.bottomMargin: 16
-                    width: bottomSeekTxt.implicitWidth + 12; height: 16; radius: 4
-                    color: root.surfaceHi; border.color: root.border1
-                    Text {
-                        id: bottomSeekTxt
-                        anchors.centerIn: parent; textFormat: Text.PlainText
-                        text: root.fmtMs(bottomSeekMa.frac(bottomSeekMa.mouseX) * root.previewDuration)
-                        color: root.accentContTx; font.family: root.mono; font.pixelSize: 9
-                    }
-                }
-            }
             // Browse layout switch (art-first vs console), floating over the
             // pane's bottom-right corner so it costs the landing page no row.
             Rectangle {
@@ -20946,9 +22626,10 @@ ApplicationWindow {
                     // While the mini player is up, elide before its left edge so a
                     // long status line never runs underneath the centered player.
                     elide: Text.ElideRight
-                    Layout.maximumWidth: root.previewKind !== "" ? Math.max(60, nowPlaying.x - 51) : statusBar.width - 260
+                    Layout.maximumWidth: root.previewKind !== "" ? Math.max(60, nowPlaying.x - 51) : statusBar.width - 260 - (idleOut.visible ? idleOut.width + 10 : 0)
                 }
                 Item { Layout.fillWidth: true }
+                OutName { id: idleOut; objectName: "idleOut"; visible: root.previewKind === ""; divR: true }
                 // Update notice: the right slot goes gold when a newer release is
                 // waiting. Full line when the bar is idle; compacts to LED +
                 // version while the mini player is up so the center stays clear
@@ -21063,45 +22744,44 @@ ApplicationWindow {
             // (the wordmark hides while playing) and slides to the center only
             // when the update notice needs the corner, one animated move each
             // way so the controls never look like they are bouncing around.
+            // Only that move eases: a width change (the title landing, a name
+            // folding into "+N") moves x at once, so docked right the rail and
+            // stop stay put and the row grows leftward, instead of the whole
+            // row sliding over and back.
             // Hovering anywhere on the bottom bar (not just the ✕) reveals the
             // mini player's "[stop]" label while something is playing.
             HoverHandler { id: npBarHover }
             Row {
                 id: nowPlaying
                 anchors.verticalCenter: parent.verticalCenter
-                x: statusUpdate.visible ? (statusBar.width - width) / 2
-                                        : statusBar.width - width - 22
-                Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
+                // 0 docked in the corner, 1 centered.
+                property real centered: statusUpdate.visible ? 1 : 0
+                Behavior on centered { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
+                x: statusBar.width - width - 22 + (22 - (statusBar.width - width) / 2) * centered
                 spacing: 9
                 visible: root.previewKind !== ""
-                // Fixed box so swapping > / || / … never nudges the art + text. The
-                // play caret is drawn larger so it stands at the pause bars' height.
+                OutName { id: npOut; objectName: "npOut"; anchors.verticalCenter: parent.verticalCenter; divR: true }
+                // palWanted: the rail paints in this cover's colors.
+                Art { id: npArt; palWanted: true; anchors.verticalCenter: parent.verticalCenter; width: 18; height: 18; url: root.previewNowArt }
                 Item {
+                    id: npInfo
                     anchors.verticalCenter: parent.verticalCenter
-                    // Always 20px. The transient "[buffering]" label paints
-                    // outside the box (leftward, over open bar space) so its
-                    // arrival and exit never resize the row: a resize moves the
-                    // right-docked row's x, and with the animated dock the whole
-                    // art + titles visibly slid when the stream became ready
-                    // (livetest: looked like the bar re-animating in).
-                    width: 20; height: 20
-                    Text {
-                        id: npGlyph
-                        anchors.centerIn: parent
-                        textFormat: Text.PlainText
-                        text: root.previewPlaying ? "||" : ">"
-                        color: root.accent; font.family: root.mono; font.bold: true
-                        font.pixelSize: root.previewPlaying ? 13 : 18
-                        // Steps aside for the buffering label, but only when
-                        // that label is actually showing: in a window too tight
-                        // for it the caret stays, so the box is never blank.
-                        opacity: (root.previewLoading && npBuffer.visible) ? 0 : 1
-                        Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InOutSine } }
-                    }
+                    implicitWidth: npInfoRow.implicitWidth; implicitHeight: npInfoRow.implicitHeight
+                    // The transient "[buffering]" label paints outside this
+                    // block (leftward, past the art and the output chip, over
+                    // open bar space) so its arrival and exit never resize the
+                    // row: a resize moves the right-docked row's x, and with the
+                    // animated dock the whole art + titles visibly slid when the
+                    // stream became ready (livetest: looked like the bar
+                    // re-animating in).
                     Text {
                         id: npBuffer
                         anchors.verticalCenter: parent.verticalCenter
-                        anchors.right: parent.right
+                        anchors.right: parent.left
+                        // Right edge 6px left of the output chip (art, then the
+                        // chip, sit left of this block), so the name stays
+                        // readable while a stream loads.
+                        anchors.rightMargin: 9 + 18 + 9 + npOut.width + 6
                         textFormat: Text.PlainText
                         text: "[buffering]"
                         color: root.accent; font.family: root.mono; font.bold: true
@@ -21116,7 +22796,7 @@ ApplicationWindow {
                         // is where it starts: margin + busy dot + spacing) and not
                         // against npInfo.leftGuard, which caps that width at a
                         // fifth of the bar for its own budgeting.
-                        readonly property bool fits: (nowPlaying.x - 39 - statusText.width - 12) >= implicitWidth
+                        readonly property bool fits: (nowPlaying.x - 6 - 39 - statusText.width - 12) >= implicitWidth
                         visible: root.previewLoading && fits
                         property real breathe: 1
                         opacity: breathe
@@ -21130,13 +22810,6 @@ ApplicationWindow {
                             NumberAnimation { from: 0.3; to: 1.0; duration: 520; easing.type: Easing.InOutSine }
                         }
                     }
-                    MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: root.nowToggle() }
-                }
-                Art { anchors.verticalCenter: parent.verticalCenter; width: 18; height: 18; url: root.previewNowArt }
-                Item {
-                    id: npInfo
-                    anchors.verticalCenter: parent.verticalCenter
-                    implicitWidth: npInfoRow.implicitWidth; implicitHeight: npInfoRow.implicitHeight
                     // Text budget. The bar is centered in the status Rectangle;
                     // the right "console" caption is hidden while playing but the
                     // update notice (statusUpdate) may hold that corner, so the
@@ -21152,7 +22825,7 @@ ApplicationWindow {
                     // the update notice stays up (compacted). Guard on whichever
                     // side claims more so the centered row stays clear of both.
                     readonly property real rightGuard: 22 + (statusUpdate.visible ? statusUpdate.implicitWidth + 24 : 0)
-                    readonly property real fixedParts: 20 + 18 + stopMetrics.width + 27
+                    readonly property real fixedParts: 20 + 18 + stopMetrics.width + 27 + npOut.width + 9 + nowRail.width + 9
                     // Docked right (no update notice) the row spans from the
                     // status text's guard to the bar's right margin; centered
                     // (notice up) it is bounded symmetrically by the wider side.
@@ -21162,9 +22835,9 @@ ApplicationWindow {
                     readonly property real sepW: npSep.implicitWidth + 12
                     readonly property real avail: Math.max(60, budget - sepW)
                     readonly property bool bothFit: (npTitle.implicitWidth + npArtist.implicitWidth) <= avail
-                    // When cramped, cap the artist to ~40% so the track title (the
-                    // thing you're more likely to want) keeps the larger share.
-                    readonly property real artistW: bothFit ? npArtist.implicitWidth : Math.min(npArtist.implicitWidth, avail * 0.42)
+                    // When cramped the title takes what the credits leave.
+                    // The credits fit themselves to their room (see npArtist).
+                    readonly property real artistW: npArtist.implicitWidth
                     readonly property real titleW: bothFit ? npTitle.implicitWidth : Math.max(48, avail - artistW)
                     Row {
                         id: npInfoRow
@@ -21188,58 +22861,85 @@ ApplicationWindow {
                             }
                         }
                         Text { id: npSep; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "·"; color: root.textDim; font.pixelSize: 11 }
-                        // Artist credits, each collaborator its own clickable
-                        // name → that artist's page. Clipped (not per-name elided)
-                        // when the bar is tight; the whole line still shows in
-                        // full whenever there's room (see npInfo's budget).
+                        // Artist credits, each its own clickable name. As many
+                        // as fit the room the bar gives them, in order; the rest
+                        // fold into a "+N" chip that opens the featured artists
+                        // card. A wider window shows more names, a narrower one
+                        // fewer. The room: whatever the title leaves, never under
+                        // 42% (the title elides first) nor over 60% of the text
+                        // budget. Read from the title, never from this line, so
+                        // the count cannot feed back into its own budget.
                         Item {
                             id: npArtist
                             anchors.verticalCenter: parent.verticalCenter
-                            readonly property var list: (root.previewNowArtists && root.previewNowArtists.length > 0)
-                                ? root.previewNowArtists
-                                : (root.previewNowArtist !== "" ? [{ name: root.previewNowArtist, id: root.previewNowArtistId }] : [])
-                            implicitWidth: npArtistsRow.implicitWidth; implicitHeight: npArtistsRow.implicitHeight
-                            width: Math.min(implicitWidth, npInfo.artistW); clip: true
+                            readonly property var list: root.nowCredits
+                            readonly property int n: list.length
+                            readonly property real cap: Math.min(npInfo.avail * 0.6, Math.max(npInfo.avail * 0.42, npInfo.avail - npTitle.implicitWidth))
+                            readonly property real chipRoom: 34
+                            // Mono: one glyph's advance times the characters,
+                            // so fitting never re-measures text in a binding.
+                            TextMetrics { id: npArtTm; font.family: root.mono; font.pixelSize: 11; text: "M" }
+                            readonly property int shown: {
+                                if (n <= 1) return n
+                                var used = 0, k = 0
+                                for (var i = 0; i < n; i++) {
+                                    var w = ((i ? 2 : 0) + ("" + list[i].name).length) * npArtTm.advanceWidth
+                                    var more = i < n - 1 ? chipRoom : 0
+                                    if (used + w + more > cap && k > 0) break
+                                    used += w; k++
+                                }
+                                return k
+                            }
+                            implicitWidth: npArtistsRow.implicitWidth; implicitHeight: 20
                             Row {
                                 id: npArtistsRow
                                 anchors.verticalCenter: parent.verticalCenter
                                 Repeater {
-                                    model: npArtist.list
+                                    model: npArtist.shown
                                     delegate: Row {
-                                        required property var modelData
                                         required property int index
-                                        Text {
-                                            id: npArtName
-                                            readonly property bool linkable: !!modelData.id && modelData.id !== "" && !root.onArtistPage(modelData.id)
+                                        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                                        NowName {
                                             anchors.verticalCenter: parent.verticalCenter
-                                            textFormat: Text.PlainText; text: modelData.name
-                                            color: npArtMa.containsMouse && linkable ? "#ffffff" : root.accent
-                                            font.family: root.mono; font.pixelSize: 11
-                                            font.underline: npArtMa.containsMouse && linkable
-                                            MouseArea {
-                                                id: npArtMa
-                                                anchors.fill: parent; anchors.topMargin: -6; anchors.bottomMargin: -6
-                                                hoverEnabled: true
-                                                cursorShape: npArtName.linkable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                onClicked: if (npArtName.linkable) waves.loadArtist(modelData.id)
-                                                // Resting on the name: build the page before the click.
-                                                readonly property var prefetchCard: ({ kind: "artist", id: "" + (modelData.id || "") })
-                                                onContainsMouseChanged: containsMouse && npArtName.linkable ? root.hoverPrefetch(prefetchCard)
-                                                                                                            : root.hoverPrefetchCancel(prefetchCard)
-                                            }
+                                            who: npArtist.list[index] || ({})
+                                            maxW: Math.max(40, npArtist.cap - (npArtist.n > npArtist.shown ? npArtist.chipRoom + 7 : 0))
                                         }
                                         Text {
-                                            visible: index < npArtist.list.length - 1
+                                            visible: index < npArtist.shown - 1
                                             anchors.verticalCenter: parent.verticalCenter
                                             textFormat: Text.PlainText; text: ", "
                                             color: root.textDim; font.family: root.mono; font.pixelSize: 11
                                         }
                                     }
                                 }
+                                Item { width: 7; height: 1; visible: npMore.visible }
+                                NowMore {
+                                    id: npMore
+                                    visible: npArtist.n > npArtist.shown
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    n: npArtist.n - npArtist.shown
+                                }
                             }
                         }
                     }
                 }
+                // Play / pause sits right before the waveform, next to stop.
+                // Fixed box so swapping > / || / … never nudges the rail. The
+                // play caret is drawn larger so it stands at the pause bars' height.
+                Item {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 20; height: 20
+                    Text {
+                        id: npGlyph
+                        anchors.centerIn: parent
+                        textFormat: Text.PlainText
+                        text: root.previewPlaying ? "||" : ">"
+                        color: root.accent; font.family: root.mono; font.bold: true
+                        font.pixelSize: root.previewPlaying ? 13 : 18
+                    }
+                    MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: root.nowToggle() }
+                }
+                NowRail { id: nowRail; anchors.verticalCenter: parent.verticalCenter }
                 // Red at rest; reveals "[stop]" on hover. The box reserves the wider
                 // "[stop]" width so the hover swap never reflows the now-playing text.
                 Item {
@@ -21256,23 +22956,193 @@ ApplicationWindow {
                     MouseArea { id: npStopMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.nowStop() }
                 }
             }
-            // Playback position line along the very bottom edge, 4px so the
-            // seek target sits clear of the window's resize-grab edge, with a
-            // phosphor spark breathing at the playhead on the shared LED clock.
-            Rectangle {
-                id: bottomSeekLine
-                anchors.bottom: parent.bottom; anchors.left: parent.left
-                height: 4; color: root.accent
-                visible: root.previewKind !== "" && root.previewDuration > 0
-                width: parent.width * root.pvFrac(root.previewKind, root.previewId)
+        }
+    }
+
+    // Above every page fade and the floating ART / CONSOLE switch: the bar's
+    // would-seek time and the featured artists card. Inside the bar they sat
+    // under the page's bottom fade and the switch.
+    Item {
+        id: nowOverlay
+        anchors.fill: parent; z: 950
+        Rectangle {
+            id: nowAimFlag
+            // The reads before the map make the binding follow layout moves.
+            readonly property point at: {
+                var dep = nowPlaying.x + statusBar.width + statusBar.height + root.height + nowRail.x + nowRail.aim
+                return nowRail.mapToItem(nowOverlay, nowRail.tw + nowRail.rw * nowRail.aim, 0)
             }
-            Rectangle {
-                visible: bottomSeekLine.visible
-                x: bottomSeekLine.width - width / 2; anchors.bottom: parent.bottom
-                width: 5; height: 5; radius: 1
-                color: root.accentSoft
-                opacity: 0.35 + 0.65 * root.ledPulse
+            visible: nowRail.hot && nowRail.visible && root.previewKind !== ""
+            x: Math.max(4, Math.min(nowOverlay.width - width - 4, at.x - width / 2))
+            y: at.y - height - 8
+            width: nowAimTx.implicitWidth + 14; height: 18; radius: 4
+            color: root.surfaceHi; border.color: root.accentDim
+            Text {
+                id: nowAimTx
+                anchors.centerIn: parent; textFormat: Text.PlainText
+                text: root.fmtMs(nowRail.aim * root.previewDuration)
+                color: root.accentContTx; font.family: root.mono; font.pixelSize: 10; font.bold: true
             }
+        }
+        Rectangle {
+            id: nowCard
+            // Only the names the bar folded into "+N": the lead and anyone
+            // already showing in the bar are one click away down there.
+            readonly property var folded: root.nowCredits.slice(npArtist.shown)
+            readonly property bool shown: root.nowCardOpen && folded.length > 0 && root.previewKind !== ""
+            // Opens over its "+N" chip: the card's own count sits right above
+            // it (14 px in from the card's right edge, see nowCardHead).
+            readonly property point at: {
+                var dep = nowPlaying.x + statusBar.width + root.height + npArtist.x + npInfo.x + npMore.x + npMore.width
+                return npMore.mapToItem(nowOverlay, npMore.width, 0)
+            }
+            TextMetrics { id: nowCardTm; font.family: root.mono; font.pixelSize: 11; text: "M" }
+            readonly property int maxChars: {
+                var m = 0, l = nowCard.folded
+                for (var i = 0; i < l.length; i++) m = Math.max(m, ("" + l[i].name).length)
+                return m
+            }
+            readonly property real rowW: Math.min(nowOverlay.width - 40, Math.max(176, maxChars * nowCardTm.advanceWidth + 72))
+            property int hotRow: -1
+            property bool glide: false
+            onShownChanged: { hotRow = -1; glide = false }
+            // A pick: the light flashes a beat, then the page opens and the
+            // card closes. Here and not in the row, since closing the card
+            // tears the row down.
+            property int pickRow: -1
+            property string pickId: ""
+            function pick(id, row) {
+                pickId = id; pickRow = row
+                pickTimer.interval = root.hoverMotion ? 230 : 0
+                pickTimer.restart()
+            }
+            Timer {
+                id: pickTimer
+                onTriggered: {
+                    waves.loadArtist(nowCard.pickId)
+                    root.nowCardOpen = false
+                    nowCard.pickRow = -1
+                }
+            }
+            visible: shown
+            x: Math.max(8, Math.min(nowOverlay.width - width - 8, at.x + 14 - width))
+            y: statusBar.mapToItem(nowOverlay, 0, 0).y - height - 8
+            width: rowW + 12; height: Math.min(nowCardCol.implicitHeight + 16, root.height * 0.6)
+            radius: 8; color: root.surfaceHi; border.color: root.border1
+            clip: true
+            Column {
+                id: nowCardCol
+                x: 6; y: 8
+                Item {
+                    id: nowCardHead
+                    width: nowCard.rowW; height: 16
+                    Text {
+                        x: 10; anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText; text: "FEATURED ARTISTS"
+                        color: root.textHi; font.family: root.mono; font.pixelSize: 10; font.bold: true
+                        font.letterSpacing: 0.8
+                    }
+                    // The count, as the same green "+N" as the bar's chip.
+                    Rectangle {
+                        anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                        width: nowCardN.implicitWidth + 10; height: 16; radius: 4
+                        color: root.accentCont; border.color: root.accentDim
+                        Text {
+                            id: nowCardN; anchors.centerIn: parent; textFormat: Text.PlainText
+                            text: "+" + nowCard.folded.length
+                            color: root.accentContTx; font.family: root.mono; font.pixelSize: 10; font.bold: true
+                        }
+                    }
+                }
+                Item { width: 1; height: 10 }
+                Repeater {
+                    model: nowCard.shown ? nowCard.folded : []
+                    delegate: NowCardRow { width: nowCard.rowW }
+                }
+            }
+            // The light rail: a hairline joins the sockets and one light rides
+            // it to the hovered row. Moving, it leaves a lit streak, bright at
+            // the light, that burns down behind it like a fuse; at rest the
+            // light breathes, and a pick flashes it.
+            Item {
+                id: nowCardRail
+                readonly property int row: nowCard.pickRow >= 0 ? nowCard.pickRow : nowCard.hotRow
+                visible: row >= 0
+                anchors.fill: parent
+                z: 2
+                readonly property real cx: nowCardCol.x + 12
+                readonly property real y0: nowCardCol.y + nowCardHead.height + 10 + 13
+                readonly property real rowY: y0 + row * 26
+                readonly property bool slide: root.hoverMotion && nowCard.glide
+                readonly property real len: Math.max(0, nowCard.folded.length - 1) * 26
+                property real rest: 0.22
+                SequentialAnimation on rest {
+                    running: nowCardRail.visible && nowCard.pickRow < 0 && root.hoverMotion
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.36; duration: 800; easing.type: Easing.InOutSine }
+                    NumberAnimation { to: 0.12; duration: 800; easing.type: Easing.InOutSine }
+                }
+                property real flash: 0
+                NumberAnimation { id: nowCardRailFlash; target: nowCardRail; property: "flash"; from: 0; to: 1; duration: 160; easing.type: Easing.OutCubic }
+                Connections {
+                    target: nowCard
+                    function onPickRowChanged() { if (nowCard.pickRow >= 0) nowCardRailFlash.restart(); else { nowCardRailFlash.stop(); nowCardRail.flash = 0 } }
+                }
+                // Where the light is, and where its last move began. Computed
+                // from row in the handler: rowY can still be stale there.
+                property real ly: rowY
+                Behavior on ly {
+                    enabled: nowCardRail.slide
+                    NumberAnimation { duration: 170; easing.type: Easing.InOutCubic }
+                }
+                property real from: rowY
+                property real heat: 0
+                NumberAnimation { id: nowCardRailCool; target: nowCardRail; property: "heat"; from: 1; to: 0; duration: 480; easing.type: Easing.InQuad }
+                onRowChanged: {
+                    if (row < 0) return
+                    if (slide) { from = ly; nowCardRailCool.restart() }
+                    else { nowCardRailCool.stop(); heat = 0; from = y0 + row * 26 }
+                }
+                Rectangle {
+                    x: nowCardRail.cx - 0.5; y: nowCardRail.y0; width: 1; height: nowCardRail.len
+                    color: nowCardRail.flash > 0 ? root.accentDim : root.border1
+                    opacity: 0.6 + 0.4 * nowCardRail.flash
+                }
+                // The streak: its far end burns toward the light as it cools.
+                Rectangle {
+                    id: nowCardStreak
+                    readonly property real burn: nowCardRail.from + (nowCardRail.rowY - nowCardRail.from) * (1 - nowCardRail.heat)
+                    readonly property bool up: nowCardRail.ly < nowCardRail.from
+                    visible: nowCardRail.heat > 0.01
+                    x: nowCardRail.cx - 1; width: 2; radius: 1
+                    y: Math.min(burn, nowCardRail.ly); height: Math.abs(nowCardRail.ly - burn)
+                    gradient: Gradient {
+                        GradientStop { position: 0; color: nowCardStreak.up ? root.accentSoft : Qt.rgba(0.24, 1, 0.43, 0.15) }
+                        GradientStop { position: 1; color: nowCardStreak.up ? Qt.rgba(0.24, 1, 0.43, 0.15) : root.accentSoft }
+                    }
+                }
+                Rectangle {
+                    x: nowCardRail.cx - width / 2; y: nowCardRail.ly - height / 2
+                    width: 16 + 12 * nowCardRail.flash; height: width; radius: width / 2
+                    color: root.accent; opacity: Math.max(nowCardRail.rest, 0.3 * nowCardRail.flash)
+                }
+                Rectangle {
+                    x: nowCardRail.cx - 3; y: nowCardRail.ly - 3; width: 6; height: 6; radius: 3
+                    scale: 1 + 0.2 * nowCardRail.flash
+                    color: nowCardRail.flash > 0.5 ? root.accentSoft : root.accent
+                }
+            }
+            HoverHandler { id: nowCardHover; onHoveredChanged: if (!hovered) nowCard.hotRow = -1 }
+        }
+        // Close once the pointer has left both the card and its chip a beat.
+        // The beat starts when the pointer leaves (re-entering either one
+        // stops it), so crossing the gap between the chip and the card never
+        // lands on a tick that closes it.
+        Timer {
+            interval: 450
+            running: root.nowCardOpen && !nowCardHover.hovered
+                     && !(root.nowCardAnchor && root.nowCardAnchor.hovered)
+            onTriggered: root.nowCardOpen = false
         }
     }
 
@@ -25094,14 +26964,15 @@ ApplicationWindow {
             opacity: 0.85 * shown
         }
 
-        // ---- v0.2.0 launch fireworks ---------------------------------------
-        // A one-release flourish: bit fireworks burst around the version while
-        // it is up, and burn out as it drains. Keyed to the exact version
-        // so the next release launches plain again; every launch of this one
-        // plays them, so they fit in a hold only 0.1 s past the usual one.
+        // ---- v0.2 launch fireworks -----------------------------------------
+        // A flourish for the 0.2.0 and 0.2.1 releases: bit fireworks burst
+        // around the version while it is up, and burn out as it drains. Keyed
+        // to the exact versions so a later release launches plain again; every
+        // launch of these plays them, so they fit in a hold only 0.1 s past
+        // the usual one.
         BitFireworks {
             id: bootFx
-            readonly property bool celebrate: waves.appVersion === "0.2.0"
+            readonly property bool celebrate: ["0.2.0", "0.2.1"].indexOf(waves.appVersion) >= 0
             visible: celebrate
             width: 680; height: 320
             x: bootVer.x + bootVer.width / 2 - width / 2

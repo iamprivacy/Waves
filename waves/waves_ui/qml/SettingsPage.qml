@@ -63,6 +63,18 @@ Item {
 
     property var groups: []
     property var editMap: ({})
+    // The audio output pick applies LIVE, like the bar's output chip, and
+    // never enters editMap (a SAVE would write a stale pick back over one
+    // the bar made since). Both mirrors follow the bridge, so a speaker that
+    // connects or a pick from the bar shows here without a schema rebuild.
+    property var outOpts: []
+    property string outPick: ""
+    function outRefresh() { outOpts = waves.audioOutputs(); outPick = String(waves.wavesPref("audio_output") || "") }
+    Connections {
+        target: waves
+        function onAudioOutputsChanged() { page.outRefresh() }
+        function onAudioOutputChanged() { page.outRefresh() }
+    }
     // The keys staged since the last SAVE or CANCEL: what the unsaved marks
     // read. editMap outlives a save (it keeps the controls on the saved
     // values) and holds the live diagnostics switches, so it cannot say
@@ -704,7 +716,7 @@ Item {
     readonly property var railGroups: [
         { head: "MUSIC", ids: ["downloads", "library", "releases", "discography"] },
         { head: "FILES", ids: ["files", "metadata", "processing"] },
-        { head: "APP",   ids: ["appearance", "notifications", "pacing", "updates", "diagnostics"] }
+        { head: "APP",   ids: ["appearance", "playback", "notifications", "pacing", "updates", "diagnostics"] }
     ]
     // The section on show. Persisted as a waves pref, so Settings reopens on
     // the section you left it on, across visits and across launches.
@@ -797,6 +809,8 @@ Item {
         case "updates":     return "M8 3V12.4 M4.6 6.4L8 3L11.4 6.4"
         case "coffee":      return "M2.8 6.4H11V10.2A3.2 3.2 0 0 1 7.8 13.4H6A3.2 3.2 0 0 1 2.8 10.2Z M11 7.4H12A1.9 1.9 0 0 1 12 11.2H11 M5.6 2.4V4.4 M8.2 2.4V4.4"
         case "pacing":      return "M2.8 11.6A5.4 5.4 0 1 1 13.2 11.6 M8 9.2L10.6 5.8 M7.2 9.2A0.8 0.8 0 1 0 8.8 9.2A0.8 0.8 0 1 0 7.2 9.2Z"
+        // Headphones: what you listen through.
+        case "playback":    return "M3.2 10V8.2A4.8 4.8 0 0 1 12.8 8.2V10 M2.4 9.6H4.4V13.4H2.4Z M11.6 9.6H13.6V13.4H11.6Z"
         case "appearance":  return "M1.8 8C3.6 4.9 5.6 3.8 8 3.8C10.4 3.8 12.4 4.9 14.2 8C12.4 11.1 10.4 12.2 8 12.2C5.6 12.2 3.6 11.1 1.8 8Z M6.3 8A1.7 1.7 0 1 0 9.7 8A1.7 1.7 0 1 0 6.3 8Z"
         // Pulse/heartbeat trace: diagnostics watch the app's vitals.
         case "diagnostics": return "M2.6 8H5.4L6.8 4.6L9.2 11.4L10.6 8H13.4"
@@ -807,7 +821,7 @@ Item {
     // Front-load the build at startup (behind the login overlay) so every
     // open of the page is instant. The startup update check is opt-in and
     // throttled in the backend, it no-ops unless the user enabled it.
-    Component.onCompleted: { refreshSchema(); loadSection(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
+    Component.onCompleted: { refreshSchema(); loadSection(); outRefresh(); auRefresh(); waves.startupUpdateCheck(); waves.startupFfmpegUpdateCheck() }
 
     onActiveChanged: {
         if (active) {
@@ -1021,6 +1035,66 @@ Item {
         color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, k)
         border.width: 1; border.color: page.mix(page.textLo, page.accent, k)
         Ico { anchors.centerIn: parent; opacity: rck.k; scale: 0.6 + 0.4 * rck.k; name: "check"; color: page.accentText; size: 9; bold: 14 }
+    }
+
+    // The audio output pick: a one-of list under the words, rows in the
+    // channel key's clothes with the round check lit on the pick. Scrolls
+    // past six. A click applies at once (see outOpts).
+    component SOutList: Item {
+        id: ol
+        // Only the device row's instance builds rows: every settings row
+        // holds a hidden one, and each would build up to six delegates.
+        property bool live: false
+        readonly property int rowH: 30
+        implicitHeight: Math.max(1, Math.min(page.outOpts.length, 6)) * (rowH + 4) - 4
+        implicitWidth: 300
+        ListView {
+            id: olList
+            anchors.fill: parent; clip: true; spacing: 4
+            interactive: contentHeight > height + 1
+            boundsBehavior: Flickable.StopAtBounds
+            model: ol.live ? page.outOpts : []
+            ScrollBar.vertical: WavesScrollBar {}
+            delegate: Item {
+                id: olRow
+                required property var modelData
+                required property int index
+                readonly property bool on: page.outPick === String(modelData.value)
+                property real k: on ? 1 : 0
+                Behavior on k { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+                width: olList.width - (olList.interactive ? 14 : 0); height: ol.rowH
+                Rectangle {
+                    anchors.fill: parent; radius: 7
+                    color: page.mix(olMa.containsMouse ? page.surface3 : page.surface0, page.accentCont, olRow.k)
+                    border.color: page.mix(page.outline, page.accentDim, olRow.k)
+                }
+                RoundCheck { id: olChk; x: 10; anchors.verticalCenter: parent.verticalCenter; k: olRow.k }
+                Text {
+                    x: olChk.x + olChk.width + 8; anchors.verticalCenter: parent.verticalCenter
+                    width: olTag.x - x - 8; elide: Text.ElideRight
+                    textFormat: Text.PlainText; text: olRow.modelData.label
+                    color: olRow.modelData.missing ? page.textDim : page.mix(page.textLo, page.accentContTx, olRow.k)
+                    font.pixelSize: 12; font.weight: Font.Medium
+                }
+                // NOT CONNECTED on a saved pick that is gone, DEFAULT on the
+                // OS default, and the device System default resolves to.
+                Text {
+                    id: olTag
+                    anchors.right: parent.right; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                    width: Math.min(implicitWidth, olRow.width * 0.45); elide: Text.ElideRight
+                    textFormat: Text.PlainText
+                    text: olRow.modelData.missing ? "NOT CONNECTED" : olRow.modelData["default"] ? "DEFAULT"
+                        : olRow.modelData.value === "" ? olRow.modelData.sub : ""
+                    color: olRow.modelData.missing ? page.gold : page.textDim
+                    font.family: page.mono; font.pixelSize: olRow.modelData.value === "" && !olRow.modelData.missing ? 10 : 9
+                }
+                MouseArea {
+                    id: olMa
+                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: if (!olRow.on) waves.setWavesPref("audio_output", olRow.modelData.value)
+                }
+            }
+        }
     }
 
     // A channel key: a small lit key with an LED, for multi-picks.
@@ -1490,6 +1564,17 @@ Item {
                 c.path = "M1.8 8C3.6 4.9 5.6 3.8 8 3.8C10.4 3.8 12.4 4.9 14.2 8C12.4 11.1 10.4 12.2 8 12.2C5.6 12.2 3.6 11.1 1.8 8Z"; c.stroke()
                 var lx = Math.max(-1, Math.min(1, Math.sin(t * 1.3) * 1.6)) * 1.8
                 c.beginPath(); c.arc(8 + lx, 8, 1.7, 0, 2 * P); c.stroke(); c.restore()
+            } else if (g === "playback") {
+                // The ear cups push out on the beat; sound ticks flare beside them.
+                var hb = t % 0.8
+                var hk = Math.exp(-hb * 7) * (hb < 0.04 ? hb / 0.04 : 1)
+                var ho = hk * 0.6
+                c.path = "M3.2 10V8.2A4.8 4.8 0 0 1 12.8 8.2V10"; c.stroke()
+                c.save(); c.translate(-ho, 0); c.path = "M2.4 9.6H4.4V13.4H2.4Z"; c.stroke(); c.restore()
+                c.save(); c.translate(ho, 0); c.path = "M11.6 9.6H13.6V13.4H11.6Z"; c.stroke(); c.restore()
+                c.globalAlpha = hk; c.lineWidth = 1.1
+                c.beginPath(); c.moveTo(0.8 - ho, 10.4); c.lineTo(0.8 - ho, 12.6); c.moveTo(15.2 + ho, 10.4); c.lineTo(15.2 + ho, 12.6); c.stroke()
+                c.globalAlpha = 1; c.lineWidth = 1.5
             } else if (g === "notifications") {
                 // Two short buzzes, marks flaring at the sides.
                 var w2 = t % 2.2, env2 = 0
@@ -3764,7 +3849,8 @@ Item {
                                             // Third-width boxes stack as a band, all three at once,
                                             // so the row keeps one height.
                                             readonly property bool stack: modelData.third === true ? width < 272
-                                                                        : ctrlW > 0 && width - ctrlW - 14 < page.rowWordsMinW
+                                                                        : modelData.type === "device"
+                                                                          || (ctrlW > 0 && width - ctrlW - 14 < page.rowWordsMinW)
                                             columns: stack ? 1 : 2
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 2
@@ -3841,6 +3927,11 @@ Item {
                                                 currentIndex: modelData.type === "enum" ? page.enumIndex(modelData.options, page.val(modelData)) : 0
                                                 ladder: page.isLadder(modelData.key)
                                                 onPicked: function(i) { page.setv(modelData.key, modelData.options[i].value) }
+                                            }
+                                            SOutList {
+                                                visible: modelData.type === "device"
+                                                live: modelData.type === "device"
+                                                Layout.fillWidth: true
                                             }
                                             SText {
                                                 id: inlineStr
