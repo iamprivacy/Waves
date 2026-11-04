@@ -44,15 +44,24 @@ class PoolGauge:
         """Hold for the duration of one work item. The lock costs about a
         microsecond against work items that are a network round trip or a tag
         read, and a plain ``+= 1`` from eight threads is not atomic."""
+        self.start()
+        try:
+            yield
+        finally:
+            self.stop()
+
+    def start(self) -> None:
+        """One more item in flight. For a hold that does not fit a ``with``
+        block (the download slots: taken in one method, given back in
+        another); pair every start with exactly one stop."""
         with self._lock:
             self._busy += 1
             if self._busy > self.peak:
                 self.peak = self._busy
-        try:
-            yield
-        finally:
-            with self._lock:
-                self._busy -= 1
+
+    def stop(self) -> None:
+        with self._lock:
+            self._busy = max(0, self._busy - 1)
 
     def activeThreadCount(self) -> int:  # (Qt's spelling: the sampler calls this)
         return self._busy

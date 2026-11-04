@@ -2,6 +2,7 @@ import contextlib
 import enum
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -27,6 +28,7 @@ from waves.constants import (
 from waves.helper.decorator import SingletonMeta
 from waves.helper.path import path_config_base, path_file_settings, path_file_token
 from waves.http_pool import IdleDropAdapter
+from waves.model.cfg import INT_BOUNDS
 from waves.model.cfg import Settings as ModelSettings
 from waves.model.cfg import Token as ModelToken
 
@@ -173,7 +175,7 @@ class BaseConfig:
             result = True
         except FileNotFoundError:
             self.data = self.cls_model()
-        except (JSONDecodeError, TypeError, ValueError, AttributeError) as e:
+        except (JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError) as e:
             # AttributeError is what a file of valid JSON whose top level is not
             # an object raises: dataclasses_json asks the parsed value for
             # .items(), and "[]", "null", a bare string or a number has none. It
@@ -181,8 +183,9 @@ class BaseConfig:
             # arm exists to do, and only deleting the file by hand recovered the
             # app. TypeError is a field of the wrong shape (a list where a number
             # belongs): it used to skip the set-aside, so the defaults written
-            # back below replaced the only copy. A file that is there and
-            # unusable is a broken config whatever shape it is broken in.
+            # back below replaced the only copy. OverflowError is a number no
+            # field can hold. A file that is there and unusable is a broken
+            # config whatever shape it is broken in.
             self.data = self.cls_model()
             if not _set_aside(path, e):
                 # Not moved (a lock, a read-only folder), so it is still the
@@ -274,12 +277,37 @@ def _migrate_settings(data: ModelSettings) -> bool:
     return changed
 
 
+def _clamp_bounded_numbers(data: ModelSettings) -> bool:
+    """Pull every INT_BOUNDS setting back inside its range, on every load.
+
+    The Settings save clamps, but a config file edited by hand never passes
+    through it, and the engine reads these raw: a finishing count of 100 sized
+    the queue's thread pool and every album's fan-out past a hundred threads.
+    Not a one-time migration, so no marker. Returns True when something
+    changed, so the caller persists it.
+    """
+    changed = False
+    for key, (low, high) in INT_BOUNDS.items():
+        value = getattr(data, key)
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError):
+            number = getattr(ModelSettings(), key)
+        number = max(low, min(high, number))
+        # A bool compares equal to 0 or 1, so the type is checked as well.
+        if number != value or isinstance(value, bool) or not isinstance(value, int):
+            setattr(data, key, number)
+            changed = True
+    return changed
+
+
 class Settings(BaseConfig, metaclass=SingletonMeta):
     def __init__(self):
         self.cls_model = ModelSettings
         self.file_path = path_file_settings()
         self.read(self.file_path)
-        if _migrate_settings(self.data):
+        # Both run: a bitwise or, not a short-circuit.
+        if _migrate_settings(self.data) | _clamp_bounded_numbers(self.data):
             # Same degrade as read()'s write-back: a still-locked file must not
             # abort startup; the migrations live in memory and persist on the
             # next successful save (their markers keep them one-time).
@@ -381,11 +409,34 @@ _BOOL_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False,
 
 
 def _field_unusable(hint, value) -> bool:
-    """A null, a string in a bool field that names no bool, or a value that is
-    not a member of the enum the field holds."""
+    """A null, a string in a bool field that names no bool, a number field
+    holding what no number can be made of, a text field holding a list, an
+    object or a bool, a number that is not finite, or a value that is not a
+    member of the enum the field holds."""
     if value is None:
         return True
     if hint is bool and isinstance(value, str):
+        return True
+    if hint in (int, float):
+        # dataclasses_json reads a number field with int(value) or
+        # float(value). A word ("three"), an empty string, a list or an
+        # object raised out of from_json and threw the whole file away; a
+        # bool is a wrong shape that int() quietly takes as 0 or 1.
+        if isinstance(value, bool):
+            return True
+        try:
+            number = hint(value)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        # json reads Infinity, -Infinity, NaN (and a literal too big for a
+        # float) as non-finite floats. A whole-number field raised
+        # OverflowError or ValueError on them out of from_json, and a seconds
+        # field would sleep forever.
+        if not math.isfinite(number):
+            return True
+    if hint is str and isinstance(value, list | dict | bool):
+        # str() of these is a literal like "['/Music']", which would then be
+        # used as a path or a template.
         return True
     if isinstance(hint, type) and issubclass(hint, enum.Enum):
         try:

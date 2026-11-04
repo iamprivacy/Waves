@@ -180,6 +180,11 @@ _SCHEMA = (
            key   TEXT PRIMARY KEY,
            value TEXT
        )""",
+    # The arrivals the pane still marks: acknowledged (the badge is clear)
+    # but not yet opened, nor marked seen all at once.
+    """CREATE TABLE IF NOT EXISTS arrivals (
+           release_id TEXT PRIMARY KEY
+       )""",
     """CREATE TABLE IF NOT EXISTS joined_reported (
            release_id TEXT PRIMARY KEY,
            at         INTEGER NOT NULL DEFAULT 0
@@ -1672,8 +1677,36 @@ class FollowStore:
             ids = sorted({r[0] for r in self._conn.execute("SELECT release_id FROM releases WHERE acknowledged = 0")})
             if ids:
                 self._conn.execute("UPDATE releases SET acknowledged = 1 WHERE acknowledged = 0")
+                self._conn.executemany("INSERT OR IGNORE INTO arrivals (release_id) VALUES (?)", [(i,) for i in ids])
                 self._conn.commit()
         return list(ids)
+
+    def arrivals(self) -> list[str]:
+        """The arrivals the pane still marks (ids as ``acknowledge_all``
+        returns them). One whose release left the feed is dropped."""
+        with self._lock:
+            self._conn.execute("DELETE FROM arrivals WHERE release_id NOT IN (SELECT release_id FROM releases)")
+            self._conn.commit()
+            return sorted(r[0] for r in self._conn.execute("SELECT release_id FROM arrivals"))
+
+    def arrival_seen(self, release_id: str) -> bool:
+        """The user opened this release: it is no longer an arrival, and no
+        longer on the badge either. True when it was one."""
+        rid = str(release_id)
+        with self._lock:
+            n = self._conn.execute("DELETE FROM arrivals WHERE release_id = ?", (rid,)).rowcount
+            n += self._conn.execute(
+                "UPDATE releases SET acknowledged = 1 WHERE release_id = ? AND acknowledged = 0", (rid,)
+            ).rowcount
+            self._conn.commit()
+        return bool(n)
+
+    def arrivals_clear(self) -> int:
+        """Every arrival is marked seen; returns how many there were."""
+        with self._lock:
+            n = self._conn.execute("DELETE FROM arrivals").rowcount
+            self._conn.commit()
+        return int(n or 0)
 
     def set_dl_state(self, release_id: str, state: int, *, video: bool = False) -> None:
         """A release's auto-download state; ``video`` for a music video's bare id."""

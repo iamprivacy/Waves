@@ -67,6 +67,7 @@ from waves.constants import (
     MetadataTargetUPC,
     QualityVideo,
 )
+from waves.download_slots import STREAM_SLOTS, JobToken, Ticket
 from waves.flac_verify import seal_file
 from waves.helper.camelot import format_initial_key
 from waves.helper.exceptions import MediaMissing
@@ -599,6 +600,10 @@ class Download:
     # The job's genre lookup (waves/genres.py), set by the bridge when the
     # Genre setting is on; None writes no Genre tag.
     genre_lookup: "GenreLookup | None" = None
+    # This instance's place in the queue's job gate (waves/download_slots.py),
+    # set by the bridge per queued item so a later item's streams wait behind
+    # this one's. None (the CLI) is not held by the gate.
+    _job_token: JobToken | None = None
     fn_logger: Callable
     progress_gui: ProgressBars
     progress: Progress
@@ -1527,6 +1532,8 @@ class Download:
         # Step 4: Download and process media.
         # The returned path reflects the TRUE stream extension and any uniquify suffix, so
         # skip/return-path/symlink below act on the file actually written, not the step-2 guess.
+        # The politeness delay rides along as the cooldown of the stream slot
+        # this item is about to take (see _download_cooldown).
         download_success, path_media_dst = self._download_and_process_media(
             media,
             path_media_dst,
@@ -1534,13 +1541,12 @@ class Download:
             is_parent_album,
             file_extension_dummy,
             event_stop,
+            cooldown_s=self._download_cooldown() if download_delay else 0.0,
         )
 
         # The file and its sidecars are fully on disk here; what follows is
-        # post-processing (symlinks) and the randomized politeness delay
-        # before the NEXT download. The queue row must not sit on a full
-        # FINISHING word through a deliberate sleep, so the delivery is
-        # announced now and the delay stays invisible.
+        # post-processing (symlinks). The queue row flips to its finished
+        # word now.
         if download_success:
             self._note_delivered(media)
 
@@ -1708,7 +1714,10 @@ class Download:
         The pause belongs to the item, taken by the worker that picked it up:
         a thread pool has no batch boundary of its own, and this is the moment
         the item's own API traffic begins. A list shorter than one batch never
-        pauses, and neither does a single-item download.
+        pauses, and neither does a single-item download. The fan-out runs
+        stream slots plus finishing seats worth of workers, so the count here
+        runs ahead of the streams by at most the seat count: the cadence
+        shifts by a few items, the batch size does not.
 
         Every OTHER worker stands back with it. One worker sleeping while its
         siblings carry on is not a pause at all: with the default three, the
@@ -1762,6 +1771,50 @@ class Download:
         # and it wakes for a STOP and for the pause's own deadline like any other
         # waiter, so neither can be stranded here.
         self._wait_for_pace_gate(event_stop)
+
+    def _download_cooldown(self) -> float:
+        """The politeness delay for this download, drawn once per item.
+
+        It used to be slept by the worker after its track was done. The worker
+        now gives its stream slot back the moment the bytes are in, so a sleep
+        there would space nothing: a sibling would start the next stream at
+        once. The delay is the SLOT's cooldown instead (download_slots.py):
+        the slot cannot be taken again until it is over, so downloads stay
+        spaced on the network and the worker is free to finish its file.
+        """
+        try:
+            low = float(self.settings.data.download_delay_sec_min)
+            high = float(self.settings.data.download_delay_sec_max)
+        except (TypeError, ValueError, AttributeError):
+            return 0.0
+        if high < low:
+            low, high = high, low
+        return max(0.0, round(random.SystemRandom().uniform(low, high), 1))
+
+    def _slot_limits(self) -> tuple[Callable[[], int], Callable[[], int]]:
+        """The two live readers the slot ledger checks on every grant, so a
+        saved setting applies to the next download without a restart. A
+        settings file from a build without the finishing field means the
+        default, not a crash."""
+
+        def streams() -> int:
+            return int(getattr(self.settings.data, "downloads_concurrent_max", 3) or 3)
+
+        def seats() -> int:
+            value = getattr(self.settings.data, "downloads_finishing_max", 3)
+            return int(3 if value is None else value)
+
+        return streams, seats
+
+    def _item_workers(self) -> int:
+        """Threads for a collection's item fan-out: one per stream slot plus
+        one per finishing seat, so a track that moved to a seat leaves a
+        thread free to take the slot it gave back. Workers pick items up in
+        list order and the slot ledger serves them first come, first served,
+        so the extra threads change nothing about the order streams start
+        in; a re-submit pass's items queue behind the next job's waiters."""
+        streams, seats = self._slot_limits()
+        return max(1, streams()) + max(0, seats())
 
     def _end_pace_hold(self) -> None:
         """Hand this worker's pause back, opening the gate only for the last one.
@@ -2559,6 +2612,7 @@ class Download:
         is_parent_album: bool,
         file_extension_dummy: str,
         event_stop: Event | None = None,
+        cooldown_s: float = 0.0,
     ) -> tuple[bool, pathlib.Path]:
         """Download and process media file.
 
@@ -2569,6 +2623,8 @@ class Download:
             is_parent_album (bool): Whether this is a parent album.
             file_extension_dummy (str): Dummy file extension.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
+            cooldown_s (float, optional): The politeness delay, applied as the cooldown of the
+                stream slot this item takes. Defaults to 0.0 (none).
 
         Returns:
             tuple[bool, pathlib.Path]: (Whether download was successful, the FINAL destination path).
@@ -2578,6 +2634,49 @@ class Download:
         if skip_download:
             return True, path_media_dst
 
+        # A paused queue hands out no slots: a worker that took one while
+        # paused would hold it idle, and resume would then start fewer streams
+        # than the setting says.
+        if getattr(self, "event_run", None) is not None and self._wait_while_paused(event_stop):
+            return False, path_media_dst
+
+        # The stream slot, taken here and not around the segment fetch alone:
+        # a manifest's URLs expire, so the ask for the stream must wait for the
+        # slot too. Everything from here to the end of the method holds it (or
+        # the finishing seat it moves to), and the cooldown spaces the next
+        # download whichever way this one ends: written, skipped after the
+        # stream, refused by TIDAL or failed.
+        streams, seats = self._slot_limits()
+        ticket = STREAM_SLOTS.acquire_stream(
+            self._job_token,
+            stream_limit=streams,
+            finish_limit=seats,
+            cooldown_s=cooldown_s,
+            stop_events=(getattr(self, "event_abort", None), event_stop),
+        )
+        if ticket is None:
+            return False, path_media_dst
+        try:
+            # A worker that waited minutes for a slot must not fire its API
+            # traffic into a sibling's rate-limit pause.
+            self._wait_for_pace_gate(event_stop)
+            abort = getattr(self, "event_abort", None)
+            if (abort is not None and abort.is_set()) or (event_stop and event_stop.is_set()):
+                return False, path_media_dst
+            self._note_stream_acquired(media)
+            return self._stream_and_finish(media, path_media_dst, is_parent_album, ticket, event_stop)
+        finally:
+            ticket.release()
+
+    def _stream_and_finish(
+        self,
+        media: Track | Video,
+        path_media_dst: pathlib.Path,
+        is_parent_album: bool,
+        ticket: Ticket,
+        event_stop: Event | None = None,
+    ) -> tuple[bool, pathlib.Path]:
+        """The part of _download_and_process_media that runs under a slot."""
         # Get stream information and final file extension
         stream_manifest, file_extension, do_flac_extract, media_stream = self._get_stream_info(media)
 
@@ -2630,6 +2729,7 @@ class Download:
             is_parent_album,
             media_stream,
             event_stop,
+            ticket=ticket,
         )
 
     def _get_stream_info(self, media: Track | Video) -> tuple[StreamManifest | None, str, bool, Stream | None]:
@@ -2837,9 +2937,14 @@ class Download:
 
     def _note_delivered(self, media: Track | Video) -> None:
         """The item's file and sidecars are fully on disk; only post-processing
-        and the deliberate inter-download delay remain. A no-op here; the GUI's
-        tracked download overrides it to flip the queue row to its finished
-        word right away instead of letting it sit through the delay."""
+        remains. A no-op here; the GUI's tracked download overrides it to flip
+        the queue row to its finished word right away."""
+
+    def _note_stream_acquired(self, media: Track | Video) -> None:
+        """This item holds a stream slot and is about to ask for its stream.
+        A no-op here; the GUI's tracked download overrides it to count the
+        job's streams started, which is what lets the next queued item begin
+        while this one finishes."""
 
     def _note_unavailable(self, media: Track | Video | Album) -> None:
         """TIDAL refuses to stream this item, so the engine skips it. A no-op
@@ -2917,6 +3022,7 @@ class Download:
         is_parent_album: bool,
         media_stream: Stream | None,
         event_stop: Event | None = None,
+        ticket: Ticket | None = None,
     ) -> tuple[bool, pathlib.Path]:
         """Perform the actual download and processing.
 
@@ -2928,6 +3034,9 @@ class Download:
             is_parent_album (bool): Whether this is a parent album.
             media_stream (Stream | None): Media stream.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
+            ticket (Ticket | None, optional): The stream slot this item holds. Once the bytes
+                are in it is asked for a finishing seat, so the slot goes back to the pool
+                while this method converts, tags and copies. Defaults to None (no slot held).
 
         Returns:
             tuple[bool, pathlib.Path]: (Whether download was successful, the final destination path).
@@ -2954,6 +3063,13 @@ class Download:
                 path_file=tmp_path_file,
                 event_stop=event_stop,
             )
+
+            # The stream is over, well or badly: the slot goes back now if a
+            # finishing seat is free, so the next track starts streaming while
+            # this one converts, tags and copies. A refused seat (every seat
+            # taken, temp disk nearly full) keeps the slot through the finish.
+            if ticket is not None:
+                ticket.try_finishing_seat()
 
             if not result_download:
                 return False, path_media_dst
@@ -3274,7 +3390,8 @@ class Download:
             quality_video (QualityVideo | None): Video quality setting.
             quality_audio_old (Quality | None): Previous audio quality.
             quality_video_old (QualityVideo | None): Previous video quality.
-            download_delay (bool): Whether to apply download delay.
+            download_delay (bool): Kept for the callers; the delay itself is the stream
+                slot's cooldown now (see _download_cooldown), so nothing sleeps here.
             skip_file (bool): Whether file was skipped.
             event_stop (Event | None, optional): Event to stop the download. Defaults to None.
         """
@@ -3290,19 +3407,6 @@ class Download:
 
         if quality_video_old is not None:
             self.adjust_quality_video(quality_video_old)
-
-        # Apply download delay if needed
-        if download_delay and not skip_file:
-            time_sleep: float = round(
-                random.SystemRandom().uniform(
-                    self.settings.data.download_delay_sec_min, self.settings.data.download_delay_sec_max
-                ),
-                1,
-            )
-
-            self.fn_logger.debug(f"Next download will start in {time_sleep} seconds.")
-
-            self._sleep_politely(time_sleep, event_stop)
 
     def media_move_and_symlink(
         self, media: Track | Video, path_media_src: pathlib.Path, file_extension: str
@@ -3652,8 +3756,9 @@ class Download:
     # buffer is 64 KiB, which turns a 40 MB track into ~640 sequential write
     # round-trips on a network mount (SMB especially); 8 MiB lets the mount's
     # client coalesce the same file into a handful of large writes. Worst-case
-    # transient RAM is one buffer per concurrent move (downloads_concurrent_max,
-    # so typically 3 x 8 MiB).
+    # transient RAM is one buffer per track being moved: the streams plus the
+    # finishing seats (downloads_concurrent_max + downloads_finishing_max, so
+    # typically 6 x 8 MiB, 18 at the maximums).
     _COPY_BUFFER_BYTES: int = 8 * 1024 * 1024
 
     def _copy_file_contents(self, path_source: pathlib.Path, path_destination: pathlib.Path) -> None:
@@ -4645,8 +4750,12 @@ class Download:
         # success. A single failed track therefore left the whole item list being
         # re-submitted forever, re-downloading every sibling on each pass.
         while not progress.tasks[progress_task].finished:
-            COLLECTION_GAUGE.limit(self.settings.data.downloads_concurrent_max)
-            with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
+            # Stream slots plus finishing seats worth of workers (see
+            # _item_workers): the slot ledger, not this pool, is what caps the
+            # streams in flight.
+            workers = self._item_workers()
+            COLLECTION_GAUGE.limit(workers)
+            with futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 # Dispatch all download tasks to worker threads
                 download_futures: list[futures.Future] = [
                     executor.submit(

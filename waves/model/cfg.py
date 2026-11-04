@@ -5,6 +5,19 @@ from tidalapi import Quality
 
 from waves.constants import CoverDimensions, DownsampleTarget, InitialKey, MetadataTargetUPC, QualityVideo
 
+# The whole-number engine settings that have a real floor and ceiling, as the
+# stepper shows them, the save clamps them and every load clamps them (a value
+# typed into the config file by hand lands inside the range too). The stream
+# count and the chunk count stop at the shared HTTP pool's ten connections,
+# past which another worker can never hold a socket; the finishing count's
+# ceiling bounds the ffmpeg processes and temp copies a slow machine is asked
+# to carry at once, and its floor of 0 turns background finishing off.
+INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "downloads_concurrent_max": (1, 10),
+    "downloads_finishing_max": (0, 8),
+    "downloads_simultaneous_per_track_max": (1, 10),
+}
+
 
 @dataclass_json
 @dataclass
@@ -117,6 +130,11 @@ class Settings:
     download_delay_sec_max: float = 5.0
     album_track_num_pad_min: int = 1
     downloads_concurrent_max: int = 3
+    # How many downloaded tracks may finish (convert, tag, copy to the
+    # library) in the background while the next ones stream. Each one may run
+    # an ffmpeg process and hold a temp copy; 0 keeps a track in its download
+    # slot until it is done, the pre-0.3 behavior.
+    downloads_finishing_max: int = 3
     symlink_to_track: bool = False
     playlist_create: bool = False
     metadata_replay_gain: bool = True
@@ -252,8 +270,10 @@ class HelpSettings:
         "Minimum length of the album track count, will be padded with zeroes (0). To disable padding set this to 1."
     )
     downloads_concurrent_max: str = (
-        "How many tracks of an album, playlist or mix download at the same time. "
-        "Queued items themselves always run one after another, in order."
+        "How many tracks download at once. Queued items start in order; the connection pool holds 10 streams."
+    )
+    downloads_finishing_max: str = (
+        "Tracks tagged and copied while the next ones download. Lower it on a slow machine or small disk; 0 turns it off."
     )
     symlink_to_track: str = (
         "If enabled the tracks of albums, playlists and mixes will be downloaded to the track directory but symlinked "
