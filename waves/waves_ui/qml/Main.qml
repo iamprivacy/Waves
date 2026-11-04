@@ -138,6 +138,42 @@ ApplicationWindow {
     // 280): 12 px read as barely rounded at all on a 200 px cover.
     property real artCornerK: 0.08
     function artCorner(side) { return Math.round(side * artCornerK) }
+    // The corner's profile, for every cover at once: 2 is a circle; 3 is a
+    // superellipse over the same box, which leaves the straight edge sooner
+    // and turns gently, so the corner has no point where curve meets edge
+    // and cuts in less (3.3 px at 45 degrees on a 200 px cover, against the
+    // circle's 4.7): the cover stays square. Read by both cover shaders
+    // (sdCorner) and by cornerPath() for what rides on a cover, so this one
+    // number reshapes faces, frames, scrims, the gloss and the playing rim.
+    property real artCornerN: 3
+    // A cubic's control point for one quarter of that corner, as a share of
+    // the corner: on the curve's midpoint exactly (0.5523 for a circle).
+    readonly property real artCornerBez: (8 * Math.pow(2, -1 / Math.max(2, artCornerN)) - 4) / 3
+    // How much smaller an outline inset by t takes its corner, per px of t,
+    // for a ring of even width: an inset superellipse is not a smaller one
+    // of the same profile, so the inner corner shrinks by this share and
+    // the ring is as wide at 45 degrees as along the edges (1 for a circle).
+    readonly property real artCornerInset: (1 - Math.SQRT1_2) / (1 - Math.pow(2, -1 / Math.max(2, artCornerN)))
+    // The face's edge: half a device pixel each side of the curve, crisp on
+    // a Retina screen (0.7 px each side read soft).
+    readonly property real artEdgeAA: 0.55 / (Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1)
+    // The cover's outline as an SVG path, for what is drawn over a cover:
+    // the face's profile, each quarter one cubic, within 0.1 px of the
+    // shader's own curve on a 16 px corner.
+    function cornerPath(x, y, w, h, c) {
+        c = Math.max(0, Math.min(c, w / 2, h / 2))
+        var e = c * (1 - artCornerBez), x1 = x + w, y1 = y + h
+        function f(v) { return v.toFixed(3) }
+        function pt(a, b) { return " " + f(a) + "," + f(b) }
+        return "M" + pt(x + c, y) + " L" + pt(x1 - c, y)
+             + " C" + pt(x1 - e, y) + pt(x1, y + e) + pt(x1, y + c)
+             + " L" + pt(x1, y1 - c)
+             + " C" + pt(x1, y1 - e) + pt(x1 - e, y1) + pt(x1 - c, y1)
+             + " L" + pt(x + c, y1)
+             + " C" + pt(x + e, y1) + pt(x, y1 - e) + pt(x, y1 - c)
+             + " L" + pt(x, y + c)
+             + " C" + pt(x, y + e) + pt(x + e, y) + pt(x + c, y) + " Z"
+    }
     property real artPlayLift: 1.02          // resting swell while it plays
     property real artPlayShadowBlur: 0.75    // MultiEffect blur, 0..1
     property real artPlayShadowA: 0.55       // shadow alpha at full depth
@@ -5201,8 +5237,12 @@ ApplicationWindow {
         // Elapsed at the left end and remaining at the right ("0:00" plus a
         // gap each), the rail between them: 200 px, or 130 in the mini
         // player (Settings > Appearance).
+        // Five characters cover "-9:59"; a track past ten minutes (a live
+        // side, a mix) needs "-61:23", and the remaining label used to run
+        // its last digit past the rail's end into the stop glyph's gap.
         TextMetrics { id: nrTm; font.family: root.mono; font.pixelSize: 10; text: "0" }
-        readonly property real tw: Math.ceil(nrTm.advanceWidth * 5 + 8)
+        readonly property int tchars: Math.max(5, 1 + root.fmtMs(root.previewDuration).length)
+        readonly property real tw: Math.ceil(nrTm.advanceWidth * tchars + 8)
         readonly property int rw: root.playerSize === "mini" ? 130 : 200
         width: rw + 2 * tw; height: 20
         readonly property real lineY: 10
@@ -5266,7 +5306,11 @@ ApplicationWindow {
         // The rail's colors are the playing cover's own (the playing glow's
         // palette, read from the small cover in the bar): the played part in
         // the cover's first color, the rest in its second, dimmed to sit
-        // back. A cover with no colors to give keeps the accent.
+        // back. A track with no cover, or one whose cover gave no colors,
+        // wears the app's own pair: the accent green over the plain gray,
+        // not the gray tinted toward the accent (the tint is for a cover's
+        // second color, where it ties the two halves together; on the
+        // accent it read as a muddy green-gray).
         readonly property var pal: npArt.fxPal && npArt.fxPal.c.length > 0 ? npArt.fxPal : null
         readonly property color palMain: pal ? pal.c[0] : root.accent
         readonly property color palTwo: pal && pal.c.length > 1 ? pal.c[1] : palMain
@@ -5274,6 +5318,7 @@ ApplicationWindow {
         function fillRgb(played, tone) {
             if (!played) {
                 var d = hot ? [91, 98, 110] : [70, 76, 87]
+                if (!pal) return d
                 return [d[0] + (palTwo.r * 255 - d[0]) * 0.55, d[1] + (palTwo.g * 255 - d[1]) * 0.55, d[2] + (palTwo.b * 255 - d[2]) * 0.55]
             }
             var c = tone ? softColor : palMain
@@ -6553,6 +6598,36 @@ ApplicationWindow {
         width: modelData.w; height: modelData.h; radius: 0   // sharp LED cells
         opacity: modelData.e
     }
+    // A frame inside a cover's edge, cut to the cover's corner by
+    // cornerPath(), so it follows the face's own curve. A filled ring
+    // (outline and inset outline, the even-odd rule between them) rather
+    // than a stroke, so its outside is the face's profile, not a stroke's
+    // offset. The outside sits half a pixel past the face's edge (outset):
+    // the face's antialiased edge pixels stay under the frame instead of
+    // showing as a light hairline round it. Its parent clips the straight
+    // edges back to the box; where nothing clips, outset is 0.
+    component CornerFrame: Shape {
+        id: cfr
+        property real radius: 0
+        property real ring: 2
+        property color ringColor: root.accent
+        property real outset: 0.5
+        readonly property real outerC: cfr.radius + cfr.outset
+        readonly property real innerC: cfr.outerC - (cfr.ring + cfr.outset) * root.artCornerInset
+        anchors.fill: parent
+        preferredRendererType: Shape.CurveRenderer
+        ShapePath {
+            strokeColor: "transparent"
+            fillColor: cfr.ringColor
+            fillRule: ShapePath.OddEvenFill
+            PathSvg {
+                path: cfr.width > 0 && cfr.ring > 0
+                      ? root.cornerPath(-cfr.outset, -cfr.outset, cfr.width + 2 * cfr.outset, cfr.height + 2 * cfr.outset, cfr.outerC)
+                        + " " + root.cornerPath(cfr.ring, cfr.ring, cfr.width - 2 * cfr.ring, cfr.height - 2 * cfr.ring, cfr.innerC)
+                      : ""
+            }
+        }
+    }
     // A cover's face with rounded corners: the Image's own texture, cropped
     // as PreserveAspectCrop crops it and cut to the cover's radius by
     // shaders/cover_round.frag. Qt clips children to an item's box, never
@@ -6570,6 +6645,8 @@ ApplicationWindow {
         // edge of its own.
         property real shadeH: 0
         property real shadeA: 0
+        readonly property real shapeN: root.artCornerN
+        readonly property real aa: root.artEdgeAA
         anchors.fill: parent
         visible: root.roundFaces && src.status === Image.Ready && opacity > 0
         readonly property vector2d size: Qt.vector2d(width, height)
@@ -6604,7 +6681,9 @@ ApplicationWindow {
         // (and its own glow colors).
         // A cached cover keeps its Image Ready across the swap, so no
         // artState change would ask for the new colors: ask here.
-        onUrlChanged: { artWaited = false; fxPal = null; Qt.callLater(function() { artRoot._fxPalFetch() }) }
+        // Guarded: a recycled delegate can be torn down before the deferred
+        // call runs, and calling into a destroyed item logs a TypeError.
+        onUrlChanged: { artWaited = false; fxPal = null; Qt.callLater(function() { if (artRoot) artRoot._fxPalFetch() }) }
         // Never fetch a cover the user has never been shown. Rows hidden
         // behind a section cap (search's first-5) still instantiate, and
         // their fetches used to queue ahead of the on-screen art on the six
@@ -6655,13 +6734,12 @@ ApplicationWindow {
         // lift, the tilt and the raise with the art and is drawn through the
         // same layer: it softens and catches the glow with the cover.
         property int ring: 0
-        Rectangle {
+        CornerFrame {
             objectName: "releaseFrame"
             visible: artRoot.ring > 0
-            anchors.fill: parent; z: 100
+            z: 100
             radius: artRoot.faceRadius
-            antialiasing: true
-            color: "transparent"; border.color: root.accent; border.width: artRoot.ring
+            ring: artRoot.ring
         }
         // Album-art hover tilt (from BGT's CoverArt.qml): opt-in per call
         // site. The whole cover (art, border, anything anchored on it)
@@ -7004,15 +7082,7 @@ ApplicationWindow {
                             GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, 0.42) }
                             GradientStop { position: 0.45; color: Qt.rgba(1, 1, 1, 0.0) }
                         }
-                        startX: glossSheet.parent.r; startY: 0
-                        PathLine { x: artRoot.width - glossSheet.parent.r; y: 0 }
-                        PathArc  { x: artRoot.width; y: glossSheet.parent.r; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
-                        PathLine { x: artRoot.width; y: artRoot.height - glossSheet.parent.r }
-                        PathArc  { x: artRoot.width - glossSheet.parent.r; y: artRoot.height; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
-                        PathLine { x: glossSheet.parent.r; y: artRoot.height }
-                        PathArc  { x: 0; y: artRoot.height - glossSheet.parent.r; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
-                        PathLine { x: 0; y: glossSheet.parent.r }
-                        PathArc  { x: glossSheet.parent.r; y: 0; radiusX: glossSheet.parent.r; radiusY: glossSheet.parent.r }
+                        PathSvg { path: root.cornerPath(0, 0, artRoot.width, artRoot.height, glossSheet.parent.r) }
                     }
                 }
             }
@@ -7076,6 +7146,7 @@ ApplicationWindow {
                 property color c4: fxFx.col(4)
                 property vector4d w: Qt.vector4d(fxFx.share(0), fxFx.share(1), fxFx.share(2), fxFx.share(3))
                 property real w4: fxFx.share(4)
+                readonly property real shapeN: root.artCornerN
                 fragmentShader: "shaders/cover_blend.frag.qsb"
             }
             MultiEffect {
@@ -8320,7 +8391,8 @@ ApplicationWindow {
             visible: arb.bar
             anchors.fill: parent
 
-            Rectangle {
+            Shape {
+                id: arbScrim
                 anchors.left: parent.left; anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 // Taller than the words it carries, and by a lot: a scrim the
@@ -8328,17 +8400,24 @@ ApplicationWindow {
                 // fade. The overflow is drawn inside the Art, which clips, so
                 // it can reach as far up the cover as it needs to.
                 height: parent.height * 2.1
-                // The cover's corner at the bottom; the top corners round
-                // too, invisibly, the gradient being transparent up there.
-                radius: arb.radius
-                // Weighted so the words' own band is already dark and only the
-                // reach above it is doing the fading: a linear ramp puts its
-                // midpoint under the text, which is where a bright cover wins.
-                gradient: Gradient {
-                    GradientStop { position: 0; color: "transparent" }
-                    GradientStop { position: 0.42; color: "#8f0b0d10" }
-                    GradientStop { position: 0.62; color: "#e00b0d10" }
-                    GradientStop { position: 1; color: "#fa0b0d10" }
+                preferredRendererType: Shape.CurveRenderer
+                // The cover's corner at the bottom (its outline, from
+                // cornerPath, so no sliver of bright cover shows past the
+                // scrim); the top corners round too, invisibly, the gradient
+                // being transparent up there.
+                ShapePath {
+                    strokeColor: "transparent"
+                    // Weighted so the words' own band is already dark and only the
+                    // reach above it is doing the fading: a linear ramp puts its
+                    // midpoint under the text, which is where a bright cover wins.
+                    fillGradient: LinearGradient {
+                        x1: 0; y1: 0; x2: 0; y2: arbScrim.height
+                        GradientStop { position: 0; color: "transparent" }
+                        GradientStop { position: 0.42; color: "#8f0b0d10" }
+                        GradientStop { position: 0.62; color: "#e00b0d10" }
+                        GradientStop { position: 1; color: "#fa0b0d10" }
+                    }
+                    PathSvg { path: root.cornerPath(0, 0, arbScrim.width, arbScrim.height, arb.radius) }
                 }
             }
 
@@ -9893,7 +9972,8 @@ ApplicationWindow {
         // doesn't shrink when the state text changes to DONE/RETRY, keeps
         // row columns aligned and avoids layout jumps mid-download.
         implicitWidth: Math.max(dbRow.implicitWidth, dbMetric.implicitWidth,
-                                dbMetricDone.implicitWidth, dbMetricQueued.implicitWidth,
+                                dbMetricDone.implicitWidth, dbMetricDoneLib.implicitWidth,
+                                dbMetricQueued.implicitWidth,
                                 (db.libAlbum || db.libArtist !== "") ? dbMetricLib.implicitWidth
                                             : db.libTrack ? dbMetricLibTrack.implicitWidth : 0) + root.btnPadH * 2
         // Boxes stand in for the glyphs in every metric row (dbMetricQueued
@@ -9905,11 +9985,22 @@ ApplicationWindow {
             Item { width: 14; height: 14 }      // the arrow Ico, size 14
             Text { textFormat: Text.PlainText; text: db.label.toUpperCase(); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
+        // Both done wordings are measured, never only the one this button
+        // would say now: an idle row resolves to DOWNLOADED (the wider word)
+        // while an in-library row resolves to IN LIBRARY, and measuring each
+        // row's own word left the in-library row's button narrower, shunting
+        // its quality tag, date and time out of line with every neighbor.
         Row {
             id: dbMetricDone
             visible: false; spacing: 7
             Item { width: 14; height: 14 }      // the check Ico, size 14
-            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + (root.libraryOn && (db.libPresent || (db.owned ? db.ownInLibrary : root.dlInLibrary)) ? "IN LIBRARY" : "DOWNLOADED"); font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + "DOWNLOADED"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
+        }
+        Row {
+            id: dbMetricDoneLib
+            visible: false; spacing: 7
+            Item { width: 14; height: 14 }
+            Text { textFormat: Text.PlainText; text: (db.doneNoun !== "" ? db.doneNoun + " " : "") + "IN LIBRARY"; font.family: root.uiFont; font.pixelSize: 11; font.bold: true; font.letterSpacing: root.btnTrack }
         }
         // The longest library-claim label ("PARTIALLY IN LIBRARY" beats "MAYBE
         // IN LIBRARY") is measured for the same reason DOWNLOADED is: the
@@ -11353,18 +11444,25 @@ ApplicationWindow {
         property bool lit: false
         property real radius: 6
         anchors.fill: parent
-        Rectangle {
+        Shape {
+            id: pbScrim
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
             height: Math.round(parent.height * 0.42)
-            radius: pb.radius
-            // Eased, and with no band squaring off the top edge: the scrim is
-            // fully transparent up there, so its rounded top corners never
-            // showed anyway, while the band's own step from transparent to
-            // #33 drew a hard line straight across a grid-sized thumbnail.
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#0006090c" }
-                GradientStop { position: 0.45; color: "#4406090c" }
-                GradientStop { position: 1.0; color: pb.lit ? "#dd06090c" : "#cc06090c" }
+            preferredRendererType: Shape.CurveRenderer
+            // Cut to the thumb's corner by cornerPath, the face's own outline.
+            ShapePath {
+                strokeColor: "transparent"
+                // Eased, and with no band squaring off the top edge: the scrim is
+                // fully transparent up there, so its rounded top corners never
+                // showed anyway, while the band's own step from transparent to
+                // #33 drew a hard line straight across a grid-sized thumbnail.
+                fillGradient: LinearGradient {
+                    x1: 0; y1: 0; x2: 0; y2: pbScrim.height
+                    GradientStop { position: 0.0; color: "#0006090c" }
+                    GradientStop { position: 0.45; color: "#4406090c" }
+                    GradientStop { position: 1.0; color: pb.lit ? "#dd06090c" : "#cc06090c" }
+                }
+                PathSvg { path: root.cornerPath(0, 0, pbScrim.width, pbScrim.height, pb.radius) }
             }
         }
         Canvas {
@@ -11443,12 +11541,13 @@ ApplicationWindow {
         PlayBadge { radius: 8; lit: bvtHover.hovered }
         // An arrival's frame (as Art.ring), over the scrim so it never dims,
         // and inside the thumb's hover scale.
-        Rectangle {
+        CornerFrame {
             objectName: "releaseFrame"
             visible: bvt.ring > 0
-            anchors.fill: parent; z: 5
+            z: 5
             radius: 8   // the thumb's own corner
-            color: "transparent"; border.color: root.accent; border.width: bvt.ring
+            ring: bvt.ring
+            outset: 0   // nothing clips the thumb
         }
         // "You already downloaded this" rides the top-LEFT corner, across from
         // the resolution badge: same plate, same size, green (the on-disk
@@ -15432,6 +15531,9 @@ ApplicationWindow {
         // bridge call per card, the same budget the library verdict spends.
         readonly property bool ownable: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
         property bool owned: false
+        // Whether the recorded copy sits under the library root, from the
+        // same rollup answer: it words the strip's done half (see stWord).
+        property bool ownInLibrary: false
         // Member ids from the last rollup, kept so the ownership listener can
         // ignore answers about other collections' tracks: at launch every
         // cold query announces its first answer, and a grid of cards each
@@ -15452,6 +15554,7 @@ ApplicationWindow {
                 _ownHeld = cid
             } else if (cid !== "") root.ownCardRekey(cid, _ownKeys)
             var v = co ? co.verdict : "no"
+            ownInLibrary = !!(co && co.in_library === true)
             if (v === "no") { owned = false; return }
             // Cold answers in flight and nothing firmly against: keep the last
             // known word rather than flashing the strip through DOWNLOAD; the
@@ -15623,9 +15726,16 @@ ApplicationWindow {
             // playlists/mixes) over Download; other kinds keep the corner icon.
             readonly property bool collection: ac.kind === "album" || ac.kind === "playlist" || ac.kind === "mix"
             readonly property string kindLabel: ac.kind === "album" ? "album" : ac.kind === "playlist" ? "playlist" : "mix"
+            // A finished download ("done") is NOT a live state here: it
+            // used to hold the strip up for the rest of the session, so every
+            // card downloaded today sat with its controls raised over the
+            // cover, hovered or not (reported from the Just in feed). The
+            // done word still shows, on the next hover, where the strip's
+            // download half wears the checkmark.
+            readonly property string dlStNow: root.dlSt(ac.card.id || "")
             readonly property bool controlsOn: collection
                                                && (acWrapHover.hovered
-                                                   || root.dlSt(ac.card.id || "") !== "" || root.pvSt(ac.kind, ac.card.id || "") !== "")
+                                                   || (dlStNow !== "" && dlStNow !== "done") || root.pvSt(ac.kind, ac.card.id || "") !== "")
             // The artwork's own hover: the strip, the percentage word and the
             // corner icon follow it. Prefetch is NOT wired here, it rides the
             // card-wide handler on ac, so moving the pointer from the art down
@@ -15741,8 +15851,18 @@ ApplicationWindow {
                     // shortest forms that still say which of the three is true,
                     // and a partial copy spends them on the count itself, which
                     // is the thing worth knowing.
+                    // A finished download reads by where its copy sits, the
+                    // same rule as the full button's done face: IN LIBRARY
+                    // when the scan proved it, the recorded copy sits under
+                    // the library root (ownInLibrary), or downloads land
+                    // inside the root today (dlInLibrary); DOWNLOADED for a
+                    // copy outside the library. It no longer waits for the
+                    // debounced rescan to flip the word.
                     readonly property string stWord: {
-                        if (acStrip.dlDone) return "DOWNLOADED"
+                        if (acStrip.dlDone) {
+                            return root.libraryOn && (ac.libState === "proven" || (ac.owned ? ac.ownInLibrary : root.dlInLibrary))
+                                   ? "IN LIBRARY" : "DOWNLOADED"
+                        }
                         if (ac.libState === "proven") return "IN LIBRARY"
                         if (ac.libState === "maybe") return "MAYBE"
                         if (ac.libState === "partial") {
@@ -20795,22 +20915,46 @@ ApplicationWindow {
                                                     required property var modelData
                                                     width: (modelData.kind || "") === "video" ? root.relVideoW : root.relCardW
                                                     height: root.relCardW + 8 + relItem.th
-                                                    Rectangle {
+                                                    // The twin wears the card's corner and, for
+                                                    // an arrival, its green frame: the row fades
+                                                    // in over a cover that already looks like
+                                                    // the one it becomes, instead of a square
+                                                    // one turning round.
+                                                    readonly property real corner: root.artCorner(root.relCardW)
+                                                    readonly property bool fresh: root.relIsFresh(modelData)
+                                                    Item {
                                                         width: ghost.width; height: root.relCardW
-                                                        radius: 12; color: root.surface2
-                                                        border.color: root.border1; border.width: 1
-                                                    }
-                                                    Image {
-                                                        objectName: "relGhostArt"
-                                                        width: ghost.width; height: root.relCardW
-                                                        source: ghost.modelData.art || ""
-                                                        fillMode: Image.PreserveAspectCrop
-                                                        asynchronous: true
-                                                        cache: true
-                                                        // Art decodes square at twice its width.
-                                                        sourceSize.width: ghost.width * 2
-                                                        sourceSize.height: ghost.width * 2
-                                                        visible: status === Image.Ready
+                                                        // As Art clips: the frame's half-pixel outset
+                                                        // stays inside the box, as on the card.
+                                                        clip: true
+                                                        Rectangle {
+                                                            anchors.fill: parent
+                                                            radius: ghost.corner; color: root.surface2
+                                                            border.color: root.border1; border.width: 1
+                                                            visible: ghostArt.status !== Image.Ready
+                                                        }
+                                                        Image {
+                                                            id: ghostArt
+                                                            objectName: "relGhostArt"
+                                                            anchors.fill: parent
+                                                            source: ghost.modelData.art || ""
+                                                            fillMode: Image.PreserveAspectCrop
+                                                            asynchronous: true
+                                                            cache: true
+                                                            // Art decodes square at twice its width.
+                                                            sourceSize.width: ghost.width * 2
+                                                            sourceSize.height: ghost.width * 2
+                                                            visible: status === Image.Ready
+                                                            // As in Art: the face paints it rounded, the
+                                                            // Image itself only on the Software backend.
+                                                            opacity: root.roundFaces ? 0 : 1
+                                                        }
+                                                        ArtFace { src: ghostArt; radius: ghost.corner }
+                                                        CornerFrame {
+                                                            objectName: "relGhostFrame"
+                                                            visible: ghost.fresh && ghostArt.status === Image.Ready
+                                                            radius: ghost.corner
+                                                        }
                                                     }
                                                     ReleaseText {
                                                         objectName: "relGhostText"

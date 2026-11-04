@@ -27,11 +27,26 @@ layout(std140, binding = 0) uniform buf {
     vec4 c4;
     vec4 w;            // shares of c0..c3
     float w4;          // share of c4
+    float shapeN;      // the corner's profile, as in the face
 };
 
-float sdRound(vec2 p, vec2 b, float r) {
+// The corner's profile, word for word the same in cover_round.frag and
+// cover_blend.frag (a test holds them together), so the face, the rim and
+// everything drawn over a cover share one shape. n = 2 is a circular
+// corner; n > 2 a superellipse over the same box, which leaves the
+// straight edge sooner and turns more gently, with no kink where curve
+// meets edge. The distance is divided by its gradient, so the edge's
+// antialiasing keeps one width all the way round.
+float sdCorner(vec2 p, vec2 b, float r, float n) {
     vec2 q = abs(p) - b + r;
-    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    vec2 m = max(q, 0.0);
+    float inner = min(max(q.x, q.y), 0.0);
+    if (n < 2.01 || max(m.x, m.y) <= 0.0)
+        return length(m) + inner - r;
+    vec2 u = m / max(r, 1e-4);
+    float s = pow(pow(u.x, n) + pow(u.y, n), 1.0 / n);
+    vec2 g = pow(u, vec2(n - 1.0)) * pow(s, 1.0 - n);
+    return r * (s - 1.0) / max(length(g), 1e-4) + inner;
 }
 
 vec3 well(vec2 u, float i, vec3 c, float wi, inout float ks) {
@@ -50,7 +65,7 @@ vec3 pools(vec2 u, float n, vec3 c, float wi, inout float ks) {
 
 void main() {
     vec2 p = (qt_TexCoord0 - 0.5) * size;
-    float d = max(sdRound(p, cover * 0.5, radius), 0.0);
+    float d = max(sdCorner(p, cover * 0.5, radius, shapeN), 0.0);
     float a = exp(-(d * d) / (2.0 * spread * spread));
     // Fade out before the quad's edge, so no falloff is ever cut square.
     vec2 e = 0.5 * size - abs(p);
