@@ -21,9 +21,9 @@
 </p>
 
 <p align="center">
-  <img src="assets/releases-feed.png" alt="The Releases feed: new singles, videos and albums from followed artists, a small dot in the corner of each cover marking its quality" width="860">
+  <img src="assets/releases-feed.png" alt="The Releases feed, opening on a Just in section of the releases that arrived since the last visit, each marked JUST IN with its kind and date" width="860">
   <br>
-  <sub>Every new release from the artists you follow, in one feed. A dot in the corner of each cover gives its quality and spells it out when you point at it.</sub>
+  <sub>Every new release from the artists you follow, in one feed. What arrived since you last looked waits under Just in until you open it or mark it seen.</sub>
 </p>
 
 Waves is a desktop app for macOS, Windows and Linux. Search all of TIDAL from one bar, listen before you choose, and keep a track, an album, a playlist or an artist's whole discography on your own drive, tagged and filed the way your music player expects. Follow the artists you love, and everything new they put out lands in one feed.
@@ -41,7 +41,7 @@ Waves is a desktop app for macOS, Windows and Linux. Search all of TIDAL from on
 </table>
 
 <p align="center">
-  <sub>The music in these screenshots is free to use: Creative Commons Attribution releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Alexander Nakarada, Jason Shaw and Broke For Free, and royalty-free tracks by Tim Kulig, Lesfm and StreamBeats.</sub>
+  <sub>The music in these screenshots is free to use: Creative Commons releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Chris Zabriskie, Alexander Nakarada, Kai Engel, Jason Shaw, Broke For Free, Doctor Turtle, Dee Yan-Key, Ketsa and Lobo Loco, Kimiko Ishizaka's public-domain Open Goldberg Variations, and royalty-free tracks by Tim Kulig, Lesfm and Streambeats.</sub>
 </p>
 
 <p align="center">
@@ -59,6 +59,7 @@ Follow artists and Waves keeps watch for you. The **Releases** tab, right next t
 - Follow from an artist's page or by search. With a library set up, **Follow your artists** (Settings → Library, on by default) follows its artists as the scan finds them on TIDAL, or **Import library** lets you review the list first. **Follow artists with at least** (5 tracks by default) skips artists you only have a song or two by, and the **Excluded** list keeps them in reach. When several TIDAL artists share a name, Waves picks the one who made the albums you own.
 - Your TIDAL favorite artists join your follows automatically, and Waves changes your TIDAL favorites only if you ask.
 - While Waves is open, it checks your artists in the background at a gentle pace, starting with the ones TIDAL's and ListenBrainz's new-release lists name, so a release shows up soon after it lands. **CHECK NOW** runs a check on demand.
+- What arrived since you last looked gathers in a **Just in** section at the top of the feed, each release marked until you open it or press **MARK AS SEEN** (**Just-in marks last**, Settings → Releases, can clear them all as you leave instead).
 - Upcoming releases have their own filter, a count shows what you haven't seen yet, and every page has a search box (Cmd+F, or Ctrl+F on Windows and Linux). **Featured releases** (ones another artist leads) and **Music videos** can each be hidden in Settings → Releases.
 - Waves can also save each new release on the day it comes out (off by default), only the kinds you pick: albums, EPs, singles or guest tracks.
 
@@ -102,7 +103,8 @@ Waves opens on TIDAL's editorial front page (New Arrivals, TIDAL Rising, every g
 
 ### 🎧 Listen and watch before you save
 
-- Play any track as a full preview, streamed from your own account, right where you are. Previews start fast, seek from the ring around the cover or the line along the bottom, and a slim now-playing bar follows you across every view.
+- Play any track as a full preview, streamed from your own account, right where you are. Previews start fast and a slim now-playing bar follows you across every view: seek from the ring around the cover or from the track's own waveform in the bar, and every credited artist that fits is one click away, the rest gathered under a **+N** chip.
+- Pick where sound plays, in Settings → Playback or from the output's name in the bar: any speaker your system lists, Bluetooth and AirPlay included. A click switches mid-song, and if the speaker goes away, Waves falls back to the system default.
 - Music videos play inside Waves, with a quality picker (up to 1080p) that switches mid-stream. Rest the pointer on a thumbnail and a preview plays in place.
 - Save videos one at a time, all of an artist's at once, or alongside a discography, tagged and filed as `Videos/Artist/[Year] Title`.
 
@@ -136,12 +138,14 @@ Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and
 ### 🧾 A queue that tells you the truth
 
 - Completed, Failed, Stopped, Downloading and Queued sections, with live progress and per-album and per-artist roll-ups.
+- The **QUEUE** button in the header is a live speed chart with the percent done, and its count rolls as downloads land.
 - Everything runs in the order you queued it, and every row shows the quality it asked for next to the quality that actually arrived.
 - **RETRY ALL** retries every failure in one click. An open row shows up to 12 tracks before it scrolls (**Tracks shown in an open queue row**, Settings → Appearance), can list just the ones that did not arrive, and its **REPORT** button saves those as a CSV. **MISSING REPORT** does the same for the whole queue.
+- Tracks are tagged and filed in the background while the next ones download, so the speed stays up between tracks (**Tracks finishing in the background**, Settings → Speed & Pacing, 3 by default).
 - Long runs finish: playlists skip what TIDAL has taken down, wait out a slow-down and carry on past one failing song, and an interrupted save never leaves a half-written file behind.
 
 <p align="center">
-  <img src="assets/queue.png" alt="The download queue open over the Releases feed, grouped into completed, downloading and queued" width="860">
+  <img src="assets/queue.png" alt="The download queue open over the Releases feed, its completed albums unfolded to their tracks and the next album downloading" width="860">
 </p>
 
 ### ⚙️ Settings, one section at a time
@@ -166,7 +170,7 @@ A rail down the side groups every setting into short sections under Music, Files
 
 - Pages and cover art you've already seen render instantly from a local cache and refresh quietly in the background. Back and Forward land on a finished page with the scroll position and expanded albums intact, tabs reopen where you left them, and a breadcrumb trail jumps back to any step.
 - A calm, dark console theme in CRT phosphor green, drawn in Qt Quick.
-- A cinematic open-water launch, an ASCII wave logo that weathers the occasional lightning storm, cover art that tilts toward your cursor, a back-to-top pill on every page, and a window that reopens at the size and place you left it.
+- A cinematic open-water launch, an ASCII wave logo that weathers the occasional lightning storm, rounded cover art that tilts toward your cursor (the playing one glows in its own colors), a back-to-top pill on every page, a player bar that can shrink to a Mini (Settings → Appearance), and a window that reopens at the size and place you left it.
 - On Windows, every FFmpeg job (FLAC extraction, video conversion, previews) runs hidden, so no console window flashes up and steals focus while you type.
 
 ---
