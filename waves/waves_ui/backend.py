@@ -35,6 +35,8 @@ from collections import Counter, deque, namedtuple
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Condition, Event, Lock, Thread, current_thread, local, main_thread
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 from uuid import uuid4
 
 from PySide6 import QtCore, QtGui
@@ -72,6 +74,7 @@ from waves.constants import (
     QualityVideo,
 )
 from waves.download import COLLECTION_GAUGE, SEGMENT_GAUGE, Download
+from waves.download_slots import FINISH_GAUGE, STREAM_GAUGE, STREAM_SLOTS
 from waves.follows import FollowStore
 from waves.genres import GenreLookup
 from waves.helper.exceptions import DownloadIncomplete
@@ -104,7 +107,7 @@ from waves.library_index import (
     root_comparison_key,
 )
 from waves.matching import local_quality_class
-from waves.model.cfg import HelpSettings
+from waves.model.cfg import INT_BOUNDS, HelpSettings
 from waves.model.cfg import Settings as CfgSettings
 from waves.model.cfg import Settings as ModelSettings
 from waves.model.downloader import TrackStreamInfo
@@ -112,7 +115,7 @@ from waves.model.gui_data import ProgressBars
 from waves.ownership import OwnershipStore, quality_rank
 from waves.page_store import PageStore
 from waves.poolgauge import PoolGauge
-from waves.waves_ui import proc
+from waves.waves_ui import cover_palette, preview_peaks, proc
 from waves.waves_ui.notify import DesktopNotify, notifications_supported
 from waves.waves_ui.session import WavesTidal
 from waves.worker import Worker
@@ -133,6 +136,20 @@ from .library_proc import LibraryWorker
 from .updater import AppUpdater, UpdateCancelled, user_facing_error
 
 logger = logging.getLogger("waves")
+
+
+def _volume_mounted(path: os.PathLike | str, volumes_root: str = "/Volumes") -> bool | None:
+    """For a path under ``volumes_root``: whether a filesystem is mounted at
+    its volume root, from the kernel's mount table (never a stat on the path,
+    which could hang on a dead share). None for a path outside the volumes
+    root or when the table cannot be read."""
+    parts = pathlib.PurePosixPath(path).parts
+    root = pathlib.PurePosixPath(volumes_root).parts
+    if len(parts) <= len(root) or parts[: len(root)] != root:
+        return None
+    return netmount.is_mounted(str(pathlib.PurePosixPath(*root, parts[len(root)])))
+
+
 # Window geometry persistence (issue #6). Its own child logger so restore/save
 # breadcrumbs are attributable in a crash report. Coordinates and sizes are not
 # PII, so they are logged in the clear (no register_secret / content wrapping).
@@ -146,6 +163,9 @@ _video_log = logging.getLogger("waves.videos")
 _update_log = logging.getLogger("waves.update")
 # Desktop-banner breadcrumbs (see _notify_send): counts only, never names.
 _notify_log = logging.getLogger("waves.notify")
+# The audio output pick (Settings > Playback and the bar's output chip):
+# picks and fallbacks by kind, never a device's name or id (see 3615b7bc).
+_audio_log = logging.getLogger("waves.audio")
 # My Tidal bulk downloads (the Tracks tab's DOWNLOAD ALL, issue #43).
 _lib_dl_log = logging.getLogger("waves.library_download")
 
@@ -395,9 +415,32 @@ _NUMBER_FIELDS = [
     "album_track_num_pad_min",
     "downloads_concurrent_max",
     # Speed & Pacing
+    "downloads_finishing_max",
     "downloads_simultaneous_per_track_max",
     "api_rate_limit_batch_size",
 ]
+# The bounded whole-number settings (see waves.model.cfg.INT_BOUNDS, which the
+# config load clamps too). Everything else in _NUMBER_FIELDS keeps the
+# stepper's own 1..9999.
+_INT_BOUNDS = INT_BOUNDS
+
+
+def _finishing_seats_of(bridge) -> int:
+    """downloads_finishing_max as the queue scheduler reads it: how many jobs
+    may finish behind the streaming one (and so how many dl_pool threads
+    beyond the first). A module function, not a method, so the test stubs
+    that bind single bridge methods reach it too; a stub without settings,
+    or a settings file from a build without the field, reads the default."""
+    try:
+        value = getattr(bridge.settings.data, "downloads_finishing_max", 3)
+    except AttributeError:
+        return 3
+    try:
+        return max(0, int(3 if value is None else value))
+    except (TypeError, ValueError):
+        return 3
+
+
 # Whole-number Waves prefs (waves.json, not the engine config), each with its
 # range: setWavesPref and the loader hold the stored value inside it, so a
 # hand-edited file or a stray string can never size the UI off a cliff.
@@ -405,6 +448,18 @@ _WAVES_INT_PREFS = {
     # Tracks an open queue row shows before its list scrolls in its own box.
     "queue_ledger_rows": (4, 40),
 }
+
+
+def _audio_note_secret(hexid) -> None:
+    """The saved output id, hex and decoded, registered with the redactor:
+    a CoreAudio or PulseAudio id can carry the device's MAC address, and a
+    WASAPI endpoint id is unique to the machine. Nothing logs it; this is
+    the net the house rule asks for."""
+    if not hexid or not isinstance(hexid, str):
+        return
+    diagnostics.register_secret(hexid, "‹audio-output›")
+    with contextlib.suppress(ValueError):
+        diagnostics.register_secret(bytes.fromhex(hexid).decode("utf-8", "ignore"), "‹audio-output›")
 
 
 def _bounded_int_pref(key: str, value, default: int) -> int:
@@ -987,6 +1042,7 @@ _FIELD_LABELS = {
     "quality_audio": "Audio quality",
     "quality_video": "Video quality",
     "downloads_concurrent_max": "Concurrent track downloads",
+    "downloads_finishing_max": "Tracks finishing in the background",
     "download_dolby_atmos": "Download Dolby Atmos",
     "confirm_category_download": "Confirm bulk downloads",
     # Discography & Editions (a source toggle like the disco_* prefs)
@@ -1061,10 +1117,12 @@ _ENUM_LABELS = {
         "merge": "Best of both",
     },
     "update_cadence": {"launch": "Every launch", "daily": "Once a day"},
+    "player_size": {"full": "Full", "mini": "Mini"},
     "notify_downloads": {"queue": "When the queue finishes", "every": "Every download", "never": "Never"},
     "releases_window_months": {"6": "6 months", "12": "12 months", "24": "24 months"},
     "releases_videos": {"show": "Show", "hide": "Hide"},
     "releases_featured": {"show": "Show", "hide": "Hide"},
+    "releases_arrivals": {"seen": "Until seen", "visit": "After a visit"},
     "releases_fresh_hints": {"on": "On", "off": "Off"},
 }
 
@@ -1515,6 +1573,15 @@ class _TrackedDownload(Download):
         # siblings; a thread-local carries that per-track decision safely.
         self._tls = local()
         self._skip_existing_base = False
+        # The streams-started count (see expect_items): how many of this
+        # job's items have yet to take their stream slot or settle without
+        # one. Fired exactly once, at zero.
+        self._gate_lock = Lock()
+        self._gate_left: int | None = None
+        self._gate_fired = False
+        # Set by the bridge: called on the engine's thread when the last
+        # stream has started; the bridge turns it into a queued GUI signal.
+        self._on_streams_started: Callable[[], None] | None = None
         super().__init__(*args, **kwargs)
         self._track_signals = track_signals
         # Live "do I already have this" lookup (waves/ownership.py's
@@ -2053,8 +2120,12 @@ class _TrackedDownload(Download):
 
     def _note_list_size(self, count: int) -> None:
         """Engine hook (download.py): the collection has been enumerated and
-        holds this many items. See list_item_count."""
+        holds this many items. See list_item_count. It is also the
+        collection's streams-started count (expect_items): without it an album
+        or playlist would hold the queue's streaming turn until its last track
+        finished."""
         self.list_item_count = int(count)
+        self.expect_items(count)
 
     def _note_stage(self, media, frac: float) -> None:
         """Engine hook (download.py) at finalize-step boundaries: the stream is
@@ -2117,7 +2188,66 @@ class _TrackedDownload(Download):
             event["quality"] = quality
         relay.track_event.emit(event)
 
+    def expect_items(self, count: int) -> None:
+        """How many items this job will put through item(): the collection's
+        enumeration (via _note_list_size), a merge plan's length, or 1 for a
+        single track. Once that many have taken their stream slot, or settled
+        without one (owned and skipped, refused, failed before the stream),
+        the job has started every stream it ever will, and the bridge may
+        start the next queued row while this one finishes. Counted here and
+        not in the engine because this class is the only place that sees
+        every item: the owned skip returns before the engine's item() runs,
+        and the merge fan-out and the single track call item() directly. A
+        counter with a per-thread mark, not a set of ids: a playlist can list
+        the same track twice. Nothing to count fires at once (an empty
+        collection); a re-submit pass of failed items counts past zero and
+        fires nothing more."""
+        with self._gate_lock:
+            self._gate_left = max(0, int(count))
+            self._gate_fired = False
+            fire = self._gate_left == 0
+            if fire:
+                self._gate_fired = True
+        if fire:
+            self._fire_streams_started()
+
+    def _gate_settle(self) -> None:
+        """One item counted toward expect_items, once per item however many
+        times this is reached (the stream-acquired hook and item()'s exit
+        both call it; the thread-local mark is reset at item() entry)."""
+        if getattr(self._tls, "gate_counted", False) or getattr(self, "_gate_left", None) is None:
+            return
+        self._tls.gate_counted = True
+        with self._gate_lock:
+            self._gate_left -= 1
+            fire = self._gate_left <= 0 and not self._gate_fired
+            if fire:
+                self._gate_fired = True
+        if fire:
+            self._fire_streams_started()
+
+    def _fire_streams_started(self) -> None:
+        token = getattr(self, "_job_token", None)
+        if token is not None:
+            STREAM_SLOTS.job_streams_started(token)
+        callback = getattr(self, "_on_streams_started", None)
+        if callback is not None:
+            callback()
+
+    def _note_stream_acquired(self, media) -> None:
+        """Engine hook (download.py): this item holds its stream slot."""
+        self._gate_settle()
+
     def item(self, *args, media=None, event_stop=None, **kwargs):
+        self._tls.gate_counted = False
+        try:
+            return self._item_tracked(*args, media=media, event_stop=event_stop, **kwargs)
+        finally:
+            # Counted on the way out too, so an item that never reached the
+            # stream (owned and skipped, refused, failed early) still counts.
+            self._gate_settle()
+
+    def _item_tracked(self, *args, media=None, event_stop=None, **kwargs):
         # Ownership gate first, before any stream is fetched: an item owned at
         # equal-or-better quality is skipped without a network round-trip; an
         # upgrade run forces the path skip off so the engine overwrites the old
@@ -4084,7 +4214,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     hoverMotionChanged = Signal()  # hover_control_motion pref flipped; Main.qml re-reads it
     artHoverTiltChanged = Signal()  # art_hover_tilt pref flipped; Main.qml re-reads it
     videoHoverPeekChanged = Signal()  # video_hover_peek pref flipped; Main.qml re-reads it
+    audioOutputsChanged = Signal()  # outputs appeared, vanished, or the system default moved
+    audioOutputChanged = Signal()  # the audio_output pref changed; Main.qml re-resolves the device
     queueLedgerRowsChanged = Signal()  # queue_ledger_rows pref changed; Main.qml re-reads it
+    playerSizeChanged = Signal()  # player_size pref changed; Main.qml re-reads it
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     # How many queued tracks failed or are unavailable (property
     # `missingTracks`), and a missing-tracks export finished: the qid it was
@@ -4178,6 +4311,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     # QML MediaPlayer a directly-streamable URL; previewMeta feeds the optional
     # 'now previewing' label.
     previewReady = Signal(str, str, str)  # kind, id, url
+    previewPeaks = Signal(str, str, "QVariant")  # kind, id, loudness buckets 0..1 (the rail's waveform)
     previewState = Signal(str, str, str)  # kind, id, state ("loading" | "error" | "")
     # In-app video playback: {id, title, artist, url, error}. The URL is the
     # stream tidalapi resolves for the video (HLS or direct); QML's overlay
@@ -4241,6 +4375,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     # Internal: a download Worker has ended (any way), so the next queued row
     # may start. Queued, so the hand-over runs on the GUI thread.
     _jobFinished = Signal(int)  # qid
+    # Internal: a job has started every stream it will start (or settled every
+    # item without one), so the next queued row may begin while this one
+    # finishes. Queued, like _jobFinished, so the hand-over runs on the GUI
+    # thread.
+    _jobStreamsStarted = Signal(int)  # qid
     # Internal: a worker thread changed queue rows; the deltas go out from the
     # GUI thread (see _emit_queue / _flush_queue_changes).
     _queueFlushRequested = Signal()
@@ -4335,17 +4474,20 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._scans_in_flight = 0
         self._scan_count_lock = Lock()
         self.dl_pool = QtCore.QThreadPool()
-        # ONE queue item at a time, strictly in the order they were queued.
-        # This pool used to run downloads_concurrent_max items side by side,
-        # which read as the queue jumping around: a 21-track album (whose
-        # tracks also carry the 3-5s anti-hammer delay) ground along while
-        # single tracks queued after it zipped past, and every concurrent item
-        # fought the album for the shared 10-connection HTTP pool (livetest
-        # report). Parallelism lives INSIDE a collection instead: the engine's
-        # track executor still fans out downloads_concurrent_max tracks, and a
-        # lone track saturates the socket pool by itself, so serial items cost
-        # little throughput and the queue keeps its promise of order.
-        self.dl_pool.setMaxThreadCount(1)
+        # One queue item STREAMS at a time, strictly in the order they were
+        # queued, plus up to downloads_finishing_max items finishing behind
+        # it. This pool used to run downloads_concurrent_max items side by
+        # side, which read as the queue jumping around: a 21-track album
+        # ground along while single tracks queued after it zipped past, and
+        # every concurrent item fought the album for the shared 10-connection
+        # HTTP pool (livetest report). Then it ran exactly one, which made a
+        # single track's tag-and-copy (minutes onto a slow library volume)
+        # block the next row entirely. Now _pump_queue starts the next row the
+        # moment the streaming one has started its last stream, and the slot
+        # ledger (waves/download_slots.py) keeps the streams themselves to
+        # downloads_concurrent_max across every live job, so the queue keeps
+        # its promise of order while the network never waits on a copy.
+        self.dl_pool.setMaxThreadCount(1 + _finishing_seats_of(self))
         # Let the verbose perf sampler report saturation per pool by name.
         diagnostics.register_pool("ui", self.threadpool)
         diagnostics.register_pool("scan", self._scan_pool)
@@ -4368,6 +4510,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # executors are job-scoped, so the stable in-flight counters register.
         diagnostics.register_pool("dlseg", SEGMENT_GAUGE)
         diagnostics.register_pool("dlitem", COLLECTION_GAUGE)
+        # The slot ledger's two holds: streams in flight (with dlseg, whether
+        # the network is being driven) and tracks finishing in the background.
+        diagnostics.register_pool("dlstream", STREAM_GAUGE)
+        diagnostics.register_pool("dlfin", FINISH_GAUGE)
         # Aggregate progress for "download discography": artist_id -> {keys, done,
         # failed, prog} so the artist button shows a bar averaged over its albums.
         self._artist_groups: dict[str, dict] = {}
@@ -4428,6 +4574,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # A track's audio never changes, so a clip is reusable until evicted;
         # files are deleted on eviction and at shutdown.
         self._preview_clips: dict[tuple[str, bool], str] = {}
+        self._preview_peaks: dict[str, list[float]] = {}  # clip path -> buckets, evicted with the clip
+        self._cover_palettes = cover_palette.PaletteCache()  # cover URL -> the playing glow's colors
         self._logged_in = False
         # False until the startup cached-token check concludes (either way).
         # The QML login overlay is gated on this so it doesn't flash over the
@@ -4647,8 +4795,20 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # order, and the Worker's end comes back through _jobFinished.
         self._job_specs: dict[int, _JobSpec] = {}
         self._pending_qids: deque[int] = deque()
-        self._running_qid: int | None = None
+        # The job that may still start streams (at most one, so streams start
+        # in queue order) and every job holding a dl_pool thread (the
+        # streaming one plus the ones finishing behind it).
+        self._streaming_qid: int | None = None
+        self._live_qids: set[int] = set()
+        # Each live job's album, held here and not looked up through its row:
+        # RETRY and the clears drop a row while its job may still be finishing,
+        # and the same-album wait in _pump_queue must still see that job.
+        self._live_media: dict[int, str] = {}
+        # The "Finished X" line a job ended with, by qid, for _on_job_finished
+        # to set once the last live job is gone (see there).
+        self._finish_lines: dict[int, str] = {}
         self._jobFinished.connect(self._on_job_finished, QtCore.Qt.ConnectionType.QueuedConnection)
+        self._jobStreamsStarted.connect(self._on_job_streams_started, QtCore.Qt.ConnectionType.QueuedConnection)
         # The live object behind every queue row (qid -> tidalapi object),
         # kept for as long as the row is: RETRY on a failed or stopped row
         # re-downloads from it, so a retry never depends on the row's object
@@ -9196,7 +9356,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         return bool(self._remove_rows_where(lambda it: it["qid"] == qid, withdrawn_out))
 
     def _abort_if_in_flight(self, gone) -> None:
-        """Abort the one job in flight when its row is among those just dropped.
+        """Abort a live job when its row is among those just dropped.
 
         _pump_queue hands a row to the pool while it still reads ``queued``:
         the status only flips to ``running`` further in, after the download
@@ -9209,12 +9369,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         failed. Setting the abort is what per-row CANCEL does for the same
         row; a row that never became a job has no abort to set and is stopped
         by dropping its spec, as before."""
-        qid = self._running_qid
-        if qid is None or qid not in set(gone):
-            return
-        ev = self._job_aborts.get(qid)
-        if ev is not None:
-            ev.set()
+        for qid in set(self._live_qids) & set(gone):
+            ev = self._job_aborts.get(qid)
+            if ev is not None:
+                ev.set()
 
     def _queue_resync(self) -> None:
         """Ask for the whole queue to cross as one queueChanged: for a rebuild
@@ -10649,7 +10807,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # gate (a NAS) and a mix's lazy fill, and a first tick landing in that
         # gap used to stop the timer for the whole job, so the chart read 0.
         with self._queue_lock:
-            running = self._running_qid is not None or any(it.get("status") == "running" for it in self._queue)
+            running = bool(self._live_qids) or any(it.get("status") == "running" for it in self._queue)
         if not running:
             self._speed_poll.stop()
             win.clear()
@@ -11210,6 +11368,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             "releases_fresh_hints": "on",
             "releases_videos": "show",
             "releases_featured": "show",
+            # How long the feed's just-in marks last: until each is opened
+            # (or MARK AS SEEN), or until the pane is left.
+            "releases_arrivals": "seen",
             # The Following view's shape (grid or list) and order (name or
             # latest release), kept across launches like the search sort.
             "releases_follow_view": "grid",
@@ -11302,6 +11463,14 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             # Resting the pointer on a video thumbnail grows a live preview
             # card with sound; off keeps thumbnails still (click to play).
             "video_hover_peek": True,
+            # The player bar's size: "full" gives the waveform 200 px, "mini"
+            # 130 px, so the title and credits keep more of the bar.
+            "player_size": "full",
+            # Where previews, videos and hover peeks play: "" follows the
+            # system default, else the picked device's id as hex. The name
+            # rides along so a pick that is unplugged still reads by name.
+            "audio_output": "",
+            "audio_output_name": "",
             # How many tracks an open queue row shows before its list stops
             # growing and scrolls inside its own box (_WAVES_INT_PREFS).
             "queue_ledger_rows": 12,
@@ -11365,8 +11534,16 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             with open(self._waves_prefs_path, encoding="utf-8") as handle:
                 stored = json.load(handle)
             prefs.update({k: v for k, v in stored.items() if k in prefs})
+            stock = self._default_waves_prefs()
             for key in _WAVES_INT_PREFS.keys() & prefs.keys():
-                prefs[key] = _bounded_int_pref(key, prefs[key], self._default_waves_prefs()[key])
+                prefs[key] = _bounded_int_pref(key, prefs[key], stock[key])
+            # A text pref holding a list, an object or a number (a hand edit)
+            # goes back to stock: the output menu asked a list "in" a set of
+            # ids and raised on every open.
+            for key, value in prefs.items():
+                if key not in _WAVES_INT_PREFS and isinstance(stock[key], str) and not isinstance(value, str):
+                    prefs[key] = stock[key]
+            _audio_note_secret(prefs.get("audio_output"))
         except FileNotFoundError:
             # A fresh install (or a config folder someone moved): defaults are
             # the whole answer and there is nothing to keep.
@@ -11554,6 +11731,109 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         """Read one Waves-only pref (whitelisted in _load_waves_prefs)."""
         return self._waves_prefs.get(key)
 
+    # ---- Audio output ---------------------------------------------------
+
+    def _audio_devices(self):
+        """The one QMediaDevices watcher, made on first use (QML asks for the
+        device as it loads, so the watcher is live from launch on)."""
+        devs = getattr(self, "_media_devices", None)
+        if devs is None:
+            from PySide6.QtMultimedia import QMediaDevices
+
+            devs = self._media_devices = QMediaDevices(self)
+            devs.audioOutputsChanged.connect(self._audio_outputs_moved)
+        return devs
+
+    def _audio_outputs_moved(self) -> None:
+        _audio_log.info("audio outputs changed (%d listed)", len(self._audio_devices().audioOutputs()))
+        self.audioOutputsChanged.emit()
+
+    def _audio_real_outputs(self) -> list:
+        """The outputs the OS lists, one per device id."""
+        seen, out = set(), []
+        for dev in self._audio_devices().audioOutputs():
+            h = bytes(dev.id()).hex()
+            if h not in seen:
+                seen.add(h)
+                out.append(dev)
+        return out
+
+    def _audio_output_name_for(self, value: str, old: str) -> str:
+        if not value:
+            return ""
+        for row in self.audioOutputs():
+            if row["value"] == value:
+                return row["label"]
+        return self._waves_prefs.get("audio_output_name", "") if value == old else ""
+
+    @Slot(result="QVariantList")
+    def audioOutputs(self) -> list:
+        """System default first, then the saved pick while it is gone, then every output the OS lists."""
+        from PySide6.QtMultimedia import QMediaDevices
+
+        self._audio_devices()
+        rows = [
+            {
+                "value": "",
+                "label": "System default",
+                "sub": QMediaDevices.defaultAudioOutput().description(),
+                "default": False,
+                "missing": False,
+            }
+        ]
+        # A gone pick sits right under System default, so the reason sound
+        # moved is in sight.
+        if self.audioOutputMissing():
+            rows.append(
+                {
+                    "value": self._waves_prefs["audio_output"],
+                    "label": self._waves_prefs.get("audio_output_name") or "Saved output",
+                    "sub": "",
+                    "default": False,
+                    "missing": True,
+                }
+            )
+        for dev in self._audio_real_outputs():
+            rows.append(
+                {
+                    "value": bytes(dev.id()).hex(),
+                    "label": dev.description(),
+                    "sub": "",
+                    "default": dev.isDefault(),
+                    "missing": False,
+                }
+            )
+        return rows
+
+    @Slot(result="QVariant")
+    def audioOutputDevice(self):
+        """The device to play through now: the saved pick while it is listed,
+        else the system default (explicit, so following the default never
+        rests on what an unset AudioOutput happens to do)."""
+        from PySide6.QtMultimedia import QMediaDevices
+
+        want = self._waves_prefs.get("audio_output") or ""
+        if want:
+            for dev in self._audio_real_outputs():
+                if bytes(dev.id()).hex() == want:
+                    return dev
+        return QMediaDevices.defaultAudioOutput()
+
+    @Slot(result=bool)
+    def audioOutputMissing(self) -> bool:
+        """True while the saved pick is not among the outputs the OS lists."""
+        want = self._waves_prefs.get("audio_output") or ""
+        if not want:
+            return False
+        return want not in {bytes(d.id()).hex() for d in self._audio_real_outputs()}
+
+    @Slot(result=str)
+    def audioOutputLive(self) -> str:
+        """The name of the output sound goes to right now (the bar's chip).
+        A machine with no output (a headless box) names none; the chip
+        would be an empty pill."""
+        return self.audioOutputDevice().description() or "No output"
+
     @Slot(str, "QVariant")
     def setWavesPref(self, key: str, value) -> None:
         if key not in self._waves_prefs:
@@ -11579,6 +11859,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 value = str(max(1, min(999, int(float(value)))))
             except (TypeError, ValueError):
                 value = old
+        if key == "player_size" and value not in ("full", "mini"):
+            value = old
+        if key == "audio_output":
+            self._waves_prefs["audio_output_name"] = self._audio_output_name_for(value, old)
+            _audio_note_secret(value)
         self._waves_prefs[key] = value
         self._save_waves_prefs()
         if key in ("library_enabled", "library_source", "library_folder") and value != old:
@@ -11636,8 +11921,17 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self.artHoverTiltChanged.emit()
         elif key == "video_hover_peek":
             self.videoHoverPeekChanged.emit()
+        elif key == "audio_output" and value != old:
+            # Which kind of pick, never the device's name: a name is a system
+            # string and can carry a person's ("Jane's AirPods").
+            _audio_log.info("audio output set to %s", "a picked device" if value else "the system default")
+            if self.audioOutputMissing():
+                _audio_log.info("picked output not connected, playing through the system default")
+            self.audioOutputChanged.emit()
         elif key == "queue_ledger_rows" and value != old:
             self.queueLedgerRowsChanged.emit()
+        elif key == "player_size" and value != old:
+            self.playerSizeChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
         elif key == "library_enabled" and value != old:
@@ -12384,11 +12678,20 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 probe = p / f".waves-probe-{os.urandom(4).hex()}"
                 probe.write_bytes(b"w")
             except PermissionError:
-                # The mount is there but the OS refused the write: on macOS
-                # this is the Privacy & Security network-volumes gate, not a
-                # dead share. Distinct breadcrumb so a report can tell
-                # "denied" from "dead" (no path: share names are identity).
-                logger.info("Folder probe denied by OS permissions, not a dead mount")
+                # /Volumes belongs to root, so a write under a share that is
+                # not mounted there any more comes back EACCES too: a mount
+                # point left behind by a dropped share, not a permission
+                # verdict. Tell the two apart from the mount table (never
+                # from the path itself, which may be hung) so a report can
+                # tell "denied" from "dead" and the gate can remount the
+                # stale one (no path: share names are identity).
+                if _volume_mounted(p, volumes_root) is False:
+                    logger.info("Folder probe hit a mount point with nothing mounted on it")
+                else:
+                    # The mount is there but the OS refused the write: on
+                    # macOS this is the Privacy & Security network-volumes
+                    # gate, not a dead share.
+                    logger.info("Folder probe denied by OS permissions, not a dead mount")
                 return False
             except OSError:
                 return False
@@ -12610,10 +12913,20 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             present = vol in os.listdir("/Volumes")
         except OSError:
             return False
-        if present and not wedged:
-            return False
-        origins = self.settings.data.network_mount_origins or {}
         root = os.path.join("/Volumes", vol)
+        if present and not wedged:
+            # A directory under /Volumes with no filesystem mounted on it is
+            # what a dropped share leaves behind (or what macOS makes a
+            # moment before a remount lands). Nothing lives there to fight
+            # with or to unmount: treat it as gone and mount the share back
+            # now, instead of raising the dialog and waiting for the mount
+            # point to vanish on its own. Read from the mount table only, a
+            # stat on the path itself could hang on a wedged mount.
+            if netmount.is_mounted(root) is not False:
+                return False
+            logger.info("The share's mount point is left behind with nothing mounted on it")
+            present = False
+        origins = self.settings.data.network_mount_origins or {}
         url = origins.get(root, "")
         if not url:
             # The share may have last been healthy under a suffixed twin of
@@ -13257,34 +13570,70 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._pump_queue()
 
     def _pump_queue(self) -> None:
-        """Start the next queued row's download if nothing is running.
+        """Start the next queued row's download if its turn has come.
 
         GUI thread only (every caller is a slot or a queued hand-over). One
-        job at a time, in queue order: the pool used to hold a Worker per
-        queued row and drain them itself, which cost the row its whole job
-        up front; now the queue is the backlog and the pool holds the one
-        job in flight. A paused queue starts nothing (resumeQueue pumps). A
-        row that was canceled, cleared or stopped while it waited has lost
-        its spec or its queued status and is skipped."""
-        if self._running_qid is not None or self._paused:
+        job STREAMS at a time, in queue order: the pool used to hold a Worker
+        per queued row and drain them itself, which cost the row its whole
+        job up front; now the queue is the backlog and the pool holds the
+        job in flight plus the ones finishing behind it. The next row starts
+        once the streaming job has started its last stream (_jobStreamsStarted)
+        and fewer than 1 + downloads_finishing_max jobs are live, so a job
+        handed to the pool always has a thread and its row flips to running
+        when it really starts. With the finishing count at 0 that is one job
+        at a time, as before. A row for the same album as a live job waits
+        for it: two jobs writing one album at once could number a duplicate
+        (the name reservations are per job). A paused queue starts nothing
+        (resumeQueue pumps). A row that was canceled, cleared or stopped while
+        it waited has lost its spec or its queued status and is skipped."""
+        if self._streaming_qid is not None or self._paused:
             return
+        if len(self._live_qids) > _finishing_seats_of(self):
+            return
+        live_media = set(self._live_media.values())
         while self._pending_qids:
-            qid = self._pending_qids.popleft()
-            spec = self._job_specs.pop(qid, None)
+            qid = self._pending_qids[0]
+            spec = self._job_specs.get(qid)
             item = self._queue_item(qid)
             if spec is None or item is None or item.get("status") != "queued":
+                self._pending_qids.popleft()
+                self._job_specs.pop(qid, None)
                 continue
-            self._running_qid = qid
+            if spec.media_id in live_media:
+                return
+            self._pending_qids.popleft()
+            self._job_specs.pop(qid, None)
+            self._streaming_qid = qid
+            self._live_qids.add(qid)
+            self._live_media[qid] = spec.media_id
             self._start_job(qid, spec)
             return
 
+    def _on_job_streams_started(self, qid: int) -> None:
+        """GUI-thread hand-over from a job that has started every stream it
+        will start: the next row may begin now, while this one finishes."""
+        if self._streaming_qid == qid:
+            self._streaming_qid = None
+        devlog.event("download", "streams started", qid=qid, live=len(self._live_qids))
+        self._pump_queue()
+
     def _on_job_finished(self, qid: int) -> None:
-        """GUI-thread end of a download Worker, however it ended: free the
-        slot, start the next row, and count the ended row toward the
+        """GUI-thread end of a download Worker, however it ended: free its
+        thread, start the next row, and count the ended row toward the
         download banners (one banner once the queue runs dry, or coalesced
-        per-download ones, see _on_dl_notify)."""
-        if self._running_qid == qid:
-            self._running_qid = None
+        per-download ones, see _on_dl_notify). A job that died before it
+        reported its streams started gives the streaming turn back here."""
+        self._live_qids.discard(qid)
+        self._live_media.pop(qid, None)
+        if self._streaming_qid == qid:
+            self._streaming_qid = None
+        # Two jobs ending together each saw the other still live on the
+        # worker thread, so neither wrote its Finished line and the status
+        # stayed on "Downloading" over an idle queue. The last one out
+        # writes its line here, only over a stale Downloading line.
+        line = self._finish_lines.pop(qid, None)
+        if line and not self._live_qids and self._status.startswith("Downloading "):
+            self._set_status(line)
         item = self._queue_item(qid)
         # The broadcast gate's per-media memo only ever grew between drains;
         # a queue that never drains (the 24/7 case) must not grow it forever.
@@ -13304,7 +13653,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         idleness can begin without one: a scan that queued nothing, a held
         replay given up, a resume over an emptied queue. With nothing counted
         since the last drain it sends nothing."""
-        if self._running_qid is None and not self._paused and not self._scans_in_flight and not self._pending_downloads:
+        if not self._live_qids and not self._paused and not self._scans_in_flight and not self._pending_downloads:
             self._notify_queue_idle()
 
     # ----- desktop banners (shared by releases, downloads and updates) ---- #
@@ -13535,16 +13884,32 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self._job_dls[qid] = dl
             if not self._track_poll.isActive():
                 self._track_poll.start()
+        else:
+            # A single track is its own whole list for the streams-started
+            # count (a collection learns its count from the engine's
+            # enumeration, a merge from its plan).
+            expect = getattr(dl, "expect_items", None)
+            if callable(expect):
+                expect(1)
+        # The job reports its last stream started through the GUI thread, so
+        # _pump_queue may start the next row while this one finishes.
+        dl._on_streams_started = lambda: self._jobStreamsStarted.emit(qid)
 
         def work() -> None:
             # This pooled thread carries the job's abort from its first call:
             # the lazy mix fill below runs before the engine would set it, and
             # a stopped earlier job's event left here failed that fill at once.
             api_waits_wake_for(job_abort)
+            # Its place in the slot ledger's job gate, taken in queue order
+            # (jobs are handed to the pool one at a time): a later job's
+            # streams wait behind this one's until it reports them started.
+            token = STREAM_SLOTS.job_enter()
+            dl._job_token = token
             try:
                 body()
             finally:
                 api_waits_wake_for(None)
+                STREAM_SLOTS.job_leave(token)
                 # The job's segment executor dies with the job, or its worker
                 # threads would pile up across queue rows.
                 with contextlib.suppress(Exception):
@@ -13761,8 +14126,14 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     self._bump_download_groups(media_id, 100.0, "done")
                     # The job finished; if TIDAL withheld part of it, the status
                     # line says so rather than leaving the user to count the
-                    # files. The queue's own track rows name which ones.
-                    self._set_status(f"Finished {name}{_unavailable_note(dl.unavailable_count)}")
+                    # files. The queue's own track rows name which ones. Not
+                    # while another job is live: the line would overwrite that
+                    # job's "Downloading" with a finish the user can read off
+                    # the row, and the chart is still moving.
+                    line = f"Finished {name}{_unavailable_note(dl.unavailable_count)}"
+                    self._finish_lines[qid] = line
+                    if not (self._live_qids - {qid}):
+                        self._set_status(line)
                     devlog.done("download", f"done {type_media} id={media_id}", devlog.clock() - t0)
             except Exception as exc:
                 if job_abort.is_set():
@@ -13838,11 +14209,19 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         total = len(plan)
         if not total:
             return
-        max_workers = max(1, int(self.settings.data.downloads_concurrent_max or 3))
+        # Stream slots plus finishing seats worth of workers, as the engine's
+        # own fan-out sizes itself (Download._item_workers): the slot ledger
+        # caps the streams, the extra threads take the slots finished tracks
+        # hand back.
+        max_workers = max(1, int(self.settings.data.downloads_concurrent_max or 3)) + _finishing_seats_of(self)
         # items() forwards this to every track it fans out; this fan-out stands in
         # for items(), so it has to forward it too or the setting is honored on a
         # plain album and ignored on a merged one.
         download_delay = bool(self.settings.data.download_delay)
+        # The streams-started count items() gets from the engine's enumeration.
+        expect = getattr(dl, "expect_items", None)
+        if callable(expect):
+            expect(total)
         done = 0
         failures = 0
         # The gauge counts items in flight so a verbose report can show whether
@@ -14244,11 +14623,74 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
 
     def _remember_preview_clip(self, key: tuple[str, bool], path: str) -> None:
         d = self._preview_clips
+        prev = d.get(key)
+        if prev is not None and prev != path:
+            # The old clip file vanished and was remuxed afresh: its peaks
+            # would otherwise outlive it until shutdown.
+            self._preview_peaks.pop(prev, None)
         d[key] = path
         while len(d) > self._PREVIEW_CLIPS_MAX:
             old = d.pop(next(iter(d)))  # evict least recently used
+            self._preview_peaks.pop(old, None)
             with contextlib.suppress(OSError):
                 os.remove(old)
+
+    _PREVIEW_PEAKS_N = 600
+
+    def _emit_preview_peaks(self, kind: str, ident: str, url: str) -> None:
+        """Hand the now-playing rail the clip's loudness shape.
+
+        Runs on the preview worker right after previewReady, so the decode
+        (the same ffmpeg, to 8 kHz mono, about a second for a whole track)
+        never delays the first note. Peaks are kept per clip path and go
+        when the clip does. Any failure sends an empty list: the rail stops
+        its waiting ghost and keeps its plain line.
+        """
+        try:
+            path = url2pathname(urlparse(url).path) if url.startswith("file:") else ""
+        except Exception:
+            path = ""
+        if not path:
+            self.previewPeaks.emit(kind, ident, [])
+            return
+        peaks = self._preview_peaks.get(path)
+        if peaks is None:
+            ffmpeg = self._preview_ffmpeg_bin()
+            if not ffmpeg:
+                self.previewPeaks.emit(kind, ident, [])
+                return
+            try:
+                with devlog.span("preview", "peaks"):
+                    peaks = preview_peaks.peaks_from_clip(
+                        ffmpeg, path, self._PREVIEW_PEAKS_N, creationflags=proc.NO_WINDOW
+                    )
+            except Exception:
+                _preview_log.debug("preview: peaks unavailable", exc_info=True)
+                self.previewPeaks.emit(kind, ident, [])
+                return
+            self._preview_peaks[path] = peaks
+        self.previewPeaks.emit(kind, ident, peaks)
+
+    @Slot(str, "QVariant", result="QVariant")
+    def coverPalette(self, url: str, image=None):
+        """A cover's colors and their shares for the playing glow.
+
+        Answers from the cache by cover URL; on a miss, reads ``image`` (a
+        small grab of the Art, see cover_palette) and remembers it. A miss
+        with no image answers None, so QML asks once without grabbing and
+        grabs only covers it has never seen. A cover with no usable color
+        answers an empty palette, and QML keeps the accent.
+        """
+        found = self._cover_palettes.get(url)
+        if found is not None or not isinstance(image, QtGui.QImage):
+            return found
+        try:
+            found = cover_palette.palette(image)
+        except Exception:
+            _preview_log.debug("preview: cover palette unavailable", exc_info=True)
+            found = {"c": [], "w": []}
+        self._cover_palettes.put(url, found)
+        return found
 
     def _preview_ffmpeg_bin(self) -> str | None:
         """Path to an ffmpeg binary for the preview remux (managed → PATH)."""
@@ -14730,6 +15172,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 self._emit_preview_meta("track", track_id, track)
                 url = self._preview_source(track, whole=True)  # full track, seekable
                 self.previewReady.emit("track", track_id, url)
+                self._emit_preview_peaks("track", track_id, url)
             except Exception:
                 _preview_log.exception("Preview failed for track %s", track_id)
                 self.previewState.emit("track", track_id, "error")
@@ -14767,6 +15210,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 self._emit_preview_meta("artist", artist_id, top, artist_id=artist_id)
                 url = self._preview_source(top, whole=True)  # full track for the scrubber
                 self.previewReady.emit("artist", artist_id, url)
+                self._emit_preview_peaks("artist", artist_id, url)
             except Exception:
                 _preview_log.exception("Preview failed for artist %s", artist_id)
                 self.previewState.emit("artist", artist_id, "error")
@@ -14810,6 +15254,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 self._emit_preview_meta(kind, media_id, pick)
                 url = self._preview_source(pick, whole=True)  # full track for the scrubber
                 self.previewReady.emit(kind, media_id, url)
+                self._emit_preview_peaks(kind, media_id, url)
             except Exception:
                 _preview_log.exception("Preview failed for %s %s", kind, media_id)
                 self.previewState.emit(kind, media_id, "error")
@@ -16932,6 +17377,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             with contextlib.suppress(OSError):
                 os.remove(path)
         self._preview_clips.clear()
+        self._preview_peaks.clear()
 
     # ----- in-app FFmpeg manager ----------------------------------------- #
     def _save_settings(self) -> None:
@@ -17892,7 +18338,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     {"minimum": 0, "maximum": 60, "step": 0.5, "decimals": 1},
                 )
             if key in _NUMBER_FIELDS:
-                return field(key, "int", int(getattr(d, key)))
+                bounds = _INT_BOUNDS.get(key)
+                extra = {"minimum": bounds[0], "maximum": bounds[1]} if bounds else None
+                return field(key, "int", int(getattr(d, key)), extra)
             if key in _FLAG_FIELDS:
                 return field(key, "bool", bool(getattr(d, key)))
             if key in _MAP_FIELDS:
@@ -18095,6 +18543,29 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("video_hover_peek"),
+                },
+                {
+                    "key": "player_size",
+                    "label": "Player bar",
+                    "help": (
+                        "Full gives the waveform in the bottom bar 200 px; Mini gives it 130 px, so "
+                        "the track's name and artists keep more of the bar."
+                    ),
+                    "type": "enum",
+                    "value": self._waves_prefs.get("player_size", "full"),
+                    "options": _enum_options("player_size", ["full", "mini"]),
+                },
+                {
+                    "key": "audio_output",
+                    "label": "Audio output",
+                    "help": (
+                        "Where previews, videos and hover peeks play. System default follows the output "
+                        "your computer picks."
+                    ),
+                    # The rows come from audioOutputs(), read live by the page
+                    # (SettingsPage.outOpts), so the schema never touches devices.
+                    "type": "device",
+                    "value": self._waves_prefs.get("audio_output", ""),
                 },
                 {
                     "key": "queue_ledger_rows",
@@ -18301,6 +18772,17 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "options": _enum_options("releases_featured", ["show", "hide"]),
                 },
                 {
+                    "key": "releases_arrivals",
+                    "label": "Just-in marks last",
+                    "help": (
+                        "Until seen, an arrival stays marked until you open it or press MARK AS SEEN. "
+                        "After a visit, all clear as you leave."
+                    ),
+                    "type": "enum",
+                    "value": str(self._waves_prefs.get("releases_arrivals", "seen")),
+                    "options": _enum_options("releases_arrivals", ["seen", "visit"]),
+                },
+                {
                     "key": "ffmpeg_auto_update",
                     "label": "Check for updates automatically",
                     "help": (
@@ -18490,6 +18972,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "releases_window_months",
                     "releases_videos",
                     "releases_featured",
+                    "releases_arrivals",
                     # Shown under the rows above, right over the switch it
                     # belongs to, while that switch is on.
                     "releases_auto_kinds",
@@ -18590,8 +19073,15 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "hover_control_motion",
                     "art_hover_tilt",
                     "video_hover_peek",
+                    "player_size",
                     "queue_ledger_rows",
                 ],
+            },
+            {
+                "group": "Playback",
+                "id": "playback",
+                "desc": "Where previews and videos play.",
+                "fields": ["audio_output"],
             },
             # The whole section shows only where banners can work:
             # desktop-notifier is an optional package, and the rail hides an
@@ -18623,6 +19113,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 # batch size and its pause (see the "range" rows below).
                 "fields": [
                     "downloads_concurrent_max",
+                    "downloads_finishing_max",
                     "downloads_simultaneous_per_track_max",
                     "download_delay",
                     "download_delay_sec_min",
@@ -18786,7 +19277,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 elif key in _FLOAT_FIELDS:
                     setattr(data, key, float(value))
                 elif key in _NUMBER_FIELDS:
-                    setattr(data, key, int(value))
+                    number = int(value)
+                    if key in _INT_BOUNDS:
+                        low, high = _INT_BOUNDS[key]
+                        number = max(low, min(high, number))
+                    setattr(data, key, number)
                 elif key in _MAP_FIELDS:
                     # Stored already laundered, so a config file written here
                     # can never carry an entry the engine would refuse: the
@@ -18934,11 +19429,15 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # re-walking the tree is what the card's own Rescan button is for.
         if lib_edit and self._library_root():
             self._rebuild_library_index()
-        # No dl_pool resize: the queue is serial by design (one item at a time,
-        # in order). downloads_concurrent_max sizes the engine's per-collection
-        # track executor, which reads settings.data live on each download, so a
-        # saved change takes effect on the next item with no reapply here.
+        # The pool holds the streaming job plus the finishing ones, so the
+        # finishing count resizes it; a running job keeps its thread either
+        # way. downloads_concurrent_max needs no reapply: the slot ledger and
+        # the engine's fan-out read settings.data live on each download.
         # Quality / path / ffmpeg changes only take effect on a fresh Download.
+        self.dl_pool.setMaxThreadCount(1 + _finishing_seats_of(self))
+        # A wider pool may have a queued row's turn come now (the streaming
+        # job has reported, and the seats were all taken before the save).
+        self._pump_queue()
         if self._logged_in:
             self._init_download()
         self._set_status("Settings saved")

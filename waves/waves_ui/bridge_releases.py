@@ -1883,6 +1883,30 @@ class ReleasesMixin:
             self.releasesChanged.emit()
         return ids
 
+    @Slot(result="QVariant")
+    def releaseArrivals(self) -> list:
+        """The arrivals still marked in the pane, kept across visits until
+        each is opened or all are marked seen."""
+        try:
+            return self._releases.arrivals()
+        except Exception:
+            return []
+
+    @Slot(str)
+    def markArrivalSeen(self, release_id: str) -> None:
+        """An arrival was opened (an album page, a video)."""
+        if self._releases.arrival_seen(release_id):
+            logger.info("releases: an arrival was opened")
+            self.releasesChanged.emit()
+
+    @Slot()
+    def markArrivalsSeen(self) -> None:
+        """MARK AS SEEN, or the pane left with arrivals set to go after a visit."""
+        n = self._releases.arrivals_clear()
+        if n:
+            logger.info("releases: %d arrivals marked seen", n)
+            self.releasesChanged.emit()
+
     @Slot(result=int)
     def followedCount(self) -> int:
         try:

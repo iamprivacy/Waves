@@ -25,7 +25,7 @@ import ctypes
 import logging
 import sys
 import urllib.parse
-from threading import Thread
+from threading import Lock, Thread
 from typing import ClassVar
 
 logger = logging.getLogger("waves.netmount")
@@ -65,6 +65,59 @@ def _libc():
     return ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
 
 
+def _inode64(libc, name: str):
+    """The 64-bit-inode variant of a statfs-family call. Intel macOS exports
+    it under the "$INODE64" suffix (the plain name there is the legacy call
+    with a smaller struct statfs, read wrongly by _StatFS); Apple Silicon has
+    only the plain symbol."""
+    try:
+        return libc[name + "$INODE64"]
+    except (KeyError, AttributeError):
+        return getattr(libc, name)
+
+
+# getmntinfo(3) mode: answer from the kernel's cached mount table, never ask
+# a server. The one safe way to look at a mount that may be hung.
+_MNT_NOWAIT = 2
+# getmntinfo hands back a buffer it owns and reuses on the next call.
+_MNT_LOCK = Lock()
+
+
+def mount_points() -> set[str] | None:
+    """The mount point of every mounted filesystem ("/", "/Volumes/Media",
+    ...), read from the kernel's own table with MNT_NOWAIT, so a dead network
+    mount cannot hang the call the way statfs on the mount itself can. None
+    when the table cannot be read or this is not macOS. Mount points name
+    shares (identity): callers never log the set."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = _libc()
+        getmntinfo = _inode64(libc, "getmntinfo")
+        getmntinfo.restype = ctypes.c_int
+        getmntinfo.argtypes = [ctypes.POINTER(ctypes.POINTER(_StatFS)), ctypes.c_int]
+        with _MNT_LOCK:
+            table = ctypes.POINTER(_StatFS)()
+            count = getmntinfo(ctypes.byref(table), _MNT_NOWAIT)
+            if count <= 0:
+                return None
+            return {table[i].f_mntonname.decode("utf-8", "replace") for i in range(count)}
+    except Exception:
+        logger.debug("mount table lookup failed", exc_info=True)
+        return None
+
+
+def is_mounted(mount_point: str) -> bool | None:
+    """True when a filesystem is mounted exactly at ``mount_point``, False
+    when the directory is there with nothing mounted on it (the leftover a
+    dropped share leaves under /Volumes), None when the mount table cannot be
+    read. Reads the cached table only: safe on a hung mount."""
+    points = mount_points()
+    if points is None:
+        return None
+    return (mount_point.rstrip("/") or "/") in points
+
+
 def mount_info(path: str) -> tuple[str, str, str]:
     """(fstype, from_name, mount_point) for any path, e.g. ("smbfs",
     "//user@nas._smb._tcp.local/Media", "/Volumes/Media"). ("", "", "") when
@@ -81,12 +134,7 @@ def mount_info(path: str) -> tuple[str, str, str]:
         return ("", "", "")
     try:
         libc = _libc()
-        # Intel macOS exports the 64-bit-inode call under a suffixed name;
-        # Apple Silicon has only the plain symbol.
-        try:
-            statfs = libc["statfs$INO64"]
-        except (KeyError, AttributeError):
-            statfs = libc.statfs
+        statfs = _inode64(libc, "statfs")
         buf = _StatFS()
         if statfs(path.encode("utf-8"), ctypes.byref(buf)) != 0:
             return ("", "", "")
