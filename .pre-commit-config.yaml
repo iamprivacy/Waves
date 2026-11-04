@@ -28,9 +28,10 @@ repos:
     rev: "v3.1.0"
     hooks:
       - id: prettier
-        # QML-dialect JS (".pragma library") is not parseable by prettier, and
-        # the star-history charts are generated elsewhere (see above).
-        exclude: ^(waves/waves_ui/qml/.*\.js|assets/star-history/.*)$
+        # QML-dialect JS (".pragma library") and GLSL shaders (which it reads
+        # as JS) are not parseable by prettier, and the star-history charts
+        # are generated elsewhere (see above).
+        exclude: ^(waves/waves_ui/qml/.*\.js|waves/waves_ui/qml/shaders/.*|assets/star-history/.*)$
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

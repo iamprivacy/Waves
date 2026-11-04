@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.2.0"
+version = "0.2.1"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -175,8 +175,13 @@ ignore = [
 # The ATMOS badge scenario, likewise (S603, fixed argv).
 "tests/test_atmos_badge_qml.py" = ["S603"]
 # The Releases pane scenario, likewise (S603, fixed argv).
+"tests/test_releases_just_in.py" = ["S603"]
 "tests/test_releases_pane_buckets.py" = ["S603"]
 "tests/test_releases_pane_search.py" = ["S603"]
+# The audio output scenario, likewise (S603, fixed argv; C901, one straight scenario).
+"tests/test_audio_output_qml.py" = ["S603", "C901"]
+"tests/test_now_credits_qml.py" = ["S603", "C901"]
+"tests/test_now_rail_loading_qml.py" = ["S603", "C901"]
 "tests/test_releases_pane_scroll.py" = ["S603"]
 "tests/test_momentum_guard.py" = ["S603"]
 "tests/test_momentum_guard_cursor.py" = ["S603"]
@@ -245,6 +250,7 @@ ignore = [
 "tests/test_badges_survive_navigation.py" = ["S603", "C901"]
 "tests/test_library_page_dressed_and_veiled.py" = ["S603", "C901"]
 "tests/test_browse_card_line_fits.py" = ["S603", "C901"]
+"tests/test_browse_art_card_words.py" = ["S603", "C901"]
 # Imports the download engine in a clean interpreter to check its import closure
 # (S603, fixed argv: sys.executable -c with a literal probe).
 "tests/test_library_bridge.py" = ["S603"]
@@ -255,6 +261,7 @@ ignore = [
 "tests/test_browse_row_window.py" = ["S603", "C901"]
 "tests/test_video_grid_hover_dwell.py" = ["S603", "C901"]
 "tests/test_hover_prefetch_scenario.py" = ["S603", "C901"]
+"tests/test_playing_glow_scenario.py" = ["S603", "C901"]
 "tests/test_releases_auto_kinds_qml.py" = ["S603", "C901"]
 "tests/test_releases_quality_badge.py" = ["S603", "C901"]
 "tests/test_offscreen_qt_is_usable.py" = ["S603"]
