@@ -41,7 +41,7 @@ Waves is a desktop app for macOS, Windows and Linux. Search all of TIDAL from on
 </table>
 
 <p align="center">
-  <sub>The music in these screenshots is free to use: Creative Commons releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Chris Zabriskie, Alexander Nakarada, Kai Engel, Jason Shaw, Broke For Free, Doctor Turtle, Dee Yan-Key, Ketsa and Lobo Loco, Kimiko Ishizaka's public-domain Open Goldberg Variations, and royalty-free tracks by Tim Kulig, Lesfm and Streambeats.</sub>
+  <sub>The music in these screenshots is free to use: Creative Commons releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Alexander Nakarada, Jason Shaw, Broke For Free, Doctor Turtle, Dee Yan-Key, Ketsa and Lobo Loco, Kimiko Ishizaka's public-domain Open Goldberg Variations, and royalty-free tracks by Tim Kulig, Lesfm and Streambeats.</sub>
 </p>
 
 <p align="center">
