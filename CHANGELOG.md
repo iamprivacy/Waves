@@ -22,6 +22,20 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.2 (2026-11-04)
+
+### 🔧 Changed
+
+- 🔲 Cover corners are smoother: each curve eases into the straight edges with no point where they meet, and covers keep their square shape.
+
+### 🐛 Fixed
+
+- 🃏 A cover's PREVIEW and DOWNLOAD controls go back down once its download finishes instead of staying up for the rest of the session, and DOWNLOADED reads IN LIBRARY right away when downloads land in your library.
+- 🎚️ The player bar's waveform draws green over gray for a track with no cover; it was all green.
+- 🎯 A track already in your library lines up with its neighbors in an artist's Top Tracks; its button was narrower, so its quality, date and length sat out of line.
+- ⏱️ The player bar's time left fits a track longer than ten minutes.
+- 🆕 A Just in release's cover arrives with its rounded corners and green frame instead of switching from a square one.
+
 ## 🗂️ v0.2.1 (2026-11-03)
 
 ### ✨ Added
