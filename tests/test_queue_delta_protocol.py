@@ -306,7 +306,7 @@ def test_a_backlog_holds_one_job_and_the_rest_wait_as_specs():
     assert len(stub.dl_pool.started) == 1, "one Worker in the pool however long the queue"
     assert len(stub._job_signals) == 1 and len(stub._job_aborts) == 1
     assert len(stub._job_specs) == 4, "the waiting rows are specs, not jobs"
-    assert stub._running_qid is not None
+    assert stub._streaming_qid is not None and stub._live_qids
 
 
 def test_jobs_run_in_queue_order_and_hand_over():
@@ -322,7 +322,7 @@ def test_jobs_run_in_queue_order_and_hand_over():
             stub._download(_albumish(f"m{n}"), "track", f"m{n}", "{title}", False, f"m{n}")
     ran = [qid for qid, st in order if st == "running"]
     assert ran == sorted(ran) and len(ran) == 3, order
-    assert stub._running_qid is None and not stub._job_specs
+    assert stub._streaming_qid is None and not stub._live_qids and not stub._job_specs
 
 
 def test_cancelling_a_waiting_row_drops_its_spec_and_row():
@@ -336,7 +336,8 @@ def test_cancelling_a_waiting_row_drops_its_spec_and_row():
     assert victim not in stub._job_specs
     assert stub._queue_item(victim) is None
     # Its turn comes and goes without a job.
-    stub._running_qid = None
+    stub._streaming_qid = None
+    stub._live_qids = set()
     with _plain_relay():
         stub._pump_queue()
     assert len(stub.dl_pool.started) == 2, "the cancelled row was skipped, the next one started"

@@ -8,9 +8,58 @@ Pure staticmethod, so no Qt or bridge construction is needed.
 
 from __future__ import annotations
 
+import logging
+
+import waves.waves_ui.backend as backend_mod
 from waves.waves_ui.backend import WavesBridge
 
 probe = WavesBridge._probe_folder_verdict
+
+
+def _deny_writes(monkeypatch):
+    def makedirs(p, exist_ok=False):
+        raise PermissionError(13, "Permission denied", str(p))
+
+    monkeypatch.setattr(backend_mod.os, "makedirs", makedirs)
+
+
+def test_a_denied_write_on_a_left_behind_mount_point_reads_as_stale(tmp_path, monkeypatch, caplog):
+    # /Volumes is root's, so a write under a share that is no longer mounted
+    # there is EACCES too. With nothing mounted at the volume root, that is
+    # a stale mount point, not the OS refusing the app.
+    volumes = tmp_path / "Volumes"
+    (volumes / "Media").mkdir(parents=True)
+    _deny_writes(monkeypatch)
+    monkeypatch.setattr(backend_mod.netmount, "is_mounted", lambda root: False)
+    with caplog.at_level(logging.INFO, logger="waves"):
+        verdict, _ = probe(str(volumes / "Media" / "Music"), volumes_root=str(volumes))
+    assert verdict == "dead"
+    assert "nothing mounted on it" in caplog.text
+    assert "denied by OS permissions" not in caplog.text
+
+
+def test_a_denied_write_on_a_live_mount_reads_as_denied(tmp_path, monkeypatch, caplog):
+    volumes = tmp_path / "Volumes"
+    (volumes / "Media").mkdir(parents=True)
+    _deny_writes(monkeypatch)
+    monkeypatch.setattr(backend_mod.netmount, "is_mounted", lambda root: True)
+    with caplog.at_level(logging.INFO, logger="waves"):
+        verdict, _ = probe(str(volumes / "Media" / "Music"), volumes_root=str(volumes))
+    assert verdict == "dead"
+    assert "denied by OS permissions" in caplog.text
+
+
+def test_a_denied_write_outside_the_volumes_root_never_reads_the_mount_table(tmp_path, monkeypatch, caplog):
+    _deny_writes(monkeypatch)
+    monkeypatch.setattr(
+        backend_mod.netmount,
+        "is_mounted",
+        lambda root: (_ for _ in ()).throw(AssertionError("mount table read for a local path")),
+    )
+    with caplog.at_level(logging.INFO, logger="waves"):
+        verdict, _ = probe(str(tmp_path / "Music"), volumes_root=str(tmp_path / "Volumes"))
+    assert verdict == "dead"
+    assert "denied by OS permissions" in caplog.text
 
 
 def test_writable_folder_is_ok(tmp_path):

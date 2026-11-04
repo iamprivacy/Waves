@@ -31,7 +31,7 @@ class _Poll:
 
 def _stub(running: bool = True, in_flight: int | None = None):
     b = SimpleNamespace(
-        _running_qid=in_flight,
+        _live_qids=set() if in_flight is None else {in_flight},
         _download_mbps=0.0,
         _speed_win=deque(),
         _speed_moved=0.0,
@@ -105,7 +105,7 @@ def test_the_timer_survives_a_job_whose_row_is_still_queued(monkeypatch):
     clock["bytes"] += 1_000_000
     b.sample()
     assert b._download_mbps > 0
-    b._running_qid = None
+    b._live_qids = set()
     b._queue[0]["status"] = "done"
     clock["t"] += 0.5
     b.sample()

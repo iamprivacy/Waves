@@ -55,7 +55,13 @@ the Loader built:
     regardless of the bar under them;
   * part-way through the reveal the shared value is strictly between 0 and
     1 (it animates, it does not snap), and unhovered every cell is a bar
-    cell again.
+    cell again;
+  * at a full bar the word is FINALIZING (finalizing lab, pick C,
+    2026-10-30: "100%" said nothing was happening while the final steps
+    ran), spelled in the packed font (one-column I, four-column N, 35
+    columns, so it fits a shrunk Browse card), and it fills from the
+    holder's finish fraction: strokes left of that share of the word are
+    1.0, the rest 0.3, with no edge fade on any stroke.
 
 The Browse card's wiring (the card's hover, not just the pill's) is pinned
 statically: the ArtCard's live download button must bind wordHover to the
@@ -85,6 +91,13 @@ _EXIT_PRECONDITION = 78
 # the CELLS it finds against this rather than trusting the matrix's own idea
 # of the glyphs.
 _FONT = {
+    "A": ["010", "101", "111", "101", "101"],
+    "F": ["111", "100", "110", "100", "100"],
+    "G": ["011", "100", "101", "101", "011"],
+    "I": ["1", "1", "1", "1", "1"],
+    "L": ["100", "100", "100", "100", "111"],
+    "N": ["1001", "1101", "1011", "1001", "1001"],
+    "Z": ["111", "001", "010", "100", "111"],
     "3": ["111", "001", "111", "001", "111"],
     "7": ["111", "001", "001", "001", "001"],
     "%": ["101", "001", "010", "100", "101"],
@@ -92,8 +105,8 @@ _FONT = {
 
 
 def _expected_rows(word: str) -> list[str]:
-    """The word's own zone (glyph, gap, glyph, ...; 4 cells a glyph less the
-    trailing gap), one string per row."""
+    """The word's own zone (glyph, a column of gap, glyph, ...; a glyph is as
+    wide as its rows), one string per row."""
     rows = []
     for r in range(5):
         row = ""
@@ -152,7 +165,8 @@ def test_ledger_and_scrub_matrices_do_not_carve():
     b = src.index("component ", a + 1)
     dm = src[a:b]
     assert 'rows >= 5 && word !== ""' in dm, "DotMatrix must gate the word on five rows or more"
-    assert src.count("word: db.pct >= 0") == 1, "exactly one site (the download face) sets the word"
+    assert src.count("word: dbFace.shown") == 1, "exactly one site (the download face) sets the word"
+    assert 'db.pct >= 99.9 ? "FINALIZING"' in src, "a full bar must read FINALIZING, not 100%"
     assert src.count("edgeFadeW: 26") == 1, "exactly one site (the download face) fades its edges"
 
 
@@ -334,7 +348,7 @@ def _run_carved_scenario() -> int:
         )
     # A stroke is lit and its plate is knocked back, both to a FIXED value:
     # what the bar under them is doing must not enter into it.
-    stroke_bad = [(c, r, lit, op) for c, r, lit, wc, op, _bar, m, _p in cells if wc and abs(op - m * 1.0) > 0.011]
+    stroke_bad = [(c, r, lit, op) for c, r, lit, wc, op, _bar, _m, _p in cells if wc and abs(op - 1.0) > 0.011]
     if stroke_bad:
         failures.append(
             f"  {len(stroke_bad)} stroke cell(s) are not fully lit, e.g. {stroke_bad[:3]} (col,row,lit,opacity)"
@@ -375,6 +389,42 @@ def _run_carved_scenario() -> int:
         if wc or pl or abs(op - bar) > 0.011:
             failures.append(f"  after the hover cell ({col},{row}) is not its bar state: opacity {op} vs bar {bar}")
             break
+
+    # --- a full bar: FINALIZING, filling from the finish fraction
+    q("(function(){ var h = root.dlHolder('al-roll'); h.pct = 100; h.fin = 0.5; return 1 })()")
+    q("(function(){" + _WALKERS + " walkBtn(contentCol).wordHover = true; return 1 })()")
+    # The holder ramps a 63-point jump over its 1.5 s cap, then the word
+    # dissolves out and back in (2 x 460 ms).
+    settle(3200)
+    s4 = json.loads(shape())
+    if s4["word"] != "FINALIZING" or s4["reveal"] != 1:
+        failures.append(f"  at a full bar the word is {s4['word']!r} (reveal {s4['reveal']}), expected FINALIZING")
+    else:
+        fin_rows = _expected_rows("FINALIZING")
+        fin_w = len(fin_rows[0])
+        if fin_w != 35:
+            failures.append(f"  the packed FINALIZING is {fin_w} columns, expected 35")
+        fin_start = math.floor((cols - fin_w) / 2 + 0.5)
+        fcells = json.loads(read_cells())
+        by_pos = {(c, r): (wc, op) for c, r, _lit, wc, op, _bar, _m, _p in fcells}
+        got = ["".join("1" if by_pos[(fin_start + z, top + r)][0] else "0" for z in range(fin_w)) for r in range(5)]
+        if got != fin_rows:
+            failures.append(
+                "  the carved cells do not spell FINALIZING:\n    got      "
+                + "\n    got      ".join(got)
+                + "\n    expected "
+                + "\n    expected ".join(fin_rows)
+            )
+        fill_bad = [
+            (c, r, op)
+            for c, r, _lit, wc, op, _bar, _m, _p in fcells
+            if wc and abs(op - (1.0 if c - fin_start < fin_w * 0.5 else 0.3)) > 0.011
+        ]
+        if fill_bad:
+            failures.append(
+                f"  {len(fill_bad)} FINALIZING stroke(s) do not fill from the finish fraction (1.0 left of half, "
+                f"0.3 right), e.g. {fill_bad[:3]} (col,row,opacity)"
+            )
 
     if failures:
         print("the download button's carved-percent face regressed:", file=sys.stderr)

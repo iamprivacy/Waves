@@ -2,13 +2,14 @@
 
 Today, This week, This month, then one section per earlier month
 ("September 2026"); what is dated ahead sits under its own Upcoming chip
-(soonest first), never in All. Each card says when (TODAY,
-YESTERDAY, TOMORROW, or MM-DD-YYYY), what kind (ALBUM, EP, SINGLE), and carries a
-dot when it arrived since the last visit. The scenario proves:
+(soonest first), never in All. What arrived sits above them all under Just
+in, framed, until it is opened or marked seen. Each card says when (TODAY,
+YESTERDAY, TOMORROW, or MM-DD-YYYY) and what kind (ALBUM, EP, SINGLE), after
+JUST IN on an arrival. The scenario proves:
 
 - the sections, their order and their counts, from releases put in the real
   store and loaded through the real bridge;
-- the chip words and the dot, read off the cards that render;
+- the date, the kind line and the frame, read off the cards that render;
 - opening the pane clears the tab's badge;
 - a new release rebuilds only the rows it shifts (an untouched row keeps its
   delegate);
@@ -432,7 +433,7 @@ _VIDEO_LENGTH = """
 })()
 """
 
-# Every rendered release card: its chips and its dot.
+# Every rendered release card: its date, its kind line and its frame.
 _CARDS = """
 JSON.stringify((function() {
     var out = {}
@@ -446,9 +447,10 @@ JSON.stringify((function() {
     function walk(it) {
         if (!it) return
         if (it.upcoming !== undefined && it.day !== undefined && it.card !== undefined && it.card.id) {
-            var d = find(it, "releaseDateChip"), k = find(it, "releaseKindChip"), dot = find(it, "releaseFreshDot")
-            out["" + it.card.id] = { date: d ? d.text : null, accent: d ? d.accent : null,
-                                     kind: k && k.visible ? k.text : "", dot: !!(dot && dot.visible), w: it.width }
+            var d = find(it, "releaseDate"), k = find(it, "releaseKick")
+            out["" + it.card.id] = { date: d ? d.text : null, accent: d ? Qt.colorEqual(d.color, root.accent) : null,
+                                     kind: k ? k.parts.map(function (p) { return p.t }).join(" \u00b7 ") : "",
+                                     dot: !!it.fresh, w: it.width }
             return
         }
         var kids = it.children || []
@@ -644,15 +646,16 @@ def _run_scenario() -> int:  # noqa: C901
     if q("navOrigin") != "releases" or not q("releasesOpen"):
         failures.append("openReleases did not put the pane up under its own tab")
 
-    # 2. Sections, order, counts. All leaves out what is dated ahead.
-    want = ["Today:1", "This week:2", "This month:1", "September 2026:1", "August 2025:1"]
+    # 2. Sections, order, counts. All leaves out what is dated ahead, and
+    # the arrival sits under Just in, out of its date section.
+    want = ["Just in:1", "Today:1", "This week:1", "This month:1", "September 2026:1", "August 2025:1"]
     if heads() != want:
         failures.append(f"sections {heads()}, wanted {want}")
     got = order()
-    if got.get("This week") != ["fresh", "week"]:
-        failures.append(f"This week runs {got.get('This week')}, wanted newest first")
+    if got.get("Just in") != ["fresh"] or got.get("This week") != ["week"]:
+        failures.append(f"Just in runs {got.get('Just in')} and This week {got.get('This week')}")
 
-    # 3. The chips and the dot on the cards that render.
+    # 3. The date, the kind line and the frame on the cards that render.
     def check_cards(expect):
         c = cards()
         for rid, (date_word, accent, kind, dot) in expect.items():
@@ -666,8 +669,8 @@ def _run_scenario() -> int:  # noqa: C901
 
     check_cards(
         {
-            "today": ("TODAY", False, "SINGLE", False),
-            "fresh": ("YESTERDAY", False, "SINGLE", True),
+            "today": ("TODAY", False, "SINGLE \u00b7 E", False),
+            "fresh": ("YESTERDAY", False, "JUST IN \u00b7 SINGLE", True),
             "week": ("10-10-2026", False, "ALBUM", False),
         }
     )
@@ -685,19 +688,20 @@ def _run_scenario() -> int:  # noqa: C901
     q('releasesFilter = "all"')
     settle(300)
 
-    # 4. A new release today rebuilds the rows it shifts, nothing else.
+    # 4. A new release today rebuilds the rows it shifts, nothing else (it
+    # joins Just in; the Today row stays).
     q('relFeedList.itemAtIndex(3).objectName = "keptRow"')
     store.record_check("ar1", [*base, _rel("fresh", "2026-10-13", "single"), _rel("fresh2", "2026-10-14", "album")])
     before = loads["n"]
     bridge.loadReleases()
-    if not pump(lambda: loads["n"] > before and "Today:2" in heads()):
+    if not pump(lambda: loads["n"] > before and "Just in:2" in heads()):
         failures.append(f"the second release today never showed: {heads()}")
     if q("relFeedList.itemAtIndex(3).objectName") != "keptRow":
-        failures.append("a This week row untouched by the new release was rebuilt")
+        failures.append("a Today row untouched by the new release was rebuilt")
 
     # 5. The kind filter re-buckets what the pane holds.
     q('releasesFilter = "single"')
-    want = ["Today:1", "This week:1", "August 2025:1"]
+    want = ["Just in:1", "Today:1", "August 2025:1"]
     if heads() != want:
         failures.append(f"Singles shows {heads()}, wanted {want}")
     q('releasesFilter = "all"')
@@ -709,7 +713,7 @@ def _run_scenario() -> int:  # noqa: C901
     store.record_videos("ar1", [{**clip, "duration_sec": 215, "quality": "1080p"}])
     before = loads["n"]
     bridge.releasesChanged.emit()
-    if not pump(lambda: loads["n"] > before and "This week:3" in heads()):
+    if not pump(lambda: loads["n"] > before and "This week:2" in heads()):
         failures.append(f"a music video never joined All: {heads()}")
     settle(300)
     check_cards({"v1": ("10-11-2026", False, "VIDEO", False)})
@@ -730,7 +734,7 @@ def _run_scenario() -> int:  # noqa: C901
     bridge._waves_prefs["releases_videos"] = "hide"
     before = loads["n"]
     bridge.releasesChanged.emit()
-    if not pump(lambda: loads["n"] > before and "This week:2" in heads()):
+    if not pump(lambda: loads["n"] > before and "This week:1" in heads()):
         failures.append(f"hidden, the music video stayed in the feed: {heads()}")
     if q("releasesVideosOn") or q("releasesFilter") != "all":
         failures.append("hidden, the Videos chip stayed (or kept the filter)")
@@ -738,11 +742,11 @@ def _run_scenario() -> int:  # noqa: C901
     # 6. The day rolls over: re-bucketed in place, no bridge call.
     held = loads["n"]
     q('todayIso = "2026-10-15"')
-    want = ["Today:1", "This week:4", "This month:1", "September 2026:1", "August 2025:1"]
+    want = ["Just in:2", "Today:1", "This week:2", "This month:1", "September 2026:1", "August 2025:1"]
     if heads() != want:
         failures.append(f"after the rollover {heads()}, wanted {want}")
     q('todayIso = "2026-11-03"')
-    want = ["October 2026:8", "September 2026:1", "August 2025:1"]
+    want = ["Just in:2", "October 2026:6", "September 2026:1", "August 2025:1"]
     if heads() != want:
         failures.append(f"after the month rollover {heads()}, wanted {want}")
     settle(300)
@@ -765,8 +769,14 @@ def _run_scenario() -> int:  # noqa: C901
     store.record_check("ar1", [*every, _rel("spring", "2026-03-03", "ep")])
     q("openSearch()")
     q("navBack()")
+    # The bulk comes in as arrivals: seen, they go back to their months.
+    if not pump(lambda: q("releasesMonths") == 3 and not q("releasesLoadingMore") and "Just in" in " ".join(heads())):
+        failures.append(f"the bulk never came in under Just in: {heads()}")
+    q("releasesMarkAllSeen()")
     if not pump(lambda: q("releasesMonths") == 3 and not q("releasesLoadingMore") and "This week" in " ".join(heads())):
         failures.append(f"the feed did not come back on its first page (months {q('releasesMonths')})")
+    if any(h.startswith("Just in") for h in heads()):
+        failures.append(f"MARK AS SEEN left Just in up: {heads()}")
     if not q("releasesHasMore") or any(h.startswith(("March 2026", "August 2025")) for h in heads()):
         failures.append(f"the first page read past July: {heads()} (more {q('releasesHasMore')})")
     if q("relFeedList.contentY") != q("relFeedList.originY"):

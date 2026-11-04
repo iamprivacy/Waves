@@ -32,6 +32,7 @@ _ORDER = [
     "metadata",
     "processing",
     "appearance",
+    "playback",
     "notifications",
     "pacing",
     "updates",
@@ -68,6 +69,7 @@ _KEYS = {
         "releases_window_months",
         "releases_videos",
         "releases_featured",
+        "releases_arrivals",
         "releases_auto_kinds",
     ],
     "discography": [
@@ -130,11 +132,14 @@ _KEYS = {
         "hover_control_motion",
         "art_hover_tilt",
         "video_hover_peek",
+        "player_size",
         "queue_ledger_rows",
     ],
+    "playback": ["audio_output"],
     # The delay switch carries its min/max, and the batch size its pause.
     "pacing": [
         "downloads_concurrent_max",
+        "downloads_finishing_max",
         "downloads_simultaneous_per_track_max",
         "download_delay",
         "download_delay_sec_min",

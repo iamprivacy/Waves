@@ -105,6 +105,10 @@ KEEP_CORPUS = [
     # inside an ordinary path.
     ("GET https://api.tidal.com/v1/tracks/123 -> 200", ["https://api.tidal.com/v1/tracks/123"]),
     ("scanning /Music//Artist/Album took 2s", ["/Music//Artist/Album"]),
+    # The download slot ledger's two lines (waves/download_slots.py): a
+    # cooldown length and a refusal over disk space, neither naming a path.
+    ("Next download will start in 3.5 seconds.", ["3.5 seconds"]),
+    ("Finishing seat refused: low disk space on the temp volume.", ["low disk space"]),
 ]
 
 
@@ -142,6 +146,20 @@ def test_registered_secret_is_replaced_everywhere(diag):
     out = diag.scrub("subscription check for user 6021985477 returned 401 (id=6021985477)")
     assert "6021985477" not in out
     assert "‹account›" in out
+
+
+def test_registered_audio_output_id_never_survives(diag):
+    """The saved output id (hex of the OS device id) can carry a MAC address
+    (CoreAudio, PulseAudio) or a machine-unique endpoint GUID (WASAPI); once
+    registered, the hex and the decoded form are both gone."""
+    raw = "28-11-A5-1F-2B-3C:output"
+    hexid = raw.encode().hex()
+    diag.register_secret(hexid, "‹audio-output›")
+    diag.register_secret(raw, "‹audio-output›")
+    out = diag.scrub(f"output pick id={hexid} was {raw}")
+    assert hexid not in out
+    assert "28-11-A5" not in out
+    assert "‹audio-output›" in out
 
 
 def test_registered_share_origin_never_survives(diag):

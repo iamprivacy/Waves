@@ -164,6 +164,7 @@ def test_favorite_ids_failed_refresh_serves_stale():
 def test_remember_preview_clip_evicts_and_deletes(tmp_path):
     b = WavesBridge.__new__(WavesBridge)
     b._preview_clips = {}
+    b._preview_peaks = {}
     cap = WavesBridge._PREVIEW_CLIPS_MAX
     paths = []
     for i in range(cap + 2):

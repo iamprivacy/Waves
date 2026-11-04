@@ -62,10 +62,13 @@ def arm_queue(stub) -> None:
         # piece of the same per-row state: a plan left behind is picked up by
         # the next plain click on that album.
         ("_merge_plans", dict),
-        # The job in flight, so a clear that drops its row can abort it: a row
-        # is handed to the pool while it still reads "queued", so the bulk
+        # The jobs in flight, so a clear that drops a row can abort its job: a
+        # row is handed to the pool while it still reads "queued", so the bulk
         # clears can select one that is already downloading.
-        ("_running_qid", lambda: None),
+        ("_streaming_qid", lambda: None),
+        ("_live_qids", set),
+        ("_live_media", dict),
+        ("_finish_lines", dict),
         # The watch that replays downloads held for an unreachable folder, and
         # which STOP now stops (the held downloads themselves are armed with
         # the rest of the rollup state, below).
@@ -111,7 +114,10 @@ def arm_notify(stub) -> None:
         ("_paused", bool),
         ("_scans_in_flight", int),
         ("_pending_downloads", list),
-        ("_running_qid", lambda: None),
+        ("_streaming_qid", lambda: None),
+        ("_live_qids", set),
+        ("_live_media", dict),
+        ("_finish_lines", dict),
     ):
         if not hasattr(stub, field):
             setattr(stub, field, default())
@@ -169,7 +175,10 @@ def arm_dispatch(stub) -> None:
     stub._job_specs = {}
     stub._job_objs = {}
     stub._pending_qids = deque()
-    stub._running_qid = None
+    stub._streaming_qid = None
+    stub._live_qids = set()
+    stub._live_media = {}
+    stub._finish_lines = {}
     stub._paused = getattr(stub, "_paused", False)
     stub._pct_last = getattr(stub, "_pct_last", {})
     if not hasattr(stub, "_track_poll"):
@@ -181,6 +190,7 @@ def arm_dispatch(stub) -> None:
         # pump re-validates the row, so answer "still queued" as a real row
         # would (the pre-dispatcher behavior: the job always started).
         stub._queue_item = lambda qid: {"qid": qid, "status": "queued"}
-    for name in ("_pump_queue", "_start_job", "_on_job_finished"):
+    for name in ("_pump_queue", "_start_job", "_on_job_finished", "_on_job_streams_started"):
         setattr(stub, name, getattr(WavesBridge, name).__get__(stub, type(stub)))
     stub._jobFinished = SimpleNamespace(emit=stub._on_job_finished)
+    stub._jobStreamsStarted = SimpleNamespace(emit=stub._on_job_streams_started)

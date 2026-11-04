@@ -76,7 +76,8 @@ def _queue_stub(statuses, *, running_qid=None):
     s._folder_lock = Lock()
     s._stranded_once = set()
     arm_queue(s)
-    s._running_qid = running_qid
+    s._streaming_qid = running_qid
+    s._live_qids = set() if running_qid is None else {running_qid}
     s._emit_queue = lambda: None
     for n in (
         "_reindex_queue",

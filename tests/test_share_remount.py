@@ -63,6 +63,64 @@ def test_mount_origin_answers_for_the_root_volume():
     assert from_name != ""
 
 
+def test_mount_table_lists_the_root_volume():
+    if sys.platform != "darwin":
+        assert netmount.mount_points() is None
+        assert netmount.is_mounted("/") is None
+        return
+    points = netmount.mount_points()
+    assert points is not None and "/" in points
+    assert netmount.is_mounted("/") is True
+
+
+def test_a_plain_directory_is_not_a_mount(tmp_path):
+    if sys.platform != "darwin":
+        return  # getmntinfo is macOS-specific; elsewhere the helper no-ops
+    # A directory that exists with nothing mounted on it: the shape a dropped
+    # share leaves under /Volumes.
+    assert netmount.is_mounted(str(tmp_path)) is False
+
+
+class _IntelLibc:
+    """libSystem as Intel macOS exports it: the "$INODE64" symbols answer with
+    the struct statfs _StatFS describes; the plain names are the legacy
+    32-bit-inode calls, whose smaller struct _StatFS would misread."""
+
+    def __init__(self):
+        self._rows = (netmount._StatFS * 1)()
+        self._rows[0].f_mntonname = b"/Volumes/Media"
+
+    def __getitem__(self, name):
+        def getmntinfo(table, mode):
+            table._obj.contents = self._rows[0]
+            return 1
+
+        def statfs(path, buf):
+            buf._obj.f_fstypename = b"smbfs"
+            buf._obj.f_mntfromname = b"//nas/Media"
+            buf._obj.f_mntonname = b"/Volumes/Media"
+            return 0
+
+        calls = {"getmntinfo$INODE64": getmntinfo, "statfs$INODE64": statfs}
+        if name not in calls:
+            raise AttributeError(name)
+        return calls[name]
+
+    def __getattr__(self, name):
+        def legacy(*args):
+            raise AssertionError(f"legacy 32-bit-inode {name} called")
+
+        return legacy
+
+
+def test_intel_macos_reads_the_64_bit_inode_calls(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(netmount, "_libc", _IntelLibc)
+    assert netmount.mount_points() == {"/Volumes/Media"}
+    assert netmount.is_mounted("/Volumes/Media/") is True
+    assert netmount.mount_info("/Volumes/Media/Music") == ("smbfs", "//nas/Media", "/Volumes/Media")
+
+
 # ---- recording the origin while the share is healthy ------------------------
 
 
@@ -178,6 +236,7 @@ def test_gone_volume_with_recorded_origin_remounts(monkeypatch):
 def test_present_volume_is_left_alone(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(backend_mod.os, "listdir", lambda p: ["Media"])
+    monkeypatch.setattr(backend_mod.netmount, "is_mounted", lambda root: True)
     monkeypatch.setattr(
         backend_mod.netmount,
         "remount",
@@ -185,6 +244,39 @@ def test_present_volume_is_left_alone(monkeypatch):
     )
     b = _bridge(origins={"/Volumes/Media": "smb://nas/Media"})
     assert b._remount_download_share("/Volumes/Media/Music") is False
+
+
+def test_present_volume_is_left_alone_when_the_mount_table_is_unreadable(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(backend_mod.os, "listdir", lambda p: ["Media"])
+    monkeypatch.setattr(backend_mod.netmount, "is_mounted", lambda root: None)
+    monkeypatch.setattr(
+        backend_mod.netmount,
+        "remount",
+        lambda url, timeout_s=20.0: (_ for _ in ()).throw(AssertionError("remounted on an unknown mount")),
+    )
+    b = _bridge(origins={"/Volumes/Media": "smb://nas/Media"})
+    assert b._remount_download_share("/Volumes/Media/Music") is False
+
+
+def test_a_left_behind_mount_point_is_remounted_at_once(monkeypatch):
+    # The 2026-11-01 launch: the share had dropped but its directory was still
+    # under /Volumes, so every write came back EACCES, the dialog came up, and
+    # the remount only ran once the directory happened to vanish. A present
+    # mount point with nothing mounted on it is gone for every purpose.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(backend_mod.os, "listdir", lambda p: ["Media"])
+    asked = []
+    monkeypatch.setattr(backend_mod.netmount, "is_mounted", lambda root: (asked.append(root), False)[1])
+    unmounted = []
+    monkeypatch.setattr(backend_mod.subprocess, "run", lambda *a, **k: unmounted.append(a))
+    mounted = []
+    monkeypatch.setattr(backend_mod.netmount, "remount", lambda url, timeout_s=20.0: (mounted.append(url), True)[1])
+    b = _bridge(origins={"/Volumes/Media": "smb://nas/Media"})
+    assert b._remount_download_share("/Volumes/Media/Music") is True
+    assert asked == ["/Volumes/Media"], "the volume root is looked up in the mount table, not the folder"
+    assert mounted == ["smb://nas/Media"]
+    assert unmounted == [], "nothing is mounted there, so there is nothing to force off"
 
 
 def test_remount_respects_the_cooldown(monkeypatch):

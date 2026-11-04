@@ -66,7 +66,7 @@ def test_the_feed_cards_wear_the_capped_quality() -> None:
 
 # Every rendered album card in the feed: its badge's word (null when the
 # badge does not show), where the badge sits on the cover, and the card's
-# own height against the feed's card height.
+# own height against its row's (the cover and the row's measured words).
 _BADGES = """
 JSON.stringify((function() {
     var out = {}
@@ -86,7 +86,11 @@ JSON.stringify((function() {
                 x: b ? Math.round(b.x) : -1, y: b ? Math.round(b.y) : -1,
                 w: b ? Math.round(b.width) : -1, h: b ? Math.round(b.height) : -1,
                 artW: art ? Math.round(art.width) : -1, artH: art ? Math.round(art.height) : -1,
-                cardH: Math.round(it.height), feedH: root.relCardH
+                cardH: Math.round(it.height), feedH: (function () {
+                    var r = it.parent
+                    while (r && r.th === undefined) r = r.parent
+                    return r ? root.relCardW + 8 + r.th : -1
+                })()
             }
             return
         }
@@ -330,10 +334,10 @@ def _run_scenario() -> int:
     )
 
     # 2. At rest the mark is a 16px dot 8px into the cover's top-right
-    # corner, and the card is the feed's card size.
+    # corner, and the card fits its row.
     for rid, b in badges().items():
-        if b["cardH"] != b["feedH"]:
-            failures.append(f"card {rid} is {b['cardH']} tall, the feed's cards are {b['feedH']}")
+        if b["feedH"] < 0 or b["cardH"] > b["feedH"]:
+            failures.append(f"card {rid} is {b['cardH']} tall, its row holds {b['feedH']}")
         if b["q"] is None:
             continue
         if b["h"] != 16 or b["w"] != 16 or b["y"] != 8 or b["x"] + b["w"] != b["artW"] - 8:

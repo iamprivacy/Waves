@@ -266,6 +266,8 @@ class TestSavingStandInsAnswersTheOfferToo:
         for signal in ("ownershipChanged", "editionMergeChanged", "ffmpegStatusChanged"):
             setattr(stub, signal, SimpleNamespace(emit=lambda *a: None))
         stub.dl_pool = SimpleNamespace(setMaxThreadCount=lambda n: None)
+        # A save pumps the queue: a wider pool may give a queued row its turn.
+        stub._pump_queue = lambda: None
         stub.tidal = SimpleNamespace(settings_apply=lambda: True)
         return stub
 

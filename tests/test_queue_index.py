@@ -72,7 +72,8 @@ def _stub():
     arm_notify(stub)
     # The job in flight, so a clear that drops its row can abort it. These
     # tests drive the index with nothing running.
-    stub._running_qid = None
+    stub._streaming_qid = None
+    stub._live_qids = set()
     stub._abort_if_in_flight = WavesBridge._abort_if_in_flight.__get__(stub, type(stub))
     # The withdrawal slots credit rollups and sweep for stranded groups now
     # (issue #32); these tests are about the index, so the groups stay empty.

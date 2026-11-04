@@ -29,6 +29,7 @@ import inspect
 import json
 import re
 from threading import Lock
+from types import SimpleNamespace
 from typing import ClassVar
 
 from conftest import _InlineWriter
@@ -310,6 +311,10 @@ def _apply_bridge(save_hook=None):
     stub._library_root = lambda: None
     stub._logged_in = False  # keeps _init_download out of it
     stub._set_status = lambda *a, **k: None
+    # A save re-sizes the download pool from the finishing count.
+    stub.dl_pool = SimpleNamespace(setMaxThreadCount=lambda n: None)
+    # A save pumps the queue: a wider pool may give a queued row its turn.
+    stub._pump_queue = lambda: None
     return stub
 
 
@@ -405,3 +410,14 @@ def test_a_worker_write_back_cannot_reach_the_apply_settings_write():
     # mean the worker's put-back landed after the GUI's restore, which is the
     # ordering that produced the leak.
     assert live.path_binary_ffmpeg == "", "the worker's put-back landed inside the apply window"
+
+
+def test_a_save_pumps_the_queue():
+    """Raising Tracks finishing in the background while a job finishes used to
+    leave the next row waiting until that job ended: the pool grew but nobody
+    asked the queue whether a row's turn had come."""
+    stub = _apply_bridge()
+    pumped = []
+    stub._pump_queue = lambda: pumped.append(True)
+    stub.applySettings({"downloads_finishing_max": 3})
+    assert pumped == [True]

@@ -69,7 +69,10 @@ def test_art_stand_in_layer_sits_beneath_and_silences_the_placeholder():
     under = art.split("id: underImg", 1)[1].split("id: artImg", 1)[0]
     assert 'source: artRoot.everShown ? artRoot.underUrl : ""' in under
     assert "sourceSize.width: artRoot.decodeW" in under and "sourceSize.height: artRoot.decodeW" in under
-    assert "visible: status === Image.Ready && artImg.opacity < 1" in under
+    assert "visible: status === Image.Ready && artRoot.artT < 1" in under
+    # Its rounded face shows for as long as it does, beneath the cover's.
+    faces = art.split("id: artImg", 1)[1]
+    assert faces.index("ArtFace { src: underImg") < faces.index("ArtFace { src: artImg")
     # The "art: GET" box never covers a visible stand-in.
     term = art.split("id: artTerm", 1)[1]
     gate = term.split("opacity:", 1)[1].split("\n", 2)

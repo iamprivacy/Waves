@@ -275,6 +275,9 @@ class _PreviewStub:
         self.log.append(("resolve", (whole,)))
         return "file:///clip.m4a"
 
+    def _emit_preview_peaks(self, kind, ident, url):
+        self.log.append(("peaks", (kind, ident, url)))
+
 
 @pytest.fixture
 def track(monkeypatch):
@@ -295,7 +298,7 @@ def test_the_label_is_published_before_the_multi_second_resolve(track):
     stub.previewTrack("t1")
 
     order = [name for name, _ in stub.log]
-    assert order == ["state", "meta", "resolve", "ready"]
+    assert order == ["state", "meta", "resolve", "ready", "peaks"]
 
 
 def test_the_label_still_carries_the_full_credit_payload(track):

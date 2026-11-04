@@ -14,7 +14,10 @@ The scene below runs Main.qml's own guard over a hover-enabled button and
 proves both halves at once: the window shows the hand over the button, and
 the button still sees the pointer. It also shows the I-beam over a text
 field (TextInput names no cursorShape) and no hand over a disabled button,
-as Qt itself does. Runs in a SUBPROCESS like the other Main.qml
+as Qt itself does, and the hand again once the page has scrolled: the
+handler lands on the page's content, so its own position scrolls with the
+rows, and read as the page's it sent the search a scroll's height below the
+pointer (a name lower in the Releases feed underlined with an arrow). Runs in a SUBPROCESS like the other Main.qml
 scenarios (offscreen Qt, a sandboxed config dir).
 """
 
@@ -52,6 +55,9 @@ def test_the_guard_wears_the_cursor_of_what_is_beneath() -> None:
     )
     assert "hoverEnabled: true" not in block, "the guard's own hover would block the rows beneath"
     assert (
+        "point.scenePosition" in block
+    ), "the handler's own position is in the page's content (it scrolls): search from the scene position"
+    assert (
         "childAt(" not in block.split("function inner")[0]
     ), "childAt's single topmost item misses an area under a sibling label: walk every child"
 
@@ -83,7 +89,7 @@ Window {
     width: 300; height: 300; visible: true
 %s
     Flickable {
-        id: flick; anchors.fill: parent; contentHeight: 600
+        id: flick; objectName: "flick"; anchors.fill: parent; contentHeight: 600
         Rectangle {
             x: 50; y: 50; width: 100; height: 40; color: "green"
             MouseArea {
@@ -126,6 +132,7 @@ def _run_scenario() -> int:
         return _EXIT_FAIL
     win = roots[0]
     btn = win.findChild(QQuickItem, "btn")
+    flick = win.findChild(QQuickItem, "flick")
     state = {"rc": _EXIT_FAIL}
 
     def probe() -> None:
@@ -154,12 +161,21 @@ def _run_scenario() -> int:
         app.processEvents()
         busy = win.cursor().shape()
         print(f"over the disabled button: cursor={busy.name}")
+        # Scrolled: the button now sits at 10..50, under (100, 30).
+        flick.setProperty("contentY", 40)
+        QTest.mouseMove(win, QPoint(100, 30))
+        app.processEvents()
+        QTest.mouseMove(win, QPoint(101, 31))
+        app.processEvents()
+        scrolled = win.cursor().shape()
+        print(f"over the button, scrolled: cursor={scrolled.name}")
         ok = (
             shape == Qt.CursorShape.PointingHandCursor
             and hovered
             and back == Qt.CursorShape.ArrowCursor
             and text == Qt.CursorShape.IBeamCursor
             and busy == Qt.CursorShape.ArrowCursor
+            and scrolled == Qt.CursorShape.PointingHandCursor
         )
         state["rc"] = _EXIT_OK if ok else _EXIT_FAIL
         app.quit()

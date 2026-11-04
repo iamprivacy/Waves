@@ -523,6 +523,7 @@ class _ShutdownStub:
         self._own_pool = _Pool(self.log, "own")
         self._ownership = SimpleNamespace(close=lambda: self.log.append(("close", "ownership")))
         self._preview_clips: dict = {}
+        self._preview_peaks: dict = {}
 
 
 def test_shutdown_drains_the_ownership_pool_before_closing_the_store():

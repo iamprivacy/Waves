@@ -52,6 +52,8 @@ def _apply_stub():
     stub.ffmpegStatusChanged = _signal()
     stub.skipExistingChanged = _signal()
     stub.dl_pool = SimpleNamespace(setMaxThreadCount=lambda n: None)
+    # A save pumps the queue: a wider pool may give a queued row its turn.
+    stub._pump_queue = lambda: None
     stub._logged_in = False
     stub._set_status = lambda text: None
     calls = []

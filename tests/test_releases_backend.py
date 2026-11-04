@@ -118,6 +118,9 @@ for _m in (
     "loadReleases",
     "releasesUnseenCount",
     "acknowledgeAllReleases",
+    "releaseArrivals",
+    "markArrivalSeen",
+    "markArrivalsSeen",
     "followedCount",
     "isFollowed",
     "followInfo",
@@ -733,6 +736,27 @@ def test_acknowledge_all_returns_ids_and_announces(tmp_path):
     assert _bind(s, "acknowledgeAllReleases")() == ["y"]
     assert s.releasesChanged.emits == [()]
     assert _bind(s, "acknowledgeAllReleases")() == [] and len(s.releasesChanged.emits) == 1
+
+
+def test_arrivals_stay_until_opened_or_marked_seen(tmp_path):
+    s = _stub(tmp_path)
+    s._releases.follow("A", "Artist", "")
+    s._releases.record_check("A", [{"id": "x", "date": "2026-01-01"}])
+    s._releases.record_check("A", [{"id": "x", "date": "2026-01-01"}, {"id": "y", "date": "2026-02-01"}])
+    s._releases.record_check(
+        "A", [{"id": "x", "date": "2026-01-01"}, {"id": "y", "date": "2026-02-01"}, {"id": "z", "date": "2026-02-02"}]
+    )
+    assert _bind(s, "acknowledgeAllReleases")() == ["y", "z"]
+    assert _bind(s, "releaseArrivals")() == ["y", "z"]
+    n = len(s.releasesChanged.emits)
+    _bind(s, "markArrivalSeen")("y")
+    assert _bind(s, "releaseArrivals")() == ["z"] and len(s.releasesChanged.emits) == n + 1
+    _bind(s, "markArrivalSeen")("x")
+    assert len(s.releasesChanged.emits) == n + 1
+    _bind(s, "markArrivalsSeen")()
+    assert _bind(s, "releaseArrivals")() == [] and len(s.releasesChanged.emits) == n + 2
+    _bind(s, "markArrivalsSeen")()
+    assert len(s.releasesChanged.emits) == n + 2
 
 
 def test_load_followed_dresses_with_library_presence(tmp_path):

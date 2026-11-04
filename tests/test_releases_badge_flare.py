@@ -1,10 +1,11 @@
-"""The Releases tab's badge flares in, counts, and counts back down before it goes.
+"""The Releases tab's badge pops in, counts, and counts back down before it goes.
 
 WHAT THIS FENCES OFF
 --------------------
-The badge used to appear and vanish in a single frame. Now it flares in
-white hot and cools to green, steps through every number on the way up, and
-when the count clears it counts back down and then shrinks away. All of it
+The badge used to appear and vanish in a single frame. Now it is drawn like
+the QUEUE button's count (LED dots on the page color) and pops in with an
+overshoot, steps through every number on the way up, and when the count
+clears it counts back down and then shrinks away. All of it
 keys off the count, so a badge that went back to switching on its own
 ``visible`` (or straight to the new number) would jump again.
 
@@ -12,8 +13,8 @@ HOW THIS STAYS FIXED
 --------------------
 Boot the real Main.qml offscreen and drive ``releasesUnseen``:
 
-* 0 to 3: the badge shows at once, white hot, steps through 1, 2 and 3, and
-  settles green at full size reading 3;
+* 0 to 3: the badge shows at once, pops past full size, steps through 1, 2
+  and 3, and settles at full size reading 3;
 * 3 to 0: it is still on screen counting down, passes back through 2 and 1,
   and only then shrinks away.
 
@@ -45,7 +46,7 @@ _FIND = """
 """
 
 
-def test_the_releases_badge_flares_in_and_counts_both_ways():
+def test_the_releases_badge_pops_in_and_counts_both_ways():
     import pytest
 
     env = dict(os.environ)
@@ -80,12 +81,10 @@ def _scenario() -> int:
         print("no navTabBadge on the Releases tab", file=sys.stderr)
         return 78
 
-    def sample() -> tuple[bool, int, float, float, str]:
-        got = js(
-            "var b = bd(); return [b.visible ? 1 : 0, b.disp, b.heat, b.sc, walk(b, 'navTabBadgeText').text].join('|')"
-        )
-        vis, disp, heat, sc, text = str(got).split("|")
-        return vis == "1", int(disp), float(heat), float(sc), text
+    def sample() -> tuple[bool, int, float, str]:
+        got = js("var b = bd(); return [b.visible ? 1 : 0, b.disp, b.sc, walk(b, 'navTabBadgeText').text].join('|')")
+        vis, disp, sc, text = str(got).split("|")
+        return vis == "1", int(disp), float(sc), text
 
     failures = []
     js("root.releasesUnseen = 0; return 1")
@@ -95,20 +94,22 @@ def _scenario() -> int:
 
     js("root.releasesUnseen = 3; return 1")
     settle(20)
-    vis, _d, heat, _sc, _t = sample()
+    vis, _d, _sc, _t = sample()
     if not vis:
         failures.append("an arrival did not show the badge at once")
-    if heat < 0.5:
-        failures.append(f"an arrival came in at heat {heat:.2f}, wanted it white hot")
-    seen = set()
+    seen, peak = set(), 0.0
     for _ in range(40):
         settle(20)
-        seen.add(sample()[1])
+        _v, disp, sc, _t = sample()
+        seen.add(disp)
+        peak = max(peak, sc)
+    if peak < 1.02:
+        failures.append(f"an arrival peaked at scale {peak:.2f}, wanted it to pop past full size")
     if not {1, 2, 3} <= seen:
         failures.append(f"counting up showed {sorted(seen)}, wanted every number through 3")
-    vis, disp, heat, sc, text = sample()
-    if not vis or disp != 3 or text != "3" or heat > 0.02 or abs(sc - 1) > 0.01:
-        failures.append(f"settled at visible={vis} disp={disp} text={text!r} heat={heat:.2f} scale={sc:.2f}")
+    vis, disp, sc, text = sample()
+    if not vis or disp != 3 or text != "3" or abs(sc - 1) > 0.01:
+        failures.append(f"settled at visible={vis} disp={disp} text={text!r} scale={sc:.2f}")
 
     js("root.releasesUnseen = 0; return 1")
     settle(20)

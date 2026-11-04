@@ -1,4 +1,4 @@
-"""The v0.2.0 launch fireworks play on every launch of that version.
+"""The v0.2 launch fireworks play on every launch of 0.2.0 and 0.2.1.
 
 So the launch stays near its usual length: the opening frame holds only
 0.1 s past the plain 1.9 s, the version drains under the last shell's
@@ -16,7 +16,7 @@ MAIN = (ROOT / "waves" / "waves_ui" / "qml" / "Main.qml").read_text(encoding="ut
 
 def test_every_launch_of_the_version_plays_the_show():
     block = MAIN[MAIN.index("id: bootFx") : MAIN.index("id: bootFx") + 400]
-    assert re.search(r'celebrate: waves\.appVersion === "0\.2\.0"\n', block)
+    assert re.search(r'celebrate: \["0\.2\.0", "0\.2\.1"\]\.indexOf\(waves\.appVersion\) >= 0\n', block)
     assert "launch_fx_seen" not in MAIN
 
 

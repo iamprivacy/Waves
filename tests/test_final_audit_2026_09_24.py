@@ -149,22 +149,34 @@ def test_an_unreadable_settings_file_starts_on_defaults_and_is_left_alone(tmp_pa
 
 
 def test_a_wrong_shaped_field_sets_the_file_aside_before_defaults_are_written(tmp_path):
-    """Final audit C27: a list where a number belongs raised TypeError, which
-    skipped the set-aside, so the defaults replaced the only copy."""
+    """Final audit C27: a wrong-shaped field raised TypeError, which skipped
+    the set-aside, so the defaults replaced the only copy. A list where a
+    number belongs now resets that field alone (the file is not set aside at
+    all); a list where a table belongs still raises out of from_json and
+    takes the whole-file path, which must keep the user's copy."""
     import json
 
     from waves.config import BaseConfig
     from waves.model.cfg import Settings as ModelSettings
 
-    target = tmp_path / "settings.json"
-    body = json.dumps({"download_base_path": "/music/mine", "window_x": [1, 2]})
-    target.write_text(body, encoding="utf-8")
+    def _read(body: str):
+        target = tmp_path / "settings.json"
+        target.write_text(body, encoding="utf-8")
+        cfg = BaseConfig.__new__(BaseConfig)
+        cfg.cls_model = ModelSettings
+        cfg.file_path = str(target)
+        cfg.path_base = str(tmp_path)
+        cfg.read(str(target))
+        return cfg
+
     (tmp_path / "settings.json.bak").write_text("older backup", encoding="utf-8")
-    cfg = BaseConfig.__new__(BaseConfig)
-    cfg.cls_model = ModelSettings
-    cfg.file_path = str(target)
-    cfg.path_base = str(tmp_path)
-    cfg.read(str(target))
+    cfg = _read(json.dumps({"download_base_path": "/music/mine", "window_x": [1, 2]}))
+    assert cfg.data.download_base_path == "/music/mine", "the rest of the file loads"
+    assert cfg.data.window_x == ModelSettings().window_x, "the one field goes back to its default"
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".bak")] == ["settings.json.bak"]
+
+    body = json.dumps({"download_base_path": "/music/mine", "filename_illegal_map": [1, 2]})
+    _read(body)
     kept = [p for p in tmp_path.iterdir() if p.name.endswith(".bak")]
     assert (tmp_path / "settings.json.bak").read_text(
         encoding="utf-8"

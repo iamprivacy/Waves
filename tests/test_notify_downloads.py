@@ -95,7 +95,8 @@ def _stub(prefs=None):
     s._dl_queue_failed = 0
     s._dl_queue_failed_qids = set()
     # The idle test's inputs, all idle.
-    s._running_qid = None
+    s._streaming_qid = None
+    s._live_qids = set()
     s._paused = False
     s._scans_in_flight = 0
     s._pending_downloads = []
@@ -546,7 +547,7 @@ def test_the_drain_banner_waits_for_a_truly_idle_queue():
     s = _stub()
     _end(s, "A", "done")
     for attr, busy in (
-        ("_running_qid", 7),  # the next row already started
+        ("_live_qids", {7}),  # the next row already started
         ("_paused", True),
         ("_scans_in_flight", 1),  # a discography scan still adding rows
         ("_pending_downloads", [("id", None)]),  # a held replay owes a row
@@ -566,10 +567,12 @@ def test_a_job_ending_into_the_next_row_sends_nothing():
     s._queue_item = lambda qid: s._queue.get(qid)
     s._pct_last = {}
     s._reap_stranded_groups = lambda: None
-    s._running_qid = 1
+    s._live_qids = {1}
+    s._live_media = {1: "A"}
+    s._finish_lines = {}
 
     def pump():
-        s._running_qid = s._next_qid
+        s._live_qids = set() if s._next_qid is None else {s._next_qid}
 
     s._pump_queue = pump
     s._next_qid = 2
@@ -588,3 +591,32 @@ def test_idleness_without_a_job_ending_is_noticed():
     assert "self.scanningChanged.connect(self._maybe_notify_idle)" in init
     assert "self._maybe_notify_idle()" in inspect.getsource(WavesBridge.resumeQueue)
     assert "self._maybe_notify_idle()" in inspect.getsource(WavesBridge.dismissDownloadFolderNudge)
+
+
+def test_the_last_of_two_jobs_ending_together_writes_the_finished_line():
+    """Two jobs ending at the same moment each saw the other still live on
+    its worker thread, so neither wrote "Finished" and the status line sat
+    on "Downloading" over an idle queue. The last one out writes its line,
+    and only over a stale Downloading line."""
+    s = _stub()
+    s._queue = {1: {"qid": 1, "name": "A", "status": "done"}, 2: {"qid": 2, "name": "B", "status": "done"}}
+    s._queue_item = lambda qid: s._queue.get(qid)
+    s._pct_last = {}
+    s._reap_stranded_groups = lambda: None
+    s._pump_queue = lambda: None
+    s._live_qids = {1, 2}
+    s._live_media = {1: "A", 2: "B"}
+    s._finish_lines = {1: "Finished A", 2: "Finished B"}
+    s._status = "Downloading B…"
+    s._set_status = lambda text: setattr(s, "_status", text)
+    _bind(s, "_on_job_finished")(1)
+    assert s._status == "Downloading B…", "B is still live"
+    _bind(s, "_on_job_finished")(2)
+    assert s._status == "Finished B"
+    assert s._finish_lines == {}
+    # A newer line (a save, a scan) is not overwritten by a late finish.
+    s._live_qids = {3}
+    s._finish_lines = {3: "Finished C"}
+    s._status = "Settings saved"
+    _bind(s, "_on_job_finished")(3)
+    assert s._status == "Settings saved"

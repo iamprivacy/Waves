@@ -65,7 +65,9 @@ def test_a_broken_settings_file_that_cannot_be_set_aside_is_left_as_it_is(tmp_pa
 
     base = _config_home(tmp_path, monkeypatch)
     target = base / "settings.json"
-    body = json.dumps({**_USER_FILE, "window_x": [1, 2]}).encode("utf-8")  # TypeError on load
+    # A list where a table belongs raises out of from_json (a list where a
+    # number belongs resets that field alone now).
+    body = json.dumps({**_USER_FILE, "filename_illegal_map": [1, 2]}).encode("utf-8")
     target.write_bytes(body)
 
     def _locked(*_a, **_k):

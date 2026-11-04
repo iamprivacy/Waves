@@ -117,7 +117,9 @@ def _run_scenario() -> int:  # noqa: C901
         return _EXIT_PRECONDITION
     root = roots[0]
     root.setProperty("width", 1280)
-    root.setProperty("height", 1200)
+    # Short enough that one page of one-line cards runs well past the 2.5
+    # views a page must fill before the feed stops reaching for the next.
+    root.setProperty("height", 960)
 
     def q(expr: str):
         e = QQmlExpression(QQmlEngine.contextForObject(root), root, expr)

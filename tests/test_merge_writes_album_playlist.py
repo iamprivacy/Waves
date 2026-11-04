@@ -68,6 +68,10 @@ class _Settings:
         base = {
             "playlist_create": True,
             "downloads_concurrent_max": 3,
+            # The fan-out is sized from the stream count plus this; the
+            # stand-in item() here takes no stream slot, so the cancel tests
+            # below need the pool exactly as wide as the stream count.
+            "downloads_finishing_max": 0,
             "download_delay": False,
             "filename_illegal_replacement": "",
             "filename_illegal_map": None,

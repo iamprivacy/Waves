@@ -86,6 +86,10 @@ def _stub(*, enabled=False, source="separate", folder="", download_base="/dl"):
     s.librarySourceChanged = _signal()
     s._logged_in = False
     s._set_status = lambda text: None
+    # A save re-sizes the download pool from the finishing count.
+    s.dl_pool = SimpleNamespace(setMaxThreadCount=lambda n: None)
+    # A save pumps the queue: a wider pool may give a queued row its turn.
+    s._pump_queue = lambda: None
     return s
 
 

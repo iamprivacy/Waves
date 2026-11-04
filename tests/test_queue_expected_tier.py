@@ -100,6 +100,10 @@ def test_a_setting_change_leaves_every_queued_row_alone():
     # it). One hidden behind a helper is caught by the drawer scenario below,
     # which reads the target from the real setting and watches the pill.
     code = "\n".join(line for line in src.splitlines() if not line.strip().startswith("#"))
+    # The pump starts the next queued row once a wider pool gives it its
+    # turn (Tracks finishing in the background raised mid-run); it reads no
+    # row's request and changes none.
+    code = code.replace("self._pump_queue()", "")
     for touch in ("_queue", "_job_tracks", "_emit_queue", "queueChanged", "askQuality", "_target_tier"):
         assert touch not in code, f"applySettings reaches for {touch!r}: a setting change may not retarget the queue"
 

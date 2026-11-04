@@ -127,6 +127,7 @@ def test_shutdown_stops_the_watchdog_before_it_drains_the_pools():
         _ownership=_Store(),
         _library=_Store(),
         _preview_clips={},
+        _preview_peaks={},
     )
 
     real_stop = diagnostics.stop_freeze_watchdog

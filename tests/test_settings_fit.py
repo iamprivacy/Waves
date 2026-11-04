@@ -51,6 +51,7 @@ _SECTIONS = [
     "metadata",
     "processing",
     "appearance",
+    "playback",
     "notifications",
     "pacing",
     "updates",
@@ -333,12 +334,12 @@ def _run_scenario() -> int:
     # pane, and a remembered pick of it is refused.
     q('settingsPage.groups = settingsPage.groups.filter(function (g) { return g.id !== "notifications" })')
     settle(150)
-    q('settingsPage.showSection("appearance")')
+    q('settingsPage.showSection("playback")')
     settle(150)
     QTest.keyClick(root, Qt.Key.Key_Down)
     settle(150)
     if q("settingsPage.curSec") != "pacing":
-        failures.append(f"Down from Appearance with Notifications hidden showed {q('settingsPage.curSec')}")
+        failures.append(f"Down from Playback with Notifications hidden showed {q('settingsPage.curSec')}")
     if q('settingsPage.railHas("notifications")'):
         failures.append("a hidden Notifications section still counts as a rail section")
     q("settingsPage.refreshSchema()")

@@ -495,6 +495,37 @@ def test_acknowledge_all_returns_ids_and_clears_badge(tmp_path):
     s.close()
 
 
+def test_arrivals_outlast_the_visit_until_opened_or_cleared(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    _seed(s, "2", [_rel("e", artist_id="2")])
+    s.record_check("1", [_rel("a"), _rel("b"), _rel("c")])
+    s.record_check("2", [_rel("e", artist_id="2"), _rel("d", artist_id="2")])
+    assert s.arrivals() == []
+    s.acknowledge_all()
+    assert s.arrivals() == ["b", "c", "d"]
+    # A reopen of the store keeps them.
+    s.close()
+    s = _store(tmp_path)
+    assert s.arrivals() == ["b", "c", "d"]
+    assert s.arrival_seen("b") and not s.arrival_seen("b") and s.arrivals() == ["c", "d"]
+    # A release that leaves the feed leaves the arrivals too.
+    s.unfollow("2")
+    assert s.arrivals() == ["c"]
+    assert s.arrivals_clear() == 1 and s.arrivals() == []
+    s.close()
+
+
+def test_opening_an_unacknowledged_arrival_clears_it_from_the_badge(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.record_check("1", [_rel("a"), _rel("b"), _rel("c")])
+    assert s.unseen_count() == 2
+    assert s.arrival_seen("b") and s.unseen_count() == 1
+    assert s.acknowledge_all() == ["c"] and s.arrivals() == ["c"]
+    s.close()
+
+
 def test_pending_auto_downloads_wait_for_the_day(tmp_path):
     s = _store(tmp_path)
     _seed(s)

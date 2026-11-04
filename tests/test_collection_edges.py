@@ -188,9 +188,17 @@ def test_the_engine_reports_the_list_size_to_the_bridge():
     td = _TrackedDownload.__new__(_TrackedDownload)
     assert Download._note_list_size(td, 5) is None  # base: nothing to report to
 
+    # The size also arms the streams-started count (expect_items), so the
+    # bare instance carries the gate __init__ would have given it.
+    td._gate_lock = threading.Lock()
+    td._gate_left = None
+    td._gate_fired = False
+    td._job_token = None
+    td._on_streams_started = None
     td.list_item_count = None
     _TrackedDownload._note_list_size(td, 0)
     assert td.list_item_count == 0
+    assert td._gate_fired is True, "an empty collection has started every stream it ever will"
 
 
 # --------------------------------------------------------------------------- #
