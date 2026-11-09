@@ -150,6 +150,7 @@ for _m in (
     "_releases_signed_out",
     "_releases_back_off",
     "_releases_library_cache",
+    "_releases_library_still",
     "startArtistImport",
     "cancelArtistImport",
     "_releases_import_alive",

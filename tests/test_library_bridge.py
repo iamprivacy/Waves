@@ -53,6 +53,13 @@ _METHODS = (
     # Which published index a baked card verdict came from.
     "libraryStamp",
     "_library_root",
+    # The download folder, scanned beside a separate library folder: its
+    # root, its cache and the joined view the badges are answered from.
+    "_library_extra_root",
+    "_open_library_extra",
+    "_joined_source",
+    "_on_download_recorded",
+    "_poll_library_containers",
     "_waves_pref_bool",
     "rescanLibrary",
     "setWavesPref",
@@ -128,14 +135,22 @@ def _make(
     # (cache_file_for_root) and is re-invoked on a root change; mirror that
     # here with the test's fake tag reader kept across reopens, so the glue
     # tests exercise the per-root file behavior without mutagen.
-    def _reopen():
-        return LibraryIndex(
-            cache_file_for_root(str(tmp_path), s._library_root()),
+    def _reopen(root=None):
+        idx = LibraryIndex(
+            cache_file_for_root(str(tmp_path), s._library_root() if root is None else root),
             read_tags=lambda p: tagmap.get(os.path.dirname(p)),
         )
+        if root is not None:
+            # The download folder's cache is stamped as the real opener
+            # stamps it; the library root's stays unstamped, so the glue
+            # tests that move a folder by hand keep their old ancestry.
+            idx.opened_for_key = root_comparison_key(root)
+        return idx
 
     s._open_library_index = _reopen
     s._library = _reopen()
+    s._library_extra = s._open_library_extra()
+    s._library_scanning_extra = None
     s._library_index = None
     s._library_track_index = None
     s._library_artist_index = {}
@@ -1398,26 +1413,35 @@ def test_downloads_inside_library_true_for_a_subfolder(tmp_path):
     assert s.downloadsInsideLibrary() is True
 
 
-def test_downloads_inside_library_false_for_a_separate_folder(tmp_path):
+def test_downloads_inside_library_true_for_a_separate_folder(tmp_path):
+    # A separate download folder is scanned beside the library folder, so what
+    # was downloaded reads IN LIBRARY before it is moved anywhere.
     s = _make(tmp_path, library_folder=str(tmp_path / "lib"), download_base=str(tmp_path / "dl"))
-    assert s.downloadsInsideLibrary() is False
+    assert s._library_extra_root() == str(tmp_path / "dl")
+    assert s.downloadsInsideLibrary() is True
 
 
-def test_downloads_inside_library_false_for_a_sibling_prefix_name(tmp_path):
-    # "lib2" begins with "lib" as a STRING but is not inside it; the check
-    # must compare path segments, not characters.
-    s = _make(tmp_path, library_folder=str(tmp_path / "lib"), download_base=str(tmp_path / "lib2"))
-    assert s.downloadsInsideLibrary() is False
-
-
-def test_downloads_inside_library_folds_case_where_the_platform_does(tmp_path):
-    # One folder spelled two ways. On macOS (APFS/HFS+ case-insensitive by
-    # default) and on Windows (folded by normcase) those name the SAME folder,
-    # so the download folder really is inside the library and the done face may
-    # say IN LIBRARY. On a case-sensitive filesystem they are two folders and
-    # the answer stays False.
-    s = _make(tmp_path, library_folder=str(tmp_path / "Lib"), download_base=str(tmp_path / "lib"))
-    assert s.downloadsInsideLibrary() is (sys.platform in ("darwin", "win32"))
+def test_extra_root_is_empty_when_one_folder_holds_the_other(tmp_path):
+    # "lib2" begins with "lib" as a STRING but is not inside it: two folders,
+    # so the download folder is scanned beside the library.
+    lib = str(tmp_path / "lib")
+    s = _make(tmp_path, library_folder=lib, download_base=str(tmp_path / "lib2"))
+    assert s._library_extra_root() == str(tmp_path / "lib2")
+    # Downloads inside the library: the library root's one scan covers them.
+    inner = _make(tmp_path, library_folder=lib, download_base=os.path.join(lib, "new"))
+    assert inner._library_extra_root() == "" and inner._library_root() == lib
+    # The library inside the download folder: the OUTER folder is the root,
+    # so no album is counted twice.
+    dl = str(tmp_path / "dl")
+    outer = _make(tmp_path, library_folder=os.path.join(dl, "lib"), download_base=dl)
+    assert outer._library_extra_root() == "" and outer._library_root() == dl
+    # One folder spelled two ways where the platform folds case: one scan.
+    folded = _make(tmp_path, library_folder=str(tmp_path / "Lib"), download_base=str(tmp_path / "lib"))
+    assert (folded._library_extra_root() == "") is (sys.platform in ("darwin", "win32"))
+    # Off, download-source mode, and no library folder: nothing extra.
+    assert _make(tmp_path, library_enabled=False, library_folder=lib, download_base=dl)._library_extra_root() == ""
+    assert _make(tmp_path, library_source="download", download_base=dl)._library_extra_root() == ""
+    assert _make(tmp_path, library_folder="", download_base=dl)._library_extra_root() == ""
 
 
 def test_downloads_inside_library_false_when_scan_off_or_unconfigured(tmp_path):
@@ -1593,3 +1617,135 @@ def test_path_inside_library_answers_for_one_recorded_copy(tmp_path):
     assert s._path_inside_library(str(tmp_path / "old" / "01.flac")) is False
     assert s._path_inside_library(str(tmp_path / "lib2" / "01.flac")) is False
     assert s._path_inside_library("") is False
+
+
+# ---------------------------------------------------------------------------
+# The download folder beside a separate library folder: scanned too, so what
+# Waves downloaded reads IN LIBRARY before it is moved into the library.
+# ---------------------------------------------------------------------------
+
+
+def _two_folders(tmp_path):
+    lib = str(tmp_path / "lib")
+    dl = str(tmp_path / "dl")
+    os.makedirs(lib, exist_ok=True)
+    os.makedirs(dl, exist_ok=True)
+    kept = _album(lib, "Lorna Shore/Pain Remains", ["1.flac", "2.flac", "3.flac"])
+    fresh = _album(dl, "Boards of Canada/Geogaddi", ["1.flac", "2.flac"])
+    both_lib = _album(lib, "Boards of Canada/Tomorrow's Harvest", ["1.flac", "2.flac"])
+    both_dl = _album(dl, "Boards of Canada/Tomorrow's Harvest", ["1.flac", "2.flac"])
+    tags = {
+        kept: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"},
+        fresh: {"album": "Geogaddi", "artist": "Boards of Canada", "date": "2002"},
+        both_lib: {"album": "Tomorrow's Harvest", "artist": "Boards of Canada", "date": "2013"},
+        both_dl: {"album": "Tomorrow's Harvest", "artist": "Boards of Canada", "date": "2013"},
+    }
+    s = _make(tmp_path, library_folder=lib, download_base=dl, tagmap=tags)
+    return s, lib, dl, fresh
+
+
+def test_a_download_not_yet_moved_reads_in_library(tmp_path):
+    s, lib, dl, fresh = _two_folders(tmp_path)
+    assert s._library_extra is not None
+    s._rebuild_library_index()
+    assert s._library_scan_status == "ok"
+    # Both folders' albums answer, the download folder's from where it sits.
+    assert s.libraryAlbumPresence("Lorna Shore", "Pain Remains", "2022", 3)["present"]
+    got = s.libraryAlbumPresence("Boards of Canada", "Geogaddi", "2002", 2)
+    assert got["present"] and got["local_album_id"] == fresh
+    # The running total counts both folders (four album folders), not just
+    # the one scanned last.
+    assert s._library_scan_progress.get("indexed") == 4
+    # An album in both folders is one album with two copies to the artist.
+    art = s.artistLibraryPresence("Boards of Canada")
+    assert art and art.get("albums") == 2
+
+
+def test_the_joined_cache_feeds_the_releases_import(tmp_path):
+    s, _lib, _dl, _fresh = _two_folders(tmp_path)
+    s._rebuild_library_index()
+    cache = s._library_index.cache
+    names = {r["name"]: r for r in cache.distinct_artists()}
+    assert set(names) == {"Lorna Shore", "Boards of Canada"}
+    assert names["Boards of Canada"]["albums"] == 3  # two folders of one album + one more
+    albums = cache.artist_albums([names["Boards of Canada"]["key"]])[names["Boards of Canada"]["key"]]
+    assert [a["year"] for a in albums] == ["2013", "2013", "2002"]
+    titles = cache.artist_titles(names["Boards of Canada"]["key"])
+    assert sorted(titles["albums"]) == ["Geogaddi", "Tomorrow's Harvest"]
+
+
+def test_an_offline_download_folder_never_costs_the_library_badges(tmp_path):
+    lib = str(tmp_path / "lib")
+    os.makedirs(lib, exist_ok=True)
+    d = _album(lib, "A/Alb", ["1.flac"])
+    s = _make(
+        tmp_path,
+        library_folder=lib,
+        download_base=str(tmp_path / "gone"),
+        tagmap={d: {"album": "Alb", "artist": "A", "date": "2000"}},
+    )
+    s._rebuild_library_index()
+    assert s._library_scan_status == "ok", "the download folder's scan spoke for the library"
+    assert s.libraryAlbumPresence("A", "Alb", "2000", 1)["present"]
+
+
+def test_a_download_landing_rebuilds_beside_a_separate_library(tmp_path):
+    s, _lib, _dl, _fresh = _two_folders(tmp_path)
+    started = []
+    s._library_dl_debounce = SimpleNamespace(isActive=lambda: False, start=lambda: started.append(1), stop=lambda: None)
+    s._library_dl_burst_start = 0.0
+    s._on_download_recorded()
+    assert started, "a download beside a separate library never scheduled a rebuild"
+    off = _make(tmp_path, library_enabled=False, library_folder=_lib, download_base=_dl)
+    off._library_dl_debounce = SimpleNamespace(
+        isActive=lambda: False, start=lambda: started.append(2), stop=lambda: None
+    )
+    off._on_download_recorded()
+    assert 2 not in started
+
+
+def test_a_download_path_counts_as_inside_the_library(tmp_path):
+    s, lib, dl, fresh = _two_folders(tmp_path)
+    assert s._path_inside_library(os.path.join(fresh, "1.flac")) is True
+    assert s._path_inside_library(str(tmp_path / "elsewhere" / "1.flac")) is False
+
+
+def test_a_folder_change_reopens_and_closes_the_download_folder_cache(tmp_path):
+    s, lib, dl, _fresh = _two_folders(tmp_path)
+    old = s._library_extra
+    s._waves_prefs["library_source"] = "download"
+    s._invalidate_library_index()
+    assert s._library_extra is None and old.is_closed()
+    s._waves_prefs["library_source"] = "separate"
+    s._invalidate_library_index()
+    assert s._library_extra is not None and s._library_extra.opened_for_key == root_comparison_key(dl)
+
+
+def test_the_poll_asks_the_download_folder_too(tmp_path):
+    s, _lib, dl, _fresh = _two_folders(tmp_path)
+    s._rebuild_library_index()
+    asked = []
+    s._library_extra.poll_containers_changed = lambda root: asked.append(root) or True
+    s._libraryPollDone = _Signal()
+    s._poll_library_containers()
+    assert asked == [dl]
+    assert s._libraryPollDone.emits[-1][1] is True
+
+
+def test_a_download_cache_left_out_of_a_scan_is_still_closed_when_retired(tmp_path):
+    # The straddle guard leaves a download folder cache opened for another
+    # folder out of the scan, but the cache is still scan-held, so the
+    # invalidation behind it leaves closing it to the scan. The scan closed
+    # only what it scanned, and the held cache stayed open for the session.
+    s, lib, dl, _fresh = _two_folders(tmp_path)
+    held = s._library_extra
+    held.opened_for_key = root_comparison_key(str(tmp_path / "elsewhere"))
+
+    def folder_changes_mid_scan(root):
+        s._library_share_remount = lambda root: None
+        s._invalidate_library_index()
+
+    s._library_share_remount = folder_changes_mid_scan
+    s._rebuild_library_index()
+    assert held is not s._library_extra
+    assert held.is_closed(), "the retired download folder cache leaked its connection"

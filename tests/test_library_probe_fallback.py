@@ -488,3 +488,35 @@ def test_a_busy_cache_stops_the_gate_asking_again_but_not_a_badge(tmp_path, monk
     s._library_probe_rearm()
     assert s.artistLibraryPresence("C")["present"]
     assert s._library_gate_cooldown == {}
+
+
+def test_a_probe_republish_keeps_the_separate_download_folder(tmp_path, monkeypatch):
+    # The probe republishes the presence indexes. Built from the library
+    # folder's cache alone, that republish dropped every album sitting only
+    # in a separate download folder from IN LIBRARY until the next scan.
+    lib, tags = _library(tmp_path)
+    dl = str(tmp_path / "dl")
+    d = _album(dl, "D/[2024] Delta", ["1.flac"])
+    tags[d] = {"album": "Delta", "artist": "D", "date": "2024", "title": "Song"}
+    _fake_listing(monkeypatch, {lib: lambda e: [x for x in e if x.name != "C"] * 2})
+    s = _make(tmp_path, library_folder=lib, download_base=dl, tagmap=tags)
+    s._library_scan_partial = False
+    s._library_probe_memo = {}
+    s._library_probe_inflight = set()
+    s._library_probe_pending = {}
+    s._library_probe_deferred = {}
+    s._library_probe_draining = False
+    s._library_probe_gate = threading.Lock()
+    s._library_backfill_done = False
+    s.emitted = []
+    s._emit_from_worker = lambda name: s.emitted.append(name)
+    s._rebuild_library_index()
+    delta = lambda: s.libraryAlbumPresence("D", "Delta", "2024", 1)["present"]
+    assert delta(), "the download folder's album counts as library"
+    old = s._library_index
+
+    assert not _gamma(s)["present"]  # the miss probes and republishes
+
+    assert s._library_index is not old
+    assert _gamma(s)["present"]
+    assert delta(), "the probe's republish dropped the download folder"

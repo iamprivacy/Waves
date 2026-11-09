@@ -157,3 +157,18 @@ def test_moved_download_folder_rescans_in_download_mode():
     _apply(s, {"download_base_path": "/moved", "library_enabled": True, "library_source": "download"})
     assert s.drops, "a moved download folder left stale badges up"
     assert s.rescans, "a moved download folder was never rescanned"
+
+
+def test_moved_download_folder_rescans_beside_a_separate_library():
+    # The download folder is scanned beside a separate library folder, so a
+    # moved download folder drops its old badges and scans its new place.
+    s = _stub(enabled=True, source="separate", folder="/lib", download_base="/dl")
+    _apply(s, {"download_base_path": "/moved", "library_enabled": True, "library_source": "separate"})
+    assert s.drops, "a moved download folder left the old folder's badges up"
+    assert s.rescans == ["/lib"], "a moved download folder was never rescanned"
+
+
+def test_moved_download_folder_scans_nothing_while_the_library_is_off():
+    s = _stub(enabled=False, source="separate", folder="/lib", download_base="/dl")
+    _apply(s, {"download_base_path": "/moved", "library_enabled": False, "library_source": "separate"})
+    assert s.drops == [] and s.rescans == []

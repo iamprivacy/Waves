@@ -417,6 +417,71 @@ def test_a_library_folder_change_ends_the_run(tmp_path, monkeypatch):
     assert s._releases.followed_artists() == []
 
 
+def _joined(lib, extra):
+    """A JoinedLibrary-shaped view: a new object over the same ``caches``,
+    answering from the library cache (the extra one holds nothing here)."""
+    return SimpleNamespace(
+        caches=(lib, extra),
+        distinct_artists=lib.distinct_artists,
+        artist_titles=lib.artist_titles,
+        first_audio_file=lib.first_audio_file,
+    )
+
+
+def test_a_republish_of_the_same_folders_keeps_the_run(tmp_path, monkeypatch):
+    # With a separate download folder every publish (each mid-scan flush, each
+    # download debounce) wraps the same caches in a new JoinedLibrary. That is
+    # the same library, so the run goes on.
+    s = _import_stub(tmp_path, [("A", [["1"]]), ("B", [["2"]])], monkeypatch=monkeypatch)
+    lib = s._library_index.cache
+    extra = _Cache([])
+    s._library_index = SimpleNamespace(cache=_joined(lib, extra))
+    read: list = []
+
+    def read_ids(path, tag):
+        read.append(path)
+        s._library_index = SimpleNamespace(cache=_joined(lib, extra))
+        return ["1"] if "/A/" in path else ["2"]
+
+    monkeypatch.setattr(rel, "read_custom_ids", read_ids)
+    _run(s)
+    assert len(read) == 2, "a fresh view over the same folders cut the run short"
+    assert s.artistImportError.emits == []
+
+
+def test_a_download_folder_joining_partway_keeps_the_run(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [("A", [["1"]]), ("B", [["2"]])], monkeypatch=monkeypatch)
+    lib = s._library_index.cache
+    read: list = []
+
+    def read_ids(path, tag):
+        read.append(path)
+        s._library_index = SimpleNamespace(cache=_joined(lib, _Cache([])))
+        return ["1"] if "/A/" in path else ["2"]
+
+    monkeypatch.setattr(rel, "read_custom_ids", read_ids)
+    _run(s)
+    assert len(read) == 2
+    assert s.artistImportError.emits == []
+
+
+def test_a_changed_download_folder_ends_the_run(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [("A", [["1"]]), ("B", [["2"]])], monkeypatch=monkeypatch)
+    lib = s._library_index.cache
+    s._library_index = SimpleNamespace(cache=_joined(lib, _Cache([])))
+    read: list = []
+
+    def read_ids(path, tag):
+        read.append(path)
+        s._library_index = SimpleNamespace(cache=_joined(lib, _Cache([])))
+        return ["1"]
+
+    monkeypatch.setattr(rel, "read_custom_ids", read_ids)
+    _run(s)
+    assert len(read) == 1
+    assert s.artistImportError.emits == ["library-changed"]
+
+
 # --- the track floor, and the library's say on namesakes ---------------------
 
 

@@ -1,61 +1,27 @@
 """Folder tree sweep + {folder_path} handling (waves/helper/folders.py).
 
-The fakes mirror the tidalapi surface the sweep touches: paged
-favorites.playlist_folders(parent_folder_id=...) and Folder.items(). The
-parent-path bookkeeping is asserted explicitly because tidalapi's parsed
-Folder objects lie about their parent (parse() never sets parent_folder_id).
+The sweep runs against _collection_server, a stand-in for the live v2 folder
+listing that ignores offset and pages by cursor. The parent-path bookkeeping is
+asserted explicitly because tidalapi's parsed Folder objects lie about their
+parent (parse() never sets parent_folder_id).
 """
 
 from types import SimpleNamespace
 
 import pytest
+from _collection_server import CollectionServer, playlist_row
 from tidalapi.exceptions import TooManyRequests
 
 from waves.helper import folders as f
 
 
-class FakePlaylist(SimpleNamespace):
-    pass
-
-
-class FakeFolder:
-    def __init__(self, fid, name, playlists=None, items_error=None):
-        self.id = fid
-        self.name = name
-        self._playlists = playlists or []
-        self._items_error = items_error
-
-    def items(self, offset=0, limit=50):
-        if self._items_error is not None:
-            raise self._items_error
-        return self._playlists[offset : offset + limit]
-
-
-class FakeSession:
-    """children: dict parent_id -> list[FakeFolder]."""
-
-    def __init__(self, children, raise_429_for=None):
-        self._children = children
-        self._raise_429_for = raise_429_for or set()
-        self.user = SimpleNamespace(favorites=SimpleNamespace(playlist_folders=self._playlist_folders))
-
-    def _playlist_folders(self, limit=50, offset=0, parent_folder_id="root"):
-        if parent_folder_id in self._raise_429_for:
-            raise TooManyRequests()
-        kids = self._children.get(parent_folder_id, [])
-        return kids[offset : offset + limit]
-
-
-def _pl(pid):
-    return FakePlaylist(id=pid)
-
-
 def test_walk_builds_paths_and_map():
-    blue = FakeFolder("f2", "Bluegrass", playlists=[_pl("p2"), _pl("p3")])
-    country = FakeFolder("f1", "Country", playlists=[_pl("p1")])
-    session = FakeSession({"root": [country], "f1": [blue], "f2": []})
+    server = CollectionServer(
+        folders={"root": [("f1", "Country")], "f1": [("f2", "Bluegrass")]},
+        playlists={"f1": ["p1"], "f2": ["p2", "p3"]},
+    )
 
-    tree = f.walk_playlist_tree(session)
+    tree = f.walk_playlist_tree(server.session())
 
     assert not tree.partial
     assert [n.path for n in tree.nodes] == ["Country", "Country/Bluegrass"]
@@ -72,47 +38,68 @@ def test_walk_builds_paths_and_map():
 
 
 def test_walk_pages_past_50():
-    many = [_pl(f"p{i}") for i in range(120)]
-    top = FakeFolder("f1", "Big", playlists=many)
-    session = FakeSession({"root": [top], "f1": []})
+    server = CollectionServer(folders={"root": [("f1", "Big")]}, playlists={"f1": [f"p{i}" for i in range(120)]})
 
-    tree = f.walk_playlist_tree(session)
+    tree = f.walk_playlist_tree(server.session())
 
-    assert len(tree.node_by_id("f1").playlists) == 120
+    assert not tree.partial
+    assert [p.id for p in tree.node_by_id("f1").playlists] == [f"p{i}" for i in range(120)]
     assert len(tree.playlist_paths) == 120
 
 
 def test_walk_reuses_prefetched_root_folders():
-    top = FakeFolder("f1", "Country", playlists=[_pl("p1")])
-    session = FakeSession({"f1": []})
+    server = CollectionServer(playlists={"f1": ["p1"]})
+    top = SimpleNamespace(id="f1", name="Country")
 
-    tree = f.walk_playlist_tree(session, root_folders=[top])
+    tree = f.walk_playlist_tree(server.session(), root_folders=[top])
 
     assert tree.folder_path_of("p1") == "Country"
+    assert all(call["folderId"] != "root" for call in server.calls)
 
 
-def test_walk_continues_past_an_unparsable_items_page_but_flags_the_tree():
-    """One malformed item raises out of a whole page, so the sweep skips it and
-    carries on. It must still flag the tree: the skip abandons every REMAINING
-    page of that folder too, so a folder of 60 whose second page fails would
-    otherwise cache as a complete folder of 50 (tile count, drill-in list,
-    DOWNLOAD ALL and a green rollup all agreeing on the wrong number)."""
-    broken = FakeFolder("f1", "Broken", items_error=KeyError("promotedArtists"))
-    ok = FakeFolder("f2", "Fine", playlists=[_pl("p1")])
-    session = FakeSession({"root": [broken, ok], "f1": [], "f2": []})
+def test_walk_skips_an_unparsable_row_but_flags_the_tree():
+    """A malformed row is skipped and the rest of the folder still lists. The
+    tree is still flagged: a folder missing a row would otherwise cache as
+    complete (tile count, drill-in list, DOWNLOAD ALL and a green rollup all
+    agreeing on the wrong number)."""
+    server = CollectionServer(
+        folders={"root": [("f1", "Broken"), ("f2", "Fine")]},
+        playlists={"f1": [playlist_row("bad", broken=True), "p0"], "f2": ["p1"]},
+    )
+
+    tree = f.walk_playlist_tree(server.session())
+
+    assert tree.partial
+    assert [p.id for p in tree.node_by_id("f1").playlists] == ["p0"]
+    assert tree.folder_path_of("p1") == "Fine", "the rest of the sweep still ran"
+
+
+def test_walk_continues_past_a_failed_folder_listing_but_flags_the_tree():
+    server = CollectionServer(
+        folders={"root": [("f1", "Broken"), ("f2", "Fine")]},
+        playlists={"f2": ["p1"]},
+    )
+    real = server.request
+
+    def failing(method, endpoint, base_url=None, params=None):
+        if params["folderId"] == "f1" and params["includeOnly"] == "PLAYLIST":
+            raise RuntimeError("listing request failed")
+        return real(method, endpoint, base_url=base_url, params=params)
+
+    session = server.session()
+    session.request.request = failing
 
     tree = f.walk_playlist_tree(session)
 
     assert tree.partial
     assert tree.node_by_id("f1").playlists == []
-    assert tree.folder_path_of("p1") == "Fine", "the rest of the sweep still ran"
+    assert tree.folder_path_of("p1") == "Fine"
 
 
 def test_walk_429_returns_partial_tree():
-    top = FakeFolder("f1", "Country", playlists=[_pl("p1")])
-    session = FakeSession({"root": [top]}, raise_429_for={"f1"})
+    server = CollectionServer(folders={"root": [("f1", "Country")]}, playlists={"f1": ["p1"]}, rate_limit={"f1"})
 
-    tree = f.walk_playlist_tree(session)
+    tree = f.walk_playlist_tree(server.session())
 
     assert tree.partial
     assert tree.folder_path_of("p1") == ""  # walk stopped before items
@@ -120,8 +107,16 @@ def test_walk_429_returns_partial_tree():
 
 
 def test_walk_429_inside_items_is_partial_not_skip():
-    top = FakeFolder("f1", "Country", items_error=TooManyRequests())
-    session = FakeSession({"root": [top], "f1": []})
+    server = CollectionServer(folders={"root": [("f1", "Country")]}, playlists={"f1": ["p1"]})
+    real = server.request
+
+    def limited(method, endpoint, base_url=None, params=None):
+        if params["includeOnly"] == "PLAYLIST":
+            raise TooManyRequests()
+        return real(method, endpoint, base_url=base_url, params=params)
+
+    session = server.session()
+    session.request.request = limited
 
     tree = f.walk_playlist_tree(session)
 

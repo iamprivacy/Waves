@@ -136,3 +136,23 @@ def test_the_playlists_page_windows_against_its_own_sweeps_tree(monkeypatch):
     ids = [r["id"] for r in page0 + page1]
     assert ids == ["f0", "p0", "p1", "p2", "p3"], "the page window skipped or repeated a playlist"
     assert more0 is True and more1 is False
+
+
+def test_a_short_root_folder_listing_does_not_replace_a_complete_tree(monkeypatch):
+    # The walk starts from the root folders the sweep parsed. A root row that
+    # would not parse is simply absent there, so the walk itself sees nothing
+    # wrong: only the sweep's folders_short says the tree is missing a folder.
+    good = _tree(["Country", "Jazz", "Rock"])
+    missing_one = _tree(["Country", "Jazz"])
+    b, _calls = _bridge(monkeypatch, [good, missing_one])
+    _lists, tree = b._media_lists(refresh=True)
+    assert tree is good
+
+    monkeypatch.setattr(
+        backend, "user_media_lists", lambda session: {"playlists": [], "mixes": [], "folders_short": True}
+    )
+    ts, data, t = b._media_lists_cache
+    b._media_lists_cache = (ts - WavesBridge._MEDIA_LISTS_TTL - 1, data, t)
+    _lists, tree = b._media_lists(refresh=True)
+    assert tree is good, "a root folder that failed to parse must not vanish from My Tidal"
+    assert b._folder_tree is good
