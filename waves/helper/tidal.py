@@ -9,6 +9,7 @@ from tidalapi.types import OrderDirection, PlaylistOrder
 from tidalapi.user import LoggedInUser
 
 from waves.constants import FAVORITES, MediaType
+from waves.helper.collection_paging import page_listing
 from waves.helper.exceptions import MediaUnknown
 
 logger = logging.getLogger(__name__)
@@ -267,43 +268,21 @@ def paginate_results(func_get_items_media: [Callable]) -> [Track | Video | Album
     return result
 
 
-# The v2 collection endpoints cap a page at 50.
-_ROOT_PLAYLIST_PAGE = 50
-
-
-def _page_root_playlists(
-    favorites, order: PlaylistOrder, direction: OrderDirection, expected: int | None
-) -> tuple[list, int]:
-    """Every root playlist in ``order``, one page after another, each id once.
+def _page_root_playlists(session: Session, order: PlaylistOrder, direction: OrderDirection) -> tuple[list, int]:
+    """Every root playlist in ``order``, each id once, read by cursor.
 
     Returns the playlists in the server's order and how many rows the pages
-    repeated. A short page ends the pass only once ``expected`` rows are in
-    hand (the server drops an unavailable playlist from its window, which
-    must not cost every page after it); an empty page, or one that brings
-    nothing new, always ends it, so a server that ignored the offset could
-    never loop here forever.
+    repeated. The listing ignores offset (every offset is the first page
+    again), so the pages are followed through the cursor each one carries;
+    see collection_paging for the guards that keep a pass from looping.
     """
-    result: list = []
-    seen: set[str] = set()
-    repeats = 0
-    offset = 0
-    while True:
-        batch = favorites.playlists(limit=_ROOT_PLAYLIST_PAGE, offset=offset, order=order, order_direction=direction)
-        if not batch:
-            break
-        fresh = [p for p in batch if str(p.id) not in seen]
-        if not fresh:
-            break
-        repeats += len(batch) - len(fresh)
-        seen.update(str(p.id) for p in fresh)
-        result.extend(fresh)
-        if len(batch) < _ROOT_PLAYLIST_PAGE and (expected is None or len(result) >= expected):
-            break
-        offset += _ROOT_PLAYLIST_PAGE
-    return result, repeats
+    listing = page_listing(
+        session, "root", "PLAYLIST", session.parse_playlist, order=order.value, direction=direction.value
+    )
+    return listing.rows, listing.repeats
 
 
-def _root_playlists(favorites, root_folder_count: int) -> list:
+def _root_playlists(session: Session, root_folder_count: int) -> list:
     """The account's root playlists, newest first, each exactly once (#46).
 
     tidalapi's ``playlists_paginated`` fetched its pages in parallel, sorted by
@@ -313,7 +292,8 @@ def _root_playlists(favorites, root_folder_count: int) -> list:
     three pages while others fell off the list. Its total also counted the root
     folders, which the playlist pages never return.
 
-    Here the pages are read one after another in the same newest-first order
+    Here the pages are read one after another, by cursor (the listing ignores
+    offset, so offset paging only ever saw the first page), in the same newest-first order
     (the list's default order in My Tidal, which the rows themselves cannot
     always restore: the v2 rows carry their added date outside the part
     tidalapi parses), keeping every row once by id. If that still comes up
@@ -321,7 +301,7 @@ def _root_playlists(favorites, root_folder_count: int) -> list:
     rare, fills the gaps at the end of the list.
     """
     try:
-        expected = int(favorites.get_playlists_count()) - root_folder_count
+        expected = int(session.user.favorites.get_playlists_count()) - root_folder_count
     except Exception:
         logger.info("Root playlist count unavailable; paging until the pages run out")
         expected = None
@@ -331,7 +311,7 @@ def _root_playlists(favorites, root_folder_count: int) -> list:
         (PlaylistOrder.DateCreated, OrderDirection.Descending),
         (PlaylistOrder.Name, OrderDirection.Ascending),
     ):
-        page, repeated = _page_root_playlists(favorites, order, direction, expected)
+        page, repeated = _page_root_playlists(session, order, direction)
         repeats += repeated
         for playlist in page:
             by_id.setdefault(str(playlist.id), playlist)
@@ -354,23 +334,14 @@ def user_media_lists(session: Session) -> dict[str, list]:
         session (Session): TIDAL session object.
 
     Returns:
-        dict[str, list]: Dictionary with 'playlists' (includes Folder and Playlist) and 'mixes' lists.
+        dict[str, list]: Dictionary with 'playlists' (includes Folder and Playlist) and 'mixes' lists,
+            plus 'folders_short' (bool), True when the root folder listing came up short.
     """
-    # Fetch root-level folders manually (no paginated version available)
-    folders = []
-    offset = 0
-    limit = 50
+    # Root-level folders, read by cursor like every level of the listing.
+    root = page_listing(session, "root", "FOLDER", session.parse_folder)
+    folders = root.rows
 
-    while True:
-        batch = session.user.favorites.playlist_folders(limit=limit, offset=offset, parent_folder_id="root")
-        if not batch:
-            break
-        folders.extend(batch)
-        if len(batch) < limit:
-            break
-        offset += limit
-
-    playlists = _root_playlists(session.user.favorites, len(folders))
+    playlists = _root_playlists(session, len(folders))
 
     # Combine folders and playlists
     all_playlists = folders + playlists
@@ -387,7 +358,9 @@ def user_media_lists(session: Session) -> dict[str, list]:
     except Exception:
         logger.exception("Could not load the user's mixes; keeping the playlists")
 
-    return {"playlists": all_playlists, "mixes": user_mixes}
+    # folders_short: the root folder listing was cut off, so a folder walk
+    # built from it must not replace a complete tree (see _media_lists).
+    return {"playlists": all_playlists, "mixes": user_mixes, "folders_short": root.short}
 
 
 def instantiate_media(

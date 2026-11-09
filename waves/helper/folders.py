@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import pathlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pathvalidate import sanitize_filename
@@ -23,14 +24,13 @@ from tidalapi import Playlist, Session
 from tidalapi.exceptions import TooManyRequests
 from tidalapi.playlist import Folder
 
+from waves.helper.collection_paging import page_listing
 from waves.helper.path import sanitize_name_component
 
 logger = logging.getLogger("waves.folders")
 
 FOLDER_PATH_TOKEN = "{folder_path}"  # noqa: S105 - a path-template token, not a secret
 
-# The v2 collection endpoints cap page size at 50 (documented in tidalapi).
-_PAGE_LIMIT = 50
 # Safety rail against a cyclic or absurd tree; TIDAL's UI nests far shallower.
 _MAX_DEPTH = 8
 
@@ -53,7 +53,8 @@ class FolderNode:
 
 @dataclass
 class FolderTree:
-    """Result of a full sweep. partial means a rate limit cut the walk short."""
+    """Result of a full sweep. partial means a rate limit, a failed or unreadable
+    listing, or the page cap cut the walk short."""
 
     nodes: list[FolderNode] = field(default_factory=list)
     playlist_paths: dict[str, str] = field(default_factory=dict)
@@ -89,52 +90,44 @@ class FolderTree:
         return result
 
 
-def _page_folders(session: Session, parent_id: str) -> list[Folder]:
-    result: list[Folder] = []
-    offset = 0
-    while True:
-        batch = session.user.favorites.playlist_folders(limit=_PAGE_LIMIT, offset=offset, parent_folder_id=parent_id)
-        if not batch:
-            break
-        result.extend(batch)
-        if len(batch) < _PAGE_LIMIT:
-            break
-        offset += _PAGE_LIMIT
-    return result
+def _parse_folder(session: Session) -> Callable[[dict], Folder]:
+    return session.parse_folder
 
 
-def _page_playlists(node: FolderNode) -> tuple[list[Playlist], bool]:
+def _parse_folder_playlist(session: Session) -> Callable[[dict], Playlist]:
+    # The same parse Folder.items() uses: the playlist sits under "data", and
+    # parse_factory turns the account's own playlists into UserPlaylist.
+    parser = session.playlist()
+    return lambda item: parser.parse_factory(item["data"])
+
+
+def _page_folders(session: Session, parent_id: str) -> tuple[list[Folder], bool]:
+    """Every folder directly inside ``parent_id``, and whether the listing is short."""
+    listing = page_listing(session, parent_id, "FOLDER", _parse_folder(session))
+    return listing.rows, listing.short
+
+
+def _page_playlists(session: Session, node: FolderNode) -> tuple[list[Playlist], bool]:
     """All playlists directly inside a folder, and whether the listing is short.
 
-    Folder.items() is not paginated by tidalapi and a single malformed item in
-    the v2 payload raises out of the whole page (Playlist.parse subscripts
-    hard), so a failing page is logged and skipped rather than failing the
-    sweep.
-
-    That skip abandons every REMAINING page too, not just the failed one, so it
-    has to be reported: a folder of 60 whose offset=50 page fails otherwise
-    caches as a complete folder of 50. The tile would read "50 playlists",
-    DOWNLOAD ALL would queue 50 and the rollup would finish green, leaving the
-    user believing the folder is fully on disk. The second element is the
-    caller's cue to mark the tree partial, exactly as a 429 does.
+    The listing is read by cursor (the server ignores offset, see
+    collection_paging). A row that will not parse is skipped rather than
+    failing the sweep, and a request that fails outright ends this folder's
+    listing; either way the folder is reported short, because a folder of 60
+    that lost its last rows would otherwise cache as a complete folder of
+    fewer. The tile count, DOWNLOAD ALL and the rollup would all agree on the
+    wrong number, leaving the user believing the folder is fully on disk. The
+    second element is the caller's cue to mark the tree partial, exactly as a
+    429 does.
     """
-    result: list[Playlist] = []
-    offset = 0
-    while True:
-        try:
-            batch = node.folder.items(offset=offset, limit=_PAGE_LIMIT)
-        except TooManyRequests:
-            raise
-        except Exception:
-            logger.exception("Skipping unparsable folder items page (folder id %s, offset %d)", node.id, offset)
-            return result, True
-        if not batch:
-            break
-        result.extend(batch)
-        if len(batch) < _PAGE_LIMIT:
-            break
-        offset += _PAGE_LIMIT
-    return result, False
+    try:
+        listing = page_listing(session, node.id, "PLAYLIST", _parse_folder_playlist(session))
+    except TooManyRequests:
+        raise
+    except Exception:
+        logger.exception("Could not read a folder's playlists; marking the folder tree partial")
+        return [], True
+    return listing.rows, listing.short
 
 
 def walk_playlist_tree(session: Session, root_folders: list[Folder] | None = None) -> FolderTree:
@@ -153,7 +146,11 @@ def walk_playlist_tree(session: Session, root_folders: list[Folder] | None = Non
     """
     tree = FolderTree()
     try:
-        level = root_folders if root_folders is not None else _page_folders(session, "root")
+        if root_folders is not None:
+            level = root_folders
+        else:
+            level, short = _page_folders(session, "root")
+            tree.partial = tree.partial or short
         pending: list[tuple[Folder, str, str]] = [(f, "", "root") for f in level]
         depth = 0
         while pending and depth < _MAX_DEPTH:
@@ -169,10 +166,12 @@ def walk_playlist_tree(session: Session, root_folders: list[Folder] | None = Non
                     parent_id=parent_id,
                 )
                 tree.nodes.append(node)
-                subfolders = _page_folders(session, node.id)
+                subfolders, short = _page_folders(session, node.id)
+                if short:
+                    tree.partial = True
                 node.subfolder_count = len(subfolders)
                 next_level.extend((sub, node.path, node.id) for sub in subfolders)
-                node.playlists, truncated = _page_playlists(node)
+                node.playlists, truncated = _page_playlists(session, node)
                 if truncated:
                     tree.partial = True
                 for playlist in node.playlists:

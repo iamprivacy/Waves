@@ -2759,8 +2759,13 @@ class LibraryIndex:
     def artist_buckets(self, artist_key: str) -> list[list[dict]]:
         """Every album bucket of one artist (one list per presence key), the
         input of matching.artist_rollup_entry."""
+        return list(self.artist_bucket_map(artist_key).values())
+
+    def artist_bucket_map(self, artist_key: str) -> dict[str, list[dict]]:
+        """artist_buckets keyed by each bucket's title key, so two caches can
+        pool one album's copies into ONE bucket (see JoinedLibrary)."""
         if not artist_key:  # the keyless mark, as in presence_facts
-            return []
+            return {}
         rows = self._read(
             f"SELECT pkey_title, {self._ALBUM_FACT_COLUMNS} FROM albums WHERE pkey_artist = ? ORDER BY pkey_title",  # noqa: S608 (a column list, the keys are bound)
             (artist_key,),
@@ -2768,7 +2773,7 @@ class LibraryIndex:
         buckets: dict[str, list[dict]] = {}
         for row in rows:
             buckets.setdefault(str(row[0] or ""), []).append(self._album_fact(row[1:]))
-        return list(buckets.values())
+        return buckets
 
     def artist_known(self, artist_key: str) -> bool:
         if not artist_key:  # the keyless mark, as in presence_facts
@@ -2785,11 +2790,18 @@ class LibraryIndex:
         where the import looks for the TIDAL artist id a Waves download
         writes into its files. Keyless rows (Various Artists, untagged
         files) never reach here: their artist half is empty by design."""
+        return self.named_artists(self.artist_entries())
+
+    def artist_entries(self, by_key: dict[str, dict] | None = None) -> dict[str, dict]:
+        """distinct_artists before the naming: per artist key, how often each
+        spelling is tagged, the album and track counts and up to three
+        folders. Adds into ``by_key`` when given, so two caches tally one
+        artist as one (see JoinedLibrary)."""
         rows = self._read(
             "SELECT pkey_artist, artist, folder_path, track_count FROM albums"
             " WHERE pkey_artist IS NOT NULL AND pkey_artist != '' ORDER BY folder_path"
         )
-        by_key: dict[str, dict] = {}
+        by_key = {} if by_key is None else by_key
         for key, artist, folder, count in rows:
             entry = by_key.setdefault(str(key), {"spellings": {}, "albums": 0, "tracks": 0, "folders": []})
             name = str(artist or "").strip()
@@ -2799,6 +2811,11 @@ class LibraryIndex:
             entry["tracks"] += int(count or 0)
             if folder and len(entry["folders"]) < 3:
                 entry["folders"].append(str(folder))
+        return by_key
+
+    @staticmethod
+    def named_artists(by_key: dict[str, dict]) -> list[dict]:
+        """The distinct_artists rows for artist_entries' tally."""
         out = []
         for key, entry in by_key.items():
             if not entry["spellings"]:
@@ -2826,11 +2843,17 @@ class LibraryIndex:
         file of that artist that carries one agrees on a single id. A
         collaboration's several ids, or files that disagree, say nothing.
         Read from file_tags, so it costs no file open."""
+        return self.settled_tag_ids(self.artist_tag_id_sets())
+
+    def artist_tag_id_sets(self, seen: dict[str, set[str]] | None = None) -> dict[str, set[str]]:
+        """artist_tag_ids before the settling: every id each artist's files
+        carry ("*" for a collaboration's). Adds into ``seen`` when given, so
+        two caches must agree on an artist's id (see JoinedLibrary)."""
         rows = self._read(
             "SELECT a.pkey_artist, f.tags FROM file_tags f JOIN albums a ON a.folder_path = f.folder_path"
             " WHERE a.pkey_artist IS NOT NULL AND a.pkey_artist != '' AND f.tags LIKE '%musicbrainz_albumartistid%'"
         )
-        seen: dict[str, set[str]] = {}
+        seen = {} if seen is None else seen
         for key, blob in rows:
             try:
                 ids = json.loads(blob or "{}").get("easy", {}).get("musicbrainz_albumartistid") or []
@@ -2839,7 +2862,15 @@ class LibraryIndex:
             # One value, one id: "a; b" or two values is a collaboration.
             one = [i for i in ids if ";" not in i and "/" not in i]
             seen.setdefault(str(key), set()).update(one if len(ids) == 1 and one else ["*"])
-        return {k: v.pop() for k, v in seen.items() if len(v) == 1 and "*" not in v and _MBID_RE.match(next(iter(v)))}
+        return seen
+
+    @staticmethod
+    def settled_tag_ids(seen: dict[str, set[str]]) -> dict[str, str]:
+        """The artist_tag_ids answer for artist_tag_id_sets' tally: one id per
+        artist, only where every file agreed on a well-formed one."""
+        return {
+            k: next(iter(v)) for k, v in seen.items() if len(v) == 1 and "*" not in v and _MBID_RE.match(next(iter(v)))
+        }
 
     def artist_titles(self, key: str) -> dict:
         """What the library holds under one artist key (a ``distinct_artists``
@@ -3416,3 +3447,94 @@ class LibraryIndex:
             with contextlib.suppress(Exception):
                 reader.conn.close()
         self._readers.reader = None
+
+
+class JoinedLibrary:
+    """A read-only view over the scan caches of BOTH folders Waves looks in,
+    the library folder and a separate download folder, answering every
+    question the presence badges, the artist rollup and the Releases import
+    ask as if the two were one library. A download that has not been moved
+    into the library yet is still something the user owns.
+
+    Each cache keeps its own file, scan and change check; only the answers
+    are pooled. An album held in both folders is two copies in one bucket,
+    exactly as two copies inside one library folder are.
+
+    The scan state (scan_root, the change poll, the watcher's containers)
+    is never asked of this view: the scan code drives each cache on its own."""
+
+    def __init__(self, *caches: LibraryIndex) -> None:
+        self.caches = tuple(c for c in caches if c is not None)
+
+    def _each(self):
+        """The caches still open: one folder's cache can be retired by a
+        settings change while a reader holds this view."""
+        for c in self.caches:
+            closed = getattr(c, "is_closed", None)
+            if closed is not None and closed():
+                continue
+            yield c
+
+    def presence_facts(self, key) -> list[dict]:
+        return [f for c in self._each() for f in c.presence_facts(key)]
+
+    def track_facts(self, key) -> list[dict]:
+        return [f for c in self._each() for f in c.track_facts(key)]
+
+    def has_presence_rows(self) -> bool:
+        return any(c.has_presence_rows() for c in self._each())
+
+    def artist_bucket_map(self, artist_key: str) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        for c in self._each():
+            for title, facts in c.artist_bucket_map(artist_key).items():
+                out.setdefault(title, []).extend(facts)
+        return out
+
+    def artist_buckets(self, artist_key: str) -> list[list[dict]]:
+        return list(self.artist_bucket_map(artist_key).values())
+
+    def artist_known(self, artist_key: str) -> bool:
+        return any(c.artist_known(artist_key) for c in self._each())
+
+    def distinct_artists(self) -> list[dict]:
+        by_key: dict[str, dict] = {}
+        for c in self._each():
+            c.artist_entries(by_key)
+        return LibraryIndex.named_artists(by_key)
+
+    def artist_tag_ids(self) -> dict[str, str]:
+        seen: dict[str, set[str]] = {}
+        for c in self._each():
+            c.artist_tag_id_sets(seen)
+        return LibraryIndex.settled_tag_ids(seen)
+
+    def artist_titles(self, key: str) -> dict:
+        albums: dict[str, None] = {}
+        tracks: dict[str, None] = {}
+        for c in self._each():
+            one = c.artist_titles(key)
+            albums.update(dict.fromkeys(one["albums"]))
+            tracks.update(dict.fromkeys(one["tracks"]))
+        return {"albums": list(albums), "tracks": list(tracks)}
+
+    def artist_albums(self, keys: Iterable[str]) -> dict[str, list[dict]]:
+        keys = list(keys)
+        out: dict[str, list[dict]] = {}
+        for c in self._each():
+            for key, albums in c.artist_albums(keys).items():
+                out.setdefault(key, []).extend(albums)
+        for albums in out.values():
+            albums.sort(key=lambda a: a["title"].casefold())
+            albums.sort(key=lambda a: a["year"], reverse=True)
+        return out
+
+    first_audio_file = staticmethod(LibraryIndex.first_audio_file)
+
+    def iter_albums(self) -> Iterator[dict]:
+        for c in self._each():
+            yield from c.iter_albums()
+
+    def iter_tracks(self) -> Iterator[dict]:
+        for c in self._each():
+            yield from c.iter_tracks()
