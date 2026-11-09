@@ -22,6 +22,18 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.3 (2026-11-09)
+
+### 🔧 Changed
+
+- 📥 When your download folder is separate from your library folder, Waves counts both as your library: a finished download shows as in your library right away, before you move it, and bulk downloads skip what you already have in either folder.
+
+### 🐛 Fixed
+
+- 📂 The Playlists page finishes loading when a folder holds 50 or more playlists, and lists every playlist and folder past the first 50 instead of stopping short ([issue #59](https://github.com/iamprivacy/Waves/issues/59)).
+- 📈 The QUEUE button's speed chart keeps the speed of each stretch it has passed, so it draws the download's ups and downs instead of a flat line with only its tip moving.
+- 🅴 Explicit versions picks one edition when the clean title is spelled differently, without an apostrophe ("Tryin" for "Tryin'") or with a starred word ("B\*tch"), so a discography no longer downloads both ([issue #60](https://github.com/iamprivacy/Waves/issues/60)).
+
 ## 🗂️ v0.2.2 (2026-11-04)
 
 ### 🔧 Changed
