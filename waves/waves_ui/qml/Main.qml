@@ -12289,29 +12289,44 @@ ApplicationWindow {
         property double offT: -1e9
         // sv is the speed on a log scale (2 Mb/s is 0, 400 Mb/s is 1),
         // eased; ph is distance traveled, so a speed change bends the
-        // sparks instead of jumping them. prof is the speed at every percent.
+        // sparks instead of jumping them. prof is the speed at every percent
+        // the head has passed: the mean speed while bytes were arriving since
+        // its last step (accS over accT). The percent mostly steps when a
+        // track settles, after its stream has gone quiet, so a level read at
+        // the step itself read nothing and the whole chart lay flat behind
+        // the head.
         property real sv: 0
         property real ph: 0
         property double _lt: 0
         property var prof: []
         property int profK: 0
+        property real accS: 0
+        property real accT: 0
         function track(t) {
             var dt = st._lt > 0 ? Math.max(0, Math.min(100, t - st._lt)) : 16
             st._lt = t
             var m = waves.paused ? 0 : st.rate, tgt = m > 0 ? clamp((Math.log(m) / Math.LN10 - 0.301) / 2.301) : 0
             st.sv += (tgt - st.sv) * (1 - Math.exp(-dt / 300))
             st.ph += dt / 1000 * (0.06 + 2.4 * st.sv)
-            var k = Math.floor(st.pct)
+            var k = Math.min(100, Math.floor(st.pct))
             // A new batch starts a new chart (the boot clears it); the dip
             // between two downloads of one batch keeps it. Stretches with
-            // no speed reading (finishing, paused) carry the last level.
-            if (st.prof.length !== 101) { var z = []; for (var i = 0; i <= 100; ++i) z.push(0); st.prof = z; st.profK = 0 }
-            while (st.profK <= k && st.profK <= 100) { st.prof[st.profK] = st.rate > 0 || st.profK === 0 ? st.sv : st.prof[st.profK - 1]; st.profK++ }
+            // no speed reading at all (finishing, paused) carry the last level.
+            if (st.prof.length !== 101) {
+                var z = []; for (var i = 0; i <= 100; ++i) z.push(0)
+                st.prof = z; st.profK = 0; st.accS = 0; st.accT = 0
+            }
+            if (m > 0) { st.accS += tgt * dt; st.accT += dt }
+            if (st.profK < k) {
+                var lv = st.accT > 0 ? st.accS / st.accT : st.profK > 0 ? st.prof[st.profK - 1] : 0
+                while (st.profK < k) { st.prof[st.profK] = lv; st.profK++ }
+                st.accS = 0; st.accT = 0
+            }
         }
         function profH(k, B) {
-            var N = Math.max(0, Math.floor(st.pct)), P = st.prof
+            var N = Math.min(st.profK, Math.max(0, Math.floor(st.pct))), P = st.prof
             if (k >= N) return B[3] * (0.1 + 0.78 * st.sv)
-            var a = P[Math.max(0, k - 1)] || 0, b = P[k] || 0, c = P[Math.min(k + 1, N)] || 0
+            var a = P[Math.max(0, k - 1)] || 0, b = P[k] || 0, c = k + 1 < N ? P[k + 1] || 0 : b
             return B[3] * (0.1 + 0.78 * (a + 2 * b + c) / 4)
         }
 
