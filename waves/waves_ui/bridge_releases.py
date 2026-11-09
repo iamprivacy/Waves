@@ -2377,6 +2377,24 @@ class ReleasesMixin:
         cache = getattr(getattr(self, "_library_index", None), "cache", None)
         return cache if hasattr(cache, "distinct_artists") else None
 
+    def _releases_library_still(self, cache) -> bool:
+        """Whether a run reading ``cache`` may go on: every folder cache it
+        reads is still behind the published index.
+
+        Not an identity check on ``cache`` itself: with a separate download
+        folder each publish wraps the same two caches in a new JoinedLibrary
+        (every mid-scan flush, every download debounce), so ``is`` called a
+        steady library "changed" and cut the import short. A download folder
+        joining in partway is fine too; a folder that changed, or a library
+        turned off, is not."""
+        current = self._releases_library_cache()
+        if current is None or cache is None:
+            return False
+        if current is cache:
+            return True
+        held = {id(c) for c in getattr(current, "caches", (current,))}
+        return all(id(c) in held for c in getattr(cache, "caches", (cache,)))
+
     @Slot()
     def startArtistImport(self) -> None:
         """Read every artist out of the library and settle each on a TIDAL
@@ -2570,7 +2588,7 @@ class ReleasesMixin:
             return
         try:
             for r in rows:
-                if gen != self._rel_gen or self._releases_library_cache() is not cache:
+                if gen != self._rel_gen or not self._releases_library_still(cache):
                     return
                 dressed = self._releases_held(albums.get(r["key"]) or [], look=True)
                 dressed.pop("unlisted")
@@ -2749,7 +2767,7 @@ class ReleasesMixin:
         def alive() -> bool:
             # The library folder changed or was turned off: its files are
             # no longer Waves' to read (the two-folder rule).
-            return self._releases_import_alive(gen, igen) and self._releases_library_cache() is cache
+            return self._releases_import_alive(gen, igen) and self._releases_library_still(cache)
 
         tagged = self._releases_import_tags(
             cache, rows, followed_ids, followed_norms | dismissed, alive, report=not auto

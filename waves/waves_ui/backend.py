@@ -3184,13 +3184,61 @@ _waves_download.get_album_artists = _album_artists_for_metadata
 
 
 _VERSION_TOKEN_RE = re.compile(r"[\[(]\s*(explicit|clean|e)\s*[\])]", re.IGNORECASE)
+# Straight, curly and modifier apostrophes plus the backtick and acute accent
+# that stand in for one. TIDAL lists one album as both "Tryin'" and "Tryin".
+_APOSTROPHE_RE = re.compile("['\u2018\u2019\u02bc`\u00b4]")
 _QUALITY_RANK = {"hi_res_lossless": 4, "high_lossless": 3, "low_320k": 2, "low_96k": 1}
 
 
 def _norm_title(title: str) -> str:
-    """Title with explicit/clean markers stripped (deluxe/remaster kept)."""
+    """Title with explicit/clean markers and apostrophes stripped (deluxe and
+    remaster kept). An apostrophe carries no identity: without dropping it a
+    clean "Tryin" never met its explicit "Tryin'" in one group, so neither the
+    explicit preference nor the edition collapse could choose between them and
+    a discography queued both (issue #60)."""
     text = _VERSION_TOKEN_RE.sub("", title or "").lower()
+    text = _APOSTROPHE_RE.sub("", text)
     return re.sub(r"\s+", " ", text).strip(" -.\u2013\u2014")
+
+
+# A run of asterisks masking letters inside a word ("b*tch", "f**k"). A run
+# that touches no letter or digit ("***", "* live *") is styling, not masking.
+_MASK_RUN_RE = re.compile(r"(?<=\w)\*+|\*+(?=\w)")
+
+
+def _censored_aliases(items, keys: dict) -> dict:
+    """Map a clean item whose title masks letters with '*' to the key of its
+    explicit, uncensored twin, for :func:`_dedup_versions`.
+
+    TIDAL lists a clean single as "Too Rich For The B*tch" beside the explicit
+    "Too Rich For The Bitch". The keys differ, so the explicit preference saw
+    two releases and kept both (issue #60). Each masking run is read as "one
+    or more letters", and the clean item takes the key of the ONE explicit
+    uncensored key that fits that shape and agrees on every other part of the
+    key (artist, track count or length, Atmos kind). The explicit flags have
+    to differ, the same clean/explicit signature the edition split asks for
+    (see _align_edition's cross_explicit), so a stylized title such as
+    "*NSYNC" is never folded into another release. No fit, or more than one
+    ("sh*t" beside both "shot" and "shut"), leaves the item alone."""
+    explicit_plain: set = set()
+    for item in items:
+        key = keys[id(item)]
+        if "*" not in key[0] and getattr(item, "explicit", False):
+            explicit_plain.add(key)
+    out: dict = {}
+    if not explicit_plain:
+        return out
+    for item in items:
+        key = keys[id(item)]
+        title = key[0]
+        if getattr(item, "explicit", False) or not _MASK_RUN_RE.search(title):
+            continue
+        parts = re.split(r"\*+", title)
+        shape = re.compile(r"[^\s*]+".join(re.escape(p) for p in parts))
+        fits = [k for k in explicit_plain if k[1:] == key[1:] and shape.fullmatch(k[0])]
+        if len(fits) == 1:
+            out[id(item)] = fits[0]
+    return out
 
 
 _WIMP_RE = re.compile(r"\[wimpLink[^\]]*\](.*?)\[/wimpLink\]", re.IGNORECASE | re.DOTALL)
@@ -3253,10 +3301,12 @@ def _dedup_versions(items, key_fn, mode: str, max_rank: int = 4) -> list:
             return within_cap[0]
         return ranked[-1] if ranked else None
 
+    keys = {id(item): key_fn(item) for item in items}
+    aliases = _censored_aliases(items, keys)
     groups: dict = {}
     order: list = []
     for item in items:
-        key = key_fn(item)
+        key = aliases.get(id(item)) or keys[id(item)]
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -5175,10 +5225,14 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # so it needs its own adapter rather than _library_probe_page.
         self.playlistTracksLoaded.connect(self._library_probe_track_rows)
         self._library = self._open_library_index()
+        # The download folder's own cache when it is scanned beside a separate
+        # library folder (see _library_extra_root), else None.
+        self._library_extra = self._open_library_extra()
         # The index object a scan currently holds (None outside a scan), so an
         # invalidation can tell whether the object it just retired may be
         # closed now or must be left to that scan's own cleanup.
         self._library_scanning = None
+        self._library_scanning_extra = None
         # Freshness (see the _LIBRARY_* constants in bridge_library): a cheap
         # container-mtime poll every few minutes (the network-safe backbone), an
         # hourly full sweep (track-level changes inside an album), a twice-daily
@@ -5274,7 +5328,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         diagnostics.set_verbose(self._waves_pref_bool("verbose_diagnostics"))
         self._try_token_login()
 
-    def _open_library_index(self) -> LibraryIndex:
+    def _open_library_index(self, root: str | None = None) -> LibraryIndex:
         """The scan cache for the CURRENT library root, opened beside the
         settings file, degrading to a throwaway in-memory cache if the file
         cannot be opened.
@@ -5291,8 +5345,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         call runs inside the bridge constructor, BEFORE the QML loads: an
         exception here means the app never opens a window, so the user cannot
         even reach the factory reset that would clear the file. Losing the
-        cache costs one re-scan; refusing to start costs the whole app."""
-        root = self._library_root()
+        cache costs one re-scan; refusing to start costs the whole app.
+
+        ``root`` names another folder's cache: the download folder's, when it
+        is scanned beside a separate library folder (_open_library_extra)."""
+        root = self._library_root() if root is None else root
         path = cache_file_for_root(os.path.dirname(self.settings.file_path), root)
 
         def stamped(idx: LibraryIndex) -> LibraryIndex:
@@ -7238,6 +7295,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         root_folders = [p for p in fresh.get("playlists", []) if not hasattr(p, "num_tracks")]
         t0 = devlog.clock()
         tree = walk_playlist_tree(self.tidal.session, root_folders=root_folders)
+        if fresh.get("folders_short"):
+            # A root folder row that would not parse is missing from
+            # root_folders, so the walk cannot know the tree is incomplete.
+            tree.partial = True
         if tree.nodes:
             devlog.done(
                 "library",
@@ -10283,6 +10344,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # may not resolve a link itself: a copy recorded by its resolved
         # path must still read IN LIBRARY.
         self._library_root_real = self._resolved_root(lib) if lib else ""
+        extra_root = getattr(self, "_library_extra_root", None)
+        extra = (extra_root() if extra_root is not None else "") or ""
+        self._library_extra_root_real = self._resolved_root(extra) if extra else ""
         return list(dict.fromkeys(roots))
 
     # How long a folder's resolved spelling is trusted before it is looked up
@@ -12237,7 +12301,21 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
 
     def _dedup_tracks(self, tracks: list) -> list:
         mode = self._waves_prefs.get("explicit_mode", "explicit")
-        key_fn = _length_clustered_key(tracks, self._track_key)
+        # The censored alias is read BEFORE length clustering, on the key
+        # without its length. Cluster numbers count from 0 within each title,
+        # so aliasing after them paired a clean "B*tch" with the first explicit
+        # "Bitch" cluster whatever the lengths: a 420 s clean cut stood in for
+        # a 200 s explicit song and one of the two recordings was lost. Folded
+        # into one title first, the two are clustered by real length together.
+        raw = {id(t): self._track_key(t) for t in tracks}
+        aliases = _censored_aliases(tracks, {i: k[:-1] for i, k in raw.items()})
+
+        def aliased_key(track):
+            key = raw[id(track)]
+            alias = aliases.get(id(track))
+            return (*alias, key[-1]) if alias else key
+
+        key_fn = _length_clustered_key(tracks, aliased_key)
         out = _dedup_versions(tracks, key_fn, mode, self._max_quality_rank())
         devlog.event("dedup", "tracks", inp=len(tracks), out=len(out), mode=mode)
         return out
@@ -17351,6 +17429,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # runs on threadpool, waited on above, and bails on the bumped gen).
         try:
             self._library.close()
+            if self._library_extra is not None:
+                self._library_extra.close()
         except Exception:
             logger.debug("shutdown: library index close failed", exc_info=True)
         # The follows store closes after its sweep pool drained (shutdown in
@@ -19394,10 +19474,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # their library IS the download folder; a moved folder means stale badges,
         # so drop them (the rescan below builds the new folder's index).
         lib_edit = any(self._waves_prefs.get(k) != v for k, v in lib_before.items())
-        if (
-            getattr(data, "download_base_path", None) != dl_base_before
-            and self._waves_prefs.get("library_source") == "download"
-        ):
+        # With the library on, the download folder is always scanned (as the
+        # root in download-source mode, beside a separate library folder
+        # otherwise), so a moved download folder re-opens the caches in every
+        # mode and its new place gets its first scan.
+        if getattr(data, "download_base_path", None) != dl_base_before and self._waves_pref_bool("library_enabled"):
             self._invalidate_library_index()
             lib_edit = True
         # A moved download folder can also enter or leave a SEPARATE library
@@ -19557,6 +19638,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self._flac_check_cache_event().wait(_FLAC_CACHE_RELEASE_WAIT_S)
         with contextlib.suppress(Exception):
             self._library.close()
+        with contextlib.suppress(Exception):
+            if self._library_extra is not None:
+                self._library_extra.close()
+        self._library_extra = None
         with contextlib.suppress(Exception):
             self._library = LibraryIndex(":memory:")
         # Same for the follows store, so the wipe can take its file and a

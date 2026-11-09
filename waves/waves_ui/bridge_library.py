@@ -48,7 +48,7 @@ from PySide6.QtCore import Signal, Slot
 
 import waves.matching as matching
 from waves.helper.path import folder_name_candidates, safe_filename_replacement, safe_filename_replacement_map
-from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, root_comparison_key
+from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, JoinedLibrary, root_comparison_key
 from waves.library_recover import recover_untrusted
 from waves.ownership import path_under
 from waves.worker import Worker
@@ -461,12 +461,63 @@ class LibraryMixin:
         poll, the watcher, the download debounce) funnels through this answer.
         The library_enabled master switch (off by default) is checked first, so
         while the feature is off NO folder resolves, whatever the source prefs
-        say, and the download folder is never indexed on its own."""
+        say, and the download folder is never indexed on its own.
+
+        A separate library folder that sits INSIDE the download folder resolves
+        to the download folder: one scan of the outer folder then covers both,
+        where two would count every album of the inner one twice."""
+        if not self._waves_pref_bool("library_enabled"):
+            return ""
+        download = (self.settings.data.download_base_path or "").strip()
+        if self._waves_prefs.get("library_source") == "download":
+            return download
+        folder = (self._waves_prefs.get("library_folder") or "").strip()
+        if folder and download and path_under(folder, download):
+            return download
+        return folder
+
+    def _library_extra_root(self) -> str:
+        """The download folder, when it is scanned as part of the library
+        beside a separate library folder, else "". What Waves downloaded is
+        the user's whether or not it has been moved into the library yet, so
+        with the library on, both of the two folders Waves looks in answer
+        IN LIBRARY. Empty while the library is off or has no folder, in
+        download-source mode (the download folder IS the library root), and
+        when one folder sits inside the other (the library root's one scan
+        already covers it)."""
         if not self._waves_pref_bool("library_enabled"):
             return ""
         if self._waves_prefs.get("library_source") == "download":
-            return (self.settings.data.download_base_path or "").strip()
-        return (self._waves_prefs.get("library_folder") or "").strip()
+            return ""
+        folder = (self._waves_prefs.get("library_folder") or "").strip()
+        download = (self.settings.data.download_base_path or "").strip()
+        if not folder or not download or path_under(download, folder) or path_under(folder, download):
+            return ""
+        return download
+
+    def _open_library_extra(self):
+        """The scan cache for _library_extra_root, or None when there is no
+        such folder. Its own file per root, like the library root's, so the
+        download folder's scan stays warm across launches (and is the very
+        cache download-source mode uses)."""
+        root = self._library_extra_root()
+        if not root:
+            return None
+        return self._open_library_index(root)
+
+    def _joined_source(self, lib, extra, extra_root: str):
+        """What the presence indexes are built over: ``lib`` alone, or ``lib``
+        joined with the download folder's cache once that cache holds a scan
+        of that very folder (never another folder's leftover rows)."""
+        if extra is None or not extra_root:
+            return lib
+        try:
+            if not extra.matches_scan_root(extra_root):
+                return lib
+        except Exception:
+            logger.debug("library: the download folder's cache could not be checked", exc_info=True)
+            return lib
+        return JoinedLibrary(lib, extra)
 
     def _invalidate_library_index(self) -> None:
         """Drop the current badges and stop watching the old folder after the
@@ -495,9 +546,12 @@ class LibraryMixin:
         with self._library_index_lock:
             self._library_gen += 1
             retired = self._library
+            retired_extra = getattr(self, "_library_extra", None)
             # getattr: partial test stubs drive this slot without the full init.
             scanning = getattr(self, "_library_scanning", None)
+            scanning_extra = getattr(self, "_library_scanning_extra", None)
             self._library = self._open_library_index()
+            self._library_extra = self._open_library_extra()
         # The scanner process may be mid-walk on the old folder: killed, so
         # the generation bump above is the end of it there too.
         worker = getattr(self, "_library_worker", None)
@@ -512,6 +566,9 @@ class LibraryMixin:
         if retired is not None and retired is not scanning:
             with contextlib.suppress(Exception):
                 retired.close()
+        if retired_extra is not None and retired_extra is not scanning_extra:
+            with contextlib.suppress(Exception):
+                retired_extra.close()
         self._library_index = None
         self._library_track_index = None
         self._library_scan_status = "unset"
@@ -701,7 +758,7 @@ class LibraryMixin:
             )
         return local, by_track
 
-    def _seed_library_badges_job(self, gen: int, lib, root: str) -> None:
+    def _seed_library_badges_job(self, gen: int, lib, root: str, extra=None, extra_root: str = "") -> None:
         """(POOL THREAD) Publish the previous scan's badges straight from the
         committed cache, so a freshly launched window is never badge-less
         while the change-check runs underneath.
@@ -723,7 +780,7 @@ class LibraryMixin:
         try:
             if not lib.matches_scan_root(root):
                 return
-            seeded, seeded_tracks = self._build_presence_indexes(lib)
+            seeded, seeded_tracks = self._build_presence_indexes(self._joined_source(lib, extra, extra_root))
         except Exception:
             # The scan behind this one publishes the real thing either way;
             # a failed seed costs the head start, never the badges.
@@ -760,10 +817,12 @@ class LibraryMixin:
         with self._library_index_lock:
             gen = self._library_gen
             lib = self._library
+            extra = getattr(self, "_library_extra", None)
         root = self._library_root()
         if not root:
             return
-        self.threadpool.start(Worker(lambda: self._seed_library_badges_job(gen, lib, root)), 10)
+        extra_root = self._library_extra_root()
+        self.threadpool.start(Worker(lambda: self._seed_library_badges_job(gen, lib, root, extra, extra_root)), 10)
 
     def _rebuild_library_index(self, force_full: bool = False) -> None:  # noqa: C901 (see below)
         """(Re)build the local library-presence index off the GUI thread by
@@ -797,10 +856,27 @@ class LibraryMixin:
             # _invalidate_library_index).
             gen = self._library_gen
             lib = self._library
+            # The download folder's cache, scanned after ``lib`` when the
+            # download folder is separate from the library folder (see
+            # _library_extra_root). Captured under the same lock, for the same
+            # reason, and scan-held the same way.
+            extra = getattr(self, "_library_extra", None)
             # Marks ``lib`` as scan-held, so an invalidation that swaps it out
             # mid-scan leaves closing it to this scan's own finally.
             self._library_scanning = lib
+            self._library_scanning_extra = extra
         root = self._library_root()
+        extra_root = self._library_extra_root() if extra is not None else ""
+        # The same straddle guard as the library root's below, but a mismatch
+        # only leaves the download folder out of THIS round: the invalidation
+        # behind it re-triggers with a matched pair.
+        extra_key = getattr(extra, "opened_for_key", None)
+        # The cache this scan holds (marked scan-held above), kept apart from
+        # ``extra``: the guard below can leave the download folder out of the
+        # scan, but an invalidation still leaves closing the held cache to us.
+        held_extra = extra
+        if not extra_root or (extra_key is not None and root_comparison_key(extra_root) != extra_key):
+            extra, extra_root = None, ""
         # A pref write precedes its own invalidation (setWavesPref stores and
         # saves the new folder, then _invalidate_library_index bumps the
         # generation), so a trailing rebuild dispatched from the pool in that
@@ -815,6 +891,7 @@ class LibraryMixin:
             with self._library_index_lock:
                 self._library_index_building = False
                 self._library_scanning = None
+                self._library_scanning_extra = None
             logger.info("library rebuild refused: index and root straddle a folder change")
             return
         if not root:
@@ -831,6 +908,7 @@ class LibraryMixin:
             with self._library_index_lock:
                 self._library_index_building = False
                 self._library_scanning = None
+                self._library_scanning_extra = None
             if changed:
                 self._bump_library_stamp()
                 self.libraryPresenceChanged.emit()
@@ -840,9 +918,9 @@ class LibraryMixin:
         self.libraryScanStatusChanged.emit()
 
         def build_index() -> tuple[dict, dict]:
-            # The shared builder, closed over THIS scan's ``lib`` (see the
-            # generation notes above).
-            return self._build_presence_indexes(lib)
+            # The shared builder, closed over THIS scan's ``lib`` and
+            # ``extra`` (see the generation notes above).
+            return self._build_presence_indexes(self._joined_source(lib, extra, extra_root))
 
         # When the LAST mid-scan partial publish rebuilt the indexes (None
         # means never, so the first committed flush always publishes; a zero
@@ -915,7 +993,38 @@ class LibraryMixin:
         def seed() -> None:
             # (POOL THREAD, dispatched AHEAD of the scan) The shared seed job:
             # see _seed_library_badges_job for why it exists and its guards.
-            self._seed_library_badges_job(gen, lib, root)
+            self._seed_library_badges_job(gen, lib, root, extra, extra_root)
+
+        def scan_extra(alive, main_count: int) -> int:
+            # The download folder, after the library folder. Its own try: a
+            # download folder that is offline or unreadable must never cost
+            # the library folder's badges or change the status Settings
+            # reports for it (the library root's scan owns that word).
+            if extra is None or not alive():
+                return 0
+
+            def relay(event: dict) -> None:
+                # One running total in Settings, not a count that restarts.
+                on_progress({**event, "indexed": main_count + int(event.get("indexed", 0) or 0)})
+
+            try:
+                self._library_share_remount(extra_root)
+                n, _status = self._library_scan_once(extra, extra_root, force_full, alive, relay)
+                return int(n or 0)
+            except Exception:
+                logger.info("library: the download folder scan did not finish; its badges wait for the next one")
+                logger.debug("download folder scan failure", exc_info=True)
+                return 0
+
+        def close_retired() -> None:
+            # Both caches this scan held, once a folder change retired them.
+            # held_extra, not extra: a download folder cache the straddle
+            # guard left out of this scan is still scan-held, so the
+            # invalidation skipped it and nobody else would ever close it.
+            for cache in (lib, held_extra):
+                if cache is not None:
+                    with contextlib.suppress(Exception):
+                        cache.close()
 
         def work() -> None:
             index = None
@@ -939,6 +1048,7 @@ class LibraryMixin:
                         return gen == self._library_gen
 
                     count, status = self._library_scan_once(lib, root, force_full, alive, on_progress)
+                    count += scan_extra(alive, count)
                     index, track_index = build_index()
                 except Exception:
                     _log_scan_failure(lib)
@@ -982,6 +1092,7 @@ class LibraryMixin:
                 with self._library_index_lock:
                     self._library_index_building = False
                     self._library_scanning = None
+                    self._library_scanning_extra = None
                     stale = gen != self._library_gen
                 # A generation bump while this scan ran means ``lib`` is no
                 # longer the live index: invalidation and factory reset swap in
@@ -990,8 +1101,7 @@ class LibraryMixin:
                 # this second close is a harmless no-op there. A CURRENT
                 # generation always leaves ``lib`` alone: it is self._library.
                 if stale:
-                    with contextlib.suppress(Exception):
-                        lib.close()
+                    close_retired()
                 # Always re-announce at the end: the "scanning" state (derived from the
                 # building flag) has just cleared even when the status string is
                 # unchanged, and Settings must drop its "Scanning…" note.
@@ -1016,7 +1126,7 @@ class LibraryMixin:
                 # the pending flag set to fire a spurious full rebuild later.
                 try:
                     if gen == self._library_gen:
-                        self._librarySyncWatch.emit(*self._resolve_watch_set(root))
+                        self._librarySyncWatch.emit(*self._resolve_watch_set(root, extra))
                 except Exception:
                     logger.debug("Watcher realignment after the scan failed", exc_info=True)
                 # Read and clear the coalescing flags under the same lock: a GUI
@@ -1048,13 +1158,20 @@ class LibraryMixin:
             return
         self._library_poll_in_flight = True
         gen = self._library_gen
+        lib = self._library
+        extra = getattr(self, "_library_extra", None)
+        extra_root = self._library_extra_root() if extra is not None else ""
 
         def work() -> None:
             # The emit is the only thing that releases the in-flight guard
             # (invalidation no longer resets it), so it must survive any raise.
             changed = False
             try:
-                changed = self._library.poll_containers_changed(root) is True
+                changed = lib.poll_containers_changed(root) is True
+                if not changed and extra is not None and extra_root:
+                    # An offline download folder must not stop the library
+                    # folder's answer above, and answers None itself.
+                    changed = extra.poll_containers_changed(extra_root) is True
             except Exception:
                 logger.debug("Library container poll failed", exc_info=True)
             finally:
@@ -1071,7 +1188,7 @@ class LibraryMixin:
         if changed and gen == self._library_gen:
             self._rebuild_library_index()
 
-    def _resolve_watch_set(self, root: str) -> tuple[bool, list[str]]:
+    def _resolve_watch_set(self, root: str, extra=None) -> tuple[bool, list[str]]:
         """(POOL THREAD) The two slow answers the watcher realignment needs:
         whether this root is on a local disk, and which container folders exist.
 
@@ -1079,11 +1196,21 @@ class LibraryMixin:
         and a dead network mount can hang that stat for many seconds; listing
         containers reads sqlite. Either on the GUI thread is a frozen window, so
         both are resolved here and handed to _sync_library_watch as arguments.
-        A failure means no watcher: the universal poll already covers that."""
+        A failure means no watcher: the universal poll already covers that.
+
+        ``extra`` is the download folder's cache when it is scanned beside a
+        separate library folder: its containers are watched too when it is
+        local, so a download lands in the badges as soon as a manual copy
+        would. Each folder is judged on its own; one on a share is left to
+        the poll while the other is still watched."""
         try:
-            if not self._library_root_is_local(root):
-                return False, []
-            return True, self._library.container_paths()
+            paths: list[str] = []
+            if self._library_root_is_local(root):
+                paths += self._library.container_paths()
+            extra_root = self._library_extra_root() if extra is not None else ""
+            if extra_root and self._library_root_is_local(extra_root):
+                paths += extra.container_paths()
+            return bool(paths), paths
         except Exception:
             logger.debug("Could not resolve the watch set; leaving it to the poll", exc_info=True)
             return False, []
@@ -1232,11 +1359,11 @@ class LibraryMixin:
         self._watched_paths.clear()
 
     def _on_download_recorded(self) -> None:
-        """(GUI thread) A downloaded file landed on disk. When the library IS
-        the download folder, schedule one debounced index rebuild so the album
-        lights up soon after the last track of a bulk download, not once per
-        track. A separate library folder cannot have changed because a download
-        landed elsewhere; the poll and sweep timers keep it fresh.
+        """(GUI thread) A downloaded file landed on disk. With the library on,
+        the download folder is always scanned (as the library root itself, or
+        beside a separate library folder, see _library_extra_root), so schedule
+        one debounced index rebuild: the album lights up soon after the last
+        track of a bulk download, not once per track.
 
         The debounce restarts on every track, so it has a CEILING, the same way
         the watcher's does. Without one, a queue that lands a track more often
@@ -1244,7 +1371,7 @@ class LibraryMixin:
         deadline back and the timer never fired: badges froze for the whole
         batch, which on a big discography is hours, and the one case where they
         matter most is the one where they stopped."""
-        if self._waves_pref_bool("library_enabled") and self._waves_prefs.get("library_source") == "download":
+        if self._library_root():
             now = time.monotonic()
             if not self._library_dl_debounce.isActive():
                 self._library_dl_burst_start = now
@@ -1341,23 +1468,22 @@ class LibraryMixin:
 
     @Slot(result=bool)
     def downloadsInsideLibrary(self) -> bool:
-        """Do fresh downloads land inside the scanned library folder? Drives
-        the done-face wording: a finished download may only read IN LIBRARY
-        when the library will actually contain it, either because downloads
-        land inside the library root (this answer) or because the scan later
-        proves the copy present (libPresent). With a separate download folder
-        the face says DOWNLOADED instead, and moving the files into the
-        library flips it through the normal rescan path.
+        """Do fresh downloads land in a folder the library scans? Drives the
+        done-face wording: a finished download may only read IN LIBRARY when
+        the library will actually contain it. With the library on that is
+        every download folder: the download folder is the library root, sits
+        inside it, or is scanned beside it (_library_extra_root). False only
+        while the library is off or has no folder, where the face says
+        DOWNLOADED.
 
         Pure string comparison on the configured paths, no filesystem access:
         this is read from QML bindings on the GUI thread, and a stat against a
-        dead network mount can hang for many seconds. In download-source mode
-        the library root IS the download folder, so the answer is trivially
-        true whenever a root resolves."""
+        dead network mount can hang for many seconds."""
         return self._path_inside_library(self.settings.data.download_base_path or "")
 
     def _path_inside_library(self, path: str) -> bool:
-        """Does ``path`` lie under the scanned library root? The same rule
+        """Does ``path`` lie under a folder the library scans (the library
+        root, or the download folder scanned beside it)? The same rule
         downloadsInsideLibrary applies to the download folder, applied to any
         one path: a copy Waves wrote before the download folder moved may sit
         anywhere, and its face must name where THAT copy is. String compare
@@ -1365,7 +1491,13 @@ class LibraryMixin:
         # The ownership store's own rule (path_under), so a copy it counts as
         # inside the library is worded IN LIBRARY by exactly the same compare.
         real = getattr(self, "_library_root_real", "")
-        return path_under(path, self._library_root()) or bool(real and path_under(path, real))
+        if path_under(path, self._library_root()) or bool(real and path_under(path, real)):
+            return True
+        extra = self._library_extra_root()
+        if not extra:
+            return False
+        extra_real = getattr(self, "_library_extra_root_real", "")
+        return path_under(path, extra) or bool(extra_real and path_under(path, extra_real))
 
     @Slot()
     def rescanLibrary(self) -> None:
@@ -2042,6 +2174,7 @@ class LibraryMixin:
         with self._library_index_lock:
             gen = self._library_gen
             lib = self._library
+            extra = getattr(self, "_library_extra", None)
         root = self._library_root()
         found: int | None = None
         try:
@@ -2059,7 +2192,11 @@ class LibraryMixin:
                 )
             if not found or gen != self._library_gen:
                 return False
-            fresh, fresh_tracks = self._build_presence_indexes(lib)
+            # Over the same joined source every scan publishes: built from
+            # ``lib`` alone, the republish dropped everything that sits only
+            # in a separate download folder from IN LIBRARY until the next scan.
+            extra_root = self._library_extra_root() if extra is not None else ""
+            fresh, fresh_tracks = self._build_presence_indexes(self._joined_source(lib, extra, extra_root))
             if gen != self._library_gen:
                 return False
             self._publish_index(fresh, fresh_tracks)
