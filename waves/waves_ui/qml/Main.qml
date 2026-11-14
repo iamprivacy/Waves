@@ -17,13 +17,16 @@ ApplicationWindow {
     // then plain QML reads everywhere else. The onLoggedInChanged handlers
     // below still ride the bridge signal itself.
     readonly property bool signedIn: waves.loggedIn
-    // Starts hidden and is shown from Component.onCompleted once the saved
-    // frame (issue #6) has been applied, so a remembered size/position takes
-    // effect BEFORE the first present: the window opens where it was left with
-    // no jump from the default frame. On a fresh install there is nothing to
-    // restore and it shows at the default (4:3, 1040x780), centered on the
-    // screen by onCompleted.
-    visible: false
+    // Starts hidden (a Window does on its own) and is shown from
+    // Component.onCompleted once the saved frame (issue #6) has been applied,
+    // so a remembered size/position takes effect BEFORE the first present:
+    // the window opens where it was left with no jump from the default frame.
+    // On a fresh install there is nothing to restore and it shows at the
+    // default (4:3, 1040x780), centered on the screen by onCompleted.
+    // Neither `visible` nor `visibility` is declared here: onCompleted sets
+    // exactly one of them, and a declared `visible: false` next to a
+    // maximized show is two explicit, contradicting settings, which Qt warns
+    // about ("Conflicting properties 'visible' and 'visibility'").
     width: 1040
     height: 780
     // Never allow a width that clips the header: the top bar's content
@@ -49,6 +52,51 @@ ApplicationWindow {
     // Settings > Appearance > "Player bar": the waveform in the bottom bar is
     // 200 px wide in full and 130 px in mini.
     property string playerSize: waves.wavesPref("player_size") === "mini" ? "mini" : "full"
+    // Settings > Appearance > "When the window is closed": what the close
+    // button does. "ask" opens closeGate, "background" hides the window and
+    // keeps Waves running, "exit" ends the app.
+    property string closeAction: root._closeActionOf(waves.wavesPref("close_action"))
+    function _closeActionOf(v) { return v === "background" || v === "exit" ? v : "ask" }
+    // The window is closed to the background (hidden, the app still running).
+    property bool inBackground: false
+    // The window state to come back to (windowed, maximized or full screen).
+    property int _bgVisibility: Window.Windowed
+    // The last state the window was shown in. Minimized hides the maximized
+    // state under it (visibility reads Minimized), so a window minimized from
+    // maximized comes back maximized by this.
+    property int _shownVisibility: Window.Windowed
+    function _shownStateOf(v) {
+        return v === Window.Maximized || v === Window.FullScreen ? v : Window.Windowed
+    }
+    function _showAs(v) {
+        if (v === Window.Maximized) root.showMaximized()
+        else if (v === Window.FullScreen) root.showFullScreen()
+        else root.showNormal()
+    }
+    function goBackground() {
+        if (root.inBackground) return
+        _winPersist()   // Hidden is never persisted, so save the frame first
+        root._bgVisibility = visibility === Window.Minimized ? root._shownVisibility : _shownStateOf(visibility)
+        root.inBackground = true
+        waves.enterBackground()
+        // hide() / show*(), never an assignment: onCompleted assigned
+        // `visible`, and assigning `visibility` too makes Qt warn about
+        // conflicting properties.
+        root.hide()
+    }
+    // Bring the window to the front: out of the background, out of the
+    // taskbar, or just above the other windows.
+    function comeBack() {
+        if (root.inBackground) {
+            root.inBackground = false
+            waves.leaveBackground()
+            root._showAs(root._bgVisibility)
+        } else if (root.visibility === Window.Minimized) {
+            root._showAs(root._shownVisibility)
+        }
+        root.raise()
+        root.requestActivate()
+    }
     // Whether the library scan is on (saved state). The green done-state
     // button reads IN LIBRARY instead of DOWNLOADED while it is: with a
     // library in the picture "you have this" is the claim that matters, and
@@ -103,9 +151,16 @@ ApplicationWindow {
         function onPlayerSizeChanged() {
             root.playerSize = waves.wavesPref("player_size") === "mini" ? "mini" : "full"
         }
+        function onCloseActionChanged() {
+            root.closeAction = root._closeActionOf(waves.wavesPref("close_action"))
+        }
+        function onShowWindowRequested() { root.comeBack() }
         function onVideoHoverPeekChanged() {
             root.videoHoverPeek = waves.wavesPref("video_hover_peek") !== false
             if (!root.videoHoverPeek && root.peekNow) root.peekClose()
+        }
+        function onArtistHoverCardsChanged() {
+            root.artistCards = waves.wavesPref("artist_hover_cards") !== false
         }
         function onQueueLedgerRowsChanged() {
             root.queueLedgerMaxRows = waves.wavesPref("queue_ledger_rows") || 12
@@ -342,7 +397,11 @@ ApplicationWindow {
     onYChanged:          if (_geomReady) winGeomSaveTimer.restart()
     onWidthChanged:      if (_geomReady) winGeomSaveTimer.restart()
     onHeightChanged:     if (_geomReady) winGeomSaveTimer.restart()
-    onVisibilityChanged: if (_geomReady) winGeomSaveTimer.restart()
+    onVisibilityChanged: {
+        if (visibility !== Window.Minimized && visibility !== Window.Hidden)
+            root._shownVisibility = root._shownStateOf(visibility)
+        if (_geomReady) winGeomSaveTimer.restart()
+    }
     onClosing: function (close) {
         _winPersist()   // best-effort final flush; not the only save path
         // The drawer's width rides its own debounce, so a drag settled inside
@@ -350,11 +409,35 @@ ApplicationWindow {
         // best-effort flush as the frame above, and the same guards behind it:
         // the bridge drops a save that changes nothing, and drops a zero.
         waves.queueSaveWidth(Math.round(root.queueWidth))
+        // The close button offers the background; everything else leaves. A
+        // real quit (the app menu, Cmd+Q, the Dock, the tray), the prompt's
+        // EXIT and the exit warning's EXIT ANYWAY all skip the offer, and so
+        // does a desktop with no way back to a hidden window.
+        var leaving = waves.takeQuitRequest() || closeGate.exitPicked || exitGate.confirmed
+            || !waves.backgroundAvailable || root.closeAction === "exit"
+        closeGate.exitPicked = false
+        if (!leaving) {
+            close.accepted = false
+            if (exitGate.open) return   // already deciding about the downloads
+            if (root.closeAction === "background") root.goBackground()
+            else {
+                // A close from the taskbar of a minimized window: the prompt
+                // needs the window up to be seen.
+                if (root.visibility === Window.Minimized) root.comeBack()
+                closeGate.open = true
+            }
+            return
+        }
+        closeGate.open = false
         // Downloads still running: veto the close and ask first. EXIT ANYWAY
         // re-closes with confirmed set, so this runs at most once per attempt.
         // Qt.quit() paths (factory reset) bypass by design: nothing to save.
         if (root.activeQueueCount > 0 && !setupSettings.exitWarnMuted && !exitGate.confirmed) {
             close.accepted = false
+            // A quit that arrives while the window is closed to the
+            // background or minimized: the warning needs a window to be
+            // read in.
+            if (root.inBackground || root.visibility === Window.Minimized) root.comeBack()
             exitGate.open = true
         }
     }
@@ -425,7 +508,7 @@ ApplicationWindow {
     // Both halves of the sort control are pref-backed (search_sort by name,
     // search_sort_asc), so a launch opens on the order last chosen.
     property bool sortAsc: waves.wavesPref("search_sort_asc") === true
-    readonly property var sortKeys: ["relevance", "date", "name", "popularity"]
+    readonly property var sortKeys: ["relevance", "date", "name", "popularity", "quality"]
     property bool bioExpanded: false
     property var albumsRaw: []            // unsorted album dicts, re-sorted into albumsModel
     property var tracksRaw: []            // same, for tracksModel
@@ -1013,7 +1096,9 @@ ApplicationWindow {
     // A row just left the active count: "done", "failed", "cancelled", or
     // "removed" when it left the queue outright. Fired after the count moved,
     // so the header button reads the count it lands on.
-    signal queueRowSettled(string status)
+    // tracks is the row's track count (0 when unknown), so the button can
+    // weigh the batch by tracks.
+    signal queueRowSettled(string status, int tracks)
 
     // ---- Download-queue grouping (Completed / Failed / Stopped / Downloading / Queued)
     // A finished row lingers 5s with its ✓ DONE chip, then slides up into the
@@ -1934,6 +2019,15 @@ ApplicationWindow {
     // NOT wired to bootContentShown: that dial also ungates input, and the
     // interface must stay inert under the launch screen (issue #13).
     property bool bootWarming: false
+    // Warming in slices. Painted in one frame, the page cost the renderer
+    // ~35-40 ms, and the launch water skipped one or two of its frames right
+    // as the version began to drain (measured on a real profile, 2026-11-14).
+    // So the warm opens on the chrome and an empty landing, and the drain's
+    // own cadence (bootWarmStep) adds the landing's shelves a few at a time:
+    // every slice fits inside a frame, and nothing is left for the zoom.
+    // Only landing shelves at a slot below this are painted; it rests far
+    // above any slot count, so outside the warm it hides nothing.
+    property int bootWarmShelves: 1000000000
 
     // ---- Ambient wave-loop background -----------------------------------
     // A muted, seamlessly looping ocean video (public-domain loop, re-encoded
@@ -3726,7 +3820,7 @@ ApplicationWindow {
     // in the window's overlay, so no row clips it or draws over it.
     property Item fullTipOwner: null
     property string fullTipText: ""
-    function fullTipFor(item, text) { root.fullTipOwner = item; root.fullTipText = text; fullTipDelay.restart() }
+    function fullTipFor(item, text) { if (item && item === root.ahcOwner) return; root.fullTipOwner = item; root.fullTipText = text; fullTipDelay.restart() }
     // An owner that died under the pointer (a refetch rebuilt its card)
     // reads null: whoever leaves next closes its bubble.
     function fullTipOff(item) {
@@ -3764,6 +3858,1178 @@ ApplicationWindow {
         }
         enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.hoverMotion ? 120 : 0 } }
         exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: root.hoverMotion ? 90 : 0 } }
+    }
+    // ---- Artist card: rest the pointer on an artist name that links to a
+    // page and a card opens with a short summary (picture, counts, bio, top
+    // tracks, a cover strip) and a Follow button. One shared Popup on the
+    // overlay. It opens at once on a skeleton and fills in when the bridge's
+    // artistSummaryReady lands (requestArtistCard builds the page silently
+    // in the hover slot when it is not cached yet).
+    property bool artistCards: waves.wavesPref("artist_hover_cards") !== false
+    readonly property bool ahcBlocked: !signedIn || !artistCards || nowCardOpen || videoNow !== null
+                                       || peekNow !== null || followDialog.open || importDialog.open
+    readonly property bool ahcOpen: ahcCard.visible
+    onAhcBlockedChanged: if (ahcBlocked) root.ahcClose()
+    // The name under the pointer (armed), and the name the open card is for.
+    property Item ahcOwner: null
+    property Item ahcShownFor: null
+    property var ahcPend: ({})
+    property string ahcId: ""
+    property string ahcName: ""
+    property string ahcArt: ""
+    property var ahcSum: ({})
+    property int ahcPop: -1
+    property bool ahcFollowed: false
+    property var ahcLib: ({})
+    property bool ahcMoreOpen: false
+    property bool ahcTimedOut: false
+    property string ahcSide: "below"
+    property real ahcCaretX: 0
+    property real ahcOwnerX0: 0
+    property real ahcOwnerY0: 0
+    // Where the armed name sat when last looked at, so a name still moving
+    // under a still pointer (a list coasting to a stop) waits to open.
+    property real ahcPendX: 0
+    property real ahcPendY: 0
+    readonly property bool ahcKnown: !!(ahcSum && ahcSum.known)
+    readonly property bool ahcSkeleton: !ahcKnown && !ahcTimedOut
+    readonly property string ahcBio: ahcKnown ? ("" + (ahcSum.bio || "")) : ""
+    readonly property string ahcPicUrl: (ahcSum && ahcSum.art) ? "" + ahcSum.art : ahcArt
+    readonly property string ahcNameText: (ahcSum && ahcSum.name) ? "" + ahcSum.name : ahcName
+    // The card keeps its loaded size while it loads: each part of the body
+    // (bio, top tracks, releases) holds a placeholder of that part's own
+    // height until the summary lands, then fades in over it, and what is
+    // left of the change (a short bio, no releases) eases. Fades and eases
+    // are armed only once the card is up, so a cached card, or a switch to
+    // another name, lands at its size at once.
+    property bool ahcArmed: false
+    readonly property bool ahcEase: ahcArmed && hoverMotion
+    readonly property bool ahcGhosting: ahcCard.visible && !ahcTimedOut && !(ahcKnown && ahcPic.picOk)
+    // One smooth clock for every placeholder's light sweep, running only
+    // while one shows.
+    property real ahcGhostT: 0
+    NumberAnimation on ahcGhostT {
+        from: 0; to: 1; loops: Animation.Infinite; duration: 1500
+        running: root.hoverMotion && root.ahcGhosting
+    }
+    // The card is no longer tied to its name: the name went (a preview
+    // rebuilt the bar's credits, a refetch rebuilt a row) while the pointer
+    // was on the card or a click inside it was a moment ago.
+    property bool ahcDetached: false
+    property bool ahcMenuOpen: false
+    property var ahcMenuFor: null
+    property real ahcMenuX: 0
+    property real ahcMenuY: 0
+
+    // Tint: the picture's colors through the app's palette path (Art
+    // palWanted -> fxPal -> waves.coverPalette). The palette is lifted for
+    // glows, so the card darkens it before it goes behind text.
+    property var ahcPal: null
+    readonly property bool ahcPalOk: !!(ahcPal && ahcPal.c && ahcPal.c.length > 0)
+    readonly property color ahcTintBase: ahcPalOk ? ahcPal.c[0] : root.surface2
+    readonly property color ahcTintDeep: Qt.hsva(Math.max(0, ahcTintBase.hsvHue), Math.min(ahcTintBase.hsvSaturation, 0.78),
+                                                 0.46, 1)
+    readonly property color ahcTintLift: Qt.hsva(Math.max(0, ahcTintBase.hsvHue), Math.min(ahcTintBase.hsvSaturation, 0.6),
+                                                 0.8, 1)
+    onAhcPicUrlChanged: root.ahcPal = root.ahcPicUrl !== "" ? (waves.coverPalette(root.ahcPicUrl, null) || null) : null
+
+    // A top track's thumb: the app's own preview.
+    function ahcPlay(t) {
+        ahcTouch.restart()
+        if (t && t.id) root.togglePreview("track", "" + t.id, 0)
+    }
+    // A finished or running download stays as it is; a failed or cancelled
+    // one may be asked again.
+    function ahcDlIdle(st) { return st === "" || st === "cancelled" || st === "failed" }
+    function ahcDownload(kind, id) {
+        ahcTouch.restart()
+        if (!id || !root.ahcDlIdle(root.dlSt("" + id))) return
+        if (kind === "album") waves.downloadAlbum("" + id)
+        else waves.downloadTrack("" + id)
+    }
+    // A cover or a title: the card goes, the album page opens (a track
+    // highlighted on it).
+    function ahcGoAlbum(albumId, highlight, title, art) {
+        if (!albumId) return
+        ahcTouch.stop()
+        root.ahcClose()
+        root.openAlbumPage("" + albumId, highlight || "", title || "", art || "")
+    }
+    function ahcMenu(kind, item, x, y) {
+        ahcTouch.restart()
+        root.ahcMenuFor = { kind: kind, t: item }
+        root.ahcMenuX = x; root.ahcMenuY = y
+        root.ahcMenuOpen = true
+    }
+    function ahcMenuDo(act) {
+        var m = root.ahcMenuFor
+        root.ahcMenuOpen = false
+        if (!m) return
+        if (act === "play") root.ahcPlay(m.t)
+        else if (act === "down") root.ahcDownload(m.kind, m.t.id)
+        else if (act === "album") {
+            if (m.kind === "album") root.ahcGoAlbum(m.t.id, "", m.t.title, m.t.art)
+            else root.ahcGoAlbum(m.t.album_id, m.t.id, m.t.album, m.t.art)
+        }
+    }
+
+    function artistCardFor(item, id, name, art) {
+        if (!item || !id || root.ahcBlocked || root.onArtistPage(id)) return
+        root.ahcOwner = item
+        root.ahcPend = { id: "" + id, name: "" + (name || ""), art: "" + (art || "") }
+        var at = item.mapToItem(null, 0, 0)
+        root.ahcPendX = at.x; root.ahcPendY = at.y
+        if (ahcCard.visible && root.ahcShownFor === item) { ahcLeave.stop(); return }
+        ahcDelay.interval = ahcCard.visible ? 200 : 450
+        ahcDelay.restart()
+    }
+    function artistCardOff(item) {
+        if (root.ahcOwner === item || root.ahcOwner === null) { ahcDelay.stop(); root.ahcOwner = null }
+        if (ahcCard.visible && (root.ahcShownFor === item || root.ahcShownFor === null)) {
+            ahcLeave.interval = 220; ahcLeave.restart()
+        }
+    }
+    function ahcClose() {
+        ahcDelay.stop(); ahcLeave.stop(); ahcWait.stop(); ahcPoll.stop(); ahcTouch.stop()
+        root.ahcMenuOpen = false; root.ahcDetached = false
+        ahcCard.close()
+        root.ahcShownFor = null
+    }
+    function ahcShow() {
+        var o = root.ahcOwner
+        if (!o || !o.visible || root.ahcBlocked) return
+        var p = root.ahcPend
+        // A click on the name during the rest already opened their page.
+        if (root.onArtistPage(p.id)) return
+        // The name moved during the rest: the list under a still pointer is
+        // coasting. Opened now, the card would be closed by the poll a frame
+        // later (its name moved), a flash. Wait for the name to hold still.
+        var at = o.mapToItem(null, 0, 0)
+        if (Math.abs(at.x - root.ahcPendX) > 2 || Math.abs(at.y - root.ahcPendY) > 2) {
+            root.ahcPendX = at.x; root.ahcPendY = at.y
+            ahcDelay.interval = 120; ahcDelay.restart()
+            return
+        }
+        root.ahcDetached = false; root.ahcMenuOpen = false
+        root.ahcShownFor = o
+        root.ahcId = p.id; root.ahcName = p.name; root.ahcArt = p.art
+        root.ahcArmed = false
+        Qt.callLater(function () { root.ahcArmed = true })
+        root.ahcMoreOpen = false; root.ahcTimedOut = false
+        root.ahcSum = waves.artistSummary(root.ahcId) || ({})
+        root.ahcPop = root.ahcKnown && root.ahcSum.popularity >= 0 ? root.ahcSum.popularity : -1
+        waves.requestArtistCard(root.ahcId)
+        root.ahcFollowed = waves.isFollowed(root.ahcId)
+        root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
+        var q = o.mapToItem(null, 0, 0)
+        root.ahcOwnerX0 = q.x; root.ahcOwnerY0 = q.y
+        ahcWait.restart(); ahcPoll.restart()
+        root.fullTipOff(root.fullTipOwner)
+        ahcScroll.toTop()
+        root.ahcPlace(false)
+        // Not .visible: through its 100 ms exit the card is still visible,
+        // and a name taken up then must open it again.
+        if (!ahcCard.opened) ahcCard.open()
+    }
+    // Below the name, above it when it would not fit (and it keeps its side
+    // while it changes height). Always inside the window by 8 px, never
+    // taller than 60% of it. Where it fits on neither side it takes the
+    // roomier one and scrolls, never covering the name.
+    function ahcPlace(keep) {
+        var o = root.ahcShownFor
+        if (!o) return
+        var p = o.mapToItem(null, 0, 0)
+        var ow = o.width, ox = 0
+        if (o.contentWidth !== undefined && o.contentWidth > 0 && o.contentWidth < o.width) {
+            ow = o.contentWidth
+            if (o.horizontalAlignment === Text.AlignHCenter) ox = (o.width - ow) / 2
+            else if (o.horizontalAlignment === Text.AlignRight) ox = o.width - ow
+        }
+        var nx = p.x + ox
+        var w = ahcCard.width, hN = ahcCard.fullH, m = 8, gap = 6
+        var x = nx - 12, y, side
+        var roomBelow = root.height - m - (p.y + o.height + gap), roomAbove = p.y - gap - m
+        var fitsBelow = hN <= roomBelow
+        var fitsAbove = hN <= roomAbove
+        if (keep && root.ahcSide === "below" && fitsBelow) side = "below"
+        else if (keep && root.ahcSide === "above" && fitsAbove) side = "above"
+        else side = fitsBelow ? "below" : fitsAbove ? "above" : (roomAbove > roomBelow ? "above" : "below")
+        var room = side === "below" ? roomBelow : roomAbove
+        ahcCard.fitH = hN <= room ? 1e9 : Math.max(120, room)
+        var h = Math.min(hN, ahcCard.fitH)
+        y = side === "below" ? p.y + o.height + gap : p.y - gap - h
+        x = Math.max(m, Math.min(root.width - w - m, x))
+        y = Math.max(m, Math.min(root.height - h - m, y))
+        root.ahcSide = side
+        root.ahcCaretX = Math.max(18, Math.min(w - 18, nx + ow / 2 - x))
+        ahcCard.x = Math.round(x); ahcCard.y = Math.round(y)
+    }
+    function ahcStatsText() {
+        if (!root.ahcKnown) return ""
+        var a = root.ahcSum.albums || 0, e = root.ahcSum.eps || 0, s = root.ahcSum.singles || 0
+        if (a + e === 0) return s > 0 ? s + (s === 1 ? " SINGLE" : " SINGLES") : "NO RELEASES YET"
+        var out = []
+        if (a > 0) out.push(a + (a === 1 ? " ALBUM" : " ALBUMS"))
+        if (e > 0) out.push(e + (e === 1 ? " EP" : " EPS"))
+        return out.join(" · ")
+    }
+    function ahcToggleFollow() {
+        ahcTouch.restart()
+        if (!root.ahcId) return
+        if (root.ahcFollowed) waves.unfollowArtist(root.ahcId)
+        else waves.followArtist(root.ahcId, root.ahcNameText, root.ahcPicUrl)
+    }
+    function ahcSolidOr(solid) { return solid ? root.textHi : root.textLo }
+    Timer { id: ahcDelay; onTriggered: root.ahcShow() }
+    // Leaving the name (220 ms) or the card (350 ms): close unless the
+    // pointer is back on either.
+    Timer {
+        id: ahcLeave
+        onTriggered: {
+            if (ahcHover.hovered || root.ahcMenuOpen) return
+            if (!root.ahcDetached && root.ahcOwner !== null && root.ahcOwner === root.ahcShownFor) return
+            // The pointer reached the next name and its card is on the way:
+            // look again once it is (it keeps the card, or a show that came
+            // to nothing closes it).
+            if (root.ahcOwner !== null && ahcDelay.running) { ahcLeave.interval = ahcDelay.interval; ahcLeave.restart(); return }
+            root.ahcClose()
+        }
+    }
+    // A click inside the card keeps it for a moment even if its name goes.
+    Timer { id: ahcTouch; interval: 1500 }
+    // Past this with no summary, the skeleton gives way to a short note.
+    Timer {
+        id: ahcWait; interval: 2500
+        onTriggered: root.ahcTimedOut = !root.ahcKnown
+    }
+    // The owner died (a refetch rebuilt its row), hid (navigation) or moved
+    // (the page scrolled under it): the card goes with it. Unless the user
+    // is working in the card (pointer on it, a click a moment ago, its menu
+    // open): then it stays where it is, detached, and closes when the
+    // pointer leaves it.
+    Timer {
+        id: ahcPoll; interval: 80; repeat: true
+        onTriggered: {
+            var o = root.ahcShownFor
+            var lost = !o || !o.visible
+            if (!lost) {
+                var q = o.mapToItem(null, 0, 0)
+                lost = Math.abs(q.x - root.ahcOwnerX0) > 2 || Math.abs(q.y - root.ahcOwnerY0) > 2
+            }
+            if (!lost) return
+            if (ahcHover.hovered || ahcTouch.running || root.ahcMenuOpen) {
+                ahcPoll.stop(); root.ahcDetached = true
+                return
+            }
+            root.ahcClose()
+        }
+    }
+    Connections {
+        target: waves
+        function onArtistSummaryReady(aid, sum) {
+            if (aid !== root.ahcId || !sum) return
+            if (sum.known) {
+                root.ahcSum = sum
+                if (sum.popularity >= 0) root.ahcPop = sum.popularity
+                root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
+            } else if (sum.failed && !root.ahcKnown) {
+                root.ahcTimedOut = true
+            }
+        }
+        function onArtistMetaLoaded(aid, pop) { if (aid === root.ahcId && pop >= 0) root.ahcPop = pop }
+        function onFollowStateChanged(aid, on) { if (aid === root.ahcId) root.ahcFollowed = on }
+        function onLibraryPresenceChanged() {
+            if (ahcCard.visible) root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
+        }
+        function onLoggedInChanged() { root.ahcClose() }
+        // Their page opened (a click on the name while the card came up):
+        // the card on that page is in the way, unless it is being used.
+        function onArtistLoaded(p) {
+            if (ahcCard.visible && p && ("" + p.id) === root.ahcId && !ahcHover.hovered && !root.ahcMenuOpen)
+                root.ahcClose()
+        }
+    }
+    Shortcut {
+        sequence: "Esc"
+        enabled: root.ahcOpen && root.peekNow === null && root.videoNow === null
+                 && !followDialog.open && !importDialog.open
+        onActivated: if (root.ahcMenuOpen) root.ahcMenuOpen = false; else root.ahcClose()
+    }
+
+    // ---- card parts
+    component AhcScroll: Item {
+        id: ahsr
+        default property alias body: ahsrCol.data
+        readonly property real contentH: ahsrCol.implicitHeight
+        function toTop() { ahsrFl.contentY = 0 }
+        clip: true
+        MouseArea {
+            // Wheel only: the card swallows it at its ends, never handing
+            // it to the page beneath.
+            anchors.fill: parent; acceptedButtons: Qt.NoButton
+            onWheel: function (w) {
+                var dy = w.pixelDelta.y !== 0 ? w.pixelDelta.y : w.angleDelta.y / 120 * 48
+                var top = Math.max(0, ahsrFl.contentHeight - ahsrFl.height)
+                ahsrFl.contentY = Math.max(0, Math.min(top, ahsrFl.contentY - dy))
+                w.accepted = true
+            }
+            Flickable {
+                id: ahsrFl
+                objectName: "ahcScrollFl"
+                anchors.fill: parent; interactive: false
+                contentWidth: width; contentHeight: ahsrCol.implicitHeight
+                // Shorter content (LESS, a smaller card) never leaves it
+                // scrolled past its end.
+                function clampY() { contentY = Math.max(0, Math.min(contentY, contentHeight - height)) }
+                onContentHeightChanged: clampY()
+                onHeightChanged: clampY()
+                Column { id: ahsrCol; width: ahsrFl.width - (ahsrBar.visible ? ahsrBar.width + 2 : 0) }
+            }
+        }
+        // The app's own LED scrollbar, held clear of the card's rounded
+        // corners (12 px top and bottom, 2 px in from the right edge).
+        WavesScrollBar {
+            id: ahsrBar
+            orientation: Qt.Vertical
+            x: ahsr.width - width - 2; y: 12
+            height: Math.max(0, ahsr.height - 24)
+            accent: root.accent; outline: root.outline; textHi: root.textHi
+            size: ahsrFl.visibleArea.heightRatio
+            position: ahsrFl.visibleArea.yPosition
+            active: ahsrHov.hovered || pressed
+            onPositionChanged: if (pressed) ahsrFl.contentY = position * ahsrFl.contentHeight
+        }
+        HoverHandler { id: ahsrHov }
+    }
+    component AhcPic: Art {
+        url: root.ahcPicUrl
+        radius: 8
+        palWanted: true
+        onFxPalChanged: if (fxPal && fxPal.c && fxPal.c.length > 0 && url === root.ahcPicUrl) root.ahcPal = fxPal
+    }
+    component AhcName: Text {
+        textFormat: Text.PlainText; text: root.ahcNameText
+        color: root.textHi; font.family: root.uiFont; font.pixelSize: 15; font.bold: true
+        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+        lineHeight: 1.08
+    }
+    component AhcStats: Text {
+        visible: root.ahcKnown
+        textFormat: Text.PlainText; text: root.ahcStatsText()
+        color: root.ahcKnown && (root.ahcSum.albums || 0) + (root.ahcSum.eps || 0) + (root.ahcSum.singles || 0) === 0
+               ? root.textDim : root.textLo
+        font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1
+        elide: Text.ElideRight
+    }
+    // Stats on the left, the popularity meter on the right (the follow row
+    // has no room for both the meter and the library chip).
+    // The line is held while loading (a placeholder bar), so the name above
+    // it never moves when the facts land.
+    component AhcStatsLine: Item {
+        id: ahsl
+        implicitHeight: Math.max(ahslSt.implicitHeight, ahslPop.implicitHeight)
+        AhcStats {
+            id: ahslSt; anchors.verticalCenter: parent.verticalCenter
+            width: ahsl.width - (ahslPop.visible ? ahslPop.width + 8 : 0)
+            visible: true; text: root.ahcKnown ? root.ahcStatsText() : " "
+            opacity: root.ahcKnown ? 1 : 0
+            Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 180 } }
+        }
+        AhcGhost {
+            objectName: "ahcStatsGhost"
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.round(ahsl.width * 0.58); height: 7; cx: 98
+            opacity: root.ahcKnown || root.ahcTimedOut ? 0 : 1
+            visible: opacity > 0
+            Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 180 } }
+        }
+        PopMeter {
+            id: ahslPop
+            objectName: "ahcPop"
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            visible: root.ahcKnown && root.ahcPop >= 0
+            value: Math.max(0, root.ahcPop)
+        }
+    }
+    // A placeholder block, with one light band sweeping across the whole
+    // card. `cx` is the block's x in the card, so every block shows its own
+    // slice of the same band.
+    component AhcGhost: Rectangle {
+        id: ahg
+        property real cx: 0
+        radius: 4
+        color: Qt.alpha(root.textHi, 0.085)
+        clip: true
+        Rectangle {
+            visible: root.hoverMotion
+            width: 110; height: ahg.height
+            x: (root.ahcGhostT * 1.5 - 0.25) * 420 - 110 - ahg.cx
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: Qt.alpha(root.textHi, 0) }
+                GradientStop { position: 0.5; color: Qt.alpha(root.textHi, 0.16) }
+                GradientStop { position: 1.0; color: Qt.alpha(root.textHi, 0) }
+            }
+        }
+    }
+    // The bio's placeholder: three line bars at the bio's own pitch and the
+    // MORE stub, measured from the bio's fonts, so it is the clamped bio's
+    // height.
+    component AhcBioGhost: Item {
+        id: ahbg
+        implicitHeight: ahbgLines.implicitHeight + 4 + ahbgMore.implicitHeight
+        Text {
+            id: ahbgLines; visible: false
+            textFormat: Text.PlainText; text: "x\nx\nx"
+            font.family: root.uiFont; font.pixelSize: 12; lineHeight: 1.18
+        }
+        Text {
+            id: ahbgMore; visible: false
+            textFormat: Text.PlainText; text: "MORE"
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.2
+        }
+        Repeater {
+            model: [1.0, 0.94, 0.62]
+            delegate: AhcGhost {
+                required property var modelData
+                required property int index
+                readonly property real pitch: ahbgLines.implicitHeight / 3
+                y: Math.round(index * pitch + (pitch - height) / 2)
+                width: Math.round(ahbg.width * modelData); height: 8; cx: 14
+            }
+        }
+        AhcGhost {
+            y: Math.round(ahbgLines.implicitHeight + 4 + (ahbgMore.implicitHeight - height) / 2)
+            width: 34; height: 7; cx: 14
+        }
+    }
+    // A section label's placeholder (TOP TRACKS, ALBUMS AND EPS).
+    component AhcLabelGhost: Item {
+        id: ahlg
+        property real barW: 64
+        property real pad: 0
+        implicitHeight: ahlgM.implicitHeight + pad
+        AhcLabel { id: ahlgM; visible: false; text: "TOP TRACKS" }
+        AhcGhost { y: Math.round((ahlgM.implicitHeight - height) / 2); width: ahlg.barW; height: 6; cx: 14 }
+    }
+    // Three top track rows at the real 38 px, with the 30 px thumb.
+    component AhcTracksGhost: Column {
+        id: ahtg
+        spacing: 1
+        AhcLabelGhost { width: ahtg.width; barW: 70; pad: 3 }
+        Repeater {
+            model: [0.58, 0.44, 0.52]
+            delegate: Item {
+                required property var modelData
+                width: ahtg.width; height: 38
+                AhcGhost { width: 30; height: 30; anchors.verticalCenter: parent.verticalCenter; cx: 14 }
+                AhcGhost { x: 40; y: 11; width: Math.round((parent.width - 80) * modelData); height: 8; cx: 54 }
+                AhcGhost { x: 40; y: 24; width: Math.round((parent.width - 80) * modelData * 0.6); height: 6; cx: 54 }
+                AhcGhost { anchors.right: parent.right; anchors.rightMargin: 30; y: 15; width: 24; height: 7; cx: 250 }
+            }
+        }
+    }
+    // The release strip's placeholder: six covers at the strip's own size,
+    // a year bar under each.
+    component AhcCoversGhost: Column {
+        id: ahcg
+        readonly property int n: 6
+        readonly property real s: Math.min(64, Math.floor((width - (n - 1) * 6) / n))
+        spacing: 6
+        AhcLabelGhost { width: ahcg.width; barW: 92 }
+        Row {
+            spacing: 6
+            Repeater {
+                model: ahcg.n
+                delegate: Column {
+                    required property int index
+                    spacing: 3
+                    AhcGhost { width: ahcg.s; height: ahcg.s; radius: 5; cx: 14 + index * (ahcg.s + 6) }
+                    Item {
+                        width: ahcg.s; height: ahcgYr.implicitHeight
+                        Text { id: ahcgYr; visible: false; textFormat: Text.PlainText; text: "2026"; font.family: root.mono; font.pixelSize: 9 }
+                        AhcGhost {
+                            anchors.centerIn: parent; width: Math.round(ahcg.s * 0.46); height: 5
+                            cx: 14 + index * (ahcg.s + 6)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // One part of the card body: its placeholder until the summary lands,
+    // then the part fades in over it. The height is the placeholder's while
+    // loading and the part's after (eased), plus the 14 px gap above it; a
+    // part that turns out empty (no releases) folds to nothing, gap and all,
+    // and so does a placeholder whose wait ran out.
+    component AhcSlot: Item {
+        id: ahslot
+        property bool ready: false
+        property real realH: 0
+        property real ghostH: 0
+        property bool gapAbove: true
+        default property alias parts: ahslotBox.data
+        readonly property real bodyH: ready ? realH : (root.ahcTimedOut ? 0 : ghostH)
+        readonly property real wantH: bodyH > 0 ? bodyH + (gapAbove ? 14 : 0) : 0
+        property real shownH: wantH
+        Behavior on shownH { enabled: root.ahcEase; NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
+        height: shownH
+        clip: true
+        Item { id: ahslotBox; y: ahslot.gapAbove ? 14 : 0; width: ahslot.width; height: ahslot.bodyH }
+    }
+    component AhcMissing: Text {
+        objectName: "ahcMissing"
+        visible: root.ahcTimedOut && !root.ahcKnown
+        textFormat: Text.PlainText; wrapMode: Text.Wrap
+        text: "Details have not loaded yet. Open the page for everything."
+        color: root.textDim; font.family: root.uiFont; font.pixelSize: 12
+    }
+    // FOLLOW, or FOLLOWING that turns into a red UNFOLLOW under the pointer
+    // (same width).
+    component AhcFollow: Rectangle {
+        id: ahfw
+        objectName: "ahcFollow"
+        readonly property bool on: root.ahcFollowed
+        readonly property bool hot: ahfwMa.containsMouse
+        readonly property bool undo: on && hot
+        readonly property string label: !on ? "FOLLOW" : undo ? "UNFOLLOW" : "FOLLOWING"
+        implicitHeight: ahfwTxt.implicitHeight + root.btnPadV * 2
+        implicitWidth: Math.max(ahfwM1.implicitWidth, ahfwM2.implicitWidth, ahfwM3.implicitWidth) + root.btnPadH * 2
+        radius: root.btnRad
+        color: undo ? root.redCont : !on ? (hot ? Qt.lighter(root.accentCont, 1.35) : root.accentCont) : "transparent"
+        border.width: 1
+        border.color: undo ? Qt.alpha(root.red, 0.55) : !on ? root.accentDim : root.border1
+        Behavior on color { ColorAnimation { duration: 110 } }
+        Text { id: ahfwM1; visible: false; textFormat: Text.PlainText; text: "FOLLOW"; font: ahfwTxt.font }
+        Text { id: ahfwM2; visible: false; textFormat: Text.PlainText; text: "FOLLOWING"; font: ahfwTxt.font }
+        Text { id: ahfwM3; visible: false; textFormat: Text.PlainText; text: "UNFOLLOW"; font: ahfwTxt.font }
+        Text {
+            id: ahfwTxt
+            objectName: "ahcFollowText"
+            anchors.centerIn: parent
+            textFormat: Text.PlainText; text: ahfw.label
+            color: ahfw.undo ? root.red : !ahfw.on ? root.accent : (ahfw.hot ? root.textHi : root.textLo)
+            font.family: root.uiFont; font.pixelSize: 13; font.bold: true; font.letterSpacing: root.btnTrack
+        }
+        MouseArea {
+            id: ahfwMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: root.ahcToggleFollow()
+        }
+    }
+    // The bio, clamped to 3 lines with MORE / LESS.
+    component AhcBio: Column {
+        id: ahbio
+        visible: root.ahcKnown
+        spacing: 4
+        Text {
+            visible: root.ahcKnown && root.ahcBio === ""
+            width: ahbio.width
+            textFormat: Text.PlainText; text: "No biography on TIDAL yet."
+            color: root.textDim; font.family: root.uiFont; font.pixelSize: 12; font.italic: true
+        }
+        Text {
+            id: ahbClamp
+            visible: root.ahcBio !== "" && !root.ahcMoreOpen
+            width: ahbio.width
+            textFormat: Text.PlainText; text: root.ahcBio.replace(/\n\n/g, " ")
+            color: root.textLo; font.family: root.uiFont; font.pixelSize: 12; lineHeight: 1.18
+            wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
+        }
+        Text {
+            visible: root.ahcBio !== "" && root.ahcMoreOpen
+            width: ahbio.width
+            textFormat: Text.PlainText; text: root.ahcBio
+            color: root.textLo; font.family: root.uiFont; font.pixelSize: 12; lineHeight: 1.18
+            wrapMode: Text.Wrap
+        }
+        Text {
+            objectName: "ahcBioMore"
+            visible: root.ahcBio !== "" && (ahbClamp.truncated || root.ahcMoreOpen)
+            textFormat: Text.PlainText; text: root.ahcMoreOpen ? "LESS" : "MORE"
+            color: ahbMoreMa.containsMouse ? root.accent : root.accentDim
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.2
+            MouseArea {
+                id: ahbMoreMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { ahcTouch.restart(); root.ahcMoreOpen = !root.ahcMoreOpen }
+            }
+        }
+    }
+    component AhcLabel: Text {
+        textFormat: Text.PlainText
+        color: root.textDim; font.family: root.mono; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.4
+    }
+    // What you already hold of this artist on disk.
+    component AhcLib: Rectangle {
+        id: ahlb
+        objectName: "ahcLib"
+        readonly property bool shown: !!(root.ahcLib && root.ahcLib.present)
+        visible: shown
+        implicitWidth: ahlbTxt.implicitWidth + 14; implicitHeight: 20; radius: 5
+        color: root.libCont; border.color: root.libDim
+        Text {
+            id: ahlbTxt; anchors.centerIn: parent
+            readonly property int n: ahlb.shown ? (root.ahcLib.albums || 0) : 0
+            textFormat: Text.PlainText
+            text: "IN LIBRARY" + (n > 0 ? " · " + n + (n === 1 ? " ALBUM" : " ALBUMS") : "")
+            color: root.libContTx; font.family: root.mono; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1
+        }
+    }
+    component AhcOpenRow: Rectangle {
+        id: ahor
+        objectName: "ahcOpenPage"
+        implicitHeight: 34
+        // The last row: its fill follows the card's rounded bottom corners.
+        bottomLeftRadius: 12; bottomRightRadius: 12
+        color: ahorMa.containsMouse ? root.surfaceHi : "transparent"
+        Rectangle { width: parent.width; height: 1; color: root.border1 }
+        Text {
+            anchors.left: parent.left; anchors.leftMargin: 14; anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: "OPEN ARTIST PAGE"
+            color: ahorMa.containsMouse ? root.textHi : root.textLo
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.3
+        }
+        Ico {
+            anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
+            name: "arrow-right"; size: 12; bold: 6
+            color: ahorMa.containsMouse ? root.accent : root.textLo
+        }
+        MouseArea {
+            id: ahorMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: { var id = root.ahcId; root.ahcClose(); if (id) waves.loadArtist(id) }
+        }
+    }
+    // The download control's faces, read from the app's own download state
+    // (root.dlSt / dlPct): the queued march, the percent with a fill line,
+    // the green check, a red arrow to try a failed one again.
+    component AhcDl: Rectangle {
+        id: ahdl
+        property string kind: "track"
+        property string mid: ""
+        property bool solid: false
+        readonly property string st: root.dlSt(mid)
+        readonly property real pct: root.dlPct(mid)
+        readonly property bool waiting: st === "queued" || st === "preparing"
+        objectName: "ahcDl_" + mid
+        implicitWidth: 24; implicitHeight: 22; radius: 5
+        color: solid ? Qt.rgba(0.03, 0.04, 0.05, 0.78)
+             : ahdlMa.containsMouse && root.ahcDlIdle(st) ? root.surfaceHi : "transparent"
+        border.width: 1
+        border.color: st === "done" ? root.greenDim : root.border1
+        Ico {
+            visible: root.ahcDlIdle(ahdl.st); anchors.centerIn: parent
+            name: "arrow-down"; size: 12; bold: 8
+            color: ahdl.st === "failed" ? root.red : ahdlMa.containsMouse ? root.accent : root.ahcSolidOr(ahdl.solid)
+        }
+        QueueStack { visible: ahdl.waiting; anchors.centerIn: parent; barW: 10 }
+        Text {
+            visible: ahdl.st === "running"; anchors.centerIn: parent; anchors.verticalCenterOffset: -1
+            textFormat: Text.PlainText; text: Math.round(Math.max(0, ahdl.pct)) + ""
+            color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true
+        }
+        Rectangle {
+            visible: ahdl.st === "running"
+            x: 3; anchors.bottom: parent.bottom; anchors.bottomMargin: 3; height: 1.5
+            width: (parent.width - 6) * Math.max(0, Math.min(100, ahdl.pct)) / 100
+            color: root.accent
+        }
+        Ico {
+            visible: ahdl.st === "done"; anchors.centerIn: parent
+            name: "check"; size: 12; bold: 10; color: root.green
+        }
+        MouseArea {
+            id: ahdlMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: root.ahcDlIdle(ahdl.st) ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: root.ahcDownload(ahdl.kind, ahdl.mid)
+        }
+    }
+    // The "..." that opens the card's own small menu.
+    component AhcMoreBtn: Rectangle {
+        id: ahmb
+        property string kind: "track"
+        property var item: null
+        property bool solid: false
+        objectName: "ahcMore_" + (item ? item.id : "")
+        implicitWidth: 24; implicitHeight: 22; radius: 5
+        color: solid ? Qt.rgba(0.03, 0.04, 0.05, 0.78) : ahmbMa.containsMouse ? root.surfaceHi : "transparent"
+        border.width: 1; border.color: ahmbMa.containsMouse || solid ? root.border1 : "transparent"
+        Row {
+            anchors.centerIn: parent; spacing: 2.5
+            Repeater {
+                model: 3
+                delegate: Rectangle {
+                    width: 3; height: 3; radius: 1.5
+                    color: ahmbMa.containsMouse ? root.accent : root.ahcSolidOr(ahmb.solid)
+                }
+            }
+        }
+        MouseArea {
+            id: ahmbMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                var p = ahmb.mapToItem(ahcFace, 0, ahmb.height + 3)
+                root.ahcMenu(ahmb.kind, ahmb.item, p.x, p.y)
+            }
+        }
+    }
+    // One top track: cover thumb (play / pause on it), title (album page on
+    // the track), album (album page), duration or elapsed, "..." menu.
+    component AhcTrackRow: Item {
+        id: ahtr
+        required property var modelData
+        required property int index
+        readonly property var t: modelData
+        readonly property string tid: "" + (t.id || "")
+        readonly property string ps: root.pvSt("track", tid)
+        readonly property bool active: ps === "playing" || ps === "paused" || ps === "loading"
+        readonly property bool menuOn: root.ahcMenuOpen && !!root.ahcMenuFor && root.ahcMenuFor.t === t
+        readonly property bool hot: ahtrHov.hovered || menuOn
+        readonly property bool icons: hot || active
+        objectName: "ahcTrack_" + tid
+        height: 38
+        HoverHandler { id: ahtrHov }
+        Rectangle {
+            x: -6; width: parent.width + 12; height: parent.height; radius: 6
+            color: ahtr.hot ? Qt.alpha(root.textHi, 0.06) : "transparent"
+        }
+        MouseArea {
+            // A right click anywhere on the row opens the same menu.
+            anchors.fill: parent; acceptedButtons: Qt.RightButton
+            onClicked: function (m) {
+                var p = ahtr.mapToItem(ahcFace, m.x, m.y)
+                root.ahcMenu("track", ahtr.t, p.x, p.y)
+            }
+        }
+        Item {
+            objectName: "ahcPlay_" + ahtr.tid
+            width: 30; height: 30; anchors.verticalCenter: parent.verticalCenter
+            Art { anchors.fill: parent; url: "" + (ahtr.t.art || ""); radius: 4 }
+            Rectangle {
+                anchors.fill: parent; radius: 4
+                visible: ahtr.icons || ahthMa.containsMouse
+                color: Qt.rgba(0, 0, 0, ahthMa.containsMouse ? 0.62 : 0.5)
+                border.width: ahtr.active ? 1 : 0; border.color: root.accent
+            }
+            Ico {
+                anchors.centerIn: parent
+                visible: ahtr.icons || ahthMa.containsMouse
+                name: ahtr.ps === "playing" ? "pause" : "play"
+                size: 12; bold: 8
+                color: ahtr.active || ahthMa.containsMouse ? root.accent : root.textHi
+                SequentialAnimation on opacity {
+                    running: ahtr.ps === "loading" && root.hoverMotion
+                    loops: Animation.Infinite
+                    onRunningChanged: if (!running) parent.opacity = 1
+                    NumberAnimation { to: 0.35; duration: 360 }
+                    NumberAnimation { to: 1; duration: 360 }
+                }
+            }
+            MouseArea {
+                id: ahthMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: root.ahcPlay(ahtr.t)
+            }
+        }
+        Column {
+            x: 40; anchors.verticalCenter: parent.verticalCenter
+            width: ahtr.width - 40 - ahtrRight.width - 8
+            spacing: 1
+            Text {
+                objectName: "ahcTitle_" + ahtr.tid
+                width: Math.min(implicitWidth, parent.width)
+                textFormat: Text.PlainText; text: "" + (ahtr.t.title || ""); elide: Text.ElideRight
+                color: ahtr.active ? root.accent : root.textHi
+                font.family: root.uiFont; font.pixelSize: 12; font.underline: ahtrTMa.containsMouse
+                MouseArea {
+                    id: ahtrTMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: root.ahcGoAlbum(ahtr.t.album_id, ahtr.tid, ahtr.t.album, ahtr.t.art)
+                }
+            }
+            Text {
+                width: Math.min(implicitWidth, parent.width)
+                textFormat: Text.PlainText; text: "" + (ahtr.t.album || ""); elide: Text.ElideRight
+                color: ahtrAMa.containsMouse ? root.textHi : root.textLo
+                font.family: root.uiFont; font.pixelSize: 11; font.underline: ahtrAMa.containsMouse
+                MouseArea {
+                    id: ahtrAMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: root.ahcGoAlbum(ahtr.t.album_id, "", ahtr.t.album, ahtr.t.art)
+                }
+            }
+        }
+        Row {
+            id: ahtrRight
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            spacing: 6
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: ahtr.active ? root.fmtMs(root.previewPosition) : "" + (ahtr.t.duration || "")
+                color: ahtr.active ? root.accent : root.textLo
+                font.family: root.mono; font.pixelSize: 10
+            }
+            Item {
+                width: 24; height: 22; anchors.verticalCenter: parent.verticalCenter
+                AhcDl {
+                    id: ahtrDl
+                    anchors.fill: parent; kind: "track"; mid: ahtr.tid
+                    visible: st !== "" && st !== "cancelled"
+                }
+                AhcMoreBtn {
+                    anchors.fill: parent; kind: "track"; item: ahtr.t
+                    visible: !ahtrDl.visible
+                    opacity: ahtr.hot ? 1 : 0
+                }
+            }
+        }
+        // Playing: a thin progress line under the text.
+        Rectangle {
+            visible: ahtr.active
+            x: 40; anchors.bottom: parent.bottom; anchors.bottomMargin: 1
+            width: ahtr.width - 40; height: 2; radius: 1
+            color: Qt.alpha(root.accent, 0.18)
+            Rectangle {
+                height: parent.height; radius: 1; color: root.accent
+                width: parent.width * root.pvFrac("track", ahtr.tid)
+            }
+        }
+    }
+    component AhcTracks: Column {
+        id: ahtk
+        readonly property var rows: root.ahcKnown && root.ahcSum.top ? root.ahcSum.top.slice(0, 3) : []
+        visible: rows.length > 0
+        spacing: 1
+        AhcLabel { text: "TOP TRACKS"; bottomPadding: 3 }
+        Repeater {
+            model: ahtk.rows
+            delegate: AhcTrackRow { width: ahtk.width }
+        }
+    }
+    // The release strip: up to 6 covers, the year under each; the title of
+    // the cover under the pointer (else the newest) beside the label.
+    component AhcCovers: Column {
+        id: ahcv
+        readonly property var rows: root.ahcKnown && root.ahcSum.releases ? root.ahcSum.releases.slice(0, 6) : []
+        readonly property int n: rows.length
+        readonly property bool singlesOnly: rows.every(function (r) { return r.rtype === "single" })
+        readonly property real s: n > 0 ? Math.min(64, Math.floor((width - (n - 1) * 6) / n)) : 0
+        property int hotIdx: -1
+        readonly property var shown: hotIdx >= 0 && hotIdx < n ? rows[hotIdx] : (n > 0 ? rows[0] : null)
+        visible: n > 0
+        spacing: 6
+        Item {
+            width: ahcv.width; height: ahcvLbl.implicitHeight
+            AhcLabel { id: ahcvLbl; text: ahcv.singlesOnly ? "SINGLES" : "ALBUMS AND EPS" }
+            Text {
+                anchors.left: ahcvLbl.right; anchors.leftMargin: 10; anchors.right: parent.right
+                anchors.verticalCenter: ahcvLbl.verticalCenter
+                horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
+                textFormat: Text.PlainText
+                text: ahcv.shown ? "" + (ahcv.shown.title || "") + "  ·  " + ("" + (ahcv.shown.rtype || "")).toUpperCase() : ""
+                color: ahcv.hotIdx >= 0 ? root.textHi : root.textLo
+                font.family: root.uiFont; font.pixelSize: 11
+            }
+        }
+        Row {
+            spacing: 6
+            Repeater {
+                model: ahcv.rows
+                delegate: Column {
+                    id: ahcvd
+                    required property var modelData
+                    required property int index
+                    readonly property string rid: "" + (modelData.id || "")
+                    readonly property bool menuOn: root.ahcMenuOpen && !!root.ahcMenuFor && root.ahcMenuFor.t === modelData
+                    readonly property bool hot: ahcvHov.hovered || menuOn
+                    onHotChanged: {
+                        if (hot) ahcv.hotIdx = index
+                        else if (ahcv.hotIdx === index) ahcv.hotIdx = -1
+                    }
+                    spacing: 3
+                    Item {
+                        objectName: "ahcCover_" + ahcvd.rid
+                        width: ahcv.s; height: ahcv.s
+                        HoverHandler { id: ahcvHov }
+                        Art { anchors.fill: parent; url: "" + (ahcvd.modelData.art || ""); radius: 5 }
+                        Rectangle {
+                            anchors.fill: parent; radius: 5; color: "transparent"
+                            border.width: ahcvd.hot ? 1.5 : 1
+                            border.color: ahcvd.hot ? root.accent : Qt.rgba(1, 1, 1, 0.08)
+                        }
+                        MouseArea {
+                            anchors.fill: parent; acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: function (m) {
+                                if (m.button === Qt.RightButton) {
+                                    var p = parent.mapToItem(ahcFace, m.x, m.y)
+                                    root.ahcMenu("album", ahcvd.modelData, p.x, p.y)
+                                    return
+                                }
+                                root.ahcGoAlbum(ahcvd.rid, "", ahcvd.modelData.title, ahcvd.modelData.art)
+                            }
+                        }
+                        AhcDl {
+                            id: ahcvDl
+                            kind: "album"; mid: ahcvd.rid; solid: true
+                            width: 20; height: 20
+                            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 3
+                            visible: st !== "" && st !== "cancelled"
+                        }
+                        AhcMoreBtn {
+                            kind: "album"; item: ahcvd.modelData; solid: true
+                            width: 20; height: 18
+                            anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 3
+                            visible: !ahcvDl.visible
+                            opacity: ahcvd.hot ? 1 : 0
+                        }
+                    }
+                    Text {
+                        width: ahcv.s; horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText; text: "" + (ahcvd.modelData.year || "")
+                        color: ahcvd.hot ? root.textHi : root.textLo
+                        font.family: root.mono; font.pixelSize: 9; font.letterSpacing: 0.5
+                    }
+                }
+            }
+        }
+    }
+
+    Popup {
+        id: ahcCard
+        objectName: "artistCard"
+        parent: Overlay.overlay
+        modal: false; focus: false
+        // Esc goes through the Shortcut above (the card never takes focus
+        // from the search field).
+        closePolicy: Popup.CloseOnPressOutside
+        padding: 0
+        width: 320
+        readonly property real maxH: Math.round(root.height * 0.6)
+        // Its height with room to spare, and the room ahcPlace found on the
+        // side it took (1e9 when it fits).
+        readonly property real fullH: Math.min(ahcScroll.contentH, maxH)
+        property real fitH: 1e9
+        height: Math.min(fullH, fitH)
+        onHeightChanged: if (visible) root.ahcPlace(true)
+        // A press elsewhere closes it too: drop the watch with it.
+        onClosed: {
+            ahcPoll.stop(); ahcWait.stop(); root.ahcShownFor = null
+            root.ahcMenuOpen = false; root.ahcDetached = false
+        }
+        background: Item {}
+        contentItem: Item {
+            HoverHandler {
+                id: ahcHover
+                onHoveredChanged: {
+                    if (hovered) ahcLeave.stop()
+                    else if (ahcCard.visible) { ahcLeave.interval = 350; ahcLeave.restart() }
+                }
+            }
+            Item {
+                id: ahcFace
+                width: ahcCard.width; height: ahcCard.height
+                // Grows from the name: the origin sits on the name's center,
+                // at the card edge that faces it.
+                transform: Scale {
+                    id: ahcScaleT
+                    origin.x: root.ahcCaretX
+                    origin.y: root.ahcSide === "above" ? ahcFace.height : 0
+                }
+                Rectangle {
+                    anchors.fill: parent; radius: 12
+                    color: root.surface2
+                }
+                // The tint: a header band from the picture's color, faded in
+                // once the palette is there; darkened so text keeps its contrast.
+                Rectangle {
+                    width: parent.width; height: Math.min(118, parent.height); radius: 12
+                    opacity: root.ahcPalOk ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: root.hoverMotion ? 320 : 0; easing.type: Easing.OutCubic } }
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Qt.alpha(root.ahcTintDeep, 0.5) }
+                        GradientStop { position: 1.0; color: Qt.alpha(root.ahcTintDeep, 0) }
+                    }
+                }
+                AhcScroll {
+                    id: ahcScroll
+                    anchors.fill: parent
+                    Column {
+                        width: parent.width
+                        spacing: 0
+                        Item { width: 1; height: 14 }
+                        Row {
+                            x: 14; width: parent.width - 28; spacing: 12
+                            // The picture holds a placeholder until its
+                            // image is decoded (or turns out to be missing).
+                            Item {
+                                id: ahcPic
+                                width: 72; height: 72
+                                readonly property bool picOk: ahcPicArt.artState === "ready" || ahcPicArt.artState === "failed"
+                                                              || (ahcPicArt.artState === "none" && (root.ahcKnown || root.ahcTimedOut))
+                                AhcPic {
+                                    id: ahcPicArt; anchors.fill: parent
+                                    opacity: ahcPic.picOk ? 1 : 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 200 } }
+                                }
+                                AhcGhost {
+                                    objectName: "ahcPicGhost"
+                                    anchors.fill: parent; radius: 8; cx: 14
+                                    opacity: ahcPic.picOk ? 0 : 1
+                                    visible: opacity > 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 200 } }
+                                }
+                            }
+                            Column {
+                                width: parent.width - ahcPic.width - 12; spacing: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                AhcName { objectName: "ahcName"; width: parent.width }
+                                AhcStatsLine { width: parent.width }
+                            }
+                        }
+                        Item { width: 1; height: 12 }
+                        Item {
+                            x: 14; width: parent.width - 28; height: ahcFol.implicitHeight
+                            AhcFollow { id: ahcFol }
+                            AhcLib { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter }
+                        }
+                        Item { width: 1; height: 14 }
+                        AhcMissing { x: 14; width: parent.width - 28 }
+                        Column {
+                            objectName: "ahcBody"
+                            x: 14; width: parent.width - 28
+                            AhcSlot {
+                                id: ahcBioSlot; objectName: "ahcBioSlot"
+                                width: parent.width; gapAbove: false
+                                ready: root.ahcKnown
+                                realH: ahcBioPart.implicitHeight; ghostH: ahcBioGhost.implicitHeight
+                                AhcBio {
+                                    id: ahcBioPart; width: parent.width; visible: true
+                                    opacity: ahcBioSlot.ready ? 1 : 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 200 } }
+                                }
+                                AhcBioGhost {
+                                    id: ahcBioGhost; objectName: "ahcSkel"; width: parent.width
+                                    opacity: ahcBioSlot.ready ? 0 : 1; visible: opacity > 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 160 } }
+                                }
+                            }
+                            AhcSlot {
+                                id: ahcTopSlot; objectName: "ahcTopSlot"
+                                width: parent.width
+                                ready: root.ahcKnown
+                                realH: ahcTopPart.rows.length > 0 ? ahcTopPart.implicitHeight : 0
+                                ghostH: ahcTopGhost.implicitHeight
+                                AhcTracks {
+                                    id: ahcTopPart; width: parent.width
+                                    opacity: ahcTopSlot.ready ? 1 : 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 200 } }
+                                }
+                                AhcTracksGhost {
+                                    id: ahcTopGhost; width: parent.width
+                                    opacity: ahcTopSlot.ready ? 0 : 1; visible: opacity > 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 160 } }
+                                }
+                            }
+                            AhcSlot {
+                                id: ahcRelSlot; objectName: "ahcRelSlot"
+                                width: parent.width
+                                ready: root.ahcKnown
+                                realH: ahcRelPart.n > 0 ? ahcRelPart.implicitHeight : 0
+                                ghostH: ahcRelGhost.implicitHeight
+                                AhcCovers {
+                                    id: ahcRelPart; width: parent.width
+                                    opacity: ahcRelSlot.ready ? 1 : 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 200 } }
+                                }
+                                AhcCoversGhost {
+                                    id: ahcRelGhost; width: parent.width
+                                    opacity: ahcRelSlot.ready ? 0 : 1; visible: opacity > 0
+                                    Behavior on opacity { enabled: root.ahcEase; NumberAnimation { duration: 160 } }
+                                }
+                            }
+                        }
+                        Item { width: 1; height: 14 }
+                        AhcOpenRow { width: parent.width }
+                    }
+                }
+                // The outline sits over the content, so a row's hover fill
+                // (OPEN ARTIST PAGE runs edge to edge) never paints over it.
+                Rectangle {
+                    objectName: "ahcOutline"
+                    anchors.fill: parent; radius: 12; color: "transparent"
+                    border.color: root.ahcPalOk ? Qt.alpha(root.ahcTintLift, 0.55) : root.outline
+                    Behavior on border.color { ColorAnimation { duration: root.hoverMotion ? 320 : 0 } }
+                }
+                // The card's own small menu (the "..." buttons and a right click).
+                Item {
+                    anchors.fill: parent
+                    visible: root.ahcMenuOpen
+                    MouseArea {
+                        anchors.fill: parent; acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: root.ahcMenuOpen = false
+                        onWheel: function (w) { w.accepted = true }
+                    }
+                    Rectangle {
+                        id: ahcMenuBox
+                        objectName: "ahcMenu"
+                        readonly property var m: root.ahcMenuFor
+                        readonly property bool isTrack: !!m && m.kind === "track"
+                        readonly property string mid: m && m.t ? "" + (m.t.id || "") : ""
+                        width: 168; height: ahcMenuCol.implicitHeight + 8; radius: 8
+                        x: Math.max(6, Math.min(ahcFace.width - width - 6, root.ahcMenuX))
+                        y: Math.max(6, Math.min(ahcFace.height - height - 6, root.ahcMenuY))
+                        color: root.surfaceHi; border.color: root.outline
+                        Column {
+                            id: ahcMenuCol
+                            x: 4; y: 4; width: parent.width - 8
+                            Repeater {
+                                model: ahcMenuBox.isTrack ? ["play", "down", "album"] : ["down", "album"]
+                                delegate: Rectangle {
+                                    required property string modelData
+                                    objectName: "ahcMenu_" + modelData
+                                    width: ahcMenuCol.width; height: 28; radius: 5
+                                    color: ahmiMa.containsMouse ? Qt.alpha(root.textHi, 0.08) : "transparent"
+                                    readonly property string dst: root.dlSt(ahcMenuBox.mid)
+                                    Text {
+                                        x: 10; anchors.verticalCenter: parent.verticalCenter
+                                        textFormat: Text.PlainText
+                                        text: modelData === "play"
+                                              ? (root.pvSt("track", ahcMenuBox.mid) === "playing" ? "PAUSE PREVIEW" : "PLAY PREVIEW")
+                                              : modelData === "down"
+                                              ? (parent.dst === "done" ? "DOWNLOADED"
+                                                 : parent.dst === "failed" ? "TRY DOWNLOAD AGAIN"
+                                                 : root.ahcDlIdle(parent.dst) ? "DOWNLOAD" : "IN QUEUE")
+                                              : (ahcMenuBox.isTrack ? "GO TO ALBUM" : "OPEN ALBUM")
+                                        color: ahmiMa.containsMouse ? root.accent : root.textHi
+                                        font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.1
+                                    }
+                                    MouseArea {
+                                        id: ahmiMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.ahcMenuDo(modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fade and scale from the name; out a little quicker than in.
+        enter: Transition {
+            ParallelAnimation {
+                NumberAnimation {
+                    target: ahcFace; property: "opacity"; from: 0; to: 1
+                    duration: root.hoverMotion ? 120 : 0; easing.type: Easing.OutCubic
+                }
+                NumberAnimation {
+                    target: ahcScaleT; properties: "xScale,yScale"; from: 0.86; to: 1
+                    duration: root.hoverMotion ? 190 : 0; easing.type: Easing.OutCubic
+                }
+            }
+        }
+        exit: Transition {
+            ParallelAnimation {
+                NumberAnimation { target: ahcFace; property: "opacity"; to: 0; duration: root.hoverMotion ? 90 : 0 }
+                NumberAnimation { target: ahcScaleT; properties: "xScale,yScale"; to: 0.94; duration: root.hoverMotion ? 100 : 0 }
+            }
+        }
     }
     readonly property var _relMonths: ["January", "February", "March", "April", "May", "June", "July",
                                        "August", "September", "October", "November", "December"]
@@ -4839,7 +6105,15 @@ ApplicationWindow {
         return artistOpen && artistData && ("" + artistData.id) === ("" + artistId)
     }
     function openAlbumPage(albumId, highlight, title, art) {
-        if (!albumId || onAlbumPage(albumId)) return
+        if (!albumId) return
+        if (onAlbumPage(albumId)) {
+            // Already reading it: no navigation and no Back entry, but a
+            // track asked for (GO TO ALBUM from an artist card) is still lit
+            // and brought into view. Cleared first so the same track asked
+            // for again re-centers.
+            if (highlight) { browseHighlightId = ""; browseHighlightId = "" + highlight }
+            return
+        }
         markNav("browse")
         openBrowseItem("album", albumId, highlight || "", title || "", art || "")   // snapshots the view being left
         settingsOpen = false; artistOpen = false; libraryOpen = false; releasesOpen = false
@@ -5520,8 +6794,12 @@ ApplicationWindow {
             onClicked: if (nn.linkable) { waves.loadArtist(nn.who.id); root.nowCardOpen = false }
             // Resting on the name: build the page before the click.
             readonly property var prefetchCard: ({ kind: "artist", id: "" + (nn.who.id || "") })
-            onContainsMouseChanged: containsMouse && nn.linkable ? root.hoverPrefetch(prefetchCard)
-                                                                 : root.hoverPrefetchCancel(prefetchCard)
+            onContainsMouseChanged: {
+                if (containsMouse && nn.linkable) root.hoverPrefetch(prefetchCard)
+                else root.hoverPrefetchCancel(prefetchCard)
+                if (containsMouse && nn.linkable) root.artistCardFor(nn, nn.who.id, nn.who.name, "")
+                else root.artistCardOff(nn)
+            }
         }
     }
     // The "+N" chip after the names that fit: opens the featured artists card.
@@ -6681,9 +7959,15 @@ ApplicationWindow {
         // (and its own glow colors).
         // A cached cover keeps its Image Ready across the swap, so no
         // artState change would ask for the new colors: ask here.
-        // Guarded: a recycled delegate can be torn down before the deferred
-        // call runs, and calling into a destroyed item logs a TypeError.
-        onUrlChanged: { artWaited = false; fxPal = null; Qt.callLater(function() { if (artRoot) artRoot._fxPalFetch() }) }
+        // Guarded by _life: a cover can be torn down before the deferred call
+        // runs, and an item whose context is gone still reads as an object
+        // (a truthiness or typeof check passes) while its functions do not
+        // exist, which logged a TypeError. The token is a plain JS object
+        // captured when the call is scheduled, so checking it never touches
+        // the item.
+        property var _life: ({ gone: false })
+        Component.onDestruction: _life.gone = true
+        onUrlChanged: { artWaited = false; fxPal = null; var life = _life; Qt.callLater(function() { if (!life.gone) artRoot._fxPalFetch() }) }
         // Never fetch a cover the user has never been shown. Rows hidden
         // behind a section cap (search's first-5) still instantiate, and
         // their fetches used to queue ahead of the on-screen art on the six
@@ -6908,8 +8192,9 @@ ApplicationWindow {
             var key = url
             var known = waves.coverPalette(key, null)
             if (known) { fxPal = known; return }
+            var life = _life
             artImg.grabToImage(function(r) {
-                if (artRoot.url === key) artRoot.fxPal = waves.coverPalette(key, r.image)
+                if (!life.gone && artRoot.url === key) artRoot.fxPal = waves.coverPalette(key, r.image)
             }, Qt.size(40, 40))
         }
         onFxRaisedChanged: _fxPalFetch()
@@ -12024,14 +13309,14 @@ ApplicationWindow {
     }
 
     // The header's QUEUE button. The word morphs with the queue's state
-    // (QUEUE at rest, the batch percent while anything is active, DONE or FAIL
-    // for a beat) and only a change of WORD decrypts; the percent ticking up
-    // is written plain. The arrow drips while anything downloads, a hairline
-    // along the bottom fills with the batch, and the corner count rolls like
-    // an odometer. A finished download floats a check off the count and sends
-    // two rings out from it (the second a beat behind and smaller) while the
-    // count bumps and rolls down; a failure flashes the count red and shakes
-    // the button, and a red dot breathes in the corner while anything failed.
+    // (QUEUE at rest, DONE when a batch lands whole, FAIL for a beat) and
+    // only a change of WORD decrypts. While anything is active the speed
+    // chart (QueueStart) fills the button and draws its own words, the word
+    // hidden under it. The corner count rolls like an odometer. A finished
+    // download bumps the count and sparks off it (the last one shatters it
+    // into a check); a failure says FAIL, and a red dot breathes in the
+    // corner while anything failed. Built for long queues: the count reads
+    // past 999, and the sparks keep quiet through a big batch.
     component QueueButton: Rectangle {
         id: qb
         objectName: "queueButton"
@@ -12044,7 +13329,6 @@ ApplicationWindow {
         radius: root.btnRad; color: "transparent"
         border.color: qbMa.containsMouse ? root.outline : root.border1
         Behavior on border.color { ColorAnimation { duration: 180 } }
-        transform: Translate { id: qbShk }
 
         readonly property int running: root.activeQueueCount - root.queuedCount
         // The batch: everything that became active since the queue was last
@@ -12052,29 +13336,28 @@ ApplicationWindow {
         property int batchTotal: 0
         property int batchDone: 0
         property int batchFails: 0
+        // The tracks of the batch's settled rows (done or failed), so the
+        // chart can weigh the batch by tracks: an album lands as more than a
+        // single.
+        property real landedW: 0
         property int _lastActive: 0
         property real pct: 0
+        // The batch's totals, counted once a tick (root.queueBatchTotals),
+        // so a frame of the chart costs the same for 5 items or 5,000.
+        property var agg: ({ n: 0, W: 0, L: 0, F: 0, nb: 0, fails: 0 })
         function measure() {
             qb.pct = qb.batchTotal > 0
                 ? Math.max(0, Math.min(100, (qb.batchDone + root.queueRunningProgress() / 100) / qb.batchTotal * 100)) : 0
+            qb.agg = root.queueBatchTotals(qb.batchTotal, qb.batchFails, qb.landedW)
         }
-        // Read as soon as the queue wakes, and the finishing flag drops when
-        // it empties: left standing from the last row's finish, it had the
-        // next download open on the whole map before the first tick.
         Timer {
             interval: 250; repeat: true; triggeredOnStart: true; running: root.activeQueueCount > 0
-            onTriggered: { qb.measure(); qb.finFrac = root.queueFinishFraction(); qb._fin = root.queueAllFinishing() }
-            onRunningChanged: if (!running) { qb._fin = false; qb.finFrac = 0 }
+            onTriggered: qb.measure()
         }
-        // Finishing: everything running is at 100% and only the final steps
-        // are left; the chart pours in as they land (finFrac). The arrow
-        // folds away while anything is active, the chart filling the button,
-        // and stays folded through the DONE flash, so DONE sits centered on
-        // its own and the arrow unfolds with QUEUE.
-        property bool _fin: false
-        property real finFrac: 0
-        readonly property bool finishing: _fin && mode === "run"
-        property real fz: finishing || root.activeQueueCount > 0 || mode === "done" ? 1 : 0
+        // The arrow folds away while anything is active, the chart filling
+        // the button, and stays folded through the DONE flash, so DONE sits
+        // centered on its own and the arrow unfolds with QUEUE.
+        property real fz: root.activeQueueCount > 0 || mode === "done" ? 1 : 0
         Behavior on fz { NumberAnimation { duration: 300 } }
 
         property string flash: ""
@@ -12115,16 +13398,16 @@ ApplicationWindow {
                 Text { id: qbMetric; visible: false; textFormat: Text.PlainText; text: "QUEUE"; font: qbWord.font }
                 DecryptText {
                     id: qbWord; objectName: "queueButtonWord"; anchors.centerIn: parent; color: qb.tone
-                    // The chart reads the percent while running and draws
-                    // its own DONE as it hands over; the word still sizes the
-                    // slot.
-                    opacity: qb.mode === "run" || qbStart.xT > 0 ? 0 : 1
+                    // The chart draws its own words while running; the word
+                    // still sizes the slot.
+                    opacity: qb.mode === "run" ? 0 : 1
                     font.family: root.uiFont; font.pixelSize: 13; font.bold: true; font.letterSpacing: root.btnTrack
                     font.features: { "tnum": 1 }
                 }
             }
         }
-        // The speed chart, the percent over the speed, and the pour.
+        // The speed chart, the batch along its floor, and the time left over
+        // the speed.
         QueueStart { id: qbStart; z: -1; anchors.centerIn: parent; btn: qb }
 
         // The count in LED dots on the page's own color, cut into the
@@ -12147,17 +13430,25 @@ ApplicationWindow {
             Behavior on scale { NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 2.2 } }
             visible: scale > 0.01; opacity: qbDone.badgeOp
             transform: Scale { origin.x: qbBadge.width / 2; origin.y: 6.5; xScale: qbDone.bump; yScale: qbDone.bump }
-            function fmt(v) { return v > 99 ? "99+" : "" + v }
+            // The true count up to 999, then 1k to 9k, then 9k+.
+            function fmt(v) { return v > 9999 ? "9k+" : v > 999 ? Math.floor(v / 1000) + "k" : "" + v }
+            // When the last roll began: a change that comes sooner switches
+            // at once, or a steady stream of landings keeps it mid-roll.
+            property real _rollT: 0
             Component.onCompleted: { if (value > 0) qbNew.text = fmt(value); _last = value }
             onValueChanged: {
                 if (value <= 0) { _last = 0; return }
                 if (_last <= 0) { qbNew.text = fmt(value); _last = value; t = 1; return }
                 dir = value > _last ? 1 : -1
-                qbOld.text = fmt(_last); qbNew.text = fmt(value); _last = value
-                qbRoll.restart()
+                var o = fmt(_last), nw = fmt(value), now = Date.now()
+                _last = value
+                // A change that keeps the same text (1,203 to 1,202) does not roll.
+                if (o === nw) return
+                qbOld.text = o; qbNew.text = nw
+                if (now - _rollT < 600) { qbRoll.stop(); t = 1; _rollT = now; return }
+                _rollT = now; qbRoll.restart()
             }
             NumberAnimation { id: qbRoll; target: qbBadge; property: "t"; from: 0; to: 1; duration: 300; easing.type: Easing.OutCubic }
-            Rectangle { id: qbErr; anchors.fill: parent; radius: parent.radius; color: root.red; opacity: 0 }
             Text {
                 id: qbOld
                 textFormat: Text.PlainText
@@ -12174,12 +13465,6 @@ ApplicationWindow {
                 color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; opacity: 0
             }
             LedCount { cur: qbNew.text; old: qbOld.text; t: qbBadge.t; dir: qbBadge.dir }
-        }
-        SequentialAnimation {
-            id: qbErrAnim
-            NumberAnimation { target: qbErr; property: "opacity"; to: 1; duration: 60 }
-            PauseAnimation { duration: 450 }
-            NumberAnimation { target: qbErr; property: "opacity"; to: 0; duration: 320 }
         }
         // Sticky while anything in the queue has failed, breathing on the LED
         // clock; overhangs the corner so it never widens the button.
@@ -12198,56 +13483,62 @@ ApplicationWindow {
         readonly property real bx: qbBadge.x + qbBadge.width / 2
         readonly property real by: qbBadge.y + 6.5
         QueueDone { id: qbDone; objectName: "queueButtonDone"; cx: qb.bx; cy: qb.by; bw: qbBadge.width; z: 4 }
-        function finish() { qbDone.play(root.activeQueueCount === 0, qb.mapToItem(null, qb.bx, qb.by).y) }
-
-        SequentialAnimation {
-            id: qbShake
-            NumberAnimation { target: qbShk; property: "x"; to: -3; duration: 40 }
-            NumberAnimation { target: qbShk; property: "x"; to: 3; duration: 60 }
-            NumberAnimation { target: qbShk; property: "x"; to: -2; duration: 50 }
-            NumberAnimation { target: qbShk; property: "x"; to: 2; duration: 50 }
-            NumberAnimation { target: qbShk; property: "x"; to: 0; duration: 40 }
+        // A batch of more than 20 items sparks only at its end, not per
+        // landing; the last download always plays.
+        function finish() {
+            var last = root.activeQueueCount === 0
+            if (!last && qb.batchTotal > 20) return
+            qbDone.play(last, qb.mapToItem(null, qb.bx, qb.by).y)
         }
         Timer { id: qbFlashT; onTriggered: qb.flash = "" }
+        // A delta burst (a thousand rows queued, a RETRY ALL) moves the
+        // counts once per row: the totals are measured once, after it.
+        property bool _measureDue: false
+        function measureSoon() {
+            if (qb._measureDue) return
+            qb._measureDue = true
+            Qt.callLater(function () { qb._measureDue = false; qb.measure() })
+        }
         function say(m, ms) { qb.flash = m; qbFlashT.interval = ms; qbFlashT.restart() }
         Connections {
             target: root
             function onActiveQueueCountChanged() {
                 var a = root.activeQueueCount, d = a - qb._lastActive
                 if (d > 0) {
-                    if (qb._lastActive === 0) { qb.batchTotal = 0; qb.batchDone = 0; qb.batchFails = 0 }
+                    if (qb._lastActive === 0) { qb.batchTotal = 0; qb.batchDone = 0; qb.batchFails = 0; qb.landedW = 0 }
                     qb.batchTotal += d
                     if (qb.flash === "done") qb.flash = ""
                 }
                 qb._lastActive = a
-                qb.measure()
+                qb.measureSoon()
             }
-            function onQueueRowSettled(status) {
-                if (status === "done" || status === "failed") qb.batchDone += 1
+            function onQueueRowSettled(status, tracks) {
+                if (status === "done" || status === "failed") { qb.batchDone += 1; qb.landedW += Math.max(1, tracks) }
                 else qb.batchTotal = Math.max(qb.batchDone, qb.batchTotal - 1)
-                qb.measure()
+                if (status === "failed") qb.batchFails += 1
+                qb.measureSoon()
+                // DONE only when the batch lands whole: mid batch the chart
+                // keeps the button and the count's sparks say it.
                 if (status === "done") {
-                    if (root.activeQueueCount > 0) qb.say("done", 650)
-                    else if (qb.batchFails === 0) qb.say("done", 1600)
+                    if (root.activeQueueCount === 0 && qb.batchFails === 0) qb.say("done", 1600)
                     qb.finish()
-                } else if (status === "failed") {
-                    qb.batchFails += 1
-                    qbErrAnim.restart(); qbShake.restart(); qb.say("fail", 1200)
-                }
+                } else if (status === "failed") qb.say("fail", 1200)
             }
         }
         MouseArea { id: qbMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: 10; onClicked: qb.clicked() }
     }
 
-    // The QUEUE button's inside while anything downloads (queue start lab,
-    // rounds 3 to 12, "Skyline" with the "Tag 9" readout, the "Pour" finish
-    // and the "Into the count" handoff). The fill is the batch's speed chart: each percent
-    // stands as tall as the speed was when it arrived, so a stall leaves a
-    // valley, and a small tag hangs off the head reading the percent over
-    // the speed. While the files are put together the chart is poured in:
-    // the skyline settles to one level, which rises to the brim as the real
-    // finish steps land (btn.finFrac), the tag reading that share. Drawn
-    // edge to edge inside the button's border; paints only while it shows.
+    // The QUEUE button's inside while anything downloads (queue item lab,
+    // "T1 throughput + floor"). Built for long queues: a frame reads the
+    // batch's few totals (btn.agg, counted once a tick) and a minute of speed
+    // history sampled every 250 ms, so it costs the same for 5 items or
+    // 5,000, and twenty landings in one beat move a number, not the picture.
+    // The recent speed (a sample a pixel) is an area, newest on the right, with a
+    // bright dot on its newest point; the batch runs along the floor by
+    // tracks (landed bright, in flight pale); the time left (the tracks still
+    // to go over the rate of the last 12 s, the shown figure changing once a
+    // second) sits over the speed. Drawn edge to edge inside the button's
+    // border; paints only while it shows.
     component QueueStart: Canvas {
         id: st
         objectName: "queueButtonChart"
@@ -12257,258 +13548,96 @@ ApplicationWindow {
         // Drawn at device resolution, shown at logical size.
         readonly property real s: Screen.devicePixelRatio
         width: lw * s; height: lh * s; scale: 1 / s
-        readonly property bool run: btn !== null && btn.mode === "run"
-        readonly property bool on: run || xT > 0
-        // The handoff: when the pour gave way to DONE (0 while none plays),
-        // and whether that was the batch's last download (the same call the
-        // button makes for its flash). A queue that went
-        // idle starts its next batch fresh, however soon it comes.
-        property double xT: 0
-        property bool xEnd: false
-        property bool fresh: false
-        // On the mode itself, not on run: the last row empties the queue
-        // first, so the button passes through idle on its way to DONE.
-        Connections {
-            target: st.btn
-            function onModeChanged() { if (st.btn.mode === "done" && st.finT > 0 && st.xT === 0) { st.xT = Date.now(); st.xEnd = root.activeQueueCount === 0 } }
-        }
+        readonly property bool on: btn !== null && btn.mode === "run"
+        // A queue that went idle starts its next batch fresh, however soon
+        // it comes. The chart is only ever off mid batch behind a FAIL
+        // flash, and a run of failures keeps the history it had.
+        property bool fresh: true
         Connections {
             target: root
             function onActiveQueueCountChanged() { if (root.activeQueueCount === 0) st.fresh = true }
         }
         opacity: on ? 1 : 0
         visible: opacity > 0
-        readonly property real pct: btn ? btn.pct : 0
+        readonly property var agg: btn ? btn.agg : null
         readonly property real rate: waves.downloadMbps || 0
         readonly property string spdText: root.queueSpeedText()
-        // The last speed read, so the tag keeps it at 100% once the stream
-        // has stopped and the speed reads nothing.
-        property string lastSp: ""
-        onSpdTextChanged: if (spdText !== "") lastSp = spdText
         property double bootT: 0
-        property double offT: -1e9
-        // sv is the speed on a log scale (2 Mb/s is 0, 400 Mb/s is 1),
-        // eased; ph is distance traveled, so a speed change bends the
-        // sparks instead of jumping them. prof is the speed at every percent
-        // the head has passed: the mean speed while bytes were arriving since
-        // its last step (accS over accT). The percent mostly steps when a
-        // track settles, after its stream has gone quiet, so a level read at
-        // the step itself read nothing and the whole chart lay flat behind
-        // the head.
-        property real sv: 0
-        property real ph: 0
-        property double _lt: 0
-        property var prof: []
-        property int profK: 0
-        property real accS: 0
-        property real accT: 0
-        function track(t) {
-            var dt = st._lt > 0 ? Math.max(0, Math.min(100, t - st._lt)) : 16
-            st._lt = t
-            var m = waves.paused ? 0 : st.rate, tgt = m > 0 ? clamp((Math.log(m) / Math.LN10 - 0.301) / 2.301) : 0
-            st.sv += (tgt - st.sv) * (1 - Math.exp(-dt / 300))
-            st.ph += dt / 1000 * (0.06 + 2.4 * st.sv)
-            var k = Math.min(100, Math.floor(st.pct))
-            // A new batch starts a new chart (the boot clears it); the dip
-            // between two downloads of one batch keeps it. Stretches with
-            // no speed reading at all (finishing, paused) carry the last level.
-            if (st.prof.length !== 101) {
-                var z = []; for (var i = 0; i <= 100; ++i) z.push(0)
-                st.prof = z; st.profK = 0; st.accS = 0; st.accT = 0
-            }
-            if (m > 0) { st.accS += tgt * dt; st.accT += dt }
-            if (st.profK < k) {
-                var lv = st.accT > 0 ? st.accS / st.accT : st.profK > 0 ? st.prof[st.profK - 1] : 0
-                while (st.profK < k) { st.prof[st.profK] = lv; st.profK++ }
-                st.accS = 0; st.accT = 0
-            }
-        }
-        function profH(k, B) {
-            var N = Math.min(st.profK, Math.max(0, Math.floor(st.pct))), P = st.prof
-            if (k >= N) return B[3] * (0.1 + 0.78 * st.sv)
-            var a = P[Math.max(0, k - 1)] || 0, b = P[k] || 0, c = k + 1 < N ? P[k + 1] || 0 : b
-            return B[3] * (0.1 + 0.78 * (a + 2 * b + c) / 4)
-        }
+        // What it draws from, kept between frames: the history (hist, a
+        // sample every 250 ms: speed, tracks landed so far), the rate and
+        // time left, and the eased batch (P landed plus in flight, Lw landed,
+        // both 0 to 1) and speed ceiling (mx).
+        property var es: ({})
 
-        // ---- the finish ----
-        // finT is when the finish began (latched as finishing starts, let go
-        // only if the batch drops back under 100%); fv is the real finish
-        // steps, eased.
-        property double finT: 0
-        property real fv: 0
-        property double _ft: 0
-        readonly property bool pouring: finT > 0
-        function finning(t) {
-            var b = st.btn
-            if (b && b.finishing && st.finT === 0) { st.finT = t; st.fv = 0; st._ft = t }
-            if (st.finT > 0 && !(b && b.finishing) && st.pct < 100) st.finT = 0
-            if (st.finT === 0) return false
-            var goal = b && b.finishing ? b.finFrac : 1, dt = Math.max(0, t - st._ft)
-            st._ft = t
-            st.fv += (goal - st.fv) * (1 - Math.exp(-dt / 220))
-            return true
+        function grp(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",") }
+        function clock(s) {
+            if (!(s >= 0)) return "--:--"
+            s = Math.round(s)
+            var m = Math.floor(s / 60), x = s % 60, z = function (q) { return (q < 10 ? "0" : "") + q }
+            return m >= 60 ? Math.floor(m / 60) + ":" + z(m % 60) + ":" + z(x) : m + ":" + z(x)
         }
-        function ease(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2 }
-        function lerp(a, b, u) { return a + (b - a) * u }
-        function pour(ctx, t, dim) {
-            var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h
-            var f = st.fv, tau = t - st.finT, sec = t / 1000
-            var ta = clamp(tau / 350)   // the download's tag hands over
-            var H = [], m = 0
-            for (var k = 0; k <= 100; ++k) { H.push(profH(k, B)); m += H[k] / 101 }
-            var X = function (k) { return x0 + w * k / 100 }
-            // The skyline settles to its mean level, which rises as the file
-            // fills, to the brim; the surface rocks less as it comes up.
-            var sl = ease(clamp(tau / 900)), L = lerp(m, h + 1.5, f)
-            var surf = function (k) { return lerp(H[k], L + Math.sin(k * 0.21 - sec * 5.5) * 1.1 * (1 - f) + Math.sin(k * 0.09 + sec * 3.1) * 0.6, sl) }
-            ctx.beginPath(); ctx.moveTo(X(0), bot)
-            for (k = 0; k <= 100; ++k) ctx.lineTo(X(k), bot - surf(k))
-            ctx.lineTo(X(100), bot); ctx.closePath()
-            var g = ctx.createLinearGradient(0, y0, 0, bot)
-            g.addColorStop(0, rgba((0.5 + 0.25 * f) * dim)); g.addColorStop(1, rgba((0.1 + 0.3 * f) * dim))
-            ctx.fillStyle = g; ctx.fill()
-            ctx.beginPath(); ctx.moveTo(X(0), bot - surf(0))
-            for (k = 1; k <= 100; ++k) ctx.lineTo(X(k), bot - surf(k))
-            ctx.strokeStyle = rgba(0.9 * dim, 0.25); ctx.lineWidth = 1; ctx.stroke()
-            // Bubbles rising through it.
-            for (var j = 0; j < 9; ++j) {
-                var u = (sec * (0.35 + 0.3 * hash(j)) + hash(j + 4)) % 1, kb = Math.floor(hash(j + 11) * 100)
-                ctx.fillStyle = rgba(0.5 * (1 - u) * sl * dim, 0.5); ctx.fillRect(X(kb), bot - u * surf(kb), 1, 1)
-            }
-            if (ta < 1) tag(ctx, B, x0 + w, bot - H[100], dim * (1 - ta))
-            finTag(ctx, B, x0 + w - 1, bot - surf(100), dim * ta)
-        }
-        // The finish's tag: what share of the file is put together, right
-        // aligned on the surface at the end.
-        function finTag(ctx, B, ax, ay, dim) {
-            if (dim <= 0.01) return
-            var tx = Math.min(ax - 5, B[0] + B[2] - 3), ty = tagY(B, ay)
+        function say(ctx, str, x, y, px, al, col, dim) {
             ctx.save(); ctx.globalCompositeOperation = "source-over"
-            ctx.fillStyle = rgba(0.6 * dim); ctx.fillRect(ax - 4, ay - 0.5, 3, 1)
-            keyed(ctx, Math.round(st.fv * 100) + "%", tx, ty, st.tagPx, "right", ink(root.textHi, dim), dim)
-            keyed(ctx, "building", tx, ty + st.tagGap, st.tagPx, "right", rgba(0.95 * dim, 0.35), dim)
+            keyed(ctx, str, x, y, px, al, col, dim)
             ctx.restore()
         }
+        function draw(ctx, t, dim) {
+            var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, i
+            var G = st.agg || { W: 0, L: 0, F: 0 }, E = st.es
+            var dt = E.t > 0 ? Math.min(100, Math.max(0, t - E.t)) : 0
+            E.t = t
+            var ez = function (cur, to, tau) { return cur === undefined ? to : cur + (to - cur) * (1 - Math.exp(-dt / tau)) }
+            var W = Math.max(1, G.W), P = Math.min(1, (G.L + G.F) / W), Lw = Math.min(1, G.L / W)
+            // The history: a sample every 250 ms of wall time, a minute of
+            // it, so a slow frame rate (settled, or the window away) keeps
+            // the clock.
+            var Hs = E.hist || (E.hist = [])
+            if (!E.ht || t - E.ht > 60000) E.ht = t - 250
+            while (t - E.ht >= 250) {
+                E.ht += 250
+                Hs.push({ t: E.ht, mb: waves.paused ? 0 : st.rate, p: G.L + G.F })
+                if (Hs.length > 240) Hs.shift()
+            }
+            // The rate in tracks a second over the last 12 s, and the time
+            // left from it; the shown time changes once a second.
+            var a = Hs[0]
+            for (i = Hs.length - 1; i >= 0; --i) if (t - Hs[i].t >= 12000) { a = Hs[i]; break }
+            var span = (t - a.t) / 1000
+            if (span >= 3) E.rate = ez(E.rate, Math.max(0, (G.L + G.F - a.p) / span), 1500)
+            var eta = E.rate > 0.01 ? (W - G.L - G.F) / E.rate : -1
+            if (!E.et || t - E.et >= 1000) { E.et = t; E.eta = eta }
+            E.P = ez(E.P, P, 250); E.Lw = ez(E.Lw, Lw, 300)
+            // The ceiling from the samples on screen (a pixel each), so a
+            // peak that scrolled off does not flatten the line.
+            var N = Math.min(Hs.length, Math.floor(w)), base = Hs.length - N, mx = 1
+            for (i = base; i < Hs.length; ++i) mx = Math.max(mx, Hs[i].mb)
+            E.mx = ez(E.mx, mx, 600)
+            // Settled: nothing arriving and nothing left to ease, so four
+            // frames a second draw the same picture.
+            st.calm = (waves.paused || st.rate <= 0) && t - st.bootT > 600
+                && Math.abs(E.P - P) < 0.002 && Math.abs(E.Lw - Lw) < 0.002 && Math.abs(E.mx - mx) < 0.01 * mx
 
-        // ---- the download ----
-        function chart(ctx, t, dim, ta) {
-            var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, fx = x0 + w * st.pct / 100
-            // A fresh start sweeps in from the left, white at its edge.
-            var bk = clamp((t - st.bootT) / 540)
-            if (bk < 1) { ctx.save(); ctx.beginPath(); ctx.rect(x0 - 1, y0 - 1, w * bk + 1, h + 2); ctx.clip() }
-            var N = Math.max(0, Math.floor(st.pct)), hd = bot - profH(N, B)
-            var g = ctx.createLinearGradient(0, y0, 0, bot)
-            g.addColorStop(0, rgba(0.5 * dim)); g.addColorStop(1, rgba(0.1 * dim))
-            ctx.beginPath(); ctx.moveTo(x0, bot)
-            for (var k = 0; k < N; ++k) ctx.lineTo(x0 + w * k / 100, bot - profH(k, B))
-            ctx.lineTo(fx, hd); ctx.lineTo(fx, bot); ctx.closePath()
-            ctx.fillStyle = g; ctx.fill()
-            ctx.beginPath(); ctx.moveTo(x0, bot - profH(0, B))
-            for (k = 1; k < N; ++k) ctx.lineTo(x0 + w * k / 100, bot - profH(k, B))
-            ctx.lineTo(fx, hd)
-            ctx.strokeStyle = rgba(0.9 * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
-            // The level it is running at, ruled ahead to the end, over a
-            // dotted floor.
-            ctx.fillStyle = rgba(0.16 * dim)
-            for (var dx = fx + 2; dx < x0 + w; dx += 3) ctx.fillRect(dx, hd - 0.4, 1.2, 0.8)
-            ctx.fillStyle = rgba(0.12 * dim)
-            for (dx = fx + 1; dx < x0 + w; dx += 3) ctx.fillRect(dx, bot - 1.2, 1.2, 0.8)
-            // Sparks off the head, as many and as fast as the speed.
-            for (var j = 0; j < 8; ++j) {
-                if (j >= 2 + 6 * st.sv) break
-                var u = (st.ph * (0.9 + 0.5 * hash(j)) + hash(j + 5)) % 1
-                ctx.fillStyle = rgba((1 - u) * 0.7 * dim, 0.6)
-                ctx.fillRect(fx - 1 - u * 5 * hash(j + 9), hd - u * (4 + 6 * st.sv), 1, 1)
-            }
-            ctx.fillStyle = rgba(0.3 * dim, 0.3); ctx.fillRect(fx - 0.5, y0, 1, h)
-            ctx.fillStyle = rgba(dim, 0.85); ctx.fillRect(fx - 1, hd - 1, 2, 2)
-            tag(ctx, B, fx, hd, dim * (ta === undefined ? 1 : ta))
-            if (bk < 1) { ctx.restore(); ctx.fillStyle = rgba(0.8 * (1 - bk), 0.8); ctx.fillRect(x0 + w * bk - 1, y0, 2, h) }
-        }
-        // The tag: the percent over the speed (in the accent), hung off the
-        // head on a short leader and riding up and down with it; ahead of
-        // the head while there is room, behind it after. 9px on 8.75px
-        // lines, about as big as two lines go in the button.
-        readonly property real tagPx: 9
-        readonly property real tagGap: 8.75
-        function tagY(B, y) { return Math.max(B[1] + st.tagPx * 0.74 + 1, Math.min(B[1] + B[3] - st.tagGap - 1.5, y - 1)) }
-        function tag(ctx, B, fx, hd, dim) {
-            var x0 = B[0], w = B[2], P = st.tagPx
-            var spT = st.spdText || (st.pct >= 100 ? st.lastSp : ""), known = spT !== ""
-            var pc = Math.floor(st.pct) + "%", sp = spT || "-- Mb/s"
-            ctx.save(); ctx.globalCompositeOperation = "source-over"
-            var wt = Math.max(tw(ctx, pc, P), tw(ctx, sp, P)), ahead = x0 + w - fx - 6 >= wt
-            var ty = tagY(B, hd)
-            var tx = ahead ? fx + 5 : Math.min(fx - 5, x0 + w - 3), al = ahead ? "left" : "right"
-            ctx.fillStyle = rgba(0.6 * dim); ctx.fillRect(ahead ? fx + 1 : fx - 4, hd - 0.5, 3, 1)
-            keyed(ctx, pc, tx, ty, P, al, ink(root.textHi, dim), dim)
-            keyed(ctx, sp, tx, ty + st.tagGap, P, al, rgba((known ? 0.95 : 0.4) * dim, 0.35), dim)
-            ctx.restore()
-        }
-        // ---- the handoff ----
-        // The pour hands over in 1.35s: the pool tips toward the count and
-        // pours into it as DONE drops in from above, then DONE falls away as
-        // the chart sweeps back in from the left with the batch's history.
-        // The batch's last download plays up to its DONE, holds it as long
-        // as the button's flash, and fades.
-        function handoff(ctx, t, dim) {
-            var u0 = t - st.xT, D = st.xEnd ? 1600 : 1350, B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, sec = t / 1000
-            if (u0 >= D) {
-                // Over: back to the chart, or nothing once the queue is idle
-                // (the button's own word takes over from here).
-                if (st.run || st.xEnd || u0 > D + 1500) st.xT = 0
-                if (st.run) chart(ctx, t, dim)
-                return
-            }
-            var u = st.xEnd ? Math.min(u0, 650) : u0
-            if (st.xEnd) dim *= 1 - ease(clamp((u0 - 1300) / 300))
-            var full = h + 1.5, X = function (k) { return x0 + w * k / 100 }
-            var e = ease(clamp(u / 600))
-            if (e < 1) {
-                var tilt = Math.sin(Math.PI * Math.min(1, e * 1.2)) * 7
-                pool(ctx, B, X, function (k) { return Math.max(0, full * (1 - e) + tilt * (k / 100 - 0.4)) }, dim)
-                var bp = st.btn.mapToItem(st, st.btn.bx, st.btn.by), bx = bp.x / st.s, by = bp.y / st.s
-                for (var j = 0; j < 10; ++j) {
-                    var q = clamp((e - 0.06 * j) / 0.45)
-                    if (q <= 0 || q >= 1) continue
-                    var sx = x0 + w * (0.72 + 0.03 * hash(j)), sy = bot - full * (1 - e) - 1
-                    var px = lerp(sx, bx - 2, q), py = lerp(sy, by + 2, q) - Math.sin(Math.PI * q) * 4
-                    ctx.fillStyle = rgba(0.9 * dim * (1 - q * 0.6), 0.6); ctx.fillRect(px - 0.75, py - 0.75, 1.5, 1.5)
-                }
-            }
-            var bk = clamp((u - 700) / 480)
-            if (bk > 0) {
-                ctx.save(); ctx.beginPath(); ctx.rect(x0 - 1, y0 - 1, w * ease(bk) + 1, h + 2); ctx.clip()
-                chart(ctx, t, dim, clamp((u - 1100) / 200)); ctx.restore()
-                if (bk < 1) { ctx.fillStyle = rgba(0.9 * dim * (1 - bk), 0.85); ctx.fillRect(x0 + w * ease(bk) - 1, y0, 2, h) }
-            }
-            var din = ease(clamp((u - 150) / 380)), dout = ease(clamp((u - 720) / 360))
-            word(ctx, B, din * (1 - dout), lerp(-15, 0, din) + 15 * dout, dim)
-        }
-        // The pool as the pour left it, tipped by y(k), its height at
-        // percent k.
-        function pool(ctx, B, x, y, a) {
-            var bot = B[1] + B[3]
-            ctx.beginPath(); ctx.moveTo(x(0), bot)
-            for (var k = 0; k <= 100; ++k) ctx.lineTo(x(k), bot - y(k))
-            ctx.lineTo(x(100), bot); ctx.closePath()
-            var g = ctx.createLinearGradient(0, B[1], 0, bot)
-            g.addColorStop(0, rgba(0.75 * a)); g.addColorStop(1, rgba(0.4 * a))
-            ctx.fillStyle = g; ctx.fill()
-            ctx.beginPath(); ctx.moveTo(x(0), bot - y(0))
-            for (k = 1; k <= 100; ++k) ctx.lineTo(x(k), bot - y(k))
-            ctx.strokeStyle = rgba(0.9 * a, 0.25); ctx.lineWidth = 1; ctx.stroke()
-        }
-        // The button's DONE, drawn here so it can move with the handoff: the
-        // same face, size and green, with a dark keyline.
-        function word(ctx, B, a, dy, dim) {
-            if (a <= 0) return
-            ctx.save(); ctx.globalCompositeOperation = "source-over"
-            ctx.font = "bold 13px \"" + root.uiFont + "\""; ctx.textAlign = "center"; ctx.textBaseline = "middle"
-            var x = B[0] + B[2] / 2, y = B[1] + B[3] / 2 + 0.5 + dy
-            ctx.lineJoin = "round"; ctx.lineWidth = 3; ctx.strokeStyle = ink(root.bg, 0.85 * a * dim); ctx.strokeText("DONE", x, y)
-            ctx.fillStyle = ink(root.green, a * dim); ctx.fillText("DONE", x, y)
-            ctx.restore()
+            // The recent speed, a pixel per sample.
+            var top = h - 3
+            var X = function (q) { return x0 + w - N + q + 1 }
+            var Y = function (q) { return bot - top * Hs[base + q].mb / E.mx }
+            ctx.beginPath(); ctx.moveTo(x0 + w - N, bot)
+            for (i = 0; i < N; ++i) ctx.lineTo(X(i), Y(i))
+            ctx.lineTo(x0 + w, bot); ctx.closePath(); ctx.fillStyle = rgba(0.16 * dim); ctx.fill()
+            ctx.beginPath()
+            for (i = 0; i < N; ++i) { if (i) ctx.lineTo(X(i), Y(i)); else ctx.moveTo(X(i), Y(i)) }
+            ctx.strokeStyle = rgba(0.45 * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
+            // The batch along the floor: landed bright, in flight pale.
+            var fx = x0 + w * E.P, lx = x0 + w * Math.min(E.P, E.Lw)
+            ctx.fillStyle = rgba(0.1 * dim); ctx.fillRect(x0, bot - 1.5, w, 1.5)
+            ctx.fillStyle = ink(root.textHi, 0.75 * dim); ctx.fillRect(x0, bot - 1.5, lx - x0, 1.5)
+            ctx.fillStyle = ink(root.textHi, 0.3 * dim); ctx.fillRect(lx, bot - 1.5, fx - lx, 1.5)
+            // The dot on the newest point of the speed line.
+            if (N > 0) { ctx.fillStyle = rgba(0.95 * dim, 0.4); ctx.fillRect(x0 + w - 2, Y(N - 1) - 1, 2, 2) }
+            // The time left over the speed.
+            var spT = st.spdText, Px = 9, ty = y0 + Px * 0.74 + 2
+            say(ctx, clock(E.eta), x0 + 3, ty, Px, "left", ink(root.textHi, dim), dim)
+            say(ctx, spT || "-- Mb/s", x0 + 3, ty + 8.75, Px, "left", rgba((spT ? 0.95 : 0.4) * dim, 0.35), dim)
         }
         // Mono text with a dark keyline round each glyph, so it reads where
         // it crosses the chart's line or fill.
@@ -12517,7 +13646,6 @@ ApplicationWindow {
             ctx.lineJoin = "round"; ctx.lineWidth = 2.5; ctx.strokeStyle = ink(root.bg, 0.9 * dim)
             ctx.strokeText(str, x, y); ctx.fillStyle = col; ctx.fillText(str, x, y)
         }
-        function tw(ctx, str, px) { ctx.font = "bold " + px + "px \"" + root.mono + "\""; return ctx.measureText(str).width }
         // The accent at alpha a, mixed c of the way to white.
         function rgba(a, c) {
             var k = c || 0, A = root.accent
@@ -12525,8 +13653,6 @@ ApplicationWindow {
                 + Math.round(255 * (A.b + (1 - A.b) * k)) + "," + Math.max(0, a) + ")"
         }
         function ink(c, a) { return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + Math.max(0, a) + ")" }
-        function hash(i) { var r = Math.sin(i * 12.9898) * 43758.5453; return r - Math.floor(r) }
-        function clamp(v) { return v < 0 ? 0 : v > 1 ? 1 : v }
         // The inside of the border, read off the button itself.
         function box() {
             if (st.btn) { var a = st.btn.mapToItem(st, 0, 0); return [a.x / st.s + 1.5, a.y / st.s + 1.5, st.btn.width - 3, st.btn.height - 3] }
@@ -12534,23 +13660,21 @@ ApplicationWindow {
         }
 
         onOnChanged: {
-            var t = Date.now()
-            // A fresh batch sweeps in; a beat off (the DONE between two
-            // downloads) comes back as it was.
-            if (on) { if (t - offT > 2500 || st.fresh) { bootT = t; prof = [] } st.fresh = false } else offT = t
+            // A fresh batch starts a fresh history; a beat off (the FAIL
+            // flash mid batch, however many in a row) comes back as it was.
+            if (on) { if (st.fresh) { st.es = ({}); bootT = Date.now() } st.fresh = false }
         }
         // Full rate only while something moves. A queue that is paused, or
         // waiting with nothing arriving (offline, a NAS that went away), has
-        // a chart that has settled, and at zero speed its sparks drift well
-        // under a pixel a frame, so four frames a second look the same. A
-        // speed or a pause wakes it at once, and a hidden window draws
-        // nothing (the clocks are wall time, so it picks up where it is).
+        // a chart that has settled once its numbers have eased in, and four
+        // frames a second keep its history ticking. A speed or a pause wakes
+        // it at once, and a hidden window draws nothing (the clocks are wall
+        // time, so it picks up where it is).
         property bool calm: false
-        readonly property bool busy: !calm || xT > 0 || pouring || (btn !== null && btn.finishing)
+        readonly property bool busy: !calm
         readonly property bool paused: waves.paused
         onRateChanged: calm = false
         onPausedChanged: calm = false
-        onPctChanged: if (calm) requestPaint()
         Timer { interval: st.busy ? 16 : 250; repeat: true; running: st.visible && root.windowUp; onTriggered: st.requestPaint() }
         onPaint: {
             var ctx = getContext("2d")
@@ -12561,12 +13685,7 @@ ApplicationWindow {
             var B = box(), r = root.btnRad - 1.5
             ctx.beginPath(); ctx.roundedRect(B[0], B[1], B[2], B[3], r, r); ctx.clip()
             ctx.globalCompositeOperation = "lighter"
-            var t = Date.now(), dim = waves.paused ? 0.5 : 1
-            track(t)
-            st.calm = (waves.paused || st.rate <= 0) && st.sv < 0.002 && t - st.bootT > 600
-            if (st.xT > 0) handoff(ctx, t, dim)
-            else if (finning(t)) pour(ctx, t, dim)
-            else chart(ctx, t, dim)
+            draw(ctx, Date.now(), waves.paused ? 0.5 : 1)
         }
     }
 
@@ -12588,7 +13707,7 @@ ApplicationWindow {
         anchors.centerIn: parent
         readonly property var f3: ({
             "0": [7, 5, 5, 5, 7], "1": [2, 6, 2, 2, 7], "2": [7, 1, 7, 4, 7], "3": [7, 1, 3, 1, 7], "4": [5, 5, 7, 1, 1],
-            "5": [7, 4, 7, 1, 7], "6": [7, 4, 7, 5, 7], "7": [7, 1, 1, 2, 2], "8": [7, 5, 7, 5, 7], "9": [7, 5, 7, 1, 7], "+": [0, 2, 7, 2, 0]
+            "5": [7, 4, 7, 1, 7], "6": [7, 4, 7, 5, 7], "7": [7, 1, 1, 2, 2], "8": [7, 5, 7, 5, 7], "9": [7, 5, 7, 1, 7], "+": [0, 2, 7, 2, 0], "k": [4, 5, 6, 5, 5]
         })
         onCurChanged: requestPaint()
         onTChanged: requestPaint()
@@ -12645,7 +13764,11 @@ ApplicationWindow {
         property var pp: []   // the count's pixels, left to right
         property var kk: []   // the check's, along its stroke
         visible: playing
+        // A mid-batch burst plays at most every 1.5 s, so a run of landings
+        // is not a strobe; the last one always plays.
+        property real _midT: -1e9
         function play(isLast, room) {
+            if (!isLast) { if (Date.now() - dn._midT < 1500) return; dn._midT = Date.now() }
             var X = [], hw = dn.bw / 2
             for (var y = -7; y <= 7; y += 2)
                 for (var x = -hw + 1; x <= hw - 1; x += 2) {
@@ -13635,8 +14758,12 @@ ApplicationWindow {
                         // before the click, as an artist card does (see
                         // hoverPrefetch).
                         readonly property var prefetchCard: ({ kind: "artist", id: "" + (modelData.id || "") })
-                        onContainsMouseChanged: containsMouse && alName.linkable ? root.hoverPrefetch(prefetchCard)
-                                                                                 : root.hoverPrefetchCancel(prefetchCard)
+                        onContainsMouseChanged: {
+                            if (containsMouse && alName.linkable) root.hoverPrefetch(prefetchCard)
+                            else root.hoverPrefetchCancel(prefetchCard)
+                            if (containsMouse && alName.linkable) root.artistCardFor(alName, modelData.id, modelData.name, "")
+                            else root.artistCardOff(alName)
+                        }
                     }
                 }
                 Text { visible: index < al.artists.length - 1; text: ", "; color: root.textLo; font.pixelSize: al.px }
@@ -14132,7 +15259,15 @@ ApplicationWindow {
                     artistName: aName
                 }
             }
-            Text { textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter }
+            Text {
+                id: ascName
+                textFormat: Text.PlainText; text: aName; color: root.textHi; font.pixelSize: 14; font.bold: true
+                elide: Text.ElideRight; width: parent.width; horizontalAlignment: Text.AlignHCenter
+                HoverHandler {
+                    onHoveredChanged: hovered && asc.aId !== "" ? root.artistCardFor(ascName, asc.aId, asc.aName, asc.aArt)
+                                                               : root.artistCardOff(ascName)
+                }
+            }
             // The meter keeps its line whether the popularity is known yet
             // or not (unlit until it is): a card that grew 20px when the
             // enrichment landed pushed the page's reservations off by that
@@ -15450,6 +16585,8 @@ ApplicationWindow {
                         onContainsMouseChanged: {
                             if (containsMouse && afName.linkable) root.hoverPrefetch(prefetchCard)
                             else root.hoverPrefetchCancel(prefetchCard)
+                            if (containsMouse && afName.linkable) root.artistCardFor(afName, modelData.id, modelData.name, "")
+                            else root.artistCardOff(afName)
                             if (containsMouse && afName.truncated) root.fullTipFor(afName, afName.text)
                             else root.fullTipOff(afName)
                         }
@@ -17302,6 +18439,7 @@ ApplicationWindow {
         root.qidAt = at
         root.lingerQids = ling
         root.completedCount = c; root.failedCount = f; root.stoppedCount = s; root.downloadingCount = d; root.queuedCount = q
+        root._qwDirty = true
         root.lingerCount = ling.length
         root.activeQueueCount = a
     }
@@ -17322,7 +18460,7 @@ ApplicationWindow {
         else if (grp === "failed") root.failedCount += d
         else if (grp === "stopped") root.stoppedCount += d
         else if (grp === "downloading") root.downloadingCount += d
-        else root.queuedCount += d
+        else { root.queuedCount += d; root._qwDirty = true }
         // The one funnel every section count passes through, so it is where
         // the header pulse is named: the section that GREW. A promotion bumps
         // two sections in the same tick, one down and one up, and only the
@@ -17357,28 +18495,39 @@ ApplicationWindow {
         var m = waves.downloadMbps || 0
         return m <= 0 ? "" : (m < 10 ? m.toFixed(1) : Math.round(m)) + " Mb/s"
     }
-    function queueFinishFraction() {
-        var m = queueModel, lo = queueGroupStart("downloading")
-        var hi = Math.min(m.count, lo + root.downloadingCount), sum = 0, n = 0
-        for (var i = lo; i < hi; ++i) {
-            var r = m.get(i)
-            if (r.status !== "running") continue
-            sum += root.queueFinish[r.qid] || 0; ++n
+    // The QUEUE button's batch in a few totals, weighed by tracks (a row
+    // with no track count weighs one): W all of it, L landed (done or
+    // failed), F the share in flight (a running row's download fills 85% of
+    // its weight, its finish steps the rest), nb how many build. Settled rows
+    // come in as landedW, since they leave the active groups as they land.
+    // The running rows are the few in flight; the queued group's weight is
+    // only re-read once something marked it dirty (a row joined or left the
+    // group, a row's track count changed, a full reconcile), so a thousand
+    // waiting rows are not walked four times a second. _qwWalks counts the
+    // walks (the long-queue test reads it).
+    property int _qwCount: -1
+    property bool _qwDirty: true
+    property real _qwSum: 0
+    property int _qwWalks: 0
+    function queueBatchTotals(total, fails, landedW) {
+        var m = queueModel, i, r, w
+        if (root._qwDirty || root._qwCount !== root.queuedCount) {
+            var qlo = queueGroupStart("queued"), qhi = Math.min(m.count, qlo + root.queuedCount), qs = 0
+            for (i = qlo; i < qhi; ++i) qs += Math.max(1, m.get(i).tracks || 0)
+            root._qwSum = qs; root._qwCount = root.queuedCount; root._qwDirty = false; root._qwWalks += 1
         }
-        return n ? sum / n : 0
-    }
-    // True while something runs and every running row sits at 100%: nothing
-    // is streaming, only the final steps (merge, extract, tagging) are left.
-    function queueAllFinishing() {
-        var m = queueModel, lo = queueGroupStart("downloading")
-        var hi = Math.min(m.count, lo + root.downloadingCount), any = false
-        for (var i = lo; i < hi; ++i) {
-            var r = m.get(i)
+        var lo = queueGroupStart("downloading"), hi = Math.min(m.count, lo + root.downloadingCount)
+        var runW = 0, F = 0, nb = 0
+        for (i = lo; i < hi; ++i) {
+            r = m.get(i)
             if (r.status !== "running") continue
-            if ((r.progress || 0) < 99.9) return false
-            any = true
+            w = Math.max(1, r.tracks || 0)
+            var p = Math.min(100, r.progress || 0) / 100, fin = root.queueFinish[r.qid] || 0
+            runW += w
+            F += w * (0.85 * p + (p >= 0.999 ? 0.15 * fin : 0))
+            if (p >= 0.999) ++nb
         }
-        return any
+        return { n: total, W: landedW + runW + root._qwSum, L: landedW, F: F, nb: nb, fails: fails }
     }
     // Re-point the index entries of model rows lo..hi after a shift.
     function queueIndexFix(lo, hi) {
@@ -17446,7 +18595,7 @@ ApplicationWindow {
             m.setProperty(i, "status", it.status)
             if (queueActiveStatus(was) !== queueActiveStatus(it.status)) {
                 root.activeQueueCount += queueActiveStatus(it.status) ? 1 : -1
-                if (queueActiveStatus(was)) root.queueRowSettled(it.status)
+                if (queueActiveStatus(was)) root.queueRowSettled(it.status, it.tracks || row.tracks || 0)
             }
         }
         // Wall-clock stamp of when the row finished: the root lingerClock
@@ -17461,7 +18610,7 @@ ApplicationWindow {
         if (row.progress !== it.progress) m.setProperty(i, "progress", it.progress)
         if (row.name !== it.name) m.setProperty(i, "name", it.name)
         if (row.artist !== it.artist) m.setProperty(i, "artist", it.artist || "")
-        if (row.tracks !== it.tracks) m.setProperty(i, "tracks", it.tracks || 0)
+        if (row.tracks !== it.tracks) { m.setProperty(i, "tracks", it.tracks || 0); root._qwDirty = true }
         var qv = it.quality || ""
         if (row.quality !== qv) m.setProperty(i, "quality", qv)
         var ex = it.expected || ""
@@ -17496,7 +18645,7 @@ ApplicationWindow {
         for (var k = 0; k < idxs.length; ++k) {
             var at = idxs[k], row = m.get(at), qid = row.qid
             queueGroupBump(row.uiGroup, -1)
-            if (queueActiveStatus(row.status)) { root.activeQueueCount -= 1; root.queueRowSettled("removed") }
+            if (queueActiveStatus(row.status)) { root.activeQueueCount -= 1; root.queueRowSettled("removed", 0) }
             if (row.status === "done" && !row.moved) queueLingerDrop(qid)
             // A row that has left the queue takes its per-qid state with it:
             // the expanded track list AND the expansion flag itself (see
@@ -17996,6 +19145,19 @@ ApplicationWindow {
             if (!root.artistTracksCollapsed) warm(p.tracks, root.discDecode)
             if (!root.artistAlbumsCollapsed) warm(p.albums, root.albumRowArt * 2)
             if (!root.artistEpsCollapsed) warm(p.eps, root.albumRowArt * 2)
+            // The artist card shows the same images smaller (decoded at twice
+            // its own sizes: the 72 px picture, the 30 px track thumbs, the
+            // strip's covers), so they are warmed at those sizes too and the
+            // card paints them from the pixmap cache when its summary lands.
+            if (root.artistCards) {
+                if (p.art) root.warmArt("" + p.art, 144, 144)
+                warm((p.tracks || []).slice(0, 3), 60)
+                // The strip's own releases (the backend picks them by the
+                // card's rule), at the size its count gives each cover.
+                var rel = (p.card || []).filter(function (a) { return !!a })
+                var n = Math.min(6, (p.card || []).length)
+                if (n > 0) warm(rel, 2 * Math.min(64, Math.floor((292 - (n - 1) * 6) / n)))
+            }
         }
         function onBrowsePageLoaded(p) {
             if (p.key !== root.browsePageKey) return   // stale: user already left this page
@@ -18700,7 +19862,7 @@ ApplicationWindow {
                         ComboBox {
                             id: sortBox
                             implicitHeight: 44; implicitWidth: 156
-                            model: ["Relevance", "Release date", "Name", "Popularity"]
+                            model: ["Relevance", "Release date", "Name", "Popularity", "Quality"]
                             currentIndex: Math.max(0, root.sortKeys.indexOf(waves.wavesPref("search_sort")))
                             onActivated: { waves.setWavesPref("search_sort", root.sortKeys[currentIndex]); root.resortSearch() }
                             background: Rectangle { radius: 8; color: root.surface2; border.color: sortBox.popup.visible ? root.accent : root.outline }
@@ -18994,8 +20156,10 @@ ApplicationWindow {
                             required property bool late
                             width: browseLandingCol.width
                             asynchronous: root._browseAsyncBuild || late
-                            // Invisible while the veil is up, but still laid out.
-                            opacity: root.browseBuilding ? 0 : 1
+                            // Invisible while the veil is up, but still laid out;
+                            // and held back until the launch warm reaches its
+                            // slot (see root.bootWarmShelves).
+                            opacity: root.browseBuilding || bsecLd.slot >= root.bootWarmShelves ? 0 : 1
                             // A late section joined no count (see browseSecSlots).
                             onLoaded: if (!late) root._browseBuildTick()
                             sourceComponent: BrowseSection {
@@ -19022,9 +20186,11 @@ ApplicationWindow {
                         delegate: Loader {
                             id: tileGroupLd
                             required property var modelData
+                            required property int index
                             width: browseLandingCol.width
                             asynchronous: root._browseAsyncBuild
-                            opacity: root.browseReveal
+                            // Warmed after the content shelves, in their order.
+                            opacity: browseSecSlots.count + index >= root.bootWarmShelves ? 0 : root.browseReveal
                             onLoaded: root._browseBuildTick()
                             sourceComponent: tileGroupComp
                             Component {
@@ -19272,8 +20438,14 @@ ApplicationWindow {
                                         onClicked: waves.loadArtist(browseItemHeader.hd.artist_id)
                                         // Resting on the artist: build the page before the click.
                                         readonly property var prefetchCard: ({ kind: "artist", id: browseItemHeader.hd ? "" + (browseItemHeader.hd.artist_id || "") : "" })
-                                        onContainsMouseChanged: containsMouse ? root.hoverPrefetch(prefetchCard)
-                                                                              : root.hoverPrefetchCancel(prefetchCard)
+                                        onContainsMouseChanged: {
+                                            if (containsMouse) root.hoverPrefetch(prefetchCard)
+                                            else root.hoverPrefetchCancel(prefetchCard)
+                                            var hd = browseItemHeader.hd
+                                            if (containsMouse && hd && hd.artist_id)
+                                                root.artistCardFor(bihSubtitle, hd.artist_id, hd.artist || hd.subtitle || "", "")
+                                            else root.artistCardOff(bihSubtitle)
+                                        }
                                     }
                                 }
                                 Text {
@@ -20536,7 +21708,7 @@ ApplicationWindow {
                         Shortcut {
                             sequence: "Esc"
                             enabled: relSearchField.activeFocus && root.peekNow === null && root.videoNow === null
-                                     && !followDialog.open && !importDialog.open
+                                     && !followDialog.open && !importDialog.open && !root.ahcOpen
                             onActivated: relSearch.dismiss()
                         }
                         Shortcut {
@@ -23349,6 +24521,17 @@ ApplicationWindow {
     // search is after: a single released this week has a popularity of 0
     // and sat under every older track that shared one word with the query,
     // while TIDAL had ranked it first. Popularity is its own option now.
+    // Quality ranks on the catalog's own word for a row, the one its pill
+    // shows: HI-RES over LOSSLESS over an Atmos-only release over HIGH over
+    // LOW, and a video by its resolution ("1080p"). A row with no word ranks
+    // -1, which the sort keeps last in both directions.
+    readonly property var qualityTiers: ({ "HI-RES": 4, "LOSSLESS": 3, "ATMOS": 2.5, "HIGH": 2, "LOW": 1 })
+    function qualityRank(row) {
+        var q = String((row && row.quality) || "").toUpperCase()
+        if (root.qualityTiers[q] !== undefined) return root.qualityTiers[q]
+        var res = parseInt(q, 10)
+        return res > 0 ? res : -1
+    }
     function applySort(inPlace) {
         var dir = root.sortAsc ? 1 : -1
         function ordered(raw, hasPop) {
@@ -23356,6 +24539,18 @@ ApplicationWindow {
             if (sortBox.currentIndex === 1) arr.sort(function(a, b){ return dir * ((a.listed || a.date || a.year || "").localeCompare(b.listed || b.date || b.year || "")) })
             else if (sortBox.currentIndex === 2) arr.sort(function(a, b){ return dir * a.title.localeCompare(b.title) })
             else if (sortBox.currentIndex === 3 && hasPop) arr.sort(function(a, b){ return dir * ((a.popularity || 0) - (b.popularity || 0)) })
+            else if (sortBox.currentIndex === 4) {
+                // Ties keep TIDAL's relevance order, and the arrow does not
+                // flip them: it reverses the tiers, not the rows inside one.
+                // Indexed by hand, so the order never rests on sort stability.
+                var keyed = arr.map(function(row, i) { return { row: row, i: i, q: root.qualityRank(row) } })
+                keyed.sort(function(a, b) {
+                    if ((a.q < 0) !== (b.q < 0)) return a.q < 0 ? 1 : -1
+                    if (a.q !== b.q) return dir * (a.q - b.q)
+                    return a.i - b.i
+                })
+                arr = keyed.map(function(k) { return k.row })
+            }
             else if (root.sortAsc) arr.reverse()  // Relevance (or no popularity data): the API's order, the arrow flips it
             return arr
         }
@@ -26783,9 +27978,11 @@ ApplicationWindow {
     }
     Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open; onActivated: importDialog.close() }
 
-    // Exit warning: the window close was vetoed (onClosing) because downloads
-    // are still running. KEEP DOWNLOADING cancels the exit; EXIT ANYWAY
-    // re-closes for real. The checkbox persists on either button; a click
+    // Exit warning: a real quit (the app menu, Cmd+Q, the Dock, the tray, or
+    // the close button set to exit) was vetoed in onClosing because downloads
+    // are still running. Same compact card as the close prompt: a title, the
+    // live count, and two tiles. KEEP DOWNLOADING cancels the exit; EXIT
+    // ANYWAY re-closes for real. The checkbox persists on either tile; a click
     // away is treated as keeping the downloads, without persisting it.
     Rectangle {
         id: exitGate
@@ -26806,72 +28003,89 @@ ApplicationWindow {
         // Lets the EXIT ANYWAY re-close pass the onClosing veto. Reset when
         // the gate opens so a canceled exit re-arms the warning.
         property bool confirmed: false
+        readonly property int running: root.activeQueueCount
         onOpenChanged: if (open) { confirmed = false; exitSkip.checked = false }
         color: "#cc06070e"
         MouseArea { anchors.fill: parent; onClicked: exitGate.open = false }
         Rectangle {
-            // 420: narrower than the info-heavy gates, this one is a short
-            // question and the body still sets as two lines.
-            anchors.centerIn: parent; width: 420
-            implicitHeight: exCol.implicitHeight + 40
+            anchors.centerIn: parent; width: 400
+            implicitHeight: exCol.implicitHeight + 44
             radius: 14; color: root.surface2; border.color: root.outline
+            // The close prompt's settle on the way in.
+            scale: exitGate.open ? 1 : 0.97
+            Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
             ColumnLayout {
-                id: exCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                id: exCol; anchors.centerIn: parent; width: parent.width - 44; spacing: 0
                 Text {
-                    textFormat: Text.PlainText; Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter
+                    color: root.textHi; font.pixelSize: 17; font.bold: true
                     text: "Exit while downloading?"
                 }
                 Text {
-                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    horizontalAlignment: Text.AlignHCenter
-                    color: root.textLo; font.pixelSize: 13; font.bold: true; lineHeight: 1.3
+                    objectName: "exitGateLead"
+                    textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: 4
                     // The 0 case is reachable: the last download can finish
-                    // while this gate is up. The copy must not read "0
-                    // downloads are still running." at that moment.
-                    text: root.activeQueueCount === 0
-                        ? "All downloads finished."
-                        : root.activeQueueCount === 1
-                            ? "A download is still running."
-                            : root.activeQueueCount + " downloads are still running."
-                }
-                Text {
-                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    horizontalAlignment: Text.AlignHCenter
-                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
-                    Layout.topMargin: -8   // the pair reads as one statement, not two paragraphs
-                    text: root.activeQueueCount === 0
-                        ? "It is safe to exit now."
-                        : "Exiting now ends " + (root.activeQueueCount === 1 ? "it" : "them")
-                            + ", and unfinished tracks will need to be downloaded again."
+                    // while this gate is up. The line must not read "0
+                    // downloads still running" at that moment.
+                    color: exitGate.running === 0 ? root.textLo : root.red
+                    font.pixelSize: 12
+                    text: exitGate.running === 0 ? "All downloads finished"
+                        : exitGate.running === 1 ? "1 download still running"
+                        : exitGate.running + " downloads still running"
                 }
                 RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.topMargin: 4; spacing: 12
-                    SpecBtn {
+                    Layout.fillWidth: true; Layout.topMargin: 16; spacing: 10
+                    CloseChoice {
+                        objectName: "exitGateKeep"
+                        Layout.fillWidth: true; Layout.preferredWidth: 1
                         primary: true; label: "KEEP DOWNLOADING"
                         onClicked: {
                             if (exitSkip.checked) setupSettings.exitWarnMuted = true
                             exitGate.open = false
                         }
+                        Shape {
+                            id: exArrow
+                            // Download sign: a stem, its arrowhead and the
+                            // tray line it lands on, at the power sign's weight.
+                            anchors.centerIn: parent; width: 20; height: 20
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: root.accent; strokeWidth: 2; fillColor: "transparent"
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                startX: 10; startY: 2
+                                PathLine { x: 10; y: 13 }
+                                PathMove { x: 5; y: 8.5 }
+                                PathLine { x: 10; y: 13.5 }
+                                PathLine { x: 15; y: 8.5 }
+                                PathMove { x: 3; y: 18 }
+                                PathLine { x: 17; y: 18 }
+                            }
+                        }
                     }
-                    SpecBtn {
-                        danger: true; label: "EXIT ANYWAY"
+                    CloseChoice {
+                        objectName: "exitGateExit"
+                        Layout.fillWidth: true; Layout.preferredWidth: 1
+                        danger: exitGate.running > 0
+                        label: exitGate.running > 0 ? "EXIT ANYWAY" : "EXIT"
                         onClicked: {
                             if (exitSkip.checked) setupSettings.exitWarnMuted = true
                             exitGate.confirmed = true
                             exitGate.open = false
                             root.close()
                         }
+                        PowerSign {
+                            anchors.centerIn: parent
+                            ink: exitGate.running > 0 ? root.red : root.textHi
+                        }
                     }
                 }
                 Row {
-                    // "Don't warn me again" row: catDlGate grammar, centered to
-                    // match this card's centered text; below the buttons so the
-                    // choice reads first and the escape hatch last.
-                    Layout.alignment: Qt.AlignHCenter
+                    // "Don't warn me again": the close prompt's checkbox row,
+                    // below the tiles so the choice reads first and the escape
+                    // hatch last.
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 14
                     spacing: 8
                     Check {
                         id: exitSkip
@@ -26886,6 +28100,181 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // Phosphor-weight power sign: an open ring and a stem through its gap.
+    // The EXIT tile's sign on the close prompt and on the exit warning.
+    component PowerSign: Shape {
+        id: pw
+        property color ink: root.textHi
+        width: 20; height: 20
+        preferredRendererType: Shape.CurveRenderer
+        ShapePath {
+            strokeColor: pw.ink; strokeWidth: 2; fillColor: "transparent"
+            capStyle: ShapePath.RoundCap
+            PathAngleArc { centerX: 10; centerY: 11; radiusX: 8; radiusY: 8; startAngle: -50; sweepAngle: 280 }
+        }
+        ShapePath {
+            strokeColor: pw.ink; strokeWidth: 2; fillColor: "transparent"
+            capStyle: ShapePath.RoundCap
+            startX: 10; startY: 1.5
+            PathLine { x: 10; y: 10 }
+        }
+    }
+
+    // One answer on the close prompt: a square-ish tile, its sign centered
+    // over a caps label. The two sit side by side at one size, so the choice
+    // reads as a pair rather than a primary button and an aside.
+    component CloseChoice: Rectangle {
+        id: cc
+        signal clicked()
+        property string label: ""
+        property bool primary: false
+        property bool danger: false
+        default property alias sign: ccSign.data
+        readonly property bool hot: ccMa.containsMouse
+        readonly property color tone: danger ? root.red : primary ? root.accent : root.textHi
+        implicitHeight: 84
+        radius: 10
+        color: hot ? root.surface3 : root.surface
+        border.width: 1
+        border.color: hot ? tone : danger ? root.redDim : primary ? root.accentDim : root.outline
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on border.color { ColorAnimation { duration: 120 } }
+        Item {
+            id: ccSign
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 20; width: 22; height: 22
+        }
+        Text {
+            textFormat: Text.PlainText
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom; anchors.bottomMargin: 17
+            text: cc.label; color: cc.tone
+            font.pixelSize: 12; font.bold: true; font.letterSpacing: 0.3
+        }
+        MouseArea {
+            id: ccMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: cc.clicked()
+        }
+    }
+
+    // Close prompt: the window's close button was pressed and the setting is
+    // "Ask every time" (onClosing vetoed the close). RUN IN BACKGROUND hides
+    // the window and keeps Waves running; EXIT re-closes for real. With
+    // downloads running (and the warning not muted) the prompt carries the
+    // download warning itself: a count under the title, and EXIT reads EXIT
+    // ANYWAY and counts as the answer to it, so the exit warning never
+    // follows as a second prompt. "Don't ask again" keeps the pick as the
+    // setting; a click away cancels the close and keeps nothing.
+    Rectangle {
+        id: closeGate
+        objectName: "closeGate"
+        parent: Overlay.overlay   // above the queue drawer, see exitGate
+        anchors.fill: parent
+        z: 1200                   // above the video overlay (999), see exitGate
+        visible: open
+        property bool open: false
+        // Lets the EXIT re-close pass the onClosing offer; onClosing clears
+        // it as it reads it, so a vetoed exit re-arms the prompt.
+        property bool exitPicked: false
+        readonly property int running: root.activeQueueCount
+        // Live, like exitGate's copy: a download can start or finish while
+        // the prompt is up, and EXIT answers whatever the card said then.
+        readonly property bool warnDl: running > 0 && !setupSettings.exitWarnMuted
+        onOpenChanged: if (open) closeSkip.checked = false
+        color: "#cc06070e"
+        MouseArea { anchors.fill: parent; onClicked: closeGate.open = false }
+        Rectangle {
+            id: clCard
+            anchors.centerIn: parent; width: 400
+            implicitHeight: clCol.implicitHeight + 44
+            radius: 14; color: root.surface2; border.color: root.outline
+            // A short settle on the way in; the gate is shown only while
+            // open, so this runs on opening and never on the way out.
+            scale: closeGate.open ? 1 : 0.97
+            Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: clCol; anchors.centerIn: parent; width: parent.width - 44; spacing: 0
+                Text {
+                    textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter
+                    color: root.textHi; font.pixelSize: 17; font.bold: true
+                    text: "Close Waves?"
+                }
+                Text {
+                    objectName: "closeGateLead"
+                    visible: closeGate.warnDl
+                    textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: 4
+                    color: root.red; font.pixelSize: 12
+                    text: closeGate.running === 1 ? "1 download still running"
+                                                   : closeGate.running + " downloads still running"
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.topMargin: 16; spacing: 10
+                    CloseChoice {
+                        objectName: "closeGateBackground"
+                        Layout.fillWidth: true; Layout.preferredWidth: 1
+                        primary: true; label: "RUN IN BACKGROUND"
+                        onClicked: {
+                            if (closeSkip.checked) waves.rememberCloseAction("background")
+                            closeGate.open = false
+                            root.goBackground()
+                        }
+                        OutWave {
+                            anchors.centerIn: parent; scale: 1.5
+                            lv: closeGate.open ? 1 : 0; col: root.accent
+                        }
+                    }
+                    CloseChoice {
+                        objectName: "closeGateExit"
+                        Layout.fillWidth: true; Layout.preferredWidth: 1
+                        danger: closeGate.warnDl
+                        label: closeGate.warnDl ? "EXIT ANYWAY" : "EXIT"
+                        onClicked: {
+                            if (closeSkip.checked) waves.rememberCloseAction("exit")
+                            // The card already warned about the downloads:
+                            // the exit warning must not ask a second time.
+                            if (closeGate.warnDl) exitGate.confirmed = true
+                            closeGate.exitPicked = true
+                            closeGate.open = false
+                            root.close()
+                        }
+                        PowerSign {
+                            anchors.centerIn: parent
+                            ink: closeGate.warnDl ? root.red : root.textHi
+                        }
+                    }
+                }
+                Row {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 14
+                    spacing: 8
+                    Check {
+                        id: closeSkip
+                        anchors.verticalCenter: parent.verticalCenter
+                        onToggled: checked = !checked
+                    }
+                    Text {
+                        textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter
+                        text: "Don't ask again"; color: root.textLo; font.pixelSize: 13
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: closeSkip.checked = !closeSkip.checked }
+                    }
+                }
+            }
+        }
+    }
+
+    // The tray icon for a window closed to the background. Windows and Linux
+    // only: macOS comes back through the Dock, and never imports the module.
+    Loader {
+        id: trayLoader
+        active: Qt.platform.os !== "osx"
+        source: "TrayHost.qml"
+    }
+    Binding {
+        target: trayLoader.item; property: "shown"; value: root.inBackground
+        when: trayLoader.status === Loader.Ready
     }
 
     // ==== Open-water launch sequence ("Z FILL", picked in the boot lab) ====
@@ -27172,7 +28561,25 @@ ApplicationWindow {
                 // while the interface faded up underneath (reported from
                 // livetesting). The drain's own last tick can never be early
                 // or late relative to itself.
-                if (tick > 3 * m) { stop(); tick = 0; bootVer.shown = 0; bootZoom.start() }
+                if (tick > 3 * m) {
+                    // Whatever the warm has not reached yet goes now, before
+                    // the zoom: a landing that outran the slices still never
+                    // hands the zoom its first frame.
+                    bootWarmStep.stop(); root.bootWarmShelves = 1000000000
+                    stop(); tick = 0; bootVer.shown = 0; bootZoom.start()
+                }
+            }
+        }
+        // The warm's slices (see root.bootWarmShelves): on the drain's beat,
+        // a few landing shelves per tick, so the whole page is painted well
+        // inside the drain and no single frame carries much of it.
+        Timer {
+            id: bootWarmStep
+            interval: 36; repeat: true
+            onTriggered: {
+                var total = browseSecSlots.count + 4   // content shelves + tile groups
+                root.bootWarmShelves += Math.max(1, Math.ceil(total / 12))
+                if (root.bootWarmShelves >= total) { root.bootWarmShelves = 1000000000; stop() }
             }
         }
 
@@ -27239,7 +28646,12 @@ ApplicationWindow {
             // The drain is also where the interface gets painted for the
             // first time, invisibly, so the zoom that follows it is not the
             // frame that pays for it (see root.bootWarming).
-            ScriptAction { script: { root.bootWarming = true; bootBlk.base = bootVer.text; bootBlk.restart() } }
+            ScriptAction {
+                script: {
+                    root.bootWarmShelves = 0; bootWarmStep.restart()
+                    root.bootWarming = true; bootBlk.base = bootVer.text; bootBlk.restart()
+                }
+            }
         }
         SequentialAnimation {
             id: bootZoom
