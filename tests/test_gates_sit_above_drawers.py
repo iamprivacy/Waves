@@ -35,7 +35,15 @@ QML_MAIN = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml"
 # The download gates joined the layer in the 2026-09-17 front-end audit fix
 # pass: with the queue drawer open, a blocked download's "no folder" /
 # "folder unreachable" / "FFmpeg missing" prompt sat under the drawer's dim.
-GATES = ("exitGate", "updateOptInGate", "folderGate", "folderUnreachableGate", "ffmpegBlockGate", "flacNoticeGate")
+GATES = (
+    "exitGate",
+    "closeGate",
+    "updateOptInGate",
+    "folderGate",
+    "folderUnreachableGate",
+    "ffmpegBlockGate",
+    "flacNoticeGate",
+)
 
 
 def test_gates_are_in_the_overlay_layer_not_the_page():

@@ -1,26 +1,26 @@
-"""The QUEUE button's speed chart keeps the speed of every percent it passed.
+"""The QUEUE button's chart keeps a minute of speed and reads the time left.
 
 WHAT THIS FENCES OFF
 --------------------
-Each percent of the chart stands as tall as the speed was while the head sat
-on it, so the fill behind the head is the batch's history. The chart used to
-read that height at the instant the head crossed a percent, and a stretch
-with no speed reading copied the level before it. A track's percent mostly
-steps when it settles, after its stream has gone quiet (the speed reads 0
-once nothing has arrived for two seconds), and the first level was read as
-the chart opened, with the eased speed still near 0. So every step copied a
-near-zero level: the chart lay flat along the floor with only the head
-bouncing up and down as each track streamed.
+The button's chart is the batch's speed over the last minute, a sample every
+250 ms of wall time, newest on the right, so a slow stretch stands lower
+than a fast one behind it. Over the speed it reads the time left: the tracks
+still to go over the rate tracks have landed at in the last 12 s, the shown
+figure changing at most once a second, and "--:--" until 3 s of history make
+a rate.
 
 HOW THIS STAYS FIXED
 --------------------
 Boot the real Main.qml offscreen and drive one row through the bridge, the
-speed set on the bridge's own property:
+speed set on the bridge's own property, the percent creeping:
 
-* streaming at 100 Mb/s at 0%, then quiet, then the percent steps to 30: the
-  passed percents stand at the 100 Mb/s level, not on the floor;
-* then 30 to 60 while streaming at 4 Mb/s: those percents stand lower than
-  the first stretch, so a slow stretch still reads as a valley.
+* before 3 s of history the time left reads unknown;
+* 100 Mb/s for a stretch, then 4 Mb/s: both stretches are in the history in
+  that order, so the slow one stands lower than the fast one;
+* with the percent moving the time left becomes a real figure, and it holds
+  for at least a second between changes;
+* the history keeps a sample per 250 ms of wall time, never more than a
+  minute of it.
 
 Runs in a SUBPROCESS like the other Main.qml scenarios (shares the sibling's
 ``_boot``).
@@ -28,14 +28,11 @@ Runs in a SUBPROCESS like the other Main.qml scenarios (shares the sibling's
 
 from __future__ import annotations
 
-import math
-import os
-import subprocess
 import sys
-import tempfile
-from pathlib import Path
+from itertools import pairwise
 
 from test_progress_matrix_stable_width import _EXIT_OK, _EXIT_REGRESSED, _boot
+from test_queue_button_finishing import run_scenario_file, watch_queue_button_errors
 
 _FIND = """
  function walk(it, name){
@@ -51,34 +48,12 @@ _FIND = """
 """
 
 
-def _level(mbps: float) -> float:
-    """The chart's log scale: 2 Mb/s is 0, 400 Mb/s is 1."""
-    return min(1.0, max(0.0, (math.log10(mbps) - 0.301) / 2.301))
-
-
 def test_the_queue_button_chart_keeps_its_history():
-    import pytest
-
-    env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"
-    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="waves-queue-chart-test-")
-    env["HOME"] = env["XDG_CONFIG_HOME"]
-    proc = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--run-scenario"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    tail = "\n".join([ln for ln in (proc.stdout + proc.stderr).strip().splitlines() if " WARN " not in ln][-12:])
-    if proc.returncode == 77:
-        pytest.skip("PySide6 / offscreen Qt unavailable")
-    if proc.returncode == 78:
-        pytest.skip(f"could not set up the scenario in this environment:\n{tail}")
-    assert proc.returncode == _EXIT_OK, f"the queue button's chart history regressed:\n{tail}"
+    run_scenario_file(__file__, "waves-queue-chart-test-", "the queue button's chart history")
 
 
 def _scenario() -> int:
+    errors = watch_queue_button_errors()
     booted = _boot()
     if not isinstance(booted, tuple):
         return booted
@@ -95,12 +70,12 @@ def _scenario() -> int:
         bridge._download_mbps = mbps
         bridge.downloadMbpsChanged.emit()
 
-    def bins(lo: int, hi: int) -> list[float]:
-        got = js(f"var c = chart(); return c.prof.slice({lo}, {hi}).join('|') + '#' + c.profK")
-        vals, k = str(got).split("#")
-        if int(k) < hi:
-            raise AssertionError(f"the chart passed only {k} percents, wanted {hi}")
-        return [float(v) for v in vals.split("|")]
+    def history() -> list[tuple[float, float]]:
+        got = js("var H = chart().es.hist || []; return H.map(function (h) { return h.t + ':' + h.mb }).join('|')")
+        return [(float(t), float(m)) for t, m in (p.split(":") for p in str(got).split("|") if p)]
+
+    def eta():
+        return js("var e = chart().es.eta; return e === undefined ? -1 : e")
 
     failures = []
     a = bridge._enqueue("History One", "track", media_id="lab-history-1", artist="Lab", tracks=0)
@@ -110,34 +85,49 @@ def _scenario() -> int:
     if not js("return chart().on"):
         print("the chart did not come on for a running row", file=sys.stderr)
         return 78
+    if eta() >= 0:
+        failures.append(f"with under 3 s of history the time left reads {eta()}, wanted unknown")
 
-    # A track streams at full speed, goes quiet as it finishes, and only
-    # then does the percent step.
+    # A fast stretch, then a slow one, the percent creeping all along.
+    pct = 0
     speed(100.0)
-    settle(1500)
-    speed(0.0)
-    settle(400)
-    bridge._set_queue_progress(a, 30)
-    settle(500)
-    fast = bins(0, 30)
-    want = _level(100.0)
-    if min(fast) < 0.8 * want:
-        failures.append(
-            f"streamed at 100 Mb/s then stepped while quiet, the passed percents lie at"
-            f" {min(fast):.2f} (want about {want:.2f}): the chart is flat behind the head"
-        )
-
-    # A slow stretch, the speed reading as the percent creeps.
+    for _ in range(8):
+        pct += 4
+        bridge._set_queue_progress(a, pct)
+        settle(250)
     speed(4.0)
-    for p in range(31, 61):
-        bridge._set_queue_progress(a, p)
-        settle(60)
+    for _ in range(8):
+        pct += 2
+        bridge._set_queue_progress(a, pct)
+        settle(250)
     speed(0.0)
-    settle(200)
-    slow = bins(31, 60)
-    mean_fast, mean_slow = sum(fast) / len(fast), sum(slow) / len(slow)
-    if not mean_slow < mean_fast - 0.3:
-        failures.append(f"a 4 Mb/s stretch ({mean_slow:.2f}) does not stand below a 100 Mb/s one ({mean_fast:.2f})")
+    settle(300)
+    H = history()
+    fast = [i for i, (_t, m) in enumerate(H) if abs(m - 100.0) < 1e-6]
+    slow = [i for i, (_t, m) in enumerate(H) if abs(m - 4.0) < 1e-6]
+    if len(fast) < 5 or len(slow) < 5:
+        failures.append(f"the history lost a stretch: {len(fast)} fast and {len(slow)} slow samples")
+    elif max(fast) > min(slow):
+        failures.append("the slow stretch does not follow the fast one in the history")
+    steps = [b[0] - a_[0] for a_, b in pairwise(H)]
+    if any(abs(s - 250) > 1e-6 for s in steps):
+        failures.append(f"the history is not a sample per 250 ms: {sorted(set(steps))[:5]}")
+
+    # The time left: a figure once there is a rate, held a second at a time.
+    pct_left = []
+    for _ in range(14):
+        pct += 1
+        bridge._set_queue_progress(a, pct)
+        settle(100)
+        pct_left.append(eta())
+    if max(pct_left) < 0:
+        failures.append("with the percent moving the time left never became a figure")
+    changes = sum(1 for x, y in pairwise(pct_left) if x != y)
+    if changes > 2:
+        failures.append(f"the time left changed {changes} times in 1.4 s, wanted at most once a second")
+    if len(history()) > 240:
+        failures.append("the history holds more than a minute")
+    failures.extend(f"QML error in the queue button: {e}" for e in errors[:5])
 
     for f in failures:
         print(f, file=sys.stderr)

@@ -166,3 +166,49 @@ def test_asterisks_that_mask_no_letters_are_styling():
     exp = _album("e", "Love", explicit=True, artist="Band")
     starred = _album("s", "***", explicit=False, artist="Band")
     assert _ids(_bridge()._dedup_albums([exp, starred])) == ["e", "s"]
+
+
+# --------------------------------------------------------------------------- #
+# Censored titles in the edition stage (different track counts)
+# --------------------------------------------------------------------------- #
+def _recs(*songs):
+    return [backend._MergeRec(None, t, d, None, e) for t, d, e in songs]
+
+
+def test_a_censored_clean_deluxe_meets_its_explicit_twin_in_the_edition_stage():
+    """With a different track count the twins survive the dedup. The edition
+    stage used to key them apart, so an explicit preference got the censored
+    deluxe beside its own cut and a clean one got the explicit album."""
+    exp = _album("e", "Bitch", explicit=True, tracks=2)
+    cln = _album("c", "B*tch (Deluxe)", explicit=False, tracks=3)
+    recs = {
+        "e": _recs(("bitch", 200, True), ("intro", 60, False)),
+        "c": _recs(("b*tch", 200, False), ("intro", 60, False), ("bonus", 180, False)),
+    }
+    keys = backend._edition_keys([exp, cln])
+    assert keys[id(exp)] == keys[id(cln)]
+
+    def run(mode):
+        out = backend._collapse_editions_by_side(
+            [exp, cln],
+            lambda a: recs[a.id],
+            lambda a: [(r.title, r.dur) for r in recs[a.id]],
+            lambda a: 3,
+            "keep_both",
+            None,
+            mode,
+        )
+        return _ids(out)
+
+    assert run("explicit") == ["e"]
+    assert run("clean") == ["c"]
+    assert run("both") == ["e", "c"]
+
+
+def test_the_edition_split_reads_a_masked_song_as_its_uncensored_twin():
+    a = _recs(("bitch", 200, True))
+    b = _recs(("b*tch", 200.5, False))
+    assert backend._align_edition(a, b) == {}  # planning never pairs the two cuts
+    assert backend._align_edition(a, b, cross_explicit=True) == {0: b[0]}
+    assert not backend._masked_title_fits("sh*t", "shot love")
+    assert not backend._masked_title_fits("***", "love")

@@ -38,7 +38,9 @@ def test_onclosing_vetoes_only_when_it_should():
     body = m.group(1)
     assert "_winPersist()" in body, "the geometry flush must survive the rewrite"
     assert "close.accepted = false" in body
-    cond = re.search(r"if \((.*?)\) \{", body, re.S)
+    # The close button's offer to run in the background comes first (see
+    # tests/test_close_gate.py); the download veto is the condition after it.
+    cond = re.search(r"if \((root\.activeQueueCount.*?)\) \{", body, re.S)
     assert cond, "the veto must be conditional"
     for clause in (
         "root.activeQueueCount > 0",
@@ -77,11 +79,11 @@ def test_count_copy_tracks_the_live_queue_badge():
     src = _src()
     gate = re.search(r"id: exitGate\b.*?\n    \}\n", src, re.S)
     body = gate.group(0)
-    # The message counts the same number as the header badge (queued+running
-    # from the bridge), singular and plural.
-    assert "root.activeQueueCount === 1" in body
-    assert "A download is still running." in body
-    assert 'root.activeQueueCount + " downloads are still running."' in body
+    # The count line counts the same number as the header badge
+    # (queued+running from the bridge), singular and plural.
+    assert "readonly property int running: root.activeQueueCount" in body
+    assert '"1 download still running"' in body
+    assert 'exitGate.running + " downloads still running"' in body
 
 
 def test_gate_stacks_above_the_video_overlay():
@@ -94,12 +96,12 @@ def test_gate_stacks_above_the_video_overlay():
 
 def test_copy_survives_the_last_download_finishing():
     """activeQueueCount can hit 0 while the gate is up (the user chose to
-    keep it open rather than auto-close); the body must never read
-    '0 downloads are still running.'"""
+    keep it open rather than auto-close); the count line must never read
+    '0 downloads still running', and EXIT stops reading as a danger."""
     src = _src()
     gate = re.search(r"id: exitGate\b.*?\n    \}\n", src, re.S)
     assert gate
     body = gate.group(0)
-    assert "All downloads finished." in body
-    assert "It is safe to exit now." in body
-    assert "root.activeQueueCount === 0" in body
+    assert '"All downloads finished"' in body
+    assert "exitGate.running === 0" in body
+    assert 'label: exitGate.running > 0 ? "EXIT ANYWAY" : "EXIT"' in body

@@ -63,6 +63,27 @@ def test_the_warm_runs_before_the_zoom_not_inside_it():
     assert "bootWarming" not in zoom, "the warm moved into the zoom, which is the frame it exists to spare"
 
 
+def test_the_warm_is_sliced_and_finished_before_the_zoom():
+    # One frame for the whole page cost the renderer ~35-40 ms and the launch
+    # water skipped a frame or two as the drain began. The warm opens on the
+    # chrome alone and the landing's shelves join a few per drain tick.
+    src = QML_MAIN.read_text()
+
+    assert "property int bootWarmShelves: 1000000000" in src, "outside the warm the gate must hide nothing"
+    handover = src[src.index("id: bootHandover") :]
+    handover = handover[: handover.index("SequentialAnimation {")]
+    assert "root.bootWarmShelves = 0; bootWarmStep.restart()" in handover, "the warm no longer starts sliced"
+
+    assert "opacity: root.browseBuilding || bsecLd.slot >= root.bootWarmShelves ? 0 : 1" in src
+    assert "browseSecSlots.count + index >= root.bootWarmShelves ? 0 : root.browseReveal" in src
+
+    # The drain's last tick paints whatever is left BEFORE it starts the zoom.
+    blk = src[src.index("id: bootBlk") :]
+    blk = blk[: blk.index("id: bootWarmStep")]
+    finish = blk.index("root.bootWarmShelves = 1000000000")
+    assert finish < blk.index("bootZoom.start()"), "the zoom can start with shelves still unpainted"
+
+
 def test_warming_is_not_the_reveal_dial():
     # bootContentShown ungates input (issue #13). If warming rode it, the
     # interface would be live under the launch screen again.

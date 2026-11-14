@@ -492,3 +492,64 @@ def test_art_cache_wipe_has_no_recursive_delete():
     names = set(backend_mod._factory_wipe_art_cache.__code__.co_names)
     assert "rmdir" in names
     assert not names & {"rmtree", "walk", "remove", "unlink", "rglob", "iterdir", "scandir"}, sorted(names)
+
+
+def _held_remove(monkeypatch, held: dict):
+    """os.remove as Windows answers it while a straggler read still holds the
+    file: a sharing violation the first ``held[name]`` times."""
+    real = os.remove
+
+    def remove(path):
+        name = os.path.basename(path)
+        if held.get(name, 0) > 0:
+            held[name] -= 1
+            raise PermissionError(32, "in use by another process", path)
+        real(path)
+
+    monkeypatch.setattr(backend_mod.os, "remove", remove)
+
+
+def test_factory_reset_waits_a_moment_for_a_store_a_straggler_still_holds(tmp_path, monkeypatch):
+    """close() cannot end a statement another thread is inside: sqlite keeps
+    the file open until it finishes, and on Windows the delete failed and the
+    store outlived the reset. It is tried again for a moment."""
+    base = tmp_path / "cfg"
+    base.mkdir()
+    (base / "ownership.sqlite3").write_text("x")
+    monkeypatch.setattr(backend_mod.os, "name", "nt")
+    _held_remove(monkeypatch, {"ownership.sqlite3": 3})
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert not (base / "ownership.sqlite3").exists()
+
+
+def test_factory_reset_gives_up_on_a_held_file_within_its_budget(tmp_path, monkeypatch):
+    import time
+
+    base = tmp_path / "cfg"
+    base.mkdir()
+    for name in ("ownership.sqlite3", "library.sqlite3"):
+        (base / name).write_text("x")
+    monkeypatch.setattr(backend_mod.os, "name", "nt")
+    monkeypatch.setattr(backend_mod, "_FACTORY_UNLINK_RETRY_S", 0.2)
+    _held_remove(monkeypatch, {"ownership.sqlite3": 10**6, "library.sqlite3": 10**6})
+
+    t0 = time.monotonic()
+    _run_factory_reset(base, monkeypatch)
+
+    assert time.monotonic() - t0 < 1.0, "one shared budget, not one per file"
+    assert (base / "ownership.sqlite3").exists()
+
+
+def test_factory_reset_does_not_retry_a_refused_delete_off_windows(tmp_path, monkeypatch):
+    base = tmp_path / "cfg"
+    base.mkdir()
+    (base / "ownership.sqlite3").write_text("x")
+    monkeypatch.setattr(backend_mod.os, "name", "posix")
+    held = {"ownership.sqlite3": 1}
+    _held_remove(monkeypatch, held)
+
+    _run_factory_reset(base, monkeypatch)
+
+    assert held["ownership.sqlite3"] == 0 and (base / "ownership.sqlite3").exists()

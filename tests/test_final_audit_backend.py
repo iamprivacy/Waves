@@ -17,6 +17,7 @@ test red.
 
 from __future__ import annotations
 
+import sys
 from collections import deque
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -576,3 +577,43 @@ def test_the_perf_line_carries_a_gauges_peak():
 
     assert lines, "the sampler emitted nothing"
     assert "dlseg=0/10^2" in lines[0], f"the pool's busiest moment never reached the log: {lines[0]}"
+
+
+# --------------------------------------------------------------------------- #
+# 7. The perf line counts open descriptors where the OS lists them, so a
+#    descriptor leak (issue 61: a long queue on Linux ran out) shows as a
+#    climbing figure in an export instead of only as the crash it ends in.
+# --------------------------------------------------------------------------- #
+def test_the_perf_line_carries_the_open_descriptor_count():
+    from waves.waves_ui import diagnostics
+
+    lines: list = []
+    sampler = diagnostics._PerfSampler.__new__(diagnostics._PerfSampler)
+    sampler._pools = []
+    sampler._probe_wall = 0.0
+    sampler._probe_busy = 0.0
+    sampler._probe_max_stall = 0.0
+    sampler._rss_mb = lambda: None
+    sampler._open_fds = lambda: 37
+    real_debug = diagnostics.logger.debug
+    diagnostics.logger.debug = lambda msg, *a, **kw: lines.append(msg % a if a else msg)
+    try:
+        sampler._sample()
+    finally:
+        diagnostics.logger.debug = real_debug
+
+    assert lines and "fds=37" in lines[0], lines
+    if sys.platform != "win32":
+        assert isinstance(diagnostics._PerfSampler._open_fds(), int)
+
+
+def test_open_fds_skips_windows_without_touching_the_disk(monkeypatch):
+    """On Windows "/proc/self/fd" resolves against the current drive, which
+    can be a network share that has gone away: no listing is tried there."""
+    from waves.waves_ui import diagnostics
+
+    tried = []
+    monkeypatch.setattr(diagnostics.os, "name", "nt")
+    monkeypatch.setattr(diagnostics.os, "listdir", lambda p: tried.append(p) or [])
+    assert diagnostics._PerfSampler._open_fds() is None
+    assert tried == []

@@ -60,3 +60,44 @@ def test_icon_usable_guard_rejects_degenerate_icons():
     assert _icon_usable(empty) is False
 
     assert _icon_usable(QIcon()) is False
+
+
+def _qt_app():
+    QtGui = pytest.importorskip("PySide6.QtGui")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    return QtGui.QGuiApplication.instance() or QtGui.QGuiApplication([])
+
+
+def test_mac_icon_never_comes_from_the_full_bleed_png_ladder(monkeypatch):
+    """On macOS setWindowIcon replaces the Dock icon, so it must be the grid-fit icns.
+
+    The PNG ladder holds the full-bleed art for Windows and Linux; handing it to
+    the Dock made the running app swap its bundle icon for that art.
+    """
+    _ = _qt_app()
+    from waves.waves_ui import app as app_mod
+
+    monkeypatch.setattr(app_mod.sys, "platform", "darwin")
+    real_qicon = app_mod.QIcon
+    seen: list[str] = []
+
+    def recording_qicon(*args):
+        seen.extend(str(a) for a in args)
+        return real_qicon(*args)
+
+    monkeypatch.setattr(app_mod, "QIcon", recording_qicon)
+    icon = app_mod._app_icon()
+    assert icon is not None  # source run: waves/ui/icon.icns
+    assert seen and all(p.endswith("icon.icns") for p in seen)
+
+
+def test_mac_bundle_without_icns_leaves_the_bundle_icon(monkeypatch, tmp_path):
+    """A packaged bundle ships no icon.icns beside the binary: set no icon at all."""
+    _ = _qt_app()
+    from waves.waves_ui import app as app_mod
+
+    monkeypatch.setattr(app_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(app_mod, "__file__", str(tmp_path / "waves" / "waves_ui" / "app.py"))
+    assert app_mod._app_icon() is None

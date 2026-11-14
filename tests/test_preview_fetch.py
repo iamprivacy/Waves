@@ -312,3 +312,56 @@ def test_the_label_still_carries_the_full_credit_payload(track):
     assert (kind, ident, track_id) == ("track", "t1", "t1")
     assert (title, artist, art) == ("Title", "Artist", "art")
     assert (artist_id, album_id, artists) == ("ar1", "al1", [])
+
+
+class _RefetchStub(_PreviewStub):
+    """No track held: the slot has to fetch it by id first."""
+
+    def __init__(self, track, *, logged_in=True, fail=False):
+        super().__init__(track)
+        self._objs = {"track": {}}
+        self._logged_in = logged_in
+        self.remembered: list = []
+
+        def fetch(tid):
+            self.log.append(("fetch", (tid,)))
+            if fail:
+                raise RuntimeError("gone")
+            return track
+
+        self.tidal = SimpleNamespace(session=SimpleNamespace(track=fetch))
+
+    def _remember(self, bucket, key, obj):
+        self.remembered.append((bucket, key, obj))
+
+
+def test_a_track_the_session_no_longer_holds_is_fetched_again(track):
+    """Every search clears the held tracks and a cached page never filled
+    them, so a top track on an artist card used to be a dead click."""
+    stub = _RefetchStub(track)
+
+    stub.previewTrack("123")
+
+    order = [name for name, _ in stub.log]
+    assert order == ["state", "fetch", "meta", "resolve", "ready", "peaks"]
+    assert stub.log[0] == ("state", ("track", "123", "loading"))
+    assert stub.log[1] == ("fetch", (123,))
+    assert stub.remembered == [("track", "123", track)]
+
+
+def test_a_refetch_that_fails_ends_in_error_not_a_spinner(track):
+    stub = _RefetchStub(track, fail=True)
+
+    stub.previewTrack("123")
+
+    states = [args for name, args in stub.log if name == "state"]
+    assert states == [("track", "123", "loading"), ("track", "123", "error")]
+    assert not any(name == "ready" for name, _ in stub.log)
+
+
+def test_signed_out_a_missing_track_stays_quiet(track):
+    stub = _RefetchStub(track, logged_in=False)
+
+    stub.previewTrack("123")
+
+    assert stub.log == [("state", ("track", "123", ""))]

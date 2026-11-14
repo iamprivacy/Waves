@@ -3,9 +3,11 @@
 WHAT THIS FENCES OFF
 --------------------
 The button shows the batch while the queue works: its word turns into the
-batch percent, the corner count rolls down as downloads finish, and a finish
-mid batch bumps the count and bursts a ring of sparks off it (the last one
-shatters it, see test_queue_button_finishing). The header starts at the
+batch percent (hidden under the chart, it still sizes the slot), the corner
+count rolls down as downloads finish, and a finish mid batch bumps the count
+and bursts a ring of sparks off it (the last one shatters it, see
+test_queue_button_finishing). A failure says FAIL; the button no longer
+flashes red or shakes for it (a long queue would flash it a dozen times). The header starts at the
 window's top edge, so a burst drawn at the size it has in the design lab
 would be cut off by the edge; it is fitted to the room above the count when
 it plays.
@@ -22,7 +24,7 @@ Boot the real Main.qml offscreen and drive two rows through the bridge:
 * both running: the count reads 2 and the word is a percent, not QUEUE, set
   in the header buttons' UI face with tabular digits (so it keeps one width
   as it counts);
-* one finishes: the count drops to 1, the word says DONE, the mid batch
+* one finishes: the count drops to 1, the mid batch
   finish plays (the count bumps and stays shown, the sparks burst), and
   sampled through the whole finish nothing it draws reaches above the
   window's top edge;

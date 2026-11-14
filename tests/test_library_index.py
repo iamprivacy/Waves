@@ -2267,12 +2267,12 @@ def test_close_takes_every_thread_s_read_connection_not_just_its_own(tmp_path):
     t = threading.Thread(target=reader, daemon=True)
     t.start()
     assert parked.wait(10), "the reader never answered"
-    closed_over = [r.conn for r in (ref() for ref in idx._reader_refs) if r is not None]
+    closed_over = idx._readers.connections()
     assert len(closed_over) >= 2, "the parked reader was never registered"
 
     idx.close()
 
-    assert idx._reader_refs == set(), "the cache still holds readers after close()"
+    assert idx._readers.connections() == [], "the cache still holds readers after close()"
     assert closed_over, "close() forgot the readers instead of shutting them"
     for conn in closed_over:
         with pytest.raises(sqlite3.ProgrammingError):
@@ -2293,11 +2293,10 @@ def test_a_reader_whose_thread_has_gone_is_dropped_at_the_next_read(tmp_path):
     idx.refresh(lib, force_full=True)
     key = matching.presence_key("Pain Remains", "Lorna Shore")
 
-    before = len(idx._reader_refs)
+    before = len(idx._readers.connections())
     t = threading.Thread(target=lambda: idx.presence_facts(key))
     t.start()
     t.join(10)
 
-    assert len(idx._reader_refs) == before, "a dead thread's reader is held open by the cache"
-    assert all(ref() is not None for ref in idx._reader_refs)
+    assert len(idx._readers.connections()) == before, "a dead thread's reader is held open by the cache"
     idx.close()

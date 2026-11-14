@@ -71,6 +71,7 @@ class _PollStub:
         self._job_tracks = {7: reg}
         self._track_poll = MagicMock()
         self._pct_last = {}
+        self._row_passes = {}
         self.queueTrackPct = _Signal()
         self._queue_index = {7: {"collection": True, "tracks": total, "progress": 0.0}}
         self._rollups: list = []
@@ -197,3 +198,24 @@ def test_the_engine_announces_the_task_it_created():
     ):
         Download._download(dl, track, pathlib.Path("/tmp/a.flac"))
     assert seen == [4242], "the engine must hand its caller the task it just created"
+
+
+# --- a second pass on the same row -------------------------------------------
+
+
+def test_a_rerun_holds_the_row_until_the_new_pass_gets_past_it():
+    """A track whose links lapsed runs again under a fresh task. The row
+    holds where the first pass left it rather than dropping back to 0."""
+    progress = Progress()
+    dl = _bare_tracked(progress)
+    _register(dl, progress, "1", "Symphony No. 5, First Movement", 60.0)
+    reg = _running_rows("1")
+    stub = _PollStub(dl, reg, total=1)
+    stub._poll_track_progress()
+    task2 = _register(dl, progress, "1", "Symphony No. 5, First Movement", 10.0)
+    stub._poll_track_progress()
+    assert reg["1"]["pct"] == 60.0, "the row dropped back for the rerun"
+    progress.update(task2, completed=1.4)  # 70%
+    stub._poll_track_progress()
+    assert reg["1"]["pct"] == 70.0
+    assert set(reg["1"]) == {"id", "status", "pct"}, "the hold must not ride into the row QML gets"

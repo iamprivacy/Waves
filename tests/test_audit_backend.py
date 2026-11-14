@@ -233,6 +233,8 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     stub._prefetch_unrecorded = {"item:playlist:p1"}
     stub._album_tracks_inflight = {"a1": False}
     stub._album_tracks_unrecorded = {"a1"}
+    stub._artist_pop_inflight = {"77"}
+    stub._artist_card_early = {"77": {"id": "77"}}
     stub._item_fetch_ts = {"item:playlist:p1": 1.0}
 
     # logout() ends the downloads before it touches the session (issue #30);
@@ -255,6 +257,8 @@ def test_logout_bumps_lib_gen_and_clears_cache():
     assert (
         stub._album_tracks_inflight == {} and stub._album_tracks_unrecorded == set()
     ), "nor a hover-fetched album's rows"
+    assert stub._artist_pop_inflight == set(), "nor an artist card's popularity read"
+    assert stub._artist_card_early == {}, "nor a page handed to a card before its videos"
     assert stub._item_fetch_ts == {}, "the next account's pages revalidate from scratch"
 
 

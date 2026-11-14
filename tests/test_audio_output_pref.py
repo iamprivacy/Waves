@@ -15,6 +15,7 @@ outputs. tests/test_audio_output_qml.py drives the real ones.
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 from PySide6 import QtMultimedia
@@ -84,6 +85,7 @@ def stub(monkeypatch):
         "_audio_devices",
         "_audio_real_outputs",
         "_audio_output_name_for",
+        "_audio_saved_device",
         "audioOutputs",
         "audioOutputDevice",
         "audioOutputMissing",
@@ -146,6 +148,67 @@ def test_an_unplugged_pick_falls_back_and_keeps_its_name(stub):
     # Re-saving the gone pick (a page save, a restart) keeps the name.
     stub.setWavesPref("audio_output", b"tv".hex())
     assert stub._waves_prefs["audio_output_name"] == "Living room TV (Miracast)"
+
+
+@pytest.fixture
+def on_linux(monkeypatch):
+    """The name re-match is a Linux rule (a backend switch renames ids)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
+def test_a_pick_listed_under_a_new_id_is_found_by_its_name(on_linux, stub, caplog):
+    """Another audio backend (on Linux, PulseAudio instead of PipeWire) lists
+    the same TV under a different id: the pick is kept and the new id
+    adopted, so the Settings row matches and nothing reads as unplugged."""
+    stub.setWavesPref("audio_output", b"tv".hex())
+    saves = []
+    stub._save_waves_prefs = lambda: saves.append(dict(stub._waves_prefs))
+    tv_again = _Dev(b"alsa_output.tv", "Living room TV (Miracast)")
+    stub._media_devices.outputs = [_SPEAKERS, tv_again]
+    with caplog.at_level(logging.INFO, logger="waves.audio"):
+        assert stub.audioOutputMissing() is False
+        assert stub.audioOutputDevice() is tv_again
+    assert stub._waves_prefs["audio_output"] == b"alsa_output.tv".hex()
+    assert saves and saves[-1]["audio_output"] == b"alsa_output.tv".hex()
+    rows = stub.audioOutputs()
+    assert not any(r["missing"] for r in rows)
+    assert b"alsa_output.tv".hex() in [r["value"] for r in rows]
+    assert "new id" in caplog.text
+    assert "Living room TV" not in caplog.text and "alsa_output" not in caplog.text
+
+
+def test_two_devices_sharing_the_saved_name_are_not_guessed_between(on_linux, stub):
+    stub.setWavesPref("audio_output", b"tv".hex())
+    twins = [_Dev(b"tv-a", "Living room TV (Miracast)"), _Dev(b"tv-b", "Living room TV (Miracast)")]
+    stub._media_devices.outputs = [_SPEAKERS, *twins]
+    assert stub.audioOutputMissing() is True
+    assert stub.audioOutputDevice() is _SPEAKERS
+    assert stub._waves_prefs["audio_output"] == b"tv".hex()
+
+
+def test_a_re_matched_id_is_registered_as_a_secret(on_linux, stub, monkeypatch):
+    import waves.waves_ui.backend as backend
+
+    seen = []
+    monkeypatch.setattr(backend.diagnostics, "register_secret", lambda v, ph: seen.append(v))
+    stub._waves_prefs.update({"audio_output": b"tv".hex(), "audio_output_name": "Living room TV (Miracast)"})
+    stub._media_devices.outputs = [_SPEAKERS, _Dev(b"new-tv", "Living room TV (Miracast)")]
+    stub.audioOutputDevice()
+    assert b"new-tv".hex() in seen
+
+
+@pytest.mark.parametrize("plat", ["darwin", "win32"])
+def test_off_linux_a_same_named_twin_does_not_take_the_pick(stub, monkeypatch, plat):
+    """macOS and Windows keep ids stable, so a missing id is a device that is
+    away: a second unit of the same model stays unpicked and the pick waits."""
+    monkeypatch.setattr(sys, "platform", plat)
+    saves = []
+    stub._save_waves_prefs = lambda: saves.append(dict(stub._waves_prefs))
+    stub._waves_prefs.update({"audio_output": b"dac-a".hex(), "audio_output_name": "USB DAC"})
+    stub._media_devices.outputs = [_SPEAKERS, _Dev(b"dac-b", "USB DAC")]
+    assert stub.audioOutputMissing() is True
+    assert stub.audioOutputDevice() is _SPEAKERS
+    assert stub._waves_prefs["audio_output"] == b"dac-a".hex() and saves == []
 
 
 def test_picking_system_default_clears_the_name(stub):

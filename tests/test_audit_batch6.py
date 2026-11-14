@@ -82,6 +82,8 @@ class _LogoutStub:
         self._prefetch_unrecorded: set = set()
         self._album_tracks_inflight: dict = {}
         self._album_tracks_unrecorded: set = set()
+        self._artist_pop_inflight: set = set()
+        self._artist_card_early: dict = {}
         self._item_fetch_ts: dict = {}
         self._artist_cache: dict = {}
         self._artist_loading: set = set()

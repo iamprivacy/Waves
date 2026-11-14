@@ -184,6 +184,8 @@ def test_a_hover_on_a_cached_page_warms_its_opening_covers():
                 "tracks": ["t0", "t1", "t2", "t3", "t4"],
                 "albums": ["a0", "a1"],
                 "eps": [],
+                # The artist card's strip, row for row (its count sizes the covers).
+                "card": ["a0", "a0", "", "a1"],
             },
         )
     ], "the opening screen's covers, deduped, five a section, videos left to the page"

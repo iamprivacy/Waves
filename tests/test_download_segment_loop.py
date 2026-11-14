@@ -24,6 +24,7 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
 from waves.download import Download
@@ -346,6 +347,49 @@ def test_segment_5xx_is_retried(tmp_path):
 
     assert r.result is True
     assert http.get.call_count == 2
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_segment_not_now_4xx_is_retried(tmp_path, status):
+    """A server timeout, a too-early refusal and a rate limit say "not now",
+    not "never": the segment is fetched again with the usual delays."""
+    b, p_task, http = _segment_bridge([_Response([], status=status), _Response([b"ok"])], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is True
+    assert http.get.call_count == 2
+
+
+@pytest.mark.parametrize("status", [401, 404, 410])
+def test_segment_link_4xx_stays_final(tmp_path, status):
+    b, p_task, http = _segment_bridge([_Response([], status=status), _Response([b"never"])], tmp_path)
+
+    r = _fetch(b, p_task, tmp_path)
+
+    assert r.result is False
+    assert http.get.call_count == 1
+
+
+def test_segment_failure_line_names_the_status_and_no_host(tmp_path):
+    """Issue #61: the report said only HTTPError, so a lapsed link (403) and a
+    missing segment (404) read the same. The number goes in; the URL never."""
+    b, p_task, _http = _segment_bridge([_Response([], status=403)], tmp_path)
+
+    _fetch(b, p_task, tmp_path)
+
+    message = b.fn_logger.error.call_args.args[0]
+    assert "HTTPError (HTTP 403)" in message
+    assert "cdn.test" not in message and "seg_0003" not in message
+
+
+def test_a_dropped_connection_line_carries_no_status(tmp_path):
+    drops = [_Response([], requests.exceptions.ConnectionError("reset")) for _ in range(Download._SEGMENT_ATTEMPTS)]
+    b, p_task, _http = _segment_bridge(drops, tmp_path)
+
+    _fetch(b, p_task, tmp_path)
+
+    assert "HTTP" not in b.fn_logger.error.call_args.args[0]
 
 
 def test_retry_wait_wakes_on_stop():

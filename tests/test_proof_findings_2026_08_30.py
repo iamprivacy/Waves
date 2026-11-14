@@ -122,6 +122,8 @@ def _logout_stub(tmp_path):
         "_prefetch_unrecorded",
         "_album_tracks_inflight",
         "_album_tracks_unrecorded",
+        "_artist_pop_inflight",
+        "_artist_card_early",
         "_item_fetch_ts",
         "_artist_cache",
         "_artist_loading",

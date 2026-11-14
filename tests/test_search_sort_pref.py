@@ -38,3 +38,26 @@ def test_the_sort_prefs_round_trip_with_their_types():
     # (the str-coercing path) must not turn "false" into a truthy value.
     b.setWavesPref("search_sort_asc", "false")
     assert b.wavesPref("search_sort_asc") is False
+
+
+def test_quality_round_trips_by_name():
+    """Issue #52: Quality is the fifth sort, stored by name like the rest."""
+    b = _bridge()
+    b.setWavesPref("search_sort", "quality")
+    assert b.wavesPref("search_sort") == "quality"
+
+
+def test_every_sort_label_has_its_key_in_the_same_place():
+    """The box shows labels and stores keys by index; a list one longer than
+    the other would save the wrong name for every entry past the gap."""
+    import json
+    import re
+    from pathlib import Path
+
+    src = (Path(backend.__file__).parent / "qml" / "Main.qml").read_text(encoding="utf-8")
+    keys = json.loads(re.search(r"readonly property var sortKeys: (\[[^\]]*\])", src).group(1))
+    box = src[src.index("id: sortBox") :]
+    labels = json.loads(re.search(r"model: (\[[^\]]*\])", box).group(1))
+    assert keys == ["relevance", "date", "name", "popularity", "quality"]
+    assert len(labels) == len(keys)
+    assert labels[keys.index("quality")] == "Quality"
