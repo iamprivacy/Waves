@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.2.3"
+version = "0.2.4"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -152,6 +152,8 @@ ignore = [
 "tests/test_releases_badge_flare.py" = ["S603", "C901"]
 "tests/test_queue_button_finishing.py" = ["S603", "C901"]
 "tests/test_queue_button_chart_history.py" = ["S603", "C901"]
+"tests/test_queue_button_badge_scale.py" = ["S603", "C901"]
+"tests/test_queue_button_long_batch.py" = ["S603", "C901"]
 # Sets a real xattr via the fixed /usr/bin/xattr binary to exercise the strip
 # helper for real on macOS (S603, fixed argv).
 "tests/test_apple_double_cleanup.py" = ["S603"]
@@ -182,6 +184,7 @@ ignore = [
 # The audio output scenario, likewise (S603, fixed argv; C901, one straight scenario).
 "tests/test_audio_output_qml.py" = ["S603", "C901"]
 "tests/test_now_credits_qml.py" = ["S603", "C901"]
+"tests/test_artist_card_qml.py" = ["S603", "C901"]
 "tests/test_now_rail_loading_qml.py" = ["S603", "C901"]
 "tests/test_releases_pane_scroll.py" = ["S603"]
 "tests/test_momentum_guard.py" = ["S603"]
@@ -246,6 +249,7 @@ ignore = [
 "tests/test_queue_drawer_close_button.py" = ["S603", "C901"]
 "tests/test_queue_delta_mirror.py" = ["S603", "C901"]
 "tests/test_queue_failure_reason_qml.py" = ["S603", "C901"]
+"tests/test_close_gate_qml.py" = ["S603", "C901"]
 "tests/test_gates_sit_above_drawers.py" = ["S603", "C901"]
 "tests/test_library_downloaded_state.py" = ["S603", "C901"]
 "tests/test_qml_loads.py" = ["S603", "C901"]
