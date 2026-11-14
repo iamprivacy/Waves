@@ -132,7 +132,8 @@ along as data files so ``app.py`` finds them next to itself at runtime.
 # nuitka-project: --include-data-dir={MAIN_DIRECTORY}/waves/waves_ui/qml=waves_ui/qml
 # nuitka-project: --include-data-dir={MAIN_DIRECTORY}/waves/waves_ui/fonts=waves_ui/fonts
 # Only the PNG size ladder is read at runtime (app.py builds the window icon
-# from it); the executable's own icon comes from --macos-app-icon /
+# from it on Windows and Linux; on macOS it sets none, so the Dock keeps the
+# bundle's grid-fit icns); the executable's own icon comes from --macos-app-icon /
 # --windows-icon-from-ico at build time, so a bare icon* glob shipped a second
 # unreachable icon.icns (and an icon.ico) inside every bundle. Windows alone
 # also carries icon.ico: app.py falls back to it if the PNG ladder is ever

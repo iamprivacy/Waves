@@ -29,6 +29,15 @@ elif [ "$(basename "$DIR")" = "MacOS" ]; then
 else
   LIBDIR="$DIR"                       # Linux/Windows standalone .dist root
 fi
+# The tray icon (run in background on Windows and Linux) comes from the
+# Qt.labs.platform QML module, whose library links the QtWidgets LIBRARY (the
+# Python binding stays removed). macOS uses the Dock and never imports it, so
+# the Mac bundle still drops all three.
+if [ -d "$DIR/Contents/MacOS" ] || [ "$(basename "$DIR")" = "MacOS" ]; then
+  KEEP_TRAY=0
+else
+  KEEP_TRAY=1
+fi
 [ -d "$LIBDIR/PySide6" ] || { echo "error: '$LIBDIR' doesn't look like a Waves bundle (no PySide6/)" >&2; exit 1; }
 
 # QML modules under PySide6/qml/ that Waves never imports (same relative path on
@@ -130,9 +139,13 @@ rm -rf "$LIBDIR/PySide6/qml/QtQml/StateMachine"
 for b in "${PYSIDE_BINDINGS[@]}"; do
   rm -f "$LIBDIR/PySide6/$b.so" "$LIBDIR/PySide6/$b.pyd" "$LIBDIR/PySide6/$b"*.so
 done
-# The Qt.labs.platform QML module and the QWidget-only style plugins both pull
-# QtWidgets and are never used by a QtQuick.Controls.Basic app.
-rm -rf "$LIBDIR/PySide6/qml/Qt/labs/platform" "$LIBDIR/PySide6/qt-plugins/styles" "$LIBDIR/PySide6/Qt/plugins/styles"
+# The QWidget-only style plugins pull QtWidgets and are never used by a
+# QtQuick.Controls.Basic app. The Qt.labs.platform QML module goes too where
+# the tray is not used (see KEEP_TRAY above).
+rm -rf "$LIBDIR/PySide6/qt-plugins/styles" "$LIBDIR/PySide6/Qt/plugins/styles"
+if [ "$KEEP_TRAY" = 0 ]; then
+  rm -rf "$LIBDIR/PySide6/qml/Qt/labs/platform"
+fi
 
 # .qmltypes are qmllint/Qt Creator metadata; the QML engine reads qmldir, never
 # these. 2.2 MB across ~56 files.
@@ -193,6 +206,12 @@ for token in "${MODULE_TOKENS[@]}"; do
       *penGLWidgets*) : ;;   # QtOpenGLWidgets is removable; fall through to rm
       *penGL*) continue ;;   # any other *OpenGL* is the framework QtQuick needs; KEEP
     esac
+    if [ "$KEEP_TRAY" = 1 ]; then
+      case "$base" in
+        *LabsPlatform*) continue ;;                       # the tray's QML module library
+        libQt6Widgets.so*|Qt6Widgets.dll) continue ;;     # the one library it links
+      esac
+    fi
     rm -rf "$f"
   done
 done
