@@ -18,6 +18,7 @@ import copy
 import dataclasses
 import functools
 import gc
+import html
 import json
 import logging
 import os
@@ -190,6 +191,8 @@ def _user_error(exc: BaseException, fallback: str, plain: tuple[type, ...] = (),
 _PROBE_LOCK = Lock()
 
 _prefetch_log = logging.getLogger("waves.prefetch")
+_card_log = logging.getLogger("waves.artistcard")
+_bg_log = logging.getLogger("waves.background")
 _export_log = logging.getLogger("waves.queue_export")
 
 
@@ -618,6 +621,9 @@ class _SingleFlightWriter:
 # How long a factory reset waits for a running FLAC scan to close its
 # remembered verdicts (it stops after the file it is on).
 _FLAC_CACHE_RELEASE_WAIT_S = 5.0
+# How long, in all, the factory reset keeps trying a store file Windows will
+# not delete yet because a straggler read still holds it (see factoryReset).
+_FACTORY_UNLINK_RETRY_S = 1.0
 
 _FACTORY_WIPE_FILES = (
     "settings.json",
@@ -1088,6 +1094,9 @@ _FIELD_LABELS = {
     "metadata_delimiter_genre": "Genre separator",
 }
 
+# The values of the close_action pref (what the window's close button does).
+_CLOSE_ACTIONS = ("ask", "background", "exit")
+
 # Human labels for enum dropdown values, keyed by field then by enum member
 # name (the stored value). Unmapped members fall back to the raw name.
 _ENUM_LABELS = {
@@ -1118,6 +1127,7 @@ _ENUM_LABELS = {
     },
     "update_cadence": {"launch": "Every launch", "daily": "Once a day"},
     "player_size": {"full": "Full", "mini": "Mini"},
+    "close_action": {"ask": "Ask every time", "background": "Run in background", "exit": "Exit"},
     "notify_downloads": {"queue": "When the queue finishes", "every": "Every download", "never": "Never"},
     "releases_window_months": {"6": "6 months", "12": "12 months", "24": "24 months"},
     "releases_videos": {"show": "Show", "hide": "Hide"},
@@ -2594,6 +2604,32 @@ def _artist_popularity(artist) -> int:
         return -1
 
 
+def _artist_popularity_by_id(session, artist_id: str) -> int:
+    """_artist_popularity for an artist we hold no object of (an artist card
+    painted from a cached page): the same raw GET, by id."""
+    try:
+        payload = session.request.request("GET", f"artists/{int(artist_id)}").json()
+        value = payload.get("popularity")
+        return max(0, min(100, int(value))) if value is not None else -1
+    except Exception:
+        return -1
+
+
+_CARD_TAG = re.compile(r"<[^>]+>")
+_CARD_BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def _card_bio(text: str) -> str:
+    """An artist bio as plain paragraphs for the artist card: no tags, a
+    <br> as a line break, runs of spaces folded, single breaks joined."""
+    if not text:
+        return ""
+    t = _CARD_BR.sub("\n", str(text))
+    t = html.unescape(_CARD_TAG.sub("", t))
+    paras = [re.sub(r"[ \t\r\f\v]+", " ", p).strip() for p in re.split(r"\n\s*\n", t)]
+    return "\n\n".join(re.sub(r"\s*\n\s*", " ", p) for p in paras if p)
+
+
 def _release_obj(obj):
     # Some payloads (e.g. an artist's top tracks) omit release_date on both the
     # track and its album stub but still carry tidal_release_date on the track.
@@ -2628,6 +2664,23 @@ def _release_type(album) -> str:
         return t
     n = int(getattr(album, "num_tracks", 0) or 0)
     return "single" if 0 < n <= 3 else "album"
+
+
+def _has_way_back(bridge) -> bool:
+    """Whether a window closed to the background can be brought back: the
+    Dock on macOS, a tray icon elsewhere (the tray host reports one)."""
+    return sys.platform == "darwin" or bool(getattr(bridge, "_tray_available", False))
+
+
+def _card_warm_row(album) -> dict:
+    """What the cover warm reads off a release before its row is built: the
+    cover, and the shape and day the artist card's strip picks by."""
+    return {
+        "art": _image(album),
+        "rtype": _release_type(album),
+        "listed": _listed_date_str(album),
+        "date": _release_date(album),
+    }
 
 
 def _album_row_ident(album) -> tuple[str, str, str]:
@@ -3206,6 +3259,21 @@ def _norm_title(title: str) -> str:
 _MASK_RUN_RE = re.compile(r"(?<=\w)\*+|\*+(?=\w)")
 
 
+def _mask_shape(title: str):
+    """Pattern an uncensored title must fullmatch to be the one ``title``
+    masks: each run of '*' reads as one or more letters."""
+    return re.compile(r"[^\s*]+".join(re.escape(p) for p in re.split(r"\*+", title)))
+
+
+def _masked_title_fits(a: str, b: str) -> bool:
+    """True when one title masks letters with '*' and the other is the
+    uncensored title it masks ("b*tch" and "bitch")."""
+    if ("*" in a) == ("*" in b):
+        return False
+    masked, plain = (a, b) if "*" in a else (b, a)
+    return bool(_MASK_RUN_RE.search(masked)) and bool(_mask_shape(masked).fullmatch(plain))
+
+
 def _censored_aliases(items, keys: dict) -> dict:
     """Map a clean item whose title masks letters with '*' to the key of its
     explicit, uncensored twin, for :func:`_dedup_versions`.
@@ -3233,8 +3301,7 @@ def _censored_aliases(items, keys: dict) -> dict:
         title = key[0]
         if getattr(item, "explicit", False) or not _MASK_RUN_RE.search(title):
             continue
-        parts = re.split(r"\*+", title)
-        shape = re.compile(r"[^\s*]+".join(re.escape(p) for p in parts))
+        shape = _mask_shape(title)
         fits = [k for k in explicit_plain if k[1:] == key[1:] and shape.fullmatch(k[0])]
         if len(fits) == 1:
             out[id(item)] = fits[0]
@@ -3426,6 +3493,17 @@ def _edition_base_key(album):
     Atmos kind (see _atmos_kind)."""
     artist = _primary_artist_name(album) or name_builder_album_artist(album)
     return (_strip_edition_quals(_norm_title(name_builder_title(album))), _norm_artist(artist), _atmos_kind(album))
+
+
+def _edition_keys(albums) -> dict:
+    """``{id(album): edition key}`` with a censored clean title folded onto
+    its explicit twin's key (see _censored_aliases). Without the alias a clean
+    "B*tch (Deluxe)" never met its explicit "Bitch" in one edition group, so
+    the clean/explicit split could not see them and an explicit preference
+    got the censored deluxe beside its own cut."""
+    keys = {id(a): _edition_base_key(a) for a in albums}
+    keys.update(_censored_aliases(albums, keys))
+    return keys
 
 
 def _drop_spatial_editions(own: list, guest: list) -> tuple[list, list, int]:
@@ -3683,10 +3761,11 @@ def _collapse_album_editions(albums, tracks_of, quality_of, conflict: str = "kee
      advertised count; an edition read short is never the one dropped, since
      a truncated list would pass as a subset of anything.
     """
+    keys = _edition_keys(albums)
     groups: dict = {}
     order: list = []
     for a in albums:
-        key = _edition_base_key(a)
+        key = keys[id(a)]
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -3730,10 +3809,11 @@ def _collapse_editions_by_side(albums, recs_of, tracks_of, quality_of, conflict,
     artist page hid the very album that preference asked for (and the
     reverse for an explicit preference over a clean-only deluxe). Input order
     is preserved."""
+    keys = _edition_keys(albums)
     groups: dict = {}
     order: list = []
     for a in albums:
-        key = _edition_base_key(a)
+        key = keys[id(a)]
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -3823,7 +3903,8 @@ def _align_edition(template: list, other: list, *, cross_explicit: bool = False)
     have to go. A clean edit IS a different recording and normally carries
     its own ISRC, so a veto on differing codes answers "not the same song" to
     every ordinary clean twin and the split never fires. What is left under
-    ``cross_explicit`` is an exact title plus a duration within 1 s, and the
+    ``cross_explicit`` is an exact title (or a censored title and the one it
+    masks, "b*tch" and "bitch") plus a duration within 1 s, and the
     caller only acts on a pair whose explicit flags actually differ, which is
     the clean/explicit signature itself. Planning never sets it (a merge must
     never substitute one cut for the other); the edition split does, to tell a
@@ -3869,7 +3950,8 @@ def _align_edition(template: list, other: list, *, cross_explicit: bool = False)
                 continue
             if not cross_explicit and tr.isrc and rec.isrc and tr.isrc != rec.isrc:
                 continue  # ISRC proves a different recording, never override by title/duration
-            if tr.title == rec.title and tr.dur is not None and rec.dur is not None and abs(tr.dur - rec.dur) <= 1:
+            same_title = tr.title == rec.title or (cross_explicit and _masked_title_fits(tr.title, rec.title))
+            if same_title and tr.dur is not None and rec.dur is not None and abs(tr.dur - rec.dur) <= 1:
                 used[j] = True
                 result[i] = rec
                 break
@@ -4203,6 +4285,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     # browsePagePrefetched, same rule: never the page payload itself.
     artistPagePrefetched = Signal("QVariant")
     artistMetaLoaded = Signal(str, int)
+    # The artist card's summary (see artistSummary) once a page build for
+    # that artist lands: id, summary dict ({id, known: False, failed: True}
+    # when the build failed).
+    artistSummaryReady = Signal(str, "QVariant")
     libraryLoaded = Signal(str, "QVariant", bool)  # category, items (replace), hasMore
     libraryMore = Signal(str, "QVariant", bool)  # category, items (append), hasMore
     # "Home" tab: a Browse-shaped, account-scoped landing. Carries a list of
@@ -4264,10 +4350,16 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     hoverMotionChanged = Signal()  # hover_control_motion pref flipped; Main.qml re-reads it
     artHoverTiltChanged = Signal()  # art_hover_tilt pref flipped; Main.qml re-reads it
     videoHoverPeekChanged = Signal()  # video_hover_peek pref flipped; Main.qml re-reads it
+    artistHoverCardsChanged = Signal()  # artist_hover_cards pref flipped; Main.qml re-reads it
     audioOutputsChanged = Signal()  # outputs appeared, vanished, or the system default moved
     audioOutputChanged = Signal()  # the audio_output pref changed; Main.qml re-resolves the device
     queueLedgerRowsChanged = Signal()  # queue_ledger_rows pref changed; Main.qml re-reads it
     playerSizeChanged = Signal()  # player_size pref changed; Main.qml re-reads it
+    closeActionChanged = Signal()  # close_action pref changed; Main.qml re-reads it
+    # Bring the window back from the background: the Dock icon, the tray
+    # icon, or a second launch handing over to this copy.
+    showWindowRequested = Signal()
+    backgroundAvailableChanged = Signal()  # a tray appeared or went away
     diagnosticsExported = Signal(str)  # export finished; arg = bundle path ("" = failed)
     # How many queued tracks failed or are unavailable (property
     # `missingTracks`), and a missing-tracks export finished: the qid it was
@@ -4731,6 +4823,16 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # and whether a click has since claimed it; both under _prefetch_lock.
         self._artist_prefetch: str | None = None
         self._artist_prefetch_claimed = False
+        # The artist card (requestArtistCard): the newest artist a card wants
+        # while the hover slot is busy (built when the slot frees, newest
+        # wins), and the artists whose popularity is being fetched for a
+        # card. Both under _prefetch_lock.
+        self._artist_card_want: str | None = None
+        self._artist_pop_inflight: set[str] = set()
+        # Pages a build already handed to the card while its videos were
+        # still on the way, by artist id, until the page cache holds them.
+        # Under _prefetch_lock.
+        self._artist_card_early: dict[str, dict] = {}
         # Album track lists by album id, cached for the session. A released
         # album's track list is immutable, so cached lists are served outright
         # with no revalidation; the QML-side trackCache resets on every new
@@ -4891,6 +4993,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # media id -> (last_broadcast_pct, monotonic_time). GUI-thread only, so
         # no lock; cleared when the queue drains (in _poll_track_progress).
         self._pct_last: dict[str, tuple[float, float]] = {}
+        # (qid, track id) -> (the progress task last read, the percent the row
+        # holds until that task gets past it); see _poll_track_progress.
+        self._row_passes: dict[tuple, tuple[int, float]] = {}
         self._track_poll = QTimer(self)
         self._track_poll.setInterval(500)
         self._track_poll.timeout.connect(self._poll_track_progress)
@@ -5940,6 +6045,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self._album_tracks_unrecorded.clear()
             self._artist_prefetch = None
             self._artist_prefetch_claimed = False
+            self._artist_card_want = None
+            self._artist_pop_inflight.clear()
+            self._artist_card_early.clear()
         self._item_fetch_ts.clear()
         self._artist_cache.clear()
         self._artist_loading.clear()
@@ -6843,6 +6951,229 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         _prefetch_log.debug("prefetch artist %s", artist_id)
         self._start_artist_build(artist_id, None, collapse, silent=True)
 
+    # ----- the artist card (a pointer resting on an artist's name) -----
+
+    _CARD_TOP_TRACKS = 3
+    _CARD_RELEASES = 6
+
+    @staticmethod
+    def _artist_card_rows(payload: dict) -> list[tuple[dict, str]]:
+        """Every album and EP row of an artist page with its shape (album,
+        ep or single)."""
+        listed = [(r, "album") for r in payload.get("albums") or [] if isinstance(r, dict)]
+        listed += [(r, "ep") for r in payload.get("eps") or [] if isinstance(r, dict)]
+
+        def shape(row: dict, listed_as: str) -> str:
+            t = str(row.get("rtype") or "").strip().lower()
+            if t in _RELEASE_TYPES:
+                return t
+            # An older cached row without a shape: judged the way
+            # _release_type judges a release TIDAL gave none.
+            if listed_as == "album":
+                return "album"
+            n = int(row.get("audio_tracks") or row.get("tracks") or 0)
+            return "single" if 0 < n <= 3 else "ep"
+
+        return [(r, shape(r, as_)) for r, as_ in listed]
+
+    @staticmethod
+    def _card_day(row: dict) -> str:
+        return str(row.get("listed") or row.get("date") or row.get("year") or "")
+
+    @staticmethod
+    def _artist_card_strip(rows: list[tuple[dict, str]]) -> list[tuple[dict, str]]:
+        """The card's strip: the newest releases, albums and EPs (singles
+        only when there is nothing else)."""
+        strip = [rk for rk in rows if rk[1] != "single"] or rows
+        return sorted(strip, key=lambda rk: WavesBridge._card_day(rk[0]), reverse=True)[: WavesBridge._CARD_RELEASES]
+
+    @staticmethod
+    def _artist_summary_of(payload: dict, popularity: int = -1) -> dict:
+        """The artist card's view of a built artist page: counts by release
+        shape, the first top tracks, the newest releases (albums and EPs;
+        singles only when there is nothing else), the bio as plain text.
+        Pure, so the GUI thread can call it on a cached page."""
+        rows = WavesBridge._artist_card_rows(payload)
+        counts = {"album": 0, "ep": 0, "single": 0}
+        for _, kind in rows:
+            counts[kind] += 1
+        day = WavesBridge._card_day
+        strip = WavesBridge._artist_card_strip(rows)
+        tracks = [t for t in payload.get("tracks") or [] if isinstance(t, dict)]
+        return {
+            "id": str(payload.get("id") or ""),
+            "known": True,
+            "name": payload.get("name") or "",
+            "art": payload.get("art") or "",
+            "bio": _card_bio(payload.get("bio") or ""),
+            "albums": counts["album"],
+            "eps": counts["ep"],
+            "singles": counts["single"],
+            "top": [
+                {
+                    "id": str(t.get("id") or ""),
+                    "title": t.get("title") or "",
+                    "duration": t.get("duration") or "",
+                    "duration_sec": int(t.get("duration_sec") or 0),
+                    "album": t.get("album") or "",
+                    "album_id": str(t.get("album_id") or ""),
+                    "art": t.get("art") or "",
+                }
+                for t in tracks[: WavesBridge._CARD_TOP_TRACKS]
+            ],
+            "releases": [
+                {
+                    "id": str(r.get("id") or ""),
+                    "title": r.get("title") or "",
+                    "year": str(r.get("year") or day(r)[:4]),
+                    "art": r.get("art") or "",
+                    "rtype": kind,
+                }
+                for r, kind in strip
+            ],
+            "popularity": int(popularity),
+        }
+
+    def _artist_card_page(self, artist_id: str) -> dict | None:
+        """The cached page a card may read: only one built under the current
+        edition rule, the same test prefetchArtist and loadArtist apply."""
+        cached = self._artist_cache.get(artist_id) if artist_id else None
+        if cached is None and artist_id:
+            # A build that handed the card its page before the videos landed.
+            early = getattr(self, "_artist_card_early", None)  # stubs have none
+            if early:
+                with self._prefetch_lock:
+                    cached = early.get(artist_id)
+        if cached is None:
+            return None
+        if bool(cached.get("editions_collapsed", False)) != self._artist_page_collapses_editions():
+            return None
+        return cached
+
+    def _artist_card_early_land(self, artist_id: str, payload: dict, gen: int) -> bool:
+        """A build has everything the card shows (all but the videos): keep
+        the page for a card that opens before the cache holds it, and fill an
+        open card now. False on a partial bridge (the tests' stubs), which has
+        no card, and for a build from before a logout."""
+        early = getattr(self, "_artist_card_early", None)
+        if early is None or getattr(self, "artistSummaryReady", None) is None:
+            return False
+        with self._prefetch_lock:
+            # Under the lock logout clears the held pages in: a page from
+            # the account before must not outlive that clear.
+            if gen != self._browse_gen:
+                return False
+            early[artist_id] = payload
+        _card_log.debug("card %s early", artist_id)
+        self._artist_card_landed(artist_id, payload)
+        return True
+
+    def _artist_card_early_drop(self, artist_id: str) -> None:
+        early = getattr(self, "_artist_card_early", None)
+        if early is not None:
+            with self._prefetch_lock:
+                early.pop(artist_id, None)
+
+    @Slot(str, result="QVariant")
+    def artistSummary(self, artist_id: str) -> dict:
+        """The artist card's summary, read from the page cache on the GUI
+        thread (no I/O). ``known`` is False when no page is built yet; the
+        card then shows its skeleton and calls requestArtistCard."""
+        artist_id = str(artist_id or "")
+        page = self._artist_card_page(artist_id)
+        if page is None:
+            return {"id": artist_id, "known": False}
+        return self._artist_summary_of(page, self._pop_cached(artist_id))
+
+    @Slot(str)
+    def requestArtistCard(self, artist_id: str) -> None:
+        """An artist card opened on ``artist_id``: build its page if needed
+        (answered on artistSummaryReady) and fetch its popularity if no memo
+        holds it (answered on artistMetaLoaded)."""
+        artist_id = str(artist_id or "")
+        if not self._logged_in or not artist_id.isdigit():
+            return
+        self._artist_card_request(artist_id)
+        self._artist_card_pop_fetch(artist_id)
+
+    def _artist_card_request(self, artist_id: str) -> None:
+        """The card's page build, through the hover slot prefetchArtist uses
+        (so a click on OPEN ARTIST PAGE mid-build claims it). Unlike a hover
+        prefetch a busy slot does not drop the request: the newest one is
+        parked and built when the slot frees, so a pointer moving from name
+        to name never leaves the card on its skeleton."""
+        if not self._logged_in or not artist_id:
+            return
+        page = self._artist_card_page(artist_id)
+        if page is not None:
+            with self._prefetch_lock:
+                self._artist_card_want = None  # newest wins, and this one is here
+            _card_log.debug("card %s cached", artist_id)
+            self.artistSummaryReady.emit(artist_id, self._artist_summary_of(page, self._pop_cached(artist_id)))
+            return
+        collapse = self._artist_page_collapses_editions()
+        with self._prefetch_lock:
+            if artist_id in self._artist_loading:
+                self._artist_card_want = None
+                outcome = "rides"  # its build lands on artistSummaryReady
+            elif self._artist_prefetch is not None:
+                self._artist_card_want = artist_id
+                outcome = "parked"
+            else:
+                self._artist_card_want = None
+                self._artist_prefetch = artist_id
+                self._artist_prefetch_claimed = False
+                self._artist_loading.add(artist_id)
+                outcome = "build"
+        _card_log.debug("card %s %s", artist_id, outcome)
+        if outcome == "build":
+            self._start_artist_build(artist_id, None, collapse, silent=True)
+
+    def _artist_card_landed(self, artist_id: str, payload: dict | None) -> None:
+        """A page build for ``artist_id`` finished (any path): tell an open
+        card. ``payload`` None means the build failed."""
+        signal = getattr(self, "artistSummaryReady", None)
+        if signal is None:  # a partial bridge (the tests' stubs) has no card
+            return
+        if payload is None:
+            _card_log.debug("card %s failed", artist_id)
+            signal.emit(artist_id, {"id": artist_id, "known": False, "failed": True})
+            return
+        _card_log.debug("card %s landed", artist_id)
+        signal.emit(artist_id, self._artist_summary_of(payload, self._pop_cached(artist_id)))
+
+    def _artist_card_pop_fetch(self, artist_id: str) -> None:
+        """The card's popularity meter: a page payload carries none, so an
+        artist without a memo (a search fills it) is asked by id, once at a
+        time, and answered on the existing artistMetaLoaded signal."""
+        if self._pop_cached(artist_id) >= 0:
+            return
+        with self._prefetch_lock:
+            if artist_id in self._artist_pop_inflight:
+                return
+            self._artist_pop_inflight.add(artist_id)
+        gen = self._browse_gen
+
+        def work() -> None:
+            pop = -1
+            try:
+                with POP_GAUGE.working():
+                    pop = _artist_popularity_by_id(self.tidal.session, artist_id)
+            finally:
+                # An ask from before a logout leaves the mark alone: the
+                # logout cleared the set, and the new account may have the
+                # same artist out now.
+                with self._prefetch_lock:
+                    if gen == self._browse_gen:
+                        self._artist_pop_inflight.discard(artist_id)
+            if pop < 0 or gen != self._browse_gen:
+                return
+            self._remember_capped(self._artist_pop_cache, artist_id, (time.monotonic(), pop), self._ARTIST_POP_MAX)
+            _card_log.debug("card %s popularity in", artist_id)
+            self.artistMetaLoaded.emit(artist_id, pop)
+
+        self.threadpool.start(Worker(work))
+
     def _start_artist_build(self, artist_id: str, cached: dict | None, collapse: bool, *, silent: bool) -> None:
         """The artist page worker behind loadArtist (a click) and
         prefetchArtist (a hover). ``artist_id`` is already in
@@ -6859,6 +7190,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         def work() -> None:
             t0 = devlog.clock()
             failed = False
+            card_early = False  # the artist card already has this page (videos aside)
             try:
                 artist = self._get_artist(artist_id)  # a miss routes through the failure tail below
                 if artist is None:
@@ -6925,8 +7257,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                                     "id": artist_id,
                                     "art": _image(artist, 320),
                                     "tracks": [{"art": _image(t, 160)} for t in tops[:8]],
-                                    "albums": [{"art": _image(a)} for a in albums[:8]],
-                                    "eps": [{"art": _image(a)} for a in eps[:8]],
+                                    # The shape and day the card's strip
+                                    # picks its releases by.
+                                    "albums": [_card_warm_row(a) for a in albums],
+                                    "eps": [_card_warm_row(a) for a in eps],
                                 }
                             )
                         )
@@ -6942,27 +7276,35 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                         bio = _clean_bio(landed("bio") or "")
                     except Exception:
                         bio = ""
+                    # A reissue sits where the day it was really listed
+                    # belongs, not in the original album's year (see
+                    # _listed_date).
+                    lifted = sum(1 for a in albums + eps if _listed_date(a) is not None)
+                    if lifted:
+                        albums = _place_by_listed(albums)
+                        eps = _place_by_listed(eps)
+                        devlog.event("artist", "listed", lifted=lifted)
+                    payload = {
+                        "id": artist_id,
+                        "name": getattr(artist, "name", ""),
+                        "editions_collapsed": collapse,
+                        # The card size on purpose: the artist card that led
+                        # here already fetched this URL, a 480 would be a cold
+                        # download.
+                        "art": _image(artist, 320),
+                        "bio": bio,
+                        "albums": [self._album_dict(a) for a in albums],
+                        "eps": [self._album_dict(a) for a in eps],
+                        "tracks": [self._track_dict(t) for t in tops],
+                        "videos": [],
+                    }
+                    # The artist card shows no videos: it fills now, while
+                    # the videos may still be on the way.
+                    early_land = getattr(self, "_artist_card_early_land", None)  # stubs have no card
+                    if early_land is not None and not refresh and complete:
+                        card_early = early_land(artist_id, payload, gen)
                     vids = landed("vids") or []
-                # A reissue sits where the day it was really listed belongs,
-                # not in the original album's year (see _listed_date).
-                lifted = sum(1 for a in albums + eps if _listed_date(a) is not None)
-                if lifted:
-                    albums = _place_by_listed(albums)
-                    eps = _place_by_listed(eps)
-                    devlog.event("artist", "listed", lifted=lifted)
-                payload = {
-                    "id": artist_id,
-                    "name": getattr(artist, "name", ""),
-                    "editions_collapsed": collapse,
-                    # The card size on purpose: the artist card that led here
-                    # already fetched this URL, a 480 would be a cold download.
-                    "art": _image(artist, 320),
-                    "bio": bio,
-                    "albums": [self._album_dict(a) for a in albums],
-                    "eps": [self._album_dict(a) for a in eps],
-                    "tracks": [self._track_dict(t) for t in tops],
-                    "videos": [self._video_dict(v) for v in self._dedup_videos(vids)],
-                }
+                payload["videos"] = [self._video_dict(v) for v in self._dedup_videos(vids)]
             except Exception:
                 # The dict builders can choke on a partial tidalapi object and
                 # Worker.run only logs an escape: without this arm the artist
@@ -6977,12 +7319,25 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 # breath as the loading mark drops: a click landing in
                 # between would otherwise start a second build of a page
                 # about to be cached, or claim a slot already gone.
+                # A build from before a logout leaves all of it alone: the
+                # logout already cleared the slot, the loading marks and the
+                # parked card, and a new account's build of the same artist
+                # may hold them now.
                 with self._prefetch_lock:
-                    self._artist_loading.discard(artist_id)
-                    claimed = silent and self._artist_prefetch == artist_id and self._artist_prefetch_claimed
-                    if self._artist_prefetch == artist_id:
+                    live = gen == self._browse_gen
+                    if live:
+                        self._artist_loading.discard(artist_id)
+                    claimed = live and silent and self._artist_prefetch == artist_id and self._artist_prefetch_claimed
+                    nxt = None
+                    if live and self._artist_prefetch == artist_id:
                         self._artist_prefetch = None
                         self._artist_prefetch_claimed = False
+                        # The slot is free: an artist card parked a newer
+                        # request on it (a partial bridge, the tests' stubs,
+                        # has no card and parks nothing).
+                        nxt = getattr(self, "_artist_card_want", None)
+                        if nxt is not None:
+                            self._artist_card_want = None
                 quiet = silent and not claimed  # nobody is watching this build
                 if failed and not refresh:
                     if quiet:
@@ -6995,6 +7350,15 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                         # or history recording stays dead until the next
                         # successful navigation.
                         self.artistLoadFailed.emit(artist_id)
+                card_landed = getattr(self, "_artist_card_landed", None)  # stubs have no card
+                if gen == self._browse_gen:
+                    if failed and card_early:
+                        # The card keeps what it was given; a later card asks again.
+                        self._artist_card_early_drop(artist_id)
+                    elif failed and not refresh and card_landed is not None:
+                        card_landed(artist_id, None)
+                    if nxt is not None and nxt != artist_id:
+                        self._artist_card_request(nxt)
             if gen != self._browse_gen:
                 return  # logged out mid-fetch, see loadBrowse's work()
             # The floor refreshArtist keeps: a page fetched now, by any path,
@@ -7010,8 +7374,19 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             keep = changed and complete and bool(payload["albums"] or payload["eps"] or payload["tracks"])
             if keep:
                 self._remember_artist_page(artist_id, payload)
-            elif refresh:
+            if card_early:
+                # The page cache answers the card from here on (or, a page
+                # not kept, the next card builds it again).
+                self._artist_card_early_drop(artist_id)
+            if refresh and not keep:
+                # A revalidate with nothing new to keep ends here; one with
+                # news goes on to the in-place update and the disk save.
                 return
+            if not refresh and card_landed is not None and not card_early:
+                # An open artist card fills in. A page missing a section still
+                # shows what it has; one with nothing at all reads as failed.
+                usable = complete or bool(payload["albums"] or payload["eps"] or payload["tracks"])
+                card_landed(artist_id, payload if usable else None)
             if refresh:
                 if changed:
                     # In-place update: the QML drops this if the user has
@@ -9031,6 +9406,12 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             "tracks": arts(payload.get("tracks")),
             "albums": arts(payload.get("albums")),
             "eps": arts(payload.get("eps")),
+            # The artist card's strip, in its order, so the card's covers are
+            # the ones warmed (and at the strip's own count).
+            "card": [
+                str(r.get("art") or "")
+                for r, _ in WavesBridge._artist_card_strip(WavesBridge._artist_card_rows(payload))
+            ],
         }
 
     # ----- browse tile art (cover mosaics) --------------------------------
@@ -10815,8 +11196,12 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         if not self._job_dls:
             self._track_poll.stop()
             self._pct_last.clear()  # bound the broadcast-gate memo to one session
+            self._row_passes = {}  # likewise the per-row task memo
             self._prune_job_tracks()  # nothing is running: settle per-row state whose row has gone
             return
+        passes = getattr(self, "_row_passes", None)
+        if passes is None:  # a bare stand-in built without __init__
+            passes = self._row_passes = {}
         for qid, dl in list(self._job_dls.items()):
             reg = self._job_tracks.get(qid)
             if not reg:
@@ -10842,6 +11227,18 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 if pct is None:
                     continue
                 pct = max(0.0, min(100.0, float(pct)))
+                # A row that moves to a new task (the track runs again, on
+                # fresh links after the first ones lapsed) holds where the
+                # last pass left it until the new pass gets past that, rather
+                # than dropping back to 0 and climbing again.
+                # Kept beside the row, not in it: the row dict is what QML gets.
+                seen_task, hold = passes.get((qid, tid), (task_id, 0.0))
+                if seen_task != task_id:
+                    hold = float(row.get("pct", 0.0))
+                if pct < hold:
+                    passes[(qid, tid)] = (task_id, hold)
+                    continue
+                passes[(qid, tid)] = (task_id, 0.0)
                 if abs(pct - float(row.get("pct", 0.0))) >= 0.5:
                     row["pct"] = pct
                     ticks[tid] = pct
@@ -11527,9 +11924,16 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             # Resting the pointer on a video thumbnail grows a live preview
             # card with sound; off keeps thumbnails still (click to play).
             "video_hover_peek": True,
+            # Resting the pointer on an artist's name opens a card with a
+            # summary and a Follow button; off keeps names as plain links.
+            "artist_hover_cards": True,
             # The player bar's size: "full" gives the waveform 200 px, "mini"
             # 130 px, so the title and credits keep more of the bar.
             "player_size": "full",
+            # What the window's close button does: "ask" shows the prompt,
+            # "background" hides the window and keeps Waves running, "exit"
+            # ends the app. Quitting from the menu or the tray always exits.
+            "close_action": "ask",
             # Where previews, videos and hover peeks play: "" follows the
             # system default, else the picked device's id as hex. The name
             # rides along so a pick that is unplugged still reads by name.
@@ -11876,20 +12280,51 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         rests on what an unset AudioOutput happens to do)."""
         from PySide6.QtMultimedia import QMediaDevices
 
+        dev = self._audio_saved_device()
+        return dev if dev is not None else QMediaDevices.defaultAudioOutput()
+
+    def _audio_saved_device(self):
+        """The listed device the saved pick names, or None.
+
+        By id first. A device whose id changed while its name did not (a
+        different audio backend lists the same speakers under other ids, as
+        on Linux where Waves now prefers PulseAudio over PipeWire) is found
+        by its saved name when exactly one listed device carries it, and its
+        new id is adopted so the pick survives and the Settings row matches
+        again. Two devices with the same name are not guessed between.
+
+        Linux only: macOS and Windows keep a device's id across launches, so
+        there a missing id means the device is away, and the one listed
+        device with its name is a twin (a second monitor or DAC of the same
+        model) that must not take over the pick."""
         want = self._waves_prefs.get("audio_output") or ""
-        if want:
-            for dev in self._audio_real_outputs():
-                if bytes(dev.id()).hex() == want:
-                    return dev
-        return QMediaDevices.defaultAudioOutput()
+        if not want:
+            return None
+        outputs = self._audio_real_outputs()
+        for dev in outputs:
+            if bytes(dev.id()).hex() == want:
+                return dev
+        if not sys.platform.startswith("linux"):
+            return None
+        name = self._waves_prefs.get("audio_output_name") or ""
+        named = [dev for dev in outputs if name and dev.description() == name]
+        if len(named) != 1:
+            return None
+        dev = named[0]
+        new = bytes(dev.id()).hex()
+        _audio_note_secret(new)
+        self._waves_prefs["audio_output"] = new
+        self._save_waves_prefs()
+        # Never the name or either id (see setWavesPref).
+        _audio_log.info("picked output found under a new id, pick kept")
+        return dev
 
     @Slot(result=bool)
     def audioOutputMissing(self) -> bool:
         """True while the saved pick is not among the outputs the OS lists."""
-        want = self._waves_prefs.get("audio_output") or ""
-        if not want:
+        if not (self._waves_prefs.get("audio_output") or ""):
             return False
-        return want not in {bytes(d.id()).hex() for d in self._audio_real_outputs()}
+        return self._audio_saved_device() is None
 
     @Slot(result=str)
     def audioOutputLive(self) -> str:
@@ -11924,6 +12359,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             except (TypeError, ValueError):
                 value = old
         if key == "player_size" and value not in ("full", "mini"):
+            value = old
+        if key == "close_action" and value not in _CLOSE_ACTIONS:
             value = old
         if key == "audio_output":
             self._waves_prefs["audio_output_name"] = self._audio_output_name_for(value, old)
@@ -11985,6 +12422,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self.artHoverTiltChanged.emit()
         elif key == "video_hover_peek":
             self.videoHoverPeekChanged.emit()
+        elif key == "artist_hover_cards":
+            self.artistHoverCardsChanged.emit()
         elif key == "audio_output" and value != old:
             # Which kind of pick, never the device's name: a name is a system
             # string and can carry a person's ("Jane's AirPods").
@@ -11996,6 +12435,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self.queueLedgerRowsChanged.emit()
         elif key == "player_size" and value != old:
             self.playerSizeChanged.emit()
+        elif key == "close_action" and value != old:
+            _bg_log.info("closing the window now means: %s", value)
+            self.closeActionChanged.emit()
         elif key == "verbose_diagnostics":
             diagnostics.set_verbose(bool(value))
         elif key == "library_enabled" and value != old:
@@ -12378,9 +12820,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         singleton title costs no track fetch."""
         t0 = devlog.clock()
         both = albums + eps
+        keys = _edition_keys(both)
         groups: dict = {}
         for a in both:
-            groups.setdefault(_edition_base_key(a), []).append(a)
+            groups.setdefault(keys[id(a)], []).append(a)
         # Only the editions that share a title are ever compared, and only
         # those the session has not read yet cost a request. The fetches are
         # independent, so they go out together rather than one after another.
@@ -12528,10 +12971,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         def tracks_of(album):  # (title, duration) view for the completeness fallback
             return [(r.title, r.dur) for r in recs_of(album)]
 
+        keys = _edition_keys(albums)
         groups: dict = {}
         order: list = []
         for a in albums:
-            key = _edition_base_key(a)
+            key = keys[id(a)]
             if key not in groups:
                 groups[key] = []
                 order.append(key)
@@ -12601,7 +13045,6 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         :meth:`_artist_releases`: a dropped session or a 429 used to be
         swallowed here and reported to the user as "No richer edition found",
         asserting something the scan never established."""
-        base = _edition_base_key(album)
         artist_id = str(getattr(getattr(album, "artist", None), "id", "") or "")
         artist = self._get_artist(artist_id) if artist_id else None
         out: list = []
@@ -12630,8 +13073,12 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     if aid in seen or not _is_album_entity(a):
                         continue
                     seen.add(aid)
-                    if _edition_base_key(a) == base:
-                        out.append(a)
+                    out.append(a)
+        # Keyed together so a censored clean title meets its explicit twin
+        # (see _edition_keys) in either direction.
+        keys = _edition_keys(out)
+        base = keys[id(album)]
+        out = [a for a in out if a is album or keys[id(a)] == base]
         return out, complete
 
     def _library_claim_media(self, media, album=None):
@@ -13769,9 +14216,12 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         with contextlib.suppress(Exception):
             self._notify_pool.start(Worker(work))
 
-    @staticmethod
-    def _notify_waves_in_front() -> bool:
-        """(GUI thread) Whether Waves is the app the user is in right now."""
+    def _notify_waves_in_front(self) -> bool:
+        """(GUI thread) Whether Waves is the app the user is in right now. A
+        window closed to the background is never in front, even while the
+        system still counts the app as the active one."""
+        if getattr(self, "_in_background", False):
+            return False
         return QtGui.QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
 
     def _notify_job_ended(self, item: dict | None) -> None:
@@ -15236,9 +15686,14 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     @Slot(str)
     def previewTrack(self, track_id: str) -> None:
         """Stream a single track. Resolves the URL off the GUI thread and hands
-        it to QML via previewReady; the shared MediaPlayer does the rest."""
-        track = self._objs["track"].get(track_id)
-        if track is None:
+        it to QML via previewReady; the shared MediaPlayer does the rest.
+
+        A track the session no longer holds (every search clears ``_objs``, and
+        a page restored from the page cache never filled it) is fetched again
+        by id on the worker, as previewMedia does, so a row from an older page
+        still plays instead of the click doing nothing."""
+        held = self._objs["track"].get(track_id)
+        if held is None and not (self._logged_in and str(track_id or "").isdigit()):
             self.previewState.emit("track", track_id, "")
             return
         self.previewState.emit("track", track_id, "loading")
@@ -15247,6 +15702,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             # Worker.run() does not catch, guarantee a terminal state so the
             # button can never stick spinning.
             try:
+                track = held
+                if track is None:
+                    track = self.tidal.session.track(int(track_id))
+                    self._remember("track", track_id, track)
                 self._emit_preview_meta("track", track_id, track)
                 url = self._preview_source(track, whole=True)  # full track, seekable
                 self.previewReady.emit("track", track_id, url)
@@ -15742,6 +16201,91 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 if obj is not None:
                     self._download(obj, "playlist", name_builder_title(obj), self._playlist_template(key), True, key)
         self._set_status(f"Downloading {len(keys)} playlists…")
+
+    # ---- Run in background (the window's close button) -----------------
+    @Property(bool, notify=backgroundAvailableChanged)
+    def backgroundAvailable(self) -> bool:
+        """Whether a closed window has a way back: the Dock on macOS, a tray
+        icon elsewhere. Without one the close button exits, as it always did."""
+        return _has_way_back(self)
+
+    @Slot(bool)
+    def setTrayAvailable(self, available: bool) -> None:
+        """The tray host's report (Windows and Linux): the desktop has a tray."""
+        available = bool(available)
+        if available == bool(getattr(self, "_tray_available", False)):
+            return
+        self._tray_available = available
+        _bg_log.info("tray %s", "available" if available else "not available")
+        self.backgroundAvailableChanged.emit()
+
+    @Slot()
+    def enterBackground(self) -> None:
+        """The window was closed to the background: Waves keeps running."""
+        if getattr(self, "_in_background", False):
+            return
+        self._in_background = True
+        devlog.event("background", "window closed, running in background")
+
+    @Slot()
+    def leaveBackground(self) -> None:
+        """The window is back on screen."""
+        if not getattr(self, "_in_background", False):
+            return
+        self._in_background = False
+        devlog.event("background", "window shown again")
+
+    @Slot(result=str)
+    def trayIconUrl(self) -> str:
+        """The tray icon's image: the 64 px rung of the app icon ladder."""
+        for root in (
+            pathlib.Path(sys.executable).resolve().parent / "ui",  # packaged
+            pathlib.Path(sys.argv[0]).resolve().parent / "ui",  # Nuitka on Windows
+            pathlib.Path(__file__).resolve().parent.parent / "ui",  # from source
+        ):
+            if (root / "icon64.png").is_file():
+                return QtCore.QUrl.fromLocalFile(str(root / "icon64.png")).toString()
+        return ""
+
+    @Slot()
+    def requestShowWindow(self) -> None:
+        """Bring the window back (tray icon, Dock icon, a second launch)."""
+        self.showWindowRequested.emit()
+
+    def note_app_active(self) -> None:
+        """(GUI thread) The app became the active one. On macOS a click on
+        the Dock icon of a windowless app arrives as exactly this."""
+        if getattr(self, "_in_background", False):
+            self.showWindowRequested.emit()
+
+    def note_quit_requested(self) -> None:
+        """(GUI thread) A real quit is on its way (the app menu, Cmd+Q, the
+        Dock, the tray): the close it causes must not offer the background."""
+        self._quit_requested = True
+
+    @Slot(result=bool)
+    def takeQuitRequest(self) -> bool:
+        """Whether the close being handled comes from a real quit; reading it
+        clears it, so a vetoed quit does not color the next close."""
+        asked = bool(getattr(self, "_quit_requested", False))
+        self._quit_requested = False
+        return asked
+
+    @Slot()
+    def requestQuit(self) -> None:
+        """The tray's Quit: a real quit, through the same door as the menu's."""
+        _bg_log.info("quit asked from the tray")
+        self._quit_requested = True
+        QtGui.QGuiApplication.quit()
+
+    @Slot(str)
+    def rememberCloseAction(self, value: str) -> None:
+        """The close prompt's "Don't ask again": keep the pick, and let an
+        open Settings page show it."""
+        if value not in ("background", "exit"):
+            return
+        self.setWavesPref("close_action", value)
+        self.settingsPersistedExternally.emit()
 
     @Property(bool, notify=confirmCategoryDlChanged)
     def confirmCategoryDl(self) -> bool:
@@ -18625,6 +19169,19 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "value": self._waves_pref_bool("video_hover_peek"),
                 },
                 {
+                    "key": "artist_hover_cards",
+                    "label": "Artist cards on hover",
+                    "help": (
+                        "Resting on an artist's name opens a card with a summary and a Follow "
+                        "button. Off keeps names as plain links."
+                    ),
+                    "type": "bool",
+                    "value": self._waves_pref_bool("artist_hover_cards"),
+                    # A row with its switch on the right, never a fifth tile:
+                    # the Appearance switch grid stays two across.
+                    "rowToggle": True,
+                },
+                {
                     "key": "player_size",
                     "label": "Player bar",
                     "help": (
@@ -18634,6 +19191,27 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "type": "enum",
                     "value": self._waves_prefs.get("player_size", "full"),
                     "options": _enum_options("player_size", ["full", "mini"]),
+                },
+                {
+                    "key": "close_action",
+                    "label": "When the window is closed",
+                    # A desktop with no tray has no way back to a hidden
+                    # window, so there the close button always exits: say so
+                    # rather than offer what will not happen.
+                    "help": (
+                        (
+                            "Run in background keeps downloads and release checks going with the window "
+                            "closed. Quitting from the menu or tray always exits."
+                        )
+                        if _has_way_back(self)
+                        else (
+                            "This desktop shows no tray icon to bring a closed window back, so closing "
+                            "the window exits Waves."
+                        )
+                    ),
+                    "type": "enum",
+                    "value": self._waves_prefs.get("close_action", "ask"),
+                    "options": _enum_options("close_action", list(_CLOSE_ACTIONS)),
                 },
                 {
                     "key": "audio_output",
@@ -19153,7 +19731,9 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "hover_control_motion",
                     "art_hover_tilt",
                     "video_hover_peek",
+                    "artist_hover_cards",
                     "player_size",
+                    "close_action",
                     "queue_ledger_rows",
                 ],
             },
@@ -19675,11 +20255,26 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             diagnostics.detach_disk_log()
         base = path_config_base()
 
+        # A straggler read can still be inside a store connection that was
+        # closed above: sqlite holds the file until that statement ends, and
+        # Windows deletes no open file. Such a file is tried again for a
+        # moment, out of one shared budget so the reset never stalls long.
+        retry_until = time.monotonic() + _FACTORY_UNLINK_RETRY_S
+
         def unlink(path: str) -> None:
             # os.remove never touches directories and never follows a
             # symlink (at most the link itself, inside our namespace, goes).
-            with contextlib.suppress(OSError):
-                os.remove(path)
+            while True:
+                try:
+                    os.remove(path)
+                except PermissionError:
+                    if os.name != "nt" or time.monotonic() >= retry_until:
+                        return
+                    time.sleep(0.05)
+                except OSError:
+                    return
+                else:
+                    return
 
         try:
             names = set(os.listdir(base))

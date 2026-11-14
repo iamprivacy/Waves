@@ -20,14 +20,14 @@ import time
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import SIGNAL, QDateTime, QObject, Qt, QTimer, QUrl, Slot
+from PySide6.QtCore import SIGNAL, QDateTime, QEvent, QObject, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QWindow
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest, QSslConfiguration
 from PySide6.QtQml import QQmlApplicationEngine, QQmlIncubationController, QQmlNetworkAccessManagerFactory
 
 from waves.config import Tidal
 
-from . import diagnostics, proc
+from . import audio_backend, diagnostics, proc, single_instance
 from .backend import _ART_CACHE_DIR, WavesBridge
 
 
@@ -452,6 +452,25 @@ def _icon_debug(msg: str) -> None:
         logging.getLogger(__name__).debug("icon debug log write failed", exc_info=True)
 
 
+def _mac_app_icon(debug: bool) -> QIcon | None:
+    """The macOS Dock icon, which must stay the grid-fit ``icon.icns`` art.
+
+    On macOS ``setWindowIcon`` replaces the Dock icon itself, and the PNG ladder
+    carries the full-bleed art meant for Windows and Linux. Setting it made the
+    Dock swap the bundle's icon for that full-bleed art while the app ran. A
+    packaged bundle ships no ``icon.icns`` beside the binary, so this returns
+    None there and the bundle's own icon stands; a source run (no bundle, so the
+    Dock would show the interpreter's icon) finds ``waves/ui/icon.icns``.
+    """
+    icns = Path(__file__).resolve().parent.parent / "ui" / "icon.icns"
+    icon = QIcon(str(icns)) if icns.is_file() else None
+    if icon is not None and not _icon_usable(icon):
+        icon = None
+    if debug:
+        _icon_debug(f"WAVES icon: mac source={'icns' if icon is not None else 'bundle'}")
+    return icon
+
+
 def _app_icon() -> QIcon | None:
     """Window/taskbar icon for the running app.
 
@@ -463,6 +482,8 @@ def _app_icon() -> QIcon | None:
     only a fallback, and whatever we return must pass :func:`_icon_usable`.
     """
     debug = bool(os.environ.get("WAVES_DEBUG"))
+    if sys.platform == "darwin":
+        return _mac_app_icon(debug)
     roots = (
         Path(sys.executable).resolve().parent / "ui",  # packaged: data files beside the binary
         Path(sys.argv[0]).resolve().parent / "ui",  # Nuitka: sys.executable is a phantom python.exe
@@ -760,6 +781,85 @@ def _failed_qml_load(bridge, owns_app: bool) -> int:
     return 1
 
 
+class _WavesApp(QGuiApplication):
+    """Tells the bridge when a real quit is on its way (the app menu, Cmd+Q,
+    the Dock, the tray), so the close it causes exits instead of offering to
+    run in the background. Overriding event() on the application costs a
+    crossing into the interpreter only for events addressed to the
+    application object itself, a handful per session, unlike an event filter
+    installed on it, which sees every event of every object."""
+
+    quit_hook = None
+
+    def event(self, e):
+        if e.type() == QEvent.Type.Quit and self.quit_hook is not None:
+            self.quit_hook()
+        return super().event(e)
+
+
+def _wire_background(app: QGuiApplication, bridge, instance) -> None:
+    """Run in background: a real quit is told apart from the close button,
+    and the Dock icon (macOS reports a click on it as the app becoming
+    active) and a second launch both bring a closed window back."""
+    if isinstance(app, _WavesApp):
+        app.quit_hook = bridge.note_quit_requested
+
+    def _app_state(state) -> None:
+        if state == Qt.ApplicationState.ApplicationActive:
+            bridge.note_app_active()
+
+    app.applicationStateChanged.connect(_app_state)
+    if instance is not None:
+        instance.set_on_show(bridge.requestShowWindow)
+        bridge._instance_server = instance
+
+
+def _set_windows_app_id() -> None:
+    """Windows only: the taskbar's AppUserModelID, set before the first window."""
+    if sys.platform != "win32":
+        return
+    # Give the taskbar an explicit AppUserModelID BEFORE the first window is
+    # created. Without this, a Qt app's taskbar button is generic even when
+    # the EXE itself carries a valid icon (Explorer shows it, the taskbar
+    # doesn't); the running button's icon is resolved through the process
+    # AUMID, not the EXE resource. This must run in the PACKAGED build too:
+    # Nuitka does NOT set an AUMID (it only writes company/product into the
+    # VERSION resource), so gating this to from-source runs left every frozen
+    # build with a generic taskbar icon. is_frozen() no longer gates it.
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Waves.Waves")
+        if os.environ.get("WAVES_DEBUG"):
+            _icon_debug("WAVES aumid: set Waves.Waves")
+    except Exception:
+        logging.getLogger(__name__).debug("could not set AppUserModelID", exc_info=True)
+        if os.environ.get("WAVES_DEBUG"):
+            _icon_debug("WAVES aumid: FAILED to set")
+
+
+def _make_app() -> tuple[bool, QGuiApplication]:
+    """The application object, and whether this launch made it (a host such
+    as the test harness may have made one already)."""
+    existing = QGuiApplication.instance()
+    app = existing if existing is not None else _WavesApp(sys.argv)
+    app.setApplicationName("Waves")
+    app.setOrganizationName("Waves")
+    return existing is None, app
+
+
+def _claim_instance(app: QGuiApplication, owns_app: bool) -> tuple[bool, single_instance.InstanceServer | None]:
+    """(whether a copy already running on this profile took this launch
+    over, this copy's listener). A launch hosted by another app (tests,
+    embedding) never takes part: (False, None)."""
+    if not owns_app:
+        return False, None
+    from waves.helper.path import path_config_base
+
+    server = single_instance.claim(single_instance.server_name(path_config_base()), app)
+    return server is None, server
+
+
 def waves_activate(tidal: Tidal | None = None) -> int:
     _tune_interpreter_for_gui()
     _install_crash_diagnostics()
@@ -767,32 +867,22 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     # crash.log faulthandler already writes to.
     diagnostics.set_crash_file(_crash_log_file)
     _raise_fd_limit()
+    # Before Qt Multimedia starts: on Linux, its PulseAudio backend rather
+    # than the PipeWire one that can crash listing devices (see the module).
+    audio_backend_verdict = audio_backend.prefer_pulse(os.environ, sys.platform)
     # Download conversions go through python-ffmpeg, which would flash a
     # console window per spawn on the console-less Windows build.
     proc.silence_python_ffmpeg()
-    if sys.platform == "win32":
-        # Give the taskbar an explicit AppUserModelID BEFORE the first window is
-        # created. Without this, a Qt app's taskbar button is generic even when
-        # the EXE itself carries a valid icon (Explorer shows it, the taskbar
-        # doesn't); the running button's icon is resolved through the process
-        # AUMID, not the EXE resource. This must run in the PACKAGED build too:
-        # Nuitka does NOT set an AUMID (it only writes company/product into the
-        # VERSION resource), so gating this to from-source runs left every frozen
-        # build with a generic taskbar icon. is_frozen() no longer gates it.
-        try:
-            import ctypes
-
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Waves.Waves")
-            if os.environ.get("WAVES_DEBUG"):
-                _icon_debug("WAVES aumid: set Waves.Waves")
-        except Exception:
-            logging.getLogger(__name__).debug("could not set AppUserModelID", exc_info=True)
-            if os.environ.get("WAVES_DEBUG"):
-                _icon_debug("WAVES aumid: FAILED to set")
-    owns_app = QGuiApplication.instance() is None
-    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
-    app.setApplicationName("Waves")
-    app.setOrganizationName("Waves")
+    _set_windows_app_id()
+    owns_app, app = _make_app()
+    # One copy per profile: if Waves is already running (its window may be
+    # closed to the background), ask that copy to show its window and leave.
+    # Before anything heavy starts, and only for a launch that owns the app:
+    # this copy listens from here on, so a launch during its startup hands
+    # over instead of starting a second copy.
+    handed_over, instance = _claim_instance(app, owns_app)
+    if handed_over:
+        return 0
     icon = _app_icon()
     if icon is not None:
         app.setWindowIcon(icon)
@@ -808,6 +898,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     # reached the breadcrumb ring, the disk log or an exported bundle, which is
     # the one thing this line is for.
     _log_config_migration()
+    audio_backend.log_choice(audio_backend_verdict)
     # Where the bundled ambient wave loop lives (packaged vs from-source is
     # this module's _data_dir knowledge); the bridge serves playback from a
     # local cached copy of it so boot never streams video off the install
@@ -838,6 +929,7 @@ def waves_activate(tidal: Tidal | None = None) -> int:
     # Abort downloads and drain the worker pools before the Qt object graph is
     # torn down, otherwise quitting mid-download hangs in QThreadPool teardown.
     app.aboutToQuit.connect(bridge.shutdown)
+    _wire_background(app, bridge, instance)
 
     engine.load(QUrl.fromLocalFile(str(_QML_MAIN)))
     root_objects = engine.rootObjects()

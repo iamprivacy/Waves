@@ -537,6 +537,20 @@ class _PerfSampler:
         except Exception:
             return None  # Windows: no resource module; skip rather than dep on psutil
 
+    @staticmethod
+    def _open_fds() -> int | None:
+        """How many file descriptors the process holds (Linux and macOS), so
+        a descriptor leak shows as a climbing figure in an export. A count
+        only, never a name or a path. None where there is no such listing,
+        and on Windows at once: there the paths would resolve against the
+        current drive, which may be a network share that has gone away."""
+        if os.name == "nt":
+            return None
+        for folder in ("/proc/self/fd", "/dev/fd"):
+            with contextlib.suppress(OSError):
+                return len(os.listdir(folder))
+        return None
+
     def _probe_tick(self) -> None:
         """Measure GUI-thread event-loop occupancy. This fixed-interval timer
         lives on the GUI thread, so however much later than _PROBE_INTERVAL_MS it
@@ -560,6 +574,9 @@ class _PerfSampler:
             rss = self._rss_mb()
             if rss is not None:
                 parts.append(f"peak_rss={rss:.0f}MB")
+            fds = self._open_fds()
+            if fds is not None:
+                parts.append(f"fds={fds}")
             for name, pool in self._pools:
                 with contextlib.suppress(Exception):
                     part = f"{name}={pool.activeThreadCount()}/{pool.maxThreadCount()}"
