@@ -37,12 +37,11 @@ import sqlite3
 import stat as stat_mod
 import time
 import unicodedata
-import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
-from threading import Lock, local
+from threading import Lock
 
 import waves.matching as matching
 from waves import db
@@ -898,20 +897,6 @@ class _RateLimitedEmit:
         self._callback(payload)
 
 
-class _Reader:
-    """One thread's read connection, held by that thread's local storage.
-
-    A plain sqlite3.Connection cannot be weakly referenced, and the cache has
-    to be able to find every live reader (see close) without becoming the
-    thing that keeps a dead thread's connection open. This wrapper can, so
-    the strong reference stays exactly where it was: with the thread."""
-
-    __slots__ = ("__weakref__", "conn")
-
-    def __init__(self, conn) -> None:
-        self.conn = conn
-
-
 def _album_keys(album, artist) -> tuple[str, str]:
     """The stored presence key halves for an album row, or EMPTY halves for a
     Various-Artists credit: the app refuses those rows on the raw tag (a
@@ -1019,16 +1004,12 @@ class LibraryIndex:
         # Presence lookups (see presence_facts and friends) read on a
         # connection of their own per thread: WAL lets them run beside the
         # scan's writes, and they never queue on ``_lock`` behind a walk.
-        self._readers = local()
-        # Weak references to every reader handed out. The thread-local alone
-        # only ever reaches the CALLING thread's connection, so close() left
-        # one open per pool thread that had answered a badge question; on
-        # Windows an open handle refuses a delete outright, and a factory
-        # reset closes this cache and then unlinks its file, so the listing
-        # of the whole music folder that the reset promises to remove stayed
-        # on disk. WEAK, so a thread that goes still takes its connection
-        # with it the moment it goes, exactly as before.
-        self._reader_refs: set = set()
+        # check_same_thread off so close() can take a connection from the
+        # thread that is quitting; each is still only USED by the thread it
+        # was made on. A thread's connection closes when the thread ends,
+        # even across a gc.freeze (see db.ThreadReaders), and close() takes
+        # every thread's, so the factory reset can remove the file.
+        self._readers = db.ThreadReaders(lambda: sqlite3.connect(self._path, check_same_thread=False))
         with self._lock:
             self._conn.execute("""CREATE TABLE IF NOT EXISTS albums (
                        folder_path TEXT    NOT NULL PRIMARY KEY,
@@ -2667,17 +2648,7 @@ class LibraryIndex:
         if self._path == ":memory:" or self._closed:
             with self._lock:
                 return self._conn.execute(sql, params).fetchall()
-        reader = getattr(self._readers, "reader", None)
-        if reader is None:
-            # check_same_thread off so close() can take it from the thread
-            # that is quitting. Each connection is still only ever USED by
-            # the thread it was made on, which is what the flag guards.
-            reader = _Reader(sqlite3.connect(self._path, check_same_thread=False))
-            self._readers.reader = reader
-            # discard as the callback: the entry goes the moment the owning
-            # thread does, on that thread, with no lock to wait for.
-            self._reader_refs.add(weakref.ref(reader, self._reader_refs.discard))
-        return reader.conn.execute(sql, params).fetchall()
+        return self._readers.conn().execute(sql, params).fetchall()
 
     @staticmethod
     def _album_fact(row) -> dict:
@@ -3426,27 +3397,12 @@ class LibraryIndex:
         with self._lock:
             self._closed = True
             self._conn.close()
-            readers, self._reader_refs = list(self._reader_refs), set()
-        # EVERY read connection, not just this thread's. Waiting for the
-        # owning threads left one open per pool thread that had answered a
-        # badge question, and a file with an open handle refuses to be deleted
-        # on Windows: the factory reset that closes this cache and then unlinks
-        # its file quietly left it behind.
-        #
-        # Closed here, explicitly, and BEFORE this thread's own reference is
-        # dropped: releasing the thread-local first leaves the close to the
-        # collector, which also leaves the WAL unfolded beside the database.
-        # Suppressed one at a time because a straggler read can be inside its
-        # own connection as this runs, which sqlite answers for itself (the
-        # close defers until the statement finishes) and which the callers
-        # already treat as the orderly end arriving late.
-        for ref in readers:
-            reader = ref()
-            if reader is None:
-                continue  # its thread already took it
-            with contextlib.suppress(Exception):
-                reader.conn.close()
-        self._readers.reader = None
+        # EVERY read connection, not just this thread's: a file with an open
+        # handle refuses to be deleted on Windows, and the factory reset
+        # closes this cache and then unlinks its file. A straggler read can
+        # be inside its own connection as this runs, which sqlite answers for
+        # itself and the callers treat as the orderly end arriving late.
+        self._readers.close()
 
 
 class JoinedLibrary:

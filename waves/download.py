@@ -19,7 +19,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent import futures
-from threading import Event, Lock
+from threading import Event, Lock, local
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -182,6 +182,30 @@ def _soxr_known_missing(ffmpeg: str) -> bool:
 def _note_soxr_missing(ffmpeg: str) -> None:
     with _SOXR_MISSING_LOCK:
         _SOXR_MISSING.add(ffmpeg)
+
+
+# The CDN's answer to a segment link that has lapsed. The signed links in a
+# stream manifest only live so long, and a track that waited behind a long
+# queue, or sat paused, can reach its segments after they died. Such a track
+# asks for its stream once more (see _download_with_link_refresh).
+_LINK_LAPSED_STATUSES: frozenset[int] = frozenset({403, 410})
+
+# Statuses in the 4xx range that say "not now" rather than "never": a request
+# the server timed out on (408), one it would not risk replaying yet (425),
+# and a rate limit (429). A segment fetch that meets one is tried again.
+_SEGMENT_STATUSES_TRY_AGAIN: frozenset[int] = frozenset({408, 425, 429})
+
+# Per item thread: whether the last _download pass failed on a lapsed link.
+# Set by _download, read and cleared by _download_with_link_refresh, so the
+# return shape of _download (and every stub of it) stays as it was.
+# ``refetch_left`` is True during a first pass that still has its one fresh-link
+# rerun in hand, so a lapsed segment there is not reported as a lost track.
+_PASS_NOTE = local()
+
+
+def _http_status(error: BaseException | None) -> int | None:
+    """The HTTP status a requests error carries, or None."""
+    return getattr(getattr(error, "response", None), "status_code", None)
 
 
 def _tidal_refuses_asset(error: HTTPError) -> str | None:
@@ -1006,7 +1030,13 @@ class Download:
                     # A deliberate Stop/Cancel makes every in-flight segment
                     # return failed by design, that's a cancellation, not
                     # corruption, so don't scream "corrupt" once per segment.
-                    if not (self.event_abort.is_set() or (event_stop and event_stop.is_set())):
+                    # Nor when the link lapsed and the track will be fetched
+                    # again with fresh links: the rerun decides, and says so.
+                    stopped = self.event_abort.is_set() or (event_stop and event_stop.is_set())
+                    will_refetch = getattr(_PASS_NOTE, "refetch_left", False) and (
+                        _http_status(result_dl_segment.error) in _LINK_LAPSED_STATUSES
+                    )
+                    if not (stopped or will_refetch):
                         self.fn_logger.error("A segment of this track could not be fetched; the track was not written.")
 
             # If app is terminated (CTRL+C) or item stopped
@@ -1141,6 +1171,11 @@ class Download:
             urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop, n_tail_spurious
         )
 
+        if not result_segments and any(
+            not r.result and _http_status(r.error) in _LINK_LAPSED_STATUSES for r in dl_segment_results
+        ):
+            _PASS_NOTE.lapsed = True
+
         result_merge, path_file_merged = self._download_postprocess(
             result_segments, path_file, dl_segment_results, media, stream_manifest, n_tail_spurious
         )
@@ -1228,11 +1263,14 @@ class Download:
         """Whether a failed segment fetch is worth another attempt.
 
         A connection dropped or timed out mid-body, or a server-side status, can
-        pass on the next try. A 4xx is the CDN's answer about the link itself
-        (expired, forbidden, gone), and asking again changes nothing.
+        pass on the next try, and so can the few 4xx statuses that mean "not
+        now" (408, 425, 429). Any other 4xx is the CDN's answer about the link
+        itself (expired, forbidden, gone), and asking again changes nothing.
         """
         if isinstance(error, HTTPError):
-            status = getattr(getattr(error, "response", None), "status_code", None)
+            status = _http_status(error)
+            if status in _SEGMENT_STATUSES_TRY_AGAIN:
+                return True
             return not (status is not None and 400 <= status < 500)
         return isinstance(error, requests.RequestException)
 
@@ -1370,7 +1408,12 @@ class Download:
                 stopped = self.event_abort.is_set() or bool(event_stop and event_stop.is_set())
                 if stopped or not self._segment_fetch_is_transient(exc) or attempt == self._SEGMENT_ATTEMPTS:
                     if not stopped:
-                        log_error(f"Segment fetch failed after {attempt} attempt(s): {type(exc).__name__}")
+                        # The status number names the cause in a report
+                        # (403 a lapsed link, 404 a missing segment); the
+                        # URL still never logs.
+                        status = _http_status(exc)
+                        said = f" (HTTP {status})" if isinstance(status, int) else ""
+                        log_error(f"Segment fetch failed after {attempt} attempt(s): {type(exc).__name__}{said}")
                     break
                 self.fn_logger.warning(f"Segment fetch broke off ({type(exc).__name__}), fetching it again")
                 if self._retry_wait(self._SEGMENT_RETRY_DELAYS_SEC[attempt - 1], event_stop):
@@ -3013,6 +3056,68 @@ class Download:
             cum[step_name] = 100.0 * acc / total_weight
         return cum
 
+    def _stop_requested(self, event_stop: Event | None) -> bool:
+        event_abort: Event | None = getattr(self, "event_abort", None)
+        return bool((event_abort is not None and event_abort.is_set()) or (event_stop and event_stop.is_set()))
+
+    def _download_with_link_refresh(
+        self,
+        media: Track | Video,
+        path_file: pathlib.Path,
+        path_media_dst: pathlib.Path,
+        stream_manifest: StreamManifest | None,
+        do_flac_extract: bool,
+        media_stream: Stream | None,
+        event_stop: Event | None = None,
+    ) -> tuple[bool, pathlib.Path, bool, Stream | None]:
+        """Run _download, and when the pass failed on a lapsed segment link
+        (403 or 410) with nothing stopped, ask for the stream once more and run
+        the whole track again, once.
+
+        The whole track, not the missing segments: two manifests are not
+        promised to cut a track the same way, so mixing their segments could
+        write a broken file. The fresh stream must land on the same file
+        extension and the same FLAC step, or the path and the finish planned
+        for the first one would be wrong; then the track fails as before.
+
+        Returns:
+            tuple: (success, the downloaded file, do_flac_extract, media_stream),
+            the last two from whichever stream the file came from.
+        """
+        _PASS_NOTE.lapsed = False
+        _PASS_NOTE.refetch_left = True
+        try:
+            result, path_out = self._download(
+                media=media, stream_manifest=stream_manifest, path_file=path_file, event_stop=event_stop
+            )
+        finally:
+            _PASS_NOTE.refetch_left = False
+        lapsed = bool(getattr(_PASS_NOTE, "lapsed", False))
+        _PASS_NOTE.lapsed = False
+
+        if result or not lapsed or self._stop_requested(event_stop):
+            return result, path_out, do_flac_extract, media_stream
+
+        self.fn_logger.warning("The stream links lapsed before the track was fetched; asking for fresh ones once")
+        fresh_manifest, fresh_ext, fresh_extract, fresh_stream = self._get_stream_info(media)
+
+        if self._stop_requested(event_stop):
+            return False, path_out, do_flac_extract, media_stream
+
+        if not fresh_ext or (isinstance(media, Track) and fresh_manifest is None):
+            self.fn_logger.error("No fresh stream links came back; the track was not written.")
+            return False, path_out, do_flac_extract, media_stream
+
+        if fresh_ext != path_media_dst.suffix or fresh_extract != do_flac_extract:
+            self.fn_logger.error("The fresh stream is a different format; the track was not written.")
+            return False, path_out, do_flac_extract, media_stream
+
+        result, path_out = self._download(
+            media=media, stream_manifest=fresh_manifest, path_file=path_file, event_stop=event_stop
+        )
+        _PASS_NOTE.lapsed = False
+        return result, path_out, fresh_extract, fresh_stream
+
     def _perform_actual_download(  # noqa: C901 - one linear pipeline, see below
         self,
         media: Track | Video,
@@ -3056,12 +3161,9 @@ class Download:
             tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
             tmp_path_file.touch()
 
-            # Download media.
-            result_download, tmp_path_file = self._download(
-                media=media,
-                stream_manifest=stream_manifest,
-                path_file=tmp_path_file,
-                event_stop=event_stop,
+            # Download media (once more with fresh links if the first ones lapsed).
+            result_download, tmp_path_file, do_flac_extract, media_stream = self._download_with_link_refresh(
+                media, tmp_path_file, path_media_dst, stream_manifest, do_flac_extract, media_stream, event_stop
             )
 
             # The stream is over, well or badly: the slot goes back now if a

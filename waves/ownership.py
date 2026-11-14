@@ -27,7 +27,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
-from threading import Lock, local
+from threading import Lock
 
 from waves import db
 
@@ -191,7 +191,11 @@ class OwnershipStore:
         # the time the cards' creation spent blocked (the launch water
         # dropping frames on it). An in-memory database cannot be shared
         # across connections, so that one case keeps the shared connection.
-        self._readers = local()
+        # A reader opens the file read-write but never creates it (see
+        # _read). Its connection closes when its thread ends, even across a
+        # gc.freeze, and close() takes every thread's (db.ThreadReaders).
+        uri = Path(os.path.abspath(self._path)).as_uri() + "?mode=rw"
+        self._readers = db.ThreadReaders(lambda: sqlite3.connect(uri, uri=True, check_same_thread=False))
         self._closed = False
         # Set once a thread's own reader has failed (see _read): every read
         # from then on goes through the shared connection.
@@ -282,22 +286,21 @@ class OwnershipStore:
         if self._path == ":memory:" or self._closed or self._shared_reads:
             with self._lock:
                 return self._conn.execute(sql, params).fetchall()
-        conn = getattr(self._readers, "conn", None)
         try:
-            if conn is None:
-                uri = Path(os.path.abspath(self._path)).as_uri() + "?mode=rw"
-                conn = sqlite3.connect(uri, uri=True)
-                self._readers.conn = conn
-            return conn.execute(sql, params).fetchall()
+            return self._readers.conn().execute(sql, params).fetchall()
         except sqlite3.Error as e:
+            # The store closed mid read (quit, a factory reset): close()
+            # takes every thread's reader, so this one failing is that, not a
+            # store file gone bad. Neither a warning nor a switch to shared
+            # reads.
+            if self._closed:
+                raise
             if not self._shared_reads:
                 logger.warning(
                     "ownership: a reader could not use the store file (%s); reading through the shared connection", e
                 )
             self._shared_reads = True
-            if conn is not None:
-                self._readers.conn = None
-                conn.close()
+            self._readers.drop()
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
@@ -676,9 +679,6 @@ class OwnershipStore:
         with self._lock:
             self._closed = True
             self._conn.close()
-        # Other threads' read connections close with their threads; this
-        # thread's own goes now so the file handle is not held past quit.
-        conn = getattr(self._readers, "conn", None)
-        if conn is not None:
-            self._readers.conn = None
-            conn.close()
+        # Every thread's read connection, not only this one's, so no handle
+        # on the file is held past quit or a factory reset.
+        self._readers.close()
