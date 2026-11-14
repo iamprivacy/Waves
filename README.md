@@ -41,7 +41,7 @@ Waves is a desktop app for macOS, Windows and Linux. Search all of TIDAL from on
 </table>
 
 <p align="center">
-  <sub>The music in these screenshots is free to use: Creative Commons releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Alexander Nakarada, Jason Shaw, Broke For Free, Doctor Turtle, Dee Yan-Key, Ketsa and Lobo Loco, Kimiko Ishizaka's public-domain Open Goldberg Variations, and royalty-free tracks by Tim Kulig, Lesfm and Streambeats.</sub>
+  <sub>The music in these screenshots is free to use: Creative Commons releases by Scott Buckley, Kevin MacLeod, Josh Woodward, Alexander Nakarada, Jason Shaw, Broke For Free, Doctor Turtle, Dee Yan-Key, Ketsa and Lobo Loco, and royalty-free tracks by Tim Kulig, Lesfm and StreamBeats.</sub>
 </p>
 
 <p align="center">
@@ -79,7 +79,7 @@ Follow artists and Waves keeps watch for you. The **Releases** tab, right next t
 
 One field searches artists, albums, tracks, videos, playlists and mixes, or opens a pasted `tidal.com` link straight away. The paste button pastes what you copied and runs the search in the same click.
 
-- Results are grouped by type, with cover art inline, color-coded quality badges (HI-RES / LOSSLESS / HIGH) and release-date sorting.
+- Results are grouped by type, with cover art inline, color-coded quality badges (HI-RES / LOSSLESS / HIGH), and sorting by release date, name, popularity or quality.
 - Albums and playlists unfold in place with per-track selection, and clicking a quality badge picks the quality for just that album or song.
 - Preview an artist in place, then save a whole discography for offline listening.
 
@@ -92,6 +92,7 @@ One field searches artists, albums, tracks, videos, playlists and mixes, or open
 Waves opens on TIDAL's editorial front page (New Arrivals, TIDAL Rising, every genre, mood and decade) and your personalized shelves, art first, with a preview and a one-click save on every cover all the way down. Leave Waves open for days and every page keeps up with what TIDAL shows now.
 
 - Artist pages bring the bio, the discography, EPs & singles and top tracks, with **Follow** right by the name and one click to save the whole thing.
+- Rest the pointer on an artist's name and a card opens with their bio, top tracks, latest releases and **Follow**, so you can size up an artist without leaving the page you are on.
 - Reissues sit at the date they first came out, and anything released in the last two weeks wears a NEW mark.
 
 <table>
@@ -138,7 +139,7 @@ Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and
 ### 🧾 A queue that tells you the truth
 
 - Completed, Failed, Stopped, Downloading and Queued sections, with live progress and per-album and per-artist roll-ups.
-- The **QUEUE** button in the header is a live speed chart with the percent done, and its count rolls as downloads land.
+- The **QUEUE** button in the header is a live speed chart with the time left, a line along its bottom fills as the batch lands, and its count rolls as downloads land.
 - Everything runs in the order you queued it, and every row shows the quality it asked for next to the quality that actually arrived.
 - **RETRY ALL** retries every failure in one click. An open row shows up to 12 tracks before it scrolls (**Tracks shown in an open queue row**, Settings → Appearance), can list just the ones that did not arrive, and its **REPORT** button saves those as a CSV. **MISSING REPORT** does the same for the whole queue.
 - Tracks are tagged and filed in the background while the next ones download, so the speed stays up between tracks (**Tracks finishing in the background**, Settings → Speed & Pacing, 3 by default).
@@ -154,6 +155,7 @@ A rail down the side groups every setting into short sections under Music, Files
 
 - **FFmpeg in one click.** Waves fetches a trusted, checksum-verified FFmpeg build for your OS and CPU, no hunting down binaries or editing paths. A color-coded status light shows where things stand, and anything that would come out degraded without FFmpeg warns you first, with a one-click fix.
 - **Desktop notifications.** Off by default; a master switch in Settings → Notifications turns them on and sends a test notification right away, so your system can ask for permission on the spot. Below it you pick what Waves announces: finished downloads (one notification when the queue finishes by default, one per download with downloads that land together grouped, or none), failed downloads, new releases from the artists you follow and new Waves versions the automatic update check finds.
+- **Run in background.** The window's close button asks whether to keep Waves running or exit, and Settings → Appearance remembers your answer. In the background, downloads, release checks and notifications carry on; the Dock icon on macOS, the tray icon on Windows and Linux, or opening Waves again brings the window back. Quitting from the menu or the tray always exits.
 - **A clean way out.** Settings → Diagnostics offers **Reset all settings** (you stay signed in) and **Reset application**, a factory reset of everything Waves saved on this computer. Both ask first, and neither can touch your music: the reset deletes only from a fixed list of Waves' own files.
 
 <p align="center">
