@@ -22,6 +22,28 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.4 (2026-11-14)
+
+### ✨ Added
+
+- 🎚️ Search results can be sorted by **Quality**: hi-res first, then lossless, Dolby Atmos, high and low, with videos by resolution. The arrow flips the order, and results of the same quality keep the search's own order ([issue #52](https://github.com/iamprivacy/Waves/issues/52)).
+- 🪪 Resting the pointer on an artist's name opens a card with their picture, a short bio, how many albums and EPs they have, their popularity on TIDAL, a FOLLOW button, three top tracks to preview or save and their latest releases, one click from the full artist page. **Artist cards on hover** (Settings → Appearance, on by default) turns it off.
+- 🪟 Closing the window can keep Waves running in the background, so music keeps saving and release checks carry on: the close button asks RUN IN BACKGROUND or EXIT, and **When the window is closed** (Settings → Appearance) sets it for good. The Dock icon on macOS and a tray icon on Windows and Linux bring the window back, and so does opening Waves again. On a Linux desktop with no tray, closing the window exits.
+
+### 🔧 Changed
+
+- 📈 The QUEUE button now shows the whole batch at once, built for long queues: the recent speed, a line along the bottom filling as albums and tracks land, and the time left above the speed.
+- 🔢 The QUEUE button's count goes past 99: it shows the real number up to 999, then 1k to 9k, then 9k+, and it keeps ticking smoothly when many items land at once.
+- ✨ The sparks off the QUEUE button's count play at most every second and a half, and a batch of more than 20 items saves them for its end. A track that fails to save says FAIL without the red flash and the shake.
+
+### 🐛 Fixed
+
+- ▶️ Previewing a track from a page opened before your latest search, or kept from an earlier session, plays it instead of doing nothing.
+- 🧵 Long queues no longer leave files open until the system limit is reached, which on Linux ended in tracks failing to save and a crash ([issue #61](https://github.com/iamprivacy/Waves/issues/61)).
+- 🔗 A track whose links expire while it waits in a long queue gets fresh links once and is saved, instead of failing on an HTTP 403 ([issue #61](https://github.com/iamprivacy/Waves/issues/61)).
+- 🔊 On Linux, audio goes through PulseAudio whenever a PulseAudio server is running (PipeWire provides one), which avoids a crash in Qt's own PipeWire audio support. A chosen output device stays chosen ([issue #61](https://github.com/iamprivacy/Waves/issues/61)).
+- 🟩 On macOS the Dock keeps the app's rounded icon while Waves runs, instead of switching to a larger, cut-off version a moment after launch.
+
 ## 🗂️ v0.2.3 (2026-11-09)
 
 ### 🔧 Changed
