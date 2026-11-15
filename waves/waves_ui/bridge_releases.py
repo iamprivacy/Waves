@@ -159,6 +159,15 @@ _REL_FRESH_WAKE_S = 15 * 60
 # The release groups a read saw are remembered this many days after a list
 # last showed them, so the next read can tell which are new to the list.
 _REL_FRESH_KEEP_DAYS = 10
+# The heads read (see waves.fresh_releases): every follow's newest release
+# ids, 20 follows a request, four requests at a time (about 40 requests and
+# 20 seconds for 800 follows). It runs at start, on wake, when the feed is
+# opened and its last pass is older than _REL_HEADS_STALE_S, every hour
+# while open (every 15 minutes on release night), and at once on Check now.
+_REL_HEADS_THREADS = 4
+_REL_HEADS_EVERY_S = 3600
+_REL_HEADS_NIGHT_S = 15 * 60
+_REL_HEADS_STALE_S = 10 * 60
 # New releases found over a minute are announced in one notification,
 # which names at most two artists.
 _REL_NOTIFY_COALESCE_MS = 60_000
@@ -337,6 +346,7 @@ class ReleasesMixin:
     _relStepDone = Signal("QVariant")  # internal: one sweep step's outcome
     _relMirrorDone = Signal(int, int, bool)  # internal: the walk's (added, removed, rate limited)
     _relFreshDone = Signal("QVariant")  # internal: one fresh-releases read's outcome
+    _relHeadsDone = Signal("QVariant")  # internal: one heads request's outcome
     # (artist id, a TIDAL favorite now): after every favorites write, done
     # or not, so the artist page's ALSO FOLLOW ON TIDAL settles.
     followTidalChanged = Signal(str, bool)
@@ -416,6 +426,20 @@ class ReleasesMixin:
         self._rel_fresh_timer.setInterval(_REL_FRESH_TICK_MS)
         self._rel_fresh_timer.timeout.connect(self._releases_fresh_tick)
         self._relFreshDone.connect(self._on_rel_fresh_done)
+        # The heads read: its own pool (four requests at a time), the pass in
+        # flight (requests left, its tally, its stop flag), its pause, and
+        # the heads waiting for a complete check before they are remembered.
+        self._rel_heads_pool = QtCore.QThreadPool()
+        self._rel_heads_pool.setMaxThreadCount(_REL_HEADS_THREADS)
+        diagnostics.register_pool("releases-heads", self._rel_heads_pool)
+        self._rel_heads_left = 0
+        self._rel_heads_tally: dict = {}
+        self._rel_heads_stop = threading.Event()
+        self._rel_heads_backoff_until = 0.0
+        self._rel_heads_woke = False
+        self._rel_heads_lock = threading.Lock()
+        self._rel_heads_pending: dict = {}
+        self._relHeadsDone.connect(self._on_rel_heads_done)
         self._relMirrorDone.connect(self._on_rel_mirror_done)
         # The favorites writes: wanted state per artist, in click order.
         self._rel_tidal_out: dict = {}
@@ -497,6 +521,7 @@ class ReleasesMixin:
         self._rel_fresh_beat_at = time.time()
         with contextlib.suppress(Exception):
             self._rel_fresh_timer.start()
+        self._releases_heads_maybe(_REL_HEADS_STALE_S)
 
     def _releases_stop(self) -> None:
         """Sign-out, reset or quit: no step may start, and one in flight is
@@ -515,6 +540,15 @@ class ReleasesMixin:
         with contextlib.suppress(Exception):
             self._rel_fresh_timer.stop()
         self._rel_fresh_running = False
+        # A heads pass in flight: its requests not yet started stay unsent,
+        # and the ones landing are dropped (the generation moved on).
+        stop = getattr(self, "_rel_heads_stop", None)
+        if stop is not None:
+            stop.set()
+        self._rel_heads_left = 0
+        self._rel_heads_tally = {}
+        with contextlib.suppress(Exception), self._rel_heads_lock:
+            self._rel_heads_pending.clear()
         self._rel_notify_pending = 0
         self._rel_notify_items = []
         # A library import in flight is dropped the same way.
@@ -557,10 +591,13 @@ class ReleasesMixin:
 
     def _releases_step_ms(self) -> int:
         """How long until the next step: a burst while any follow has never
-        been checked or waits for a Check now, else the round spread over
-        the follows."""
-        if self._releases.due_count(self._releases_due_from()) > 0 or self._releases.hinted_count() > 0:
+        been checked or waits for a Check now, quicker still while a hint
+        names follows with something new, else the round spread over the
+        follows."""
+        if self._releases.due_count(self._releases_due_from()) > 0:
             return _REL_BURST_BUSY_MS if self._releases_queue_busy() else _REL_BURST_MS
+        if self._releases.hinted_count() > 0:
+            return _REL_BURST_BUSY_MS if self._releases_queue_busy() else _REL_MIN_STEP_MS
         n = max(1, self._releases.followed_count())
         return max(_REL_MIN_STEP_MS, min(_REL_MAX_STEP_MS, _REL_ROUND_S * 1000 // n))
 
@@ -668,6 +705,7 @@ class ReleasesMixin:
             "rate_limited": False,
             "gen": gen,
         }
+        started = time.time()
         try:
             self._rel_head_full = []
             releases, failures, limited = self._artist_recent_releases(aid)
@@ -692,6 +730,8 @@ class ReleasesMixin:
                     full={True: "get_albums" in cut, False: "get_ep_singles" in cut},
                     joined=result["joined"],
                 )
+                if not failures:
+                    self._releases_heads_settle(aid, started)
                 result["fresh"] += self._releases_check_videos(aid)
                 # The releases this follow is featured on, for the
                 # auto-download alone: never announced, never in the feed.
@@ -872,6 +912,9 @@ class ReleasesMixin:
         logger.info("check now: %d follow(s) to check", n)
         self.releasesProgress.emit(0, n)
         self.releasesChanged.emit()
+        # The heads read names the follows with something new: they go
+        # first, so the news lands in the first minute of the full check.
+        self._releases_heads_maybe(0)
         if not self._rel_step_running:
             self._releases_rearm(0)
         return True
@@ -916,7 +959,7 @@ class ReleasesMixin:
             except Exception as exc:
                 if _is_rate_limit(exc):
                     return out, [*failures, getter], True
-                logger.debug("releases: %s failed for artist %s", getter, artist_id, exc_info=True)
+                logger.info("releases: %s failed (%s)", getter, type(exc).__name__)
                 failures.append(getter)
                 continue
             if len(raw) >= _REL_FETCH_LIMIT:
@@ -1302,9 +1345,17 @@ class ReleasesMixin:
             # Held until a read starts: a beat that cannot read now (a read
             # running, a pause) keeps it for the next one.
             self._rel_fresh_woke = True
+            self._rel_heads_woke = True
         woke = getattr(self, "_rel_fresh_woke", False)
         if not (getattr(self, "_logged_in", False) and getattr(self, "_rel_revealed", False)):
             return
+        # The heads read, on its own clock and whatever the hint setting: it
+        # asks TIDAL alone and covers every follow.
+        if getattr(self, "_rel_heads_woke", False):
+            self._releases_heads_maybe(_REL_HEADS_STALE_S)
+        else:
+            night = fresh_releases.in_release_window(_dt.datetime.fromtimestamp(now))
+            self._releases_heads_maybe(_REL_HEADS_NIGHT_S if night else _REL_HEADS_EVERY_S)
         if self._rel_fresh_running or not self._releases_fresh_on():
             return
         # The pauses run on the monotonic clock, so a clock set back cannot
@@ -1461,12 +1512,8 @@ class ReleasesMixin:
         if result.get("tidal_limited"):
             self._releases_back_off()
             return
-        if int(result.get("hinted") or 0) > 0 and not self._rel_step_running:
-            # Sooner, never later: a pause after a rate limit still holds
-            # (the beat itself waits it out).
-            left = self._rel_timer.remainingTime() if self._rel_timer.isActive() else -1
-            if left < 0 or left > _REL_MIN_STEP_MS:
-                self._releases_rearm(_REL_MIN_STEP_MS)
+        if int(result.get("hinted") or 0) > 0:
+            self._releases_step_sooner()
 
     def _releases_fresh_switched(self, on: bool) -> None:
         """(GUI thread) The hint setting flipped: on, the list is read on the
@@ -1488,6 +1535,214 @@ class ReleasesMixin:
         self._rel_backoff_until = time.monotonic() + pause
         logger.warning("releases: the catalog sweep pauses %d min after a rate limit", pause // 60)
         self._releases_rearm(pause * 1000)
+
+    def _releases_step_sooner(self) -> None:
+        """(GUI thread) Bring the sweep's next beat forward to the hinted
+        pace: sooner, never later (a pause after a rate limit still holds,
+        the beat itself waits it out)."""
+        if self._rel_step_running:
+            return
+        left = self._rel_timer.remainingTime() if self._rel_timer.isActive() else -1
+        if left < 0 or left > _REL_MIN_STEP_MS:
+            self._releases_rearm(_REL_MIN_STEP_MS)
+
+    # ----- the heads read ----------------------------------------------------
+
+    def _releases_heads_maybe(self, min_age_s: float) -> bool:
+        """(GUI thread) Start a heads pass when the last one is at least
+        ``min_age_s`` old and nothing holds it back (signed out, a pass in
+        flight, a pause, no follow checked yet). True when one started."""
+        if not (getattr(self, "_logged_in", False) and getattr(self, "_rel_revealed", False)):
+            return False
+        if getattr(self, "_rel_heads_left", 0) > 0 or not hasattr(self, "_rel_heads_pool"):
+            return False
+        mono = time.monotonic()
+        if mono < getattr(self, "_rel_heads_backoff_until", 0.0) or mono < getattr(self, "_rel_backoff_until", 0.0):
+            return False
+        now = time.time()
+        try:
+            last = int(self._releases.meta_get("heads_read_at", "0") or 0)
+        except ValueError:
+            last = 0
+        woke, self._rel_heads_woke = getattr(self, "_rel_heads_woke", False), False
+        # A stamp ahead of the clock (it was set back) reads as due.
+        if last <= now and now - last < float(min_age_s):
+            return False
+        # A follow never checked is left out: its first check seeds the
+        # baseline and already runs ahead of everything.
+        follows = [
+            {"artist_id": str(f.get("artist_id") or ""), "last_checked": int(f.get("last_checked") or 0)}
+            for f in self._releases.follows()
+            if f.get("artist_id") and int(f.get("last_checked") or 0) > 0
+        ]
+        if not follows:
+            return False
+        size = fresh_releases.HEADS_PER_REQUEST
+        chunks = [follows[i : i + size] for i in range(0, len(follows), size)]
+        self._rel_heads_stop = stop = threading.Event()
+        self._rel_heads_left = len(chunks)
+        self._rel_heads_tally = {
+            "follows": len(follows),
+            "requests": 0,
+            "answered": 0,
+            "hinted": 0,
+            "failed": 0,
+            "offline": 0,
+            "woke": woke,
+        }
+        gen = self._rel_gen
+        for chunk in chunks:
+            self._rel_heads_pool.start(Worker(lambda c=chunk: self._releases_heads_chunk(c, gen, stop)))
+        return True
+
+    def _releases_heads_fetch(self, artist_ids: list) -> dict:
+        """(worker) One heads request: these follows' newest release ids
+        (see ``fresh_releases.parse_artist_heads``). Raises FetchError with
+        the pause a refusal asked for."""
+        session = self.tidal.session
+        resp = session.request.basic_request(
+            "GET",
+            fresh_releases.TIDAL_HEADS_PATH,
+            params=fresh_releases.heads_params(artist_ids),
+            base_url=session.config.openapi_v2_location,
+        )
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if status != 200:
+            wait = fresh_releases._retry_after(getattr(resp, "headers", None))
+            raise fresh_releases.FetchError(f"HTTP {status}", wait)  # noqa: TRY003
+        try:
+            body = resp.json()
+        except ValueError:
+            raise fresh_releases.FetchError("not the artists list") from None  # noqa: TRY003
+        return fresh_releases.parse_artist_heads(body)
+
+    def _releases_heads_chunk(self, chunk: list, gen: int, stop: threading.Event) -> None:
+        """(worker) Read one request's worth of heads and mark the follows
+        whose head shows something new; the outcome is posted to the GUI
+        thread. A head with news waits in ``_rel_heads_pending`` until a
+        complete check (``_releases_heads_settle``), so a check that fails
+        leaves it new for the next pass."""
+        result: dict = {"gen": gen, "asked": 0, "answered": 0, "hinted": 0}
+        try:
+            if stop.is_set() or gen != self._rel_gen:
+                result["skipped"] = True
+            else:
+                result["asked"] = 1
+                self._releases_heads_judge(
+                    chunk, self._releases_heads_fetch([f["artist_id"] for f in chunk]), gen, result
+                )
+        except fresh_releases.FetchError as e:
+            result["retry"] = e.retry_after
+            if "429" in str(e):
+                result["limited"] = True
+                stop.set()
+            logger.info("releases: heads read unavailable (%s)", e)
+        except Exception as e:
+            # A connection that never opened asked nothing of the service.
+            offline = isinstance(e, OSError)
+            result["retry"] = float(fresh_releases.OFFLINE_RETRY_SEC if offline else fresh_releases.MIN_BACKOFF_SEC)
+            result["offline"] = offline
+            logger.info("releases: heads read failed (%s)", type(e).__name__)
+        if gen == self._rel_gen:
+            self._relHeadsDone.emit(result)
+
+    def _releases_heads_judge(self, chunk: list, heads: dict, gen: int, result: dict) -> None:
+        """(worker) Compare one answer with what the store knows: a quiet
+        head is remembered at once, one with news is hinted and held."""
+        result["answered"] = len(heads)
+        known = self._releases.heads_known(heads)
+        pairs = self._releases.seen_pairs(rid for head in heads.values() for rid, _day in head)
+        seen: dict = {}
+        for aid, rid in pairs:
+            seen.setdefault(aid, set()).add(rid)
+        quiet: dict = {}
+        news: dict = {}
+        for f in chunk:
+            aid = f["artist_id"]
+            head = heads.get(aid)
+            if head is None:
+                continue
+            since = fresh_releases.day_before(f["last_checked"])
+            ids = [rid for rid, _day in head]
+            if fresh_releases.head_news(head, known.get(aid, set()), seen.get(aid, set()), since):
+                news[aid] = ids
+            else:
+                quiet[aid] = ids
+        # Checked again before each write: a quit or a sign-out may have
+        # closed the store meanwhile.
+        if gen != self._rel_gen:
+            return
+        self._releases.note_heads(quiet)
+        if news:
+            at = time.time()
+            with self._rel_heads_lock:
+                for aid, ids in news.items():
+                    self._rel_heads_pending[aid] = (at, ids)
+            if gen != self._rel_gen:
+                return
+            self._releases.hint(news)
+        result["hinted"] = len(news)
+
+    def _releases_heads_settle(self, artist_id: str, started: float) -> None:
+        """(worker) A complete check of this follow: the head the last pass
+        held for it is remembered now, when the check started after it was
+        read. A check already under way may have missed what it named: the
+        head stays held and the follow is hinted again (the check's own
+        record cleared the hint the pass set)."""
+        lock = getattr(self, "_rel_heads_lock", None)
+        if lock is None:
+            return
+        with lock:
+            held = self._rel_heads_pending.get(artist_id)
+            if held is None:
+                return
+            if held[0] <= started:
+                del self._rel_heads_pending[artist_id]
+        if held[0] > started:
+            self._releases.hint([artist_id])
+            return
+        self._releases.note_heads({artist_id: held[1]})
+
+    @Slot("QVariant")
+    def _on_rel_heads_done(self, result) -> None:
+        """(GUI thread) One heads request landed: hinted follows bring the
+        sweep's next beat forward, a rate limit pauses the pass and the
+        sweep, and the last request of a pass stamps it."""
+        result = dict(result or {})
+        if result.get("gen") != self._rel_gen or self._rel_heads_left <= 0:
+            return
+        self._rel_heads_left -= 1
+        tally = self._rel_heads_tally
+        tally["requests"] = tally.get("requests", 0) + int(result.get("asked") or 0)
+        tally["answered"] = tally.get("answered", 0) + int(result.get("answered") or 0)
+        tally["hinted"] = tally.get("hinted", 0) + int(result.get("hinted") or 0)
+        if "retry" in result:
+            tally["failed"] = tally.get("failed", 0) + 1
+            tally["offline"] = tally.get("offline", 0) + int(bool(result.get("offline")))
+            until = time.monotonic() + float(result["retry"] or 0)
+            self._rel_heads_backoff_until = max(getattr(self, "_rel_heads_backoff_until", 0.0), until)
+        if result.get("limited") and not tally.get("limited"):
+            tally["limited"] = True
+            self._releases_back_off()
+        elif result.get("hinted") and not tally.get("limited"):
+            self._releases_step_sooner()
+        if self._rel_heads_left > 0:
+            return
+        if tally.get("answered"):
+            self._releases.meta_set("heads_read_at", str(int(time.time())))
+        elif tally.get("woke") and tally.get("failed") and tally.get("offline") == tally.get("failed"):
+            # The read on wake met the network not back yet: still owed, so
+            # the beat after the offline pause reads at the wake threshold.
+            self._rel_heads_woke = True
+        if not tally.get("failed"):
+            self._rel_heads_backoff_until = 0.0
+        logger.info(
+            "releases: heads read: %d follow(s) in %d request(s), %d to check first%s",
+            tally.get("answered", 0),
+            tally.get("requests", 0),
+            tally.get("hinted", 0),
+            f", {tally['failed']} request(s) failed" if tally.get("failed") else "",
+        )
 
     @Slot(int, int, bool)
     def _on_rel_mirror_done(self, added: int, removed: int, limited: bool = False) -> None:
@@ -1799,6 +2054,9 @@ class ReleasesMixin:
         releases is never laid out at once."""
         gen = self._rel_gen
         months = max(0, int(months or 0))
+        # Opening the feed reads the heads when the last pass is stale.
+        with contextlib.suppress(Exception):
+            self._releases_heads_maybe(_REL_HEADS_STALE_S)
 
         def work() -> None:
             more = False
