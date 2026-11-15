@@ -162,6 +162,26 @@ ApplicationWindow {
         function onArtistHoverCardsChanged() {
             root.artistCards = waves.wavesPref("artist_hover_cards") !== false
         }
+        function onArtistBioFallbackChanged() {
+            root.artistBioOn = waves.wavesPref("artist_bio_fallback") === true
+            if (!root.artistBioOn) return
+            // Turned on from the missing-bio link: the page left behind fills
+            // in by the time the user is back on it.
+            if (root.artistData && root.artistData.id && !root.artistData.bio) root.askBio(root.artistData.id)
+            if (root.ahcKnown && !root.ahcSum.bio) root.askBio(root.ahcSum.id)
+        }
+        function onArtistBioLanded(d) {
+            var id = "" + d.id
+            var a = Object.assign({}, root.bioAsking); delete a[id]; root.bioAsking = a
+            // A lookup cut short by the switch going off, or one that could
+            // not ask (offline, a service down), found nothing yet: not a
+            // "none" to keep, the next view asks again.
+            if (d.failed || (!d.bio && !root.artistBioOn)) return
+            var m = Object.assign({}, root.bioLanded)
+            m[id] = { bio: "" + (d.bio || ""), bio_source: "" + (d.bio_source || ""), bio_url: "" + (d.bio_url || ""),
+                      bio_until: Number(d.bio_until) || 0 }
+            root.bioLanded = m
+        }
         function onQueueLedgerRowsChanged() {
             root.queueLedgerMaxRows = waves.wavesPref("queue_ledger_rows") || 12
         }
@@ -855,6 +875,40 @@ ApplicationWindow {
     // until the user sets FFmpeg up or explicitly continues degraded.
     property bool ffmpegBlocked: false
     property var artistData: ({})         // payload of the open artist page (artistLoaded)
+    // The artist bio fallback (Settings > Appearance, "Fill missing artist
+    // bios"): when TIDAL has none, Wikipedia's intro or the Discogs profile.
+    // bioLanded keeps what each lookup found this session ({bio, bio_source,
+    // bio_url, bio_until}, bio '' for none) so a page or card patches in
+    // without its payload being replaced; an answer past its bio_until (a
+    // Discogs profile after six hours, a "none" after a week) reads as never
+    // landed. bioAsking marks the lookups in flight. Both are reassigned,
+    // never mutated, so the bindings below re-read them.
+    property bool artistBioOn: waves.wavesPref("artist_bio_fallback") === true
+    property var bioLanded: ({})
+    property var bioAsking: ({})
+    // The bio to show for a page or card payload: TIDAL's own, else one that
+    // landed; a fallback one only while the switch is on.
+    function bioOf(d) {
+        if (!d || !d.id) return ({})
+        var src = d.bio ? d : (root.bioLanded["" + d.id] || ({}))
+        if (!src.bio || (src.bio_source && (!root.artistBioOn || root.bioPast(src)))) return ({})
+        return src
+    }
+    function bioPast(e) {
+        return !!e && Number(e.bio_until) > 0 && Date.now() / 1000 >= Number(e.bio_until)
+    }
+    function bioCredit(src) {
+        return src === "wikipedia" ? "From Wikipedia" : src === "discogs" ? "Data provided by Discogs." : ""
+    }
+    function askBio(id) {
+        id = "" + (id || "")
+        var had = root.bioLanded[id]
+        if (!root.artistBioOn || id === "" || root.bioAsking[id] || (had !== undefined && !root.bioPast(had))) return
+        var m = Object.assign({}, root.bioAsking); m[id] = true; root.bioAsking = m
+        waves.wantArtistBio(id)
+    }
+    readonly property var pageBioObj: bioOf(artistData)
+    readonly property string pageBio: "" + (pageBioObj.bio || "")
     // Artist-page section collapse: persisted (prefs), so a section a user
     // folds away stays folded on every artist page until reopened. Album/EP
     // hunters shouldn't have to scroll past Top tracks on each visit.
@@ -3660,6 +3714,7 @@ ApplicationWindow {
         root.artistFollowed = !!(root.artistData && root.artistData.id)
                               && waves.isFollowed("" + root.artistData.id)
         root.artistTidalRead()
+        if (root.artistData && root.artistData.id && !root.artistData.bio) root.askBio(root.artistData.id)
     }
     // Card rows of the feed list by row uid. Mutated in place and never
     // reassigned: a row re-reads it only when its own sig changes, so a new
@@ -3893,7 +3948,11 @@ ApplicationWindow {
     property real ahcPendY: 0
     readonly property bool ahcKnown: !!(ahcSum && ahcSum.known)
     readonly property bool ahcSkeleton: !ahcKnown && !ahcTimedOut
-    readonly property string ahcBio: ahcKnown ? ("" + (ahcSum.bio || "")) : ""
+    readonly property var ahcBioObj: ahcKnown ? bioOf(ahcSum) : ({})
+    readonly property string ahcBio: "" + (ahcBioObj.bio || "")
+    // Read off ahcSum itself: ahcKnown, a binding on it, may not have caught
+    // up yet when this runs.
+    onAhcSumChanged: if (root.ahcSum && root.ahcSum.known && !root.ahcSum.bio) root.askBio(root.ahcSum.id)
     readonly property string ahcPicUrl: (ahcSum && ahcSum.art) ? "" + ahcSum.art : ahcArt
     readonly property string ahcNameText: (ahcSum && ahcSum.name) ? "" + ahcSum.name : ahcName
     // The card keeps its loaded size while it loads: each part of the body
@@ -4141,7 +4200,11 @@ ApplicationWindow {
         function onLibraryPresenceChanged() {
             if (ahcCard.visible) root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
         }
-        function onLoggedInChanged() { root.ahcClose() }
+        function onLoggedInChanged() {
+            root.ahcClose()
+            // A logout drops lookups in flight without an answer.
+            root.bioAsking = ({})
+        }
         // Their page opened (a click on the name while the card came up):
         // the card on that page is in the way, unless it is being used.
         function onArtistLoaded(p) {
@@ -4422,10 +4485,26 @@ ApplicationWindow {
         visible: root.ahcKnown
         spacing: 4
         Text {
+            objectName: "ahcBioNone"
             visible: root.ahcKnown && root.ahcBio === ""
             width: ahbio.width
-            textFormat: Text.PlainText; text: "No biography on TIDAL yet."
+            textFormat: Text.PlainText
+            text: !root.artistBioOn ? "No biography on TIDAL."
+                  : root.bioAsking["" + root.ahcSum.id] ? "Looking for a biography\u2026" : "No biography found."
             color: root.textDim; font.family: root.uiFont; font.pixelSize: 12; font.italic: true
+        }
+        // The switch that fills it, one click away (it is off by default).
+        Text {
+            objectName: "ahcBioFill"
+            visible: root.ahcKnown && root.ahcBio === "" && !root.artistBioOn
+            textFormat: Text.PlainText; text: "FILL MISSING BIOS"
+            color: ahbFillMa.containsMouse ? root.accent : root.accentDim
+            font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.2
+            MouseArea {
+                id: ahbFillMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { root.ahcClose(); root.openBioSetting() }
+            }
         }
         Text {
             id: ahbClamp
@@ -4452,6 +4531,20 @@ ApplicationWindow {
                 id: ahbMoreMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: { ahcTouch.restart(); root.ahcMoreOpen = !root.ahcMoreOpen }
+            }
+        }
+        // A bio from Wikipedia or Discogs carries its source's credit, a
+        // link to the page it came from (both sources require it).
+        Text {
+            objectName: "ahcBioCredit"
+            visible: root.ahcBio !== "" && !!root.ahcBioObj.bio_source
+            textFormat: Text.PlainText; text: root.bioCredit(root.ahcBioObj.bio_source)
+            color: ahbCreditMa.containsMouse ? root.accent : root.textDim
+            font.family: root.uiFont; font.pixelSize: 11
+            MouseArea {
+                id: ahbCreditMa; anchors.fill: parent; anchors.margins: -2; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { ahcTouch.restart(); Qt.openUrlExternally("" + root.ahcBioObj.bio_url) }
             }
         }
     }
@@ -5551,6 +5644,21 @@ ApplicationWindow {
             root.releasesFollowed = waves.followedCount()
             if (!on && root.releasesFollowedRows.length > 0)
                 root.releasesFollowedSet(root.releasesFollowedRows.filter(function (r) { return ("" + r.id) !== ("" + aid) }))
+            // An unfollow takes the artist's cards off the feed at once
+            // (the store already dropped them), then the feed is asked again
+            // now rather than after the debounce, so a release another follow
+            // also holds, or a featured row, settles by the store's rule.
+            if (!on) {
+                var keep = function (r) { return ("" + r.via) !== ("" + aid) }
+                var before = root.releasesRows.length + root.relFindRows.length
+                root.releasesRows = root.releasesRows.filter(keep)
+                root.relFindRows = root.relFindRows.filter(keep)
+                if (root.releasesRows.length + root.relFindRows.length !== before) root.releasesApply()
+                if (root.releasesOpen) {
+                    root.releasesLoad()
+                    if (root.releasesFinding) waves.searchReleases(root.relFindAsked, root.releasesFilter)
+                }
+            }
             if (root.releasesOpen && root.releasesView === "excluded") root.releasesExcludedLoad()
         }
         // A library import followed many at once (one signal, not one each).
@@ -5697,6 +5805,13 @@ ApplicationWindow {
         navPush(); markNav("settings")
         settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
         Qt.callLater(function() { settingsPage.jumpToCard("downloads") })
+    }
+    // Deep-link to the Appearance card, where "Fill missing artist bios"
+    // lives (from an artist page or card with no bio).
+    function openBioSetting() {
+        navPush(); markNav("settings")
+        settingsOpen = true; artistOpen = false; libraryOpen = false; releasesOpen = false; browseOpen = false
+        Qt.callLater(function() { settingsPage.jumpToCard("appearance") })
     }
     // Deep-link to the FFmpeg card (from the pre-download gate).
     function openFfmpegSetting() {
@@ -11460,7 +11575,10 @@ ApplicationWindow {
                     // fade to read as one), instant with motion off. One value
                     // drives every cell, so leaving mid-reveal reverses from
                     // wherever it is. The swap rides on top of it.
-                    property real hoverReveal: db.wordHover ? 1 : 0
+                    // FINALIZING stays up on its own (the percent waits for a
+                    // hover): the final steps are the one stretch where the bar
+                    // alone cannot say what is happening.
+                    property real hoverReveal: (db.wordHover || dbFace.shown === "FINALIZING") ? 1 : 0
                     Behavior on hoverReveal { NumberAnimation { duration: root.hoverMotion ? 460 : 0; easing.type: Easing.InOutSine } }
                     wordReveal: hoverReveal * dbFace.swapK
                 }
@@ -13344,7 +13462,7 @@ ApplicationWindow {
         property real pct: 0
         // The batch's totals, counted once a tick (root.queueBatchTotals),
         // so a frame of the chart costs the same for 5 items or 5,000.
-        property var agg: ({ n: 0, W: 0, L: 0, F: 0, nb: 0, fails: 0 })
+        property var agg: ({ n: 0, W: 0, L: 0, F: 0, D: 0, nb: 0, fails: 0 })
         function measure() {
             qb.pct = qb.batchTotal > 0
                 ? Math.max(0, Math.min(100, (qb.batchDone + root.queueRunningProgress() / 100) / qb.batchTotal * 100)) : 0
@@ -13406,8 +13524,8 @@ ApplicationWindow {
                 }
             }
         }
-        // The speed chart, the batch along its floor, and the time left over
-        // the speed.
+        // The speed chart, the batch along its floor, and the download speed
+        // in its bottom left corner.
         QueueStart { id: qbStart; z: -1; anchors.centerIn: parent; btn: qb }
 
         // The count in LED dots on the page's own color, cut into the
@@ -13505,7 +13623,11 @@ ApplicationWindow {
             function onActiveQueueCountChanged() {
                 var a = root.activeQueueCount, d = a - qb._lastActive
                 if (d > 0) {
-                    if (qb._lastActive === 0) { qb.batchTotal = 0; qb.batchDone = 0; qb.batchFails = 0; qb.landedW = 0 }
+                    if (qb._lastActive === 0) {
+                        qb.batchTotal = 0; qb.batchDone = 0; qb.batchFails = 0; qb.landedW = 0
+                        // The last batch's totals never reach the new batch's chart.
+                        qb.agg = ({ n: 0, W: 0, L: 0, F: 0, D: 0, nb: 0, fails: 0 })
+                    }
                     qb.batchTotal += d
                     if (qb.flash === "done") qb.flash = ""
                 }
@@ -13530,15 +13652,19 @@ ApplicationWindow {
 
     // The QUEUE button's inside while anything downloads (queue item lab,
     // "T1 throughput + floor"). Built for long queues: a frame reads the
-    // batch's few totals (btn.agg, counted once a tick) and a minute of speed
-    // history sampled every 250 ms, so it costs the same for 5 items or
-    // 5,000, and twenty landings in one beat move a number, not the picture.
-    // The recent speed (a sample a pixel) is an area, newest on the right, with a
-    // bright dot on its newest point; the batch runs along the floor by
-    // tracks (landed bright, in flight pale); the time left (the tracks still
-    // to go over the rate of the last 12 s, the shown figure changing once a
-    // second) sits over the speed. Drawn edge to edge inside the button's
-    // border; paints only while it shows.
+    // batch's few totals (btn.agg, counted once a tick) and a speed trace
+    // sampled every 250 ms (at most two points a pixel), so it costs the
+    // same for 5 items or 5,000, and twenty landings in one beat move a
+    // number, not the picture. The speed is an area over the download's own
+    // time, from the batch's start at the left edge to its live tip (a
+    // bright dot), which keeps step with the download and reaches the right
+    // edge as its last bytes land, so a short album fills it as fully as a
+    // long queue; through the finish steps (merge, extract, tagging) and the
+    // landing the trace holds still. The batch runs along the floor by
+    // tracks (landed bright, in flight pale, the finish steps included); the
+    // download speed sits in the bottom left corner, just clear of the
+    // floor. Drawn edge to edge inside the button's border; paints only
+    // while it shows.
     component QueueStart: Canvas {
         id: st
         objectName: "queueButtonChart"
@@ -13563,19 +13689,22 @@ ApplicationWindow {
         readonly property real rate: waves.downloadMbps || 0
         readonly property string spdText: root.queueSpeedText()
         property double bootT: 0
-        // What it draws from, kept between frames: the history (hist, a
-        // sample every 250 ms: speed, tracks landed so far), the rate and
-        // time left, and the eased batch (P landed plus in flight, Lw landed,
-        // both 0 to 1) and speed ceiling (mx).
+        // What it draws from, kept between frames: the whole batch's trace
+        // (tr: a speed sample every 250 ms of wall time, over the download
+        // clock dc, which runs only while something is left to download),
+        // and the eased batch (P landed plus in flight, Pd downloaded,
+        // Lw landed, all 0 to 1) and speed ceiling (mx).
         property var es: ({})
+        // The look of the speed's words and of the speed itself: the words'
+        // ink alpha, the dark keyline round each glyph (alpha, width), their
+        // size, and the speed's fill and line alphas.
+        property real wordAlpha: 1
+        property real keyAlpha: 0.9
+        property real keyWidth: 2.5
+        property real wordPx: 9
+        property real areaAlpha: 0.22
+        property real lineAlpha: 0.8
 
-        function grp(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",") }
-        function clock(s) {
-            if (!(s >= 0)) return "--:--"
-            s = Math.round(s)
-            var m = Math.floor(s / 60), x = s % 60, z = function (q) { return (q < 10 ? "0" : "") + q }
-            return m >= 60 ? Math.floor(m / 60) + ":" + z(m % 60) + ":" + z(x) : m + ":" + z(x)
-        }
         function say(ctx, str, x, y, px, al, col, dim) {
             ctx.save(); ctx.globalCompositeOperation = "source-over"
             keyed(ctx, str, x, y, px, al, col, dim)
@@ -13583,68 +13712,102 @@ ApplicationWindow {
         }
         function draw(ctx, t, dim) {
             var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, i
-            var G = st.agg || { W: 0, L: 0, F: 0 }, E = st.es
-            var dt = E.t > 0 ? Math.min(100, Math.max(0, t - E.t)) : 0
+            var G = st.agg || { W: 0, L: 0, F: 0, D: 0 }, E = st.es
+            var wall = E.t > 0 ? Math.max(0, t - E.t) : 0, dt = Math.min(100, wall)
             E.t = t
             var ez = function (cur, to, tau) { return cur === undefined ? to : cur + (to - cur) * (1 - Math.exp(-dt / tau)) }
             var W = Math.max(1, G.W), P = Math.min(1, (G.L + G.F) / W), Lw = Math.min(1, G.L / W)
-            // The history: a sample every 250 ms of wall time, a minute of
-            // it, so a slow frame rate (settled, or the window away) keeps
-            // the clock.
-            var Hs = E.hist || (E.hist = [])
+            // The download alone, 0 to 1: the speed's front, complete at the
+            // right edge when the last bytes land, whatever the finish steps
+            // still do. The download clock runs only while it is short of
+            // that, so the trace holds still through the finish steps.
+            var Pd = Math.min(1, (G.L + (G.D || 0)) / W), dl = Pd < 0.999
+            if (!(E.dc >= 0)) E.dc = 0
+            if (dl) E.dc += wall
+            // A sample every 250 ms of wall time, so a slow frame rate
+            // (settled, or the window away) keeps the clock.
             if (!E.ht || t - E.ht > 60000) E.ht = t - 250
+            // The trace: the whole batch's speed over the download clock, the
+            // same samples while anything downloads, each entry the speed
+            // summed over its n samples at their mean time. Past two entries
+            // a pixel, neighbors merge in pairs, so a long batch costs the
+            // same as a short one and the line keeps one to two points a
+            // pixel.
+            var Tr = E.tr || (E.tr = []), C = 2 * Math.max(8, Math.floor(w))
             while (t - E.ht >= 250) {
                 E.ht += 250
-                Hs.push({ t: E.ht, mb: waves.paused ? 0 : st.rate, p: G.L + G.F })
-                if (Hs.length > 240) Hs.shift()
+                var mb = waves.paused ? 0 : st.rate
+                if (!dl) continue
+                Tr.push({ t: Math.max(0, E.dc - (t - E.ht)), sum: mb, n: 1 })
+                if (Tr.length > C) {
+                    var half = []
+                    for (i = 0; i + 1 < Tr.length; i += 2) {
+                        var u = Tr[i], v = Tr[i + 1], k = u.n + v.n
+                        half.push({ t: (u.t * u.n + v.t * v.n) / k, sum: u.sum + v.sum, n: k })
+                    }
+                    if (Tr.length % 2) half.push(Tr[Tr.length - 1])
+                    E.tr = Tr = half
+                }
             }
-            // The rate in tracks a second over the last 12 s, and the time
-            // left from it; the shown time changes once a second.
-            var a = Hs[0]
-            for (i = Hs.length - 1; i >= 0; --i) if (t - Hs[i].t >= 12000) { a = Hs[i]; break }
-            var span = (t - a.t) / 1000
-            if (span >= 3) E.rate = ez(E.rate, Math.max(0, (G.L + G.F - a.p) / span), 1500)
-            var eta = E.rate > 0.01 ? (W - G.L - G.F) / E.rate : -1
-            if (!E.et || t - E.et >= 1000) { E.et = t; E.eta = eta }
-            E.P = ez(E.P, P, 250); E.Lw = ez(E.Lw, Lw, 300)
-            // The ceiling from the samples on screen (a pixel each), so a
-            // peak that scrolled off does not flatten the line.
-            var N = Math.min(Hs.length, Math.floor(w)), base = Hs.length - N, mx = 1
-            for (i = base; i < Hs.length; ++i) mx = Math.max(mx, Hs[i].mb)
+            E.P = ez(E.P, P, 250); E.Lw = ez(E.Lw, Lw, 300); E.Pd = ez(E.Pd, Pd, 250)
+            // The live tip: the speed right now, eased, so the line's front
+            // moves between samples instead of waiting for the next one.
+            E.cur = ez(E.cur, waves.paused ? 0 : st.rate, 300)
+            var N = Tr.length, mx = Math.max(1, E.cur)
+            for (i = 0; i < N; ++i) mx = Math.max(mx, Tr[i].sum / Tr[i].n)
             E.mx = ez(E.mx, mx, 600)
             // Settled: nothing arriving and nothing left to ease, so four
             // frames a second draw the same picture.
             st.calm = (waves.paused || st.rate <= 0) && t - st.bootT > 600
-                && Math.abs(E.P - P) < 0.002 && Math.abs(E.Lw - Lw) < 0.002 && Math.abs(E.mx - mx) < 0.01 * mx
+                && Math.abs(E.P - P) < 0.002 && Math.abs(E.Lw - Lw) < 0.002 && Math.abs(E.Pd - Pd) < 0.002
+                && Math.abs(E.mx - mx) < 0.01 * mx
 
-            // The recent speed, a pixel per sample.
+            // The speed over the download clock, from the left edge (the
+            // batch's start) to its front, which keeps step with the download
+            // (eased the same) and reaches the right edge as its last bytes
+            // land. The clock is spread over that span, so a short album
+            // fills the button as fully as a long queue, and both stand
+            // still through the finish steps. While the batch has not moved
+            // yet (the first tracks still starting) it grows a pixel a sample.
             var top = h - 3
-            var X = function (q) { return x0 + w - N + q + 1 }
-            var Y = function (q) { return bot - top * Hs[base + q].mb / E.mx }
-            ctx.beginPath(); ctx.moveTo(x0 + w - N, bot)
-            for (i = 0; i < N; ++i) ctx.lineTo(X(i), Y(i))
-            ctx.lineTo(x0 + w, bot); ctx.closePath(); ctx.fillStyle = rgba(0.16 * dim); ctx.fill()
-            ctx.beginPath()
-            for (i = 0; i < N; ++i) { if (i) ctx.lineTo(X(i), Y(i)); else ctx.moveTo(X(i), Y(i)) }
-            ctx.strokeStyle = rgba(0.45 * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
-            // The batch along the floor: landed bright, in flight pale.
             var fx = x0 + w * E.P, lx = x0 + w * Math.min(E.P, E.Lw)
+            var R = Math.min(x0 + w, Math.max(x0 + w * E.Pd, x0 + Math.min(N, w * 0.12)))
+            var Tw = Math.max(1, E.dc)
+            var X = function (q) { return x0 + (R - x0) * Math.min(1, Tr[q].t / Tw) }
+            var Y = function (q) { return bot - top * (Tr[q].sum / Tr[q].n) / E.mx }
+            var yc = bot - top * E.cur / E.mx
+            if (N > 0) {
+                ctx.beginPath(); ctx.moveTo(x0, bot)
+                for (i = 0; i < N; ++i) ctx.lineTo(X(i), Y(i))
+                ctx.lineTo(R, yc); ctx.lineTo(R, bot); ctx.closePath()
+                ctx.fillStyle = rgba(st.areaAlpha * dim); ctx.fill()
+                ctx.beginPath(); ctx.moveTo(X(0), Y(0))
+                for (i = 1; i < N; ++i) ctx.lineTo(X(i), Y(i))
+                ctx.lineTo(R, yc)
+                ctx.strokeStyle = rgba(st.lineAlpha * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
+            }
+            // The batch along the floor: landed bright, in flight pale.
             ctx.fillStyle = rgba(0.1 * dim); ctx.fillRect(x0, bot - 1.5, w, 1.5)
             ctx.fillStyle = ink(root.textHi, 0.75 * dim); ctx.fillRect(x0, bot - 1.5, lx - x0, 1.5)
             ctx.fillStyle = ink(root.textHi, 0.3 * dim); ctx.fillRect(lx, bot - 1.5, fx - lx, 1.5)
-            // The dot on the newest point of the speed line.
-            if (N > 0) { ctx.fillStyle = rgba(0.95 * dim, 0.4); ctx.fillRect(x0 + w - 2, Y(N - 1) - 1, 2, 2) }
-            // The time left over the speed.
-            var spT = st.spdText, Px = 9, ty = y0 + Px * 0.74 + 2
-            say(ctx, clock(E.eta), x0 + 3, ty, Px, "left", ink(root.textHi, dim), dim)
-            say(ctx, spT || "-- Mb/s", x0 + 3, ty + 8.75, Px, "left", rgba((spT ? 0.95 : 0.4) * dim, 0.35), dim)
+            // The dot on the speed line's live tip.
+            if (N > 0) { ctx.fillStyle = rgba(0.95 * dim, 0.4); ctx.fillRect(Math.min(R - 1, x0 + w - 2), yc - 1, 2, 2) }
+            // The download speed in the bottom left corner, its baseline far
+            // enough over the floor that the slash's tail and the glyphs'
+            // keyline (half its width below the baseline) end a clear pixel
+            // over the floor's line.
+            var spT = st.spdText, ty = bot - 1.5 - st.keyWidth / 2 - 2.5
+            say(ctx, spT || "-- Mb/s", x0 + 3, ty, st.wordPx, "left", rgba((spT ? 0.95 : 0.4) * dim, 0.35), dim)
         }
         // Mono text with a dark keyline round each glyph, so it reads where
         // it crosses the chart's line or fill.
         function keyed(ctx, str, x, y, px, al, col, dim) {
             ctx.font = "bold " + px + "px \"" + root.mono + "\""; ctx.textAlign = al; ctx.textBaseline = "alphabetic"
-            ctx.lineJoin = "round"; ctx.lineWidth = 2.5; ctx.strokeStyle = ink(root.bg, 0.9 * dim)
-            ctx.strokeText(str, x, y); ctx.fillStyle = col; ctx.fillText(str, x, y)
+            if (st.keyWidth > 0 && st.keyAlpha > 0) {
+                ctx.lineJoin = "round"; ctx.lineWidth = st.keyWidth; ctx.strokeStyle = ink(root.bg, st.keyAlpha * dim)
+                ctx.strokeText(str, x, y)
+            }
+            ctx.globalAlpha = st.wordAlpha; ctx.fillStyle = col; ctx.fillText(str, x, y); ctx.globalAlpha = 1
         }
         // The accent at alpha a, mixed c of the way to white.
         function rgba(a, c) {
@@ -18498,7 +18661,8 @@ ApplicationWindow {
     // The QUEUE button's batch in a few totals, weighed by tracks (a row
     // with no track count weighs one): W all of it, L landed (done or
     // failed), F the share in flight (a running row's download fills 85% of
-    // its weight, its finish steps the rest), nb how many build. Settled rows
+    // its weight, its finish steps the rest), D the running rows' download
+    // alone (the speed chart's front), nb how many build. Settled rows
     // come in as landedW, since they leave the active groups as they land.
     // The running rows are the few in flight; the queued group's weight is
     // only re-read once something marked it dirty (a row joined or left the
@@ -18517,7 +18681,7 @@ ApplicationWindow {
             root._qwSum = qs; root._qwCount = root.queuedCount; root._qwDirty = false; root._qwWalks += 1
         }
         var lo = queueGroupStart("downloading"), hi = Math.min(m.count, lo + root.downloadingCount)
-        var runW = 0, F = 0, nb = 0
+        var runW = 0, F = 0, D = 0, nb = 0
         for (i = lo; i < hi; ++i) {
             r = m.get(i)
             if (r.status !== "running") continue
@@ -18525,9 +18689,10 @@ ApplicationWindow {
             var p = Math.min(100, r.progress || 0) / 100, fin = root.queueFinish[r.qid] || 0
             runW += w
             F += w * (0.85 * p + (p >= 0.999 ? 0.15 * fin : 0))
+            D += w * p
             if (p >= 0.999) ++nb
         }
-        return { n: total, W: landedW + runW + root._qwSum, L: landedW, F: F, nb: nb, fails: fails }
+        return { n: total, W: landedW + runW + root._qwSum, L: landedW, F: F, D: D, nb: nb, fails: fails }
     }
     // Re-point the index entries of model rows lo..hi after a shift.
     function queueIndexFix(lo, hi) {
@@ -21183,27 +21348,79 @@ ApplicationWindow {
                         }
                         // Collapsed bio preview (never taller than the photo)
                         Text {
-                            visible: (root.artistData.bio || "") !== "" && !root.bioExpanded
-                            text: root.artistData.bio || ""
+                            visible: root.pageBio !== "" && !root.bioExpanded
+                            text: root.pageBio
                             textFormat: Text.PlainText  // never interpret remote bio as rich text (no auto <img> fetch)
                             color: root.textLo; font.pixelSize: 13; width: parent.width
                             wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
                         }
                         Text {
                             textFormat: Text.PlainText
-                            visible: (root.artistData.bio || "") !== ""
+                            visible: root.pageBio !== ""
                             text: root.bioExpanded ? "SHOW LESS" : "READ MORE"
                             color: root.accent; font.pixelSize: 12; font.letterSpacing: 0.8
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.bioExpanded = !root.bioExpanded }
+                        }
+                        // A bio from Wikipedia or Discogs: its source's credit,
+                        // linking to the page it came from.
+                        Text {
+                            objectName: "artistBioCredit"
+                            textFormat: Text.PlainText
+                            // Under the full text once it is open (below).
+                            visible: root.pageBio !== "" && !!root.pageBioObj.bio_source && !root.bioExpanded
+                            text: root.bioCredit(root.pageBioObj.bio_source)
+                            color: pageCreditMa.containsMouse ? root.accent : root.textDim; font.pixelSize: 12
+                            MouseArea {
+                                id: pageCreditMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: Qt.openUrlExternally("" + root.pageBioObj.bio_url)
+                            }
+                        }
+                        // No bio: say so, with the switch that fills it while it
+                        // is off, or that one is on its way while it is on.
+                        Row {
+                            objectName: "artistBioMissing"
+                            visible: root.pageBio === "" && !!root.artistData.id
+                                     && (!root.artistBioOn || !!root.bioAsking["" + root.artistData.id])
+                            spacing: 10
+                            Text {
+                                id: pageNoBio
+                                textFormat: Text.PlainText
+                                text: root.artistBioOn ? "Looking for a biography\u2026" : "No biography on TIDAL."
+                                color: root.textDim; font.pixelSize: 13; font.italic: true
+                            }
+                            Text {
+                                objectName: "artistBioFill"
+                                visible: !root.artistBioOn
+                                textFormat: Text.PlainText; text: "FILL MISSING BIOS"
+                                color: pageFillMa.containsMouse ? root.accent : root.accentDim
+                                font.pixelSize: 12; font.letterSpacing: 0.8
+                                anchors.baseline: pageNoBio.baseline
+                                MouseArea {
+                                    id: pageFillMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.openBioSetting()
+                                }
+                            }
                         }
                     }
                 }
                 // Full bio appears below the header only when expanded
                 Text {
-                    visible: (root.artistData.bio || "") !== "" && root.bioExpanded
-                    text: root.artistData.bio || ""
+                    visible: root.pageBio !== "" && root.bioExpanded
+                    text: root.pageBio
                     textFormat: Text.PlainText  // never interpret remote bio as rich text (no auto <img> fetch)
                     color: root.textLo; font.pixelSize: 13; width: parent.width; wrapMode: Text.WordWrap; lineHeight: 1.3
+                }
+                // The open bio's credit, under the text it credits.
+                Text {
+                    objectName: "artistBioCreditOpen"
+                    textFormat: Text.PlainText
+                    visible: root.pageBio !== "" && !!root.pageBioObj.bio_source && root.bioExpanded
+                    text: root.bioCredit(root.pageBioObj.bio_source)
+                    color: pageCreditOpenMa.containsMouse ? root.accent : root.textDim; font.pixelSize: 12
+                    MouseArea {
+                        id: pageCreditOpenMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: Qt.openUrlExternally("" + root.pageBioObj.bio_url)
+                    }
                 }
 
                 // Top tracks: first 5 only, SHOW ALL reveals the rest. Both
