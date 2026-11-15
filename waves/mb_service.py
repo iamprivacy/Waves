@@ -195,6 +195,14 @@ _SCHEMA = (
            scope TEXT NOT NULL, key TEXT NOT NULL, name_key TEXT, mbid TEXT, how TEXT, at REAL,
            PRIMARY KEY (scope, key))""",
     "CREATE INDEX IF NOT EXISTS artist_links_by_name ON artist_links (name_key)",
+    # The artist bio a TIDAL artist id fell back on when TIDAL had none
+    # (waves.artist_bio): ``source`` "wikipedia", "discogs" or "" (looked,
+    # found none), ``ref`` that source's own id (an article title, a Discogs
+    # artist id) so an expired bio is read again in one request, ``url`` the
+    # page the credit links to. Public text only, never a local path.
+    """CREATE TABLE IF NOT EXISTS artist_bios (
+           tidal_id TEXT PRIMARY KEY, mbid TEXT, source TEXT, ref TEXT, text TEXT, url TEXT,
+           at REAL, expires REAL)""",
 )
 
 # Per table: the key column and the columns kept beside the raw JSON.
@@ -455,6 +463,50 @@ class MBService:
             ).fetchall()
         ids = {str(m) for m, how in rows if how not in refuse}
         return ids.pop() if len(ids) == 1 else ""
+
+    def bio_get(self, tidal_id: str) -> dict | None:
+        """The fallback bio on record for a TIDAL artist id: ``{mbid,
+        source, ref, text, url, at, expires, expired}``, None when nothing
+        is."""
+        if not tidal_id:
+            return None
+        row = self._query_one(
+            "SELECT mbid, source, ref, text, url, at, expires FROM artist_bios WHERE tidal_id = ?", (str(tidal_id),)
+        )
+        if row is None:
+            return None
+        expires = row[6]
+        return {
+            "mbid": row[0] or "",
+            "source": row[1] or "",
+            "ref": row[2] or "",
+            "text": row[3] or "",
+            "url": row[4] or "",
+            "at": float(row[5] or 0),
+            "expires": float(expires or 0),
+            "expired": expires is not None and self._now() > float(expires),
+        }
+
+    def bio_put(self, tidal_id: str, *, mbid: str, source: str, ref: str, text: str, url: str, ttl: float) -> None:
+        """Put a fallback bio (or "found none": ``source`` '') on record for
+        ``ttl`` seconds."""
+        if not tidal_id:
+            return
+        now = self._now()
+        with self._db_lock:
+            conn = self._db()
+            if conn is None:
+                return
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO artist_bios (tidal_id, mbid, source, ref, text, url, at, expires)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(tidal_id), mbid or "", source or "", ref or "", text or "", url or "", now, now + ttl),
+                )
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                logger.info("artist bio write failed")
 
     def counts(self) -> dict:
         """How many of each thing the file holds (logs and tests)."""

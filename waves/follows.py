@@ -218,7 +218,23 @@ _FOLLOWED_GROWN = (
     # When a fresh-releases hint asked for this follow to be checked ahead of
     # the round (0 for none): see waves.fresh_releases. A check clears it.
     ("hinted", "INTEGER NOT NULL DEFAULT 0"),
+    # The release ids the heads read has shown for this follow (a JSON list,
+    # newest kept): an id not among them is news. See waves.fresh_releases.
+    ("head_ids", "TEXT NOT NULL DEFAULT ''"),
 )
+
+# How many head ids a follow remembers (fresh_releases.HEADS_KEEP).
+_HEADS_KEEP = 60
+
+
+def _head_list(raw) -> list[str]:
+    """A stored head_ids value as a list of ids ([] for none or a bad one)."""
+    try:
+        ids = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return [str(i) for i in ids if i] if isinstance(ids, list) else []
+
 
 _RELEASE_COLS = (
     "artist_id, release_id, title, artist_name, primary_artist_id, artists_json, art, date, listed, year, "
@@ -818,6 +834,42 @@ class FollowStore:
                 q = f"SELECT artist_id, release_id FROM seen WHERE release_id IN ({marks})"  # noqa: S608 (placeholders)
                 out.update((str(a), str(r)) for a, r in self._conn.execute(q, chunk))
         return out
+
+    def heads_known(self, artist_ids: Iterable[str]) -> dict[str, set[str]]:
+        """The head ids remembered for each of these follows (an empty set for
+        none yet); an id no longer followed is left out."""
+        ids = sorted({str(a) for a in artist_ids if a})
+        out: dict[str, set[str]] = {}
+        with self._lock:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                q = f"SELECT artist_id, head_ids FROM followed WHERE artist_id IN ({marks})"  # noqa: S608 (placeholders)
+                for aid, raw in self._conn.execute(q, chunk):
+                    out[str(aid)] = set(_head_list(raw))
+        return out
+
+    def note_heads(self, heads: dict[str, Iterable[str]]) -> int:
+        """Remember these head ids (newest first) on top of what each follow
+        already holds, the newest ``_HEADS_KEEP`` kept; how many follows
+        changed. Writes only a change; an id no longer followed is skipped."""
+        changed = 0
+        with self._lock:
+            for aid, ids in heads.items():
+                row = self._conn.execute("SELECT head_ids FROM followed WHERE artist_id = ?", (str(aid),)).fetchone()
+                if row is None:
+                    continue
+                old = _head_list(row[0])
+                held = set(old)
+                added = [r for r in dict.fromkeys(str(r) for r in ids if r) if r not in held]
+                if not added:
+                    continue
+                new = (added + old)[:_HEADS_KEEP]
+                self._conn.execute("UPDATE followed SET head_ids = ? WHERE artist_id = ?", (json.dumps(new), str(aid)))
+                changed += 1
+            if changed:
+                self._conn.commit()
+        return changed
 
     def clear_hints(self) -> int:
         """Drop every waiting hint (the hint setting went off); how many."""

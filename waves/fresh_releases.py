@@ -23,6 +23,13 @@ names TIDAL artist and album ids, so it is exact and has no MusicBrainz lag,
 but it covers only TIDAL favorites. It is only ever read: nothing here marks
 an activity seen, so the TIDAL apps' own new-release dot is left alone.
 
+The heads read (``parse_artist_heads``, ``head_news``) is the third and the
+one that covers every follow: TIDAL's open API answers for up to 20 artists
+in one request with each artist's newest releases of every kind, newest
+first. A whole follow list reads in a few dozen requests, and a follow whose
+newest ids changed is checked next. It names who to check, nothing more: the
+per-artist check stays the one that records releases.
+
 Pure standard library over one injectable ``fetch``, so it unit tests with
 canned answers and never touches the network.
 """
@@ -59,6 +66,12 @@ MIN_BACKOFF_SEC = 1800
 # A read that never reached the service (the network not back yet after a
 # wake) tries again this soon instead.
 OFFLINE_RETRY_SEC = 120
+# The heads read: a path on the open v2 API (the session's
+# ``openapi_v2_location``), at most this many artist ids per request (the
+# service answers 400 past 20), and how many head ids a follow remembers.
+TIDAL_HEADS_PATH = "artists"
+HEADS_PER_REQUEST = 20
+HEADS_KEEP = 60
 
 # What joins the artists of one credit ("A feat. B", "A & B", "A x B"). Not
 # "and": too many band names hold it ("Florence and the Machine").
@@ -184,6 +197,77 @@ def parse_tidal_feed(body) -> list[dict]:
             continue
         out.append({"rgid": "t:" + rid, "day": day, "credit": "", "mbids": [], "tidal_ids": ids, "release_id": rid})
     return out
+
+
+def heads_params(artist_ids: Iterable[str]) -> dict[str, str]:
+    """The query of one heads request (at most ``HEADS_PER_REQUEST`` ids)."""
+    return {"filter[id]": ",".join(str(a) for a in artist_ids), "include": "albums"}
+
+
+def parse_artist_heads(body) -> dict[str, list[tuple[str, str]]]:
+    """Each artist's newest releases in a heads answer, artist id to
+    ``(release id, release day)`` in the answer's order (newest first). An
+    artist with no albums relationship reads as an empty head. Raises
+    FetchError when the answer is not the artists list."""
+    try:
+        data = body["data"]
+    except (KeyError, TypeError):
+        raise FetchError("not the artists list") from None  # noqa: TRY003
+    if not isinstance(data, list):
+        raise FetchError("not the artists list")  # noqa: TRY003
+    days: dict[str, str] = {}
+    included = body.get("included") if isinstance(body, dict) else None
+    for inc in included if isinstance(included, list) else []:
+        if not isinstance(inc, dict) or inc.get("type") != "albums" or inc.get("id") is None:
+            continue
+        attrs = inc.get("attributes") if isinstance(inc.get("attributes"), dict) else {}
+        days[str(inc["id"])] = str(attrs.get("releaseDate") or "")[:10]
+    out: dict[str, list[tuple[str, str]]] = {}
+    for a in data:
+        if not isinstance(a, dict) or a.get("id") is None:
+            continue
+        rels = a.get("relationships") if isinstance(a.get("relationships"), dict) else {}
+        albums = rels.get("albums") if isinstance(rels.get("albums"), dict) else {}
+        refs = albums.get("data") if isinstance(albums.get("data"), list) else []
+        head: list[tuple[str, str]] = []
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("id") is not None:
+                rid = str(ref["id"])
+                head.append((rid, days.get(rid, "")))
+        out[str(a["id"])] = head
+    return out
+
+
+def head_news(
+    head: Iterable[tuple[str, str]],
+    known: set[str],
+    seen: set[str],
+    since_day: str,
+) -> list[str]:
+    """The ids in a follow's head that call for a check.
+
+    With remembered head ids (``known``), the ones not among them: only
+    additions count, so an id falling off the end is no news, and a
+    remembered one coming back is not either. With none yet (the first read),
+    the ids the store has not ``seen`` and dated on or after ``since_day``:
+    a head carries older ids the store never records (featured spots,
+    edition twins), and those must not all be checked again. An undated id
+    counts as recent."""
+    if known:
+        return [rid for rid, _day in head if rid not in known]
+    return [rid for rid, day in head if rid not in seen and (not day or day >= since_day)]
+
+
+def day_before(ts: float) -> str:
+    """The local day (YYYY-MM-DD) before the one ``ts`` falls in; the empty
+    string (every day is on or after it) for no timestamp."""
+    if not ts or ts <= 0:
+        return ""
+    try:
+        d = _dt.date.fromtimestamp(float(ts))
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return (d - _dt.timedelta(days=1)).isoformat()
 
 
 def credit_keys(credit: str) -> set[str]:
