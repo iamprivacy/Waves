@@ -56,7 +56,7 @@ the Loader built:
   * part-way through the reveal the shared value is strictly between 0 and
     1 (it animates, it does not snap), and unhovered every cell is a bar
     cell again;
-  * at a full bar the word is FINALIZING (finalizing lab, pick C,
+  * at a full bar the word is FINALIZING, shown with no hover (finalizing lab, pick C,
     2026-10-30: "100%" said nothing was happening while the final steps
     ran), spelled in the packed font (one-column I, four-column N, 35
     columns, so it fits a shrunk Browse card), and it fills from the
@@ -392,13 +392,16 @@ def _run_carved_scenario() -> int:
 
     # --- a full bar: FINALIZING, filling from the finish fraction
     q("(function(){ var h = root.dlHolder('al-roll'); h.pct = 100; h.fin = 0.5; return 1 })()")
-    q("(function(){" + _WALKERS + " walkBtn(contentCol).wordHover = true; return 1 })()")
+    # No hover: FINALIZING stays up on its own, unlike the percent.
+    q("(function(){" + _WALKERS + " walkBtn(contentCol).wordHover = false; return 1 })()")
     # The holder ramps a 63-point jump over its 1.5 s cap, then the word
     # dissolves out and back in (2 x 460 ms).
     settle(3200)
     s4 = json.loads(shape())
     if s4["word"] != "FINALIZING" or s4["reveal"] != 1:
-        failures.append(f"  at a full bar the word is {s4['word']!r} (reveal {s4['reveal']}), expected FINALIZING")
+        failures.append(
+            f"  at a full bar the word is {s4['word']!r} (reveal {s4['reveal']}), expected FINALIZING unhovered"
+        )
     else:
         fin_rows = _expected_rows("FINALIZING")
         fin_w = len(fin_rows[0])

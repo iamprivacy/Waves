@@ -133,6 +133,7 @@ _KEYS = {
         "art_hover_tilt",
         "video_hover_peek",
         "artist_hover_cards",
+        "artist_bio_fallback",
         "player_size",
         "close_action",
         "queue_ledger_rows",

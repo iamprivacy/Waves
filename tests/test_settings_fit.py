@@ -349,7 +349,13 @@ def _run_scenario() -> int:
 
     # 3. Every deep link Main.qml makes lands where it means to.
     main_src = QML_MAIN.read_text(encoding="utf-8")
-    want = {"downloads": "downloads", "ffmpeg": "processing", "updates": "updates", "flac": "processing"}
+    want = {
+        "downloads": "downloads",
+        "ffmpeg": "processing",
+        "updates": "updates",
+        "flac": "processing",
+        "appearance": "appearance",
+    }
     links = set(re.findall(r'jumpToCard\("([a-z]+)"\)', main_src))
     for link in sorted(links):
         if link not in want:

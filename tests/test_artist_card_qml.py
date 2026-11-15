@@ -10,7 +10,8 @@ note instead, and a late summary still fills it. It sits inside the window,
 under 60% of its height, above a name near the bottom and below one near the
 top. Moving to the next name switches it in about 200 ms. Follow reads
 FOLLOW, FOLLOWING, UNFOLLOW under the pointer, and an outside follow change
-reaches the open card. The "..." menu plays a preview, downloads a track or
+reaches the open card; an unfollow takes that artist's releases off the feed
+at once. The "..." menu plays a preview, downloads a track or
 an album, and goes to the album page (the card closes, the track is
 highlighted), or lights the track on the album already open. Esc closes
 the menu first, then the card. A name still moving under the pointer (a
@@ -352,8 +353,18 @@ def _run_scenario() -> int:  # (one linear scenario)
     click(at("ahcFollow"))
     settle(80)
     check(("unfollow", "11") in calls, "UNFOLLOW did not unfollow")
+    # The unfollowed artist's cards leave the releases feed (and a search
+    # on it) at once, not after the reload debounce; another follow's stay.
+    q(
+        'root.releasesRows = [{id:"r1", via:"11", title:"Gone"}, {id:"r2", via:"12", title:"Kept"}],'
+        ' root.relFindRows = [{id:"r1", via:"11", title:"Gone"}]'
+    )
     followed.discard("11")
     bridge.followStateChanged.emit("11", False)
+    check(
+        [r["id"] for r in q("root.releasesRows")] == ["r2"] and len(q("root.relFindRows")) == 0,
+        "an unfollowed artist's releases stayed on the releases page",
+    )
     settle(150)
 
     # 6. The menu: play a preview, download, Esc closes the menu first.

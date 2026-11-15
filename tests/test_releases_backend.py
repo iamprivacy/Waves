@@ -220,6 +220,13 @@ for _m in (
     "_releases_queue_guest",
     "_releases_check_guests",
     "_artist_recent_guests",
+    "_releases_step_sooner",
+    "_releases_heads_maybe",
+    "_releases_heads_fetch",
+    "_releases_heads_chunk",
+    "_releases_heads_judge",
+    "_releases_heads_settle",
+    "_on_rel_heads_done",
 ):
     if hasattr(WavesBridge, _m):
         setattr(_Stub, _m, getattr(WavesBridge, _m))

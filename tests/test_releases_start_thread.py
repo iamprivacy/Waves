@@ -38,6 +38,10 @@ class _Host(QtCore.QObject):
     def _releases_library_moved(self) -> None:
         self.moved_on.append(QtCore.QThread.currentThread() is self.thread())
 
+    def _releases_heads_maybe(self, min_age_s) -> bool:
+        self.heads_on = QtCore.QThread.currentThread() is self.thread()
+        return False
+
 
 @pytest.fixture
 def app():

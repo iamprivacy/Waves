@@ -454,12 +454,14 @@ def test_done_backs_off_on_failure_and_brings_the_sweep_forward_on_a_hint(tmp_pa
     assert s._rel_fresh_running is True
 
 
-def test_hinted_follows_set_the_burst_pace(tmp_path):
+def test_hinted_follows_set_the_quick_pace(tmp_path):
     s = _fresh_stub(tmp_path)
     _checked(s, "Alpha", "Beta", "Gamma")
     assert _bind(s, "_releases_step_ms")() == rel._REL_MAX_STEP_MS
     s._releases.hint(["alpha"])
-    assert _bind(s, "_releases_step_ms")() == rel._REL_BURST_MS
+    assert _bind(s, "_releases_step_ms")() == rel._REL_MIN_STEP_MS
+    s._job_aborts = {"job": object()}
+    assert _bind(s, "_releases_step_ms")() == rel._REL_BURST_BUSY_MS
 
 
 def test_the_sweep_checks_a_hinted_follow_inside_the_round(tmp_path):
@@ -667,7 +669,7 @@ def test_switching_off_drops_the_waiting_hints(tmp_path):
     s = _fresh_stub(tmp_path)
     _checked(s, "Alpha", "Beta")
     s._releases.hint(["alpha"])
-    assert _bind(s, "_releases_step_ms")() == rel._REL_BURST_MS
+    assert _bind(s, "_releases_step_ms")() == rel._REL_MIN_STEP_MS
     _bind(s, "_releases_fresh_switched")(False)
     assert s._releases.hinted_count() == 0
     assert _bind(s, "_releases_step_ms")() == rel._REL_MAX_STEP_MS

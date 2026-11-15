@@ -3,9 +3,9 @@
 WHAT THIS FENCES OFF
 --------------------
 While anything is active the button's inside is the batch's throughput chart
-(queue item lab, T1): a minute of speed history, the batch along the floor by
-tracks (landed bright, in flight pale), the time left over the speed. The
-word hides under it and the arrow folds away. It reads a few totals counted
+(queue item lab, T1): the batch's speed over time, the batch along the floor by
+tracks (landed bright, in flight pale), the download speed in its bottom
+left corner. The word hides under it and the arrow folds away. It reads a few totals counted
 once a tick, so a thousand-item queue costs a frame what five do.
 
 The totals weigh rows by tracks: an album lands as more of the batch than a
@@ -153,11 +153,11 @@ def _scenario() -> int:
     def state() -> dict:
         got = js(
             "var b = qb(), c = walk(b, 'queueButtonChart'), w = walk(b, 'queueButtonWord'), g = b.agg;"
-            " return [c.on ? 1 : 0, w.opacity, w.target, b.fz, b.width, g.W, g.L, g.F, g.nb,"
+            " return [c.on ? 1 : 0, w.opacity, w.target, b.fz, b.width, g.W, g.L, g.F, g.D, g.nb,"
             "  c.es.P === undefined ? -1 : c.es.P, c.es.Lw === undefined ? -1 : c.es.Lw,"
-            "  (c.es.hist || []).length].join('|')"
+            "  (c.es.tr || []).length].join('|')"
         )
-        on, op, word, fz, width, W, L, F, nb, P, Lw, hist = str(got).split("|")
+        on, op, word, fz, width, W, L, F, D, nb, P, Lw, hist = str(got).split("|")
         return {
             "on": on == "1",
             "op": float(op),
@@ -167,6 +167,7 @@ def _scenario() -> int:
             "W": float(W),
             "L": float(L),
             "F": float(F),
+            "D": float(D),
             "nb": int(nb),
             "P": float(P),
             "Lw": float(Lw),
@@ -203,8 +204,10 @@ def _scenario() -> int:
     bridge._track_lifecycle(a, {"id": "lab-batch-1", "status": "running", "fpct": 50.0})
     settle(600)
     s = state()
-    if abs(s["F"] - 9.25) > 0.01 or s["nb"] != 1:
-        failures.append(f"album downloaded with half its finish steps in: wanted 9.25 in flight, 1 building: {s}")
+    if abs(s["F"] - 9.25) > 0.01 or s["nb"] != 1 or abs(s["D"] - 10) > 0.01:
+        failures.append(
+            f"album downloaded with half its finish steps in: wanted 9.25 in flight, 10 downloaded, 1 building: {s}"
+        )
 
     bridge._set_queue_status(a, "done")
     played, last_mid, words = False, False, set()
