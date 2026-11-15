@@ -58,7 +58,7 @@ Follow artists and Waves keeps watch for you. The **Releases** tab, right next t
 
 - Follow from an artist's page or by search. With a library set up, **Follow your artists** (Settings → Library, on by default) follows its artists as the scan finds them on TIDAL, or **Import library** lets you review the list first. **Follow artists with at least** (5 tracks by default) skips artists you only have a song or two by, and the **Excluded** list keeps them in reach. When several TIDAL artists share a name, Waves picks the one who made the albums you own.
 - Your TIDAL favorite artists join your follows automatically, and Waves changes your TIDAL favorites only if you ask.
-- While Waves is open, it checks your artists in the background at a gentle pace, starting with the ones TIDAL's and ListenBrainz's new-release lists name, so a release shows up soon after it lands. **CHECK NOW** runs a check on demand.
+- While Waves is open, it checks your artists in the background at a gentle pace. It first asks TIDAL for every followed artist's newest releases (when Waves opens, now and then while it runs, and on **CHECK NOW**) and checks the artists with something new right away, together with the ones TIDAL's and ListenBrainz's new-release lists name, so a release shows up within about a minute. **CHECK NOW** runs a check on demand.
 - What arrived since you last looked gathers in a **Just in** section at the top of the feed, each release marked until you open it or press **MARK AS SEEN** (**Just-in marks last**, Settings → Releases, can clear them all as you leave instead).
 - Upcoming releases have their own filter, a count shows what you haven't seen yet, and every page has a search box (Cmd+F, or Ctrl+F on Windows and Linux). **Featured releases** (ones another artist leads) and **Music videos** can each be hidden in Settings → Releases.
 - Waves can also save each new release on the day it comes out (off by default), only the kinds you pick: albums, EPs, singles or guest tracks.
@@ -93,6 +93,7 @@ Waves opens on TIDAL's editorial front page (New Arrivals, TIDAL Rising, every g
 
 - Artist pages bring the bio, the discography, EPs & singles and top tracks, with **Follow** right by the name and one click to save the whole thing.
 - Rest the pointer on an artist's name and a card opens with their bio, top tracks, latest releases and **Follow**, so you can size up an artist without leaving the page you are on.
+- TIDAL has no bio for many artists. Turn on **Fill missing artist bios** (Settings → Appearance, off by default) and those get the intro of their Wikipedia article, or their Discogs profile, credited and linked to the source.
 - Reissues sit at the date they first came out, and anything released in the last two weeks wears a NEW mark.
 
 <table>
@@ -139,7 +140,7 @@ Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and
 ### 🧾 A queue that tells you the truth
 
 - Completed, Failed, Stopped, Downloading and Queued sections, with live progress and per-album and per-artist roll-ups.
-- The **QUEUE** button in the header is a live speed chart with the time left, a line along its bottom fills as the batch lands, and its count rolls as downloads land.
+- The **QUEUE** button in the header is a live speed chart across the whole button with the download speed in its bottom left corner, a line along its bottom fills as the batch lands, and its count rolls as downloads land.
 - Everything runs in the order you queued it, and every row shows the quality it asked for next to the quality that actually arrived.
 - **RETRY ALL** retries every failure in one click. An open row shows up to 12 tracks before it scrolls (**Tracks shown in an open queue row**, Settings → Appearance), can list just the ones that did not arrive, and its **REPORT** button saves those as a CSV. **MISSING REPORT** does the same for the whole queue.
 - Tracks are tagged and filed in the background while the next ones download, so the speed stays up between tracks (**Tracks finishing in the background**, Settings → Speed & Pacing, 3 by default).
@@ -283,6 +284,9 @@ With TIDAL, Waves does what you ask, and while it's open it also keeps the Relea
 | [MusicBrainz](https://musicbrainz.org)   | **Look up your artists on MusicBrainz** (Settings → Library)                 | Your library's artist names                           | **Off** |
 | [MusicBrainz](https://musicbrainz.org)   | **Also check MusicBrainz** (Settings → Releases)                             | The names of the artists you follow                   | **Off** |
 | [MusicBrainz](https://musicbrainz.org)   | **Genre from MusicBrainz** (Settings → Tags & Artwork), for each new release | The release's barcode, or its title and artist        | **Off** |
+| [MusicBrainz](https://musicbrainz.org)   | **Fill missing artist bios** (Settings → Appearance), when TIDAL has none    | The artist's TIDAL id, and their name when needed     | **Off** |
+| [Wikipedia](https://www.wikipedia.org)   | **Fill missing artist bios**, after MusicBrainz finds the artist             | The artist's Wikidata id and article title            | **Off** |
+| [Discogs](https://www.discogs.com)       | **Fill missing artist bios**, when Wikipedia has no article                  | The artist's Discogs id                               | **Off** |
 
 - **ListenBrainz** answers with its public list of new releases, and Waves matches it against your follows on your own machine.
 - **FFmpeg's update check** runs on every launch or at most once a day (your choice, once a day by default). The default above is for the check; installing only happens when you click.
@@ -290,6 +294,7 @@ With TIDAL, Waves does what you ask, and while it's open it also keeps the Relea
 - **Lyrics:** turning off **Prefer LRCLIB lyrics** skips LRCLIB and uses TIDAL's lyrics alone.
 - **Genre from MusicBrainz:** with **Artist genres for unlisted releases** on (the default), it also sends the artist's name when MusicBrainz does not list the release yet, unless Waves already knows the artist from a library or Releases lookup.
 - **MusicBrainz** requests go out at most one per second, and their answers are cached locally.
+- **Fill missing artist bios** asks about an artist only when their page or card shows with no bio, and keeps what it finds on your machine: a Wikipedia intro for a month, a Discogs profile for six hours (as Discogs' terms ask). The name is sent only when MusicBrainz has no link from the artist's TIDAL page, and is then matched by the releases both list, never by name alone.
 
 Your credentials and your saved music stay on your machine, and on macOS and Linux the files Waves keeps for itself (your settings, your sign-in, its caches and logs) live in a folder only your account can open, not every account on the machine. The same principle carries into the optional diagnostic log below: nothing leaves your machine unless you export a report yourself.
 
@@ -410,6 +415,12 @@ Waves is only possible because of a lot of excellent open-source work. All credi
 - [python-ffmpeg](https://github.com/jonghwanhyeon/python-ffmpeg), [m3u8](https://github.com/globocom/m3u8), [pycryptodome](https://github.com/Legrandin/pycryptodome): streaming, playlist parsing and update signature checks
 - [requests](https://github.com/psf/requests), [urllib3](https://github.com/urllib3/urllib3), [certifi](https://github.com/certifi/python-certifi), [dataclasses-json](https://github.com/lidatong/dataclasses-json), [pathvalidate](https://github.com/thombashi/pathvalidate)
 - [Nuitka](https://nuitka.net): compiles Waves into the app you download
+
+**Artist bios** (with **Fill missing artist bios** on)
+
+- Artists are matched through [MusicBrainz](https://musicbrainz.org), its data under [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
+- Bio text from [Wikipedia](https://en.wikipedia.org) is under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); each one is credited and links to its article.
+- Data provided by [Discogs](https://www.discogs.com). This application uses Discogs' API but is not affiliated with, sponsored or endorsed by Discogs. 'Discogs' is a trademark of Zink Media, LLC.
 
 **FFmpeg**
 
