@@ -107,6 +107,7 @@ _KEYS = {
         "metadata_genre_artist_fallback",
         "metadata_delimiter_genre",
         "metadata_cover_embed",
+        "metadata_cover_rockbox_compatible",
         "cover_album_file",
         "cover_single_track_file",
         "mark_explicit",
