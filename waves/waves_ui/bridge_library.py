@@ -1560,10 +1560,11 @@ class LibraryMixin:
             self._presence_memo = {}
             self._presence_memo_src = idx
         key = (title, artist, year, num_tracks, duration, flag)
-        verdict = self._presence_memo.get(key)
-        if verdict is None:
-            verdict = matching.decide_presence(title, artist, year, num_tracks, idx, duration, flag)
-            _remember(self._presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
+        memo = self._presence_memo.get(key)
+        if memo is None:
+            memo = LibraryMixin._album_verdict(idx, title, artist, year, num_tracks, duration, flag)
+            _remember(self._presence_memo, key, memo, _PRESENCE_MEMO_MAX)
+        verdict, used = memo
         if not verdict.get("present"):
             # A miss on a share whose listing cannot be trusted is not an
             # answer yet: ask the disk by name (see the probe section). A
@@ -1573,12 +1574,60 @@ class LibraryMixin:
             probe = getattr(self, "_library_probe_async", None)
             if probe is not None:
                 probe(artist)
+                # The primary's own folder too, the fallback above asks it.
+                primary = matching.credit_primary(artist)
+                if primary:
+                    probe(primary)
         have = verdict.get("local_explicit", -1)
         if flag is not None and have in (0, 1) and bool(have) != flag:
             # The copy is the other edition: no second opinion on the release
             # may swear it is this one.
             return verdict
-        return self._mb_arbitrated(verdict, title, artist, year, num_tracks, duration)
+        return self._mb_arbitrated(verdict, title, used, year, num_tracks, duration)
+
+    @staticmethod
+    def _album_verdict(idx, title, artist, year, num_tracks, duration, flag) -> tuple:
+        """The badge's verdict and the artist that answered it: the whole
+        credit first, then its primary artist. Cards name a collaboration
+        "A, B" while its files (Waves' own downloads, most taggers) file it
+        under A, so the whole credit alone left every collaboration in the
+        library without a badge. The primary only ever answers when the
+        whole credit found nothing, so a band with a comma in its name still
+        matches as itself."""
+        primary = matching.credit_primary(artist)
+        best = None
+        for asked in (artist, primary) if primary else (artist,):
+            found = matching.decide_presence(title, asked, year, num_tracks, idx, duration, flag)
+            if best is None or found.get("present"):
+                best = (found, asked)
+            if found.get("present"):
+                break
+        return best
+
+    @staticmethod
+    def _album_credit(album, artist: str) -> str:
+        """The release's main artists joined the way its card names them
+        ("A, B"), or ``artist`` when the release lists none or one."""
+        try:
+            from waves.helper.tidal import name_builder_album_artist
+
+            return name_builder_album_artist(album) or artist
+        except Exception:
+            return artist
+
+    @staticmethod
+    def _track_verdict(idx, title, artist, album, album_year, duration, flag) -> dict:
+        """The pill's verdict, asked like the badge's: the whole credit first,
+        then its primary artist only when the whole credit found nothing."""
+        primary = matching.credit_primary(artist)
+        best = None
+        for asked in (artist, primary) if primary else (artist,):
+            found = matching.decide_track_presence(title, asked, idx, album, album_year, duration, flag)
+            if best is None or found.get("present"):
+                best = found
+            if found.get("present"):
+                break
+        return best
 
     @staticmethod
     def _advisory_flag(value):
@@ -1630,12 +1679,15 @@ class LibraryMixin:
         key = (title, artist, album, album_year, duration, flag)
         verdict = self._track_presence_memo.get(key)
         if verdict is None:
-            verdict = matching.decide_track_presence(title, artist, idx, album, album_year, duration, flag)
+            verdict = LibraryMixin._track_verdict(idx, title, artist, album, album_year, duration, flag)
             _remember(self._track_presence_memo, key, verdict, _PRESENCE_MEMO_MAX)
         if not verdict.get("present"):
             probe = getattr(self, "_library_probe_async", None)  # as the album pill above
             if probe is not None:
                 probe(artist)
+                primary = matching.credit_primary(artist)
+                if primary:
+                    probe(primary)
         return verdict
 
     # ---- MusicBrainz arbitration (library_mb_arbiter, default off) -----------
@@ -1921,12 +1973,15 @@ class LibraryMixin:
             # the pill does: a mis-yeared remaster the seconds vouch for is
             # skipped, and a same-count copy minutes apart is refuted, both
             # the safe direction for a decision that costs a download.
-            p = matching.decide_presence(
+            # Asked the way the badge asks (the whole credit, then its
+            # primary), so a collaboration the badge finds is never fetched
+            # again, whichever way its files name it.
+            p, _used = LibraryMixin._album_verdict(
+                idx,
                 title,
-                artist,
+                LibraryMixin._album_credit(album, artist),
                 year,
                 int(getattr(album, "num_tracks", 0) or 0),
-                idx,
                 int(getattr(album, "duration", 0) or 0),
                 LibraryMixin._release_explicit(album, explicit),
             )
