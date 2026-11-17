@@ -122,6 +122,23 @@ def feat_guests(title: str, artist: str) -> frozenset:
     return frozenset(out)
 
 
+def credit_primary(artist: str) -> str:
+    """The first name of a comma-joined credit ("A, B" -> "A"), or "" when
+    the credit has no comma or nothing before it.
+
+    A FALLBACK identity only, never part of a key: the comma stays whole in
+    norm_artist because "Earth, Wind and Fire" is one band. Waves shows a
+    collaboration's main artists joined by ", ", while the files it writes
+    carry each album artist as its own tag value and the scan reads the
+    first, so a collaboration Waves downloaded files under its primary
+    artist. A caller asks with the whole credit first and with this only
+    when the whole credit finds nothing."""
+    text = (artist or "").strip()
+    if "," not in text:
+        return ""
+    return text.split(",", 1)[0].strip()
+
+
 def norm_artist(name: str) -> str:
     """Lowercased, whitespace-collapsed artist name for stable grouping, with
     a free-standing "&"/"+" folded to "and", the credit cut to its primary
