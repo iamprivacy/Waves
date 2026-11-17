@@ -34,6 +34,7 @@ Design rules baked in here:
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import logging
@@ -1947,17 +1948,37 @@ class AppUpdater:
                 raise
             backup = _spare_sibling(bundle, ".old", inside)
             _rmtree(backup)
-            backed_up = False
+            # The bundle folder itself stays; only what is inside it moves.
+            # Renaming the folder away (together with the old `open -n`
+            # restart) left the pinned Dock icon dead and brought the
+            # restarted app up as a second icon; keeping the folder and
+            # reopening it after this copy quits (see relaunch) keeps the pin.
+            # Checked on a pinned build of this app, not just reasoned.
+            backup.mkdir()
+            moved_out: list[str] = []
+            moved_in: list[str] = []
             try:
-                if bundle.exists():
-                    os.replace(bundle, backup)
-                    backed_up = True
-                os.replace(staged_same_dev, bundle)
+                for name in sorted(os.listdir(bundle)):
+                    os.replace(bundle / name, backup / name)
+                    moved_out.append(name)
+                for name in sorted(os.listdir(staged_same_dev)):
+                    os.replace(staged_same_dev / name, bundle / name)
+                    moved_in.append(name)
             except OSError:
-                if backed_up and not bundle.exists() and backup.exists():
-                    os.replace(backup, bundle)
+                for name in reversed(moved_in):
+                    os.replace(bundle / name, staged_same_dev / name)
+                for name in reversed(moved_out):
+                    os.replace(backup / name, bundle / name)
                 _rmtree(staged_same_dev)
+                # Only an emptied backup goes: if a move back failed, it still
+                # holds the old app, and that is the only copy left.
+                with contextlib.suppress(OSError):
+                    backup.rmdir()
                 raise
+            staged_same_dev.rmdir()
+            # Tell LaunchServices the bundle changed so it reads the new
+            # Info.plist (version, minimum system) instead of a cached one.
+            os.utime(bundle)
             # INVARIANT: only ever reached from install() *after* the signature +
             # checksum gate has passed, so quarantine is only stripped off bytes we
             # have authenticated. Do not call _apply before that gate.
@@ -2141,11 +2162,29 @@ class AppUpdater:
         try:
             if self.os_key == "macos" and ".app/" in exe:
                 bundle = exe.split(".app/")[0] + ".app"
-                subprocess.Popen(["open", "-n", bundle], close_fds=True)
+                # Opened once this copy has quit (capped at about 30 s), and
+                # without -n: a second instance started next to the dying one
+                # got its own Dock tile instead of lighting up the pinned one.
+                # The pid and path travel as arguments, never in the script.
+                subprocess.Popen(
+                    ["/bin/sh", "-c", _MACOS_RELAUNCH_SCRIPT, "waves-relaunch", str(os.getpid()), bundle],
+                    start_new_session=True,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 return
             os.execv(exe, [exe, *sys.argv[1:]])
         except Exception:
             logger.exception("relaunch failed")
+
+
+#: Waits for the quitting copy ($1, a pid) to exit, then opens the bundle ($2).
+_MACOS_RELAUNCH_SCRIPT = (
+    'i=0; while kill -0 "$1" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i+1)); done; '
+    'exec /usr/bin/open "$2"'
+)
 
 
 def _tree_paths(root: Path) -> list[str]:
