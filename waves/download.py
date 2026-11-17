@@ -4408,12 +4408,26 @@ class Download:
             )
             cover_data = self.cover_data_cached(url_cover)
 
+        # Compatibility mode applies to BOTH the embedded cover and the sidecar.
+        # Do not alter the cached original bytes, which may be used elsewhere.
+        if cover_data and getattr(self.settings.data, "metadata_cover_rockbox_compatible", False):
+            from waves.artwork import baseline_jpeg
+
+            cover_data = baseline_jpeg(cover_data)
+
         if cover_data and want_cover_file:
             cover_data_album_file = self._album_cover_file_data(
                 track, cover_data, cover_dimension, cover_file_dimension
             )
             # Its own fetch at the file size can fail ('' back) while the
             # embedded one worked: the track still lands, without cover.jpg.
+            if cover_data_album_file and getattr(self.settings.data, "metadata_cover_rockbox_compatible", False):
+                from waves.artwork import baseline_jpeg
+
+                # If a separate size was requested, it was fetched independently.
+                # Normalize that image too, not just the embedded one.
+                if cover_data_album_file is not cover_data:
+                    cover_data_album_file = baseline_jpeg(cover_data_album_file)
             if cover_data_album_file:
                 path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
 
