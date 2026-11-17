@@ -112,6 +112,7 @@ class Settings:
     # is a CoverDimensions member name (e.g. "Px640", "PxORIGIN") applied only to
     # the saved file, so the embedded art and the on-disk cover can differ.
     metadata_cover_file_dimension: str = "follow"
+    metadata_cover_rockbox_compatible: bool = False
     metadata_cover_embed: bool = True
     mark_explicit: bool = False
     cover_album_file: bool = True
@@ -253,6 +254,10 @@ class HelpSettings:
         "otherwise pick an independent size (80, 160, 320, 640, 1280, origin)."
     )
     metadata_cover_embed: str = "Embed album cover into file."
+    metadata_cover_rockbox_compatible: str = (
+        "Convert downloaded cover art to baseline 320px JPEG for Rockbox and older players. "
+        "Applies to embedded art and cover.jpg; does not change audio."
+    )
     mark_explicit: str = "Mark explicit tracks with '🅴' in track title (only applies to metadata)."
     cover_album_file: str = "Save cover to 'cover.jpg', if an album is downloaded."
     cover_single_track_file: str = "Also save cover.jpg when downloading a single track on its own."
