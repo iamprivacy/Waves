@@ -22,6 +22,14 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.6 (2026-11-17)
+
+### 🐛 Fixed
+
+- ✅ An album by two or more artists shows the in-library mark on its cover when its files are tagged with the first artist only.
+- ✅ Songs from such an album show their in-library mark too, and automatic downloads skip such an album already on disk however its files name the artists.
+- 🍎 On macOS an update keeps Waves in its Dock spot instead of adding a second icon.
+
 ## 🗂️ v0.2.5 (2026-11-14)
 
 ### ✨ Added
