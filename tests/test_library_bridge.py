@@ -1088,7 +1088,8 @@ def test_presence_never_reaches_the_download_engine():
     backend = (root / "waves" / "waves_ui" / "backend.py").read_text(encoding="utf-8")
     assert "decide_presence" not in backend, "presence answers stay in bridge_library"
     bridge = (root / "waves" / "waves_ui" / "bridge_library.py").read_text(encoding="utf-8")
-    assert bridge.count("decide_presence") == 2  # the badge slot + _library_claims_album
+    assert bridge.count("decide_presence") == 1  # inside _album_verdict, asked by:
+    assert bridge.count("_album_verdict(") == 3  # its def, the badge slot, _library_claims_album
     assert bridge.count("decide_track_presence") == 2  # the pill slot + _library_claims_track
 
 

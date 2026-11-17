@@ -346,14 +346,95 @@ def test_apply_macos_rolls_back_on_swap_failure(tmp_path, monkeypatch):
     real_replace = os.replace
 
     def fake_replace(src, dst, *a, **k):
-        if str(src).endswith(".app.new"):  # the staged→bundle swap blows up
+        if ".app.new/" in str(src):  # the staged→bundle swap blows up
+            raise OSError(errno.EIO, "boom")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(u.os, "replace", fake_replace)
+    ino = os.stat(bundle).st_ino
+    with pytest.raises(OSError):
+        up._apply_macos(staged, target, lambda *a, **k: None)
+    assert (bundle / "Contents" / "MacOS" / "Waves").read_text() == "LIVE"
+    assert os.stat(bundle).st_ino == ino
+    assert not (apps / "Waves.app.old").exists()
+    assert not (apps / "Waves.app.new").exists()
+
+
+def test_apply_macos_rolls_back_a_half_done_swap(tmp_path, monkeypatch):
+    """A failure after some of the new bundle already moved in puts those
+    entries back out and the old ones back in, so nothing of the two builds
+    is left mixed in the live bundle."""
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    monkeypatch.setattr(u.subprocess, "run", lambda *a, **k: None)
+    apps = tmp_path / "Applications"
+    bundle = apps / "Waves.app"
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    target = bundle / "Contents" / "MacOS" / "Waves"
+    target.write_text("LIVE")
+    staged = tmp_path / "staging" / "Waves.app"
+    (staged / "Contents" / "MacOS").mkdir(parents=True)
+    (staged / "Contents" / "MacOS" / "Waves").write_text("NEW")
+    (staged / "Zextra").write_text("NEW")  # sorts after Contents, so it fails second
+
+    real_replace = os.replace
+
+    def fake_replace(src, dst, *a, **k):
+        if str(src).endswith(".app.new/Zextra"):
             raise OSError(errno.EIO, "boom")
         return real_replace(src, dst, *a, **k)
 
     monkeypatch.setattr(u.os, "replace", fake_replace)
     with pytest.raises(OSError):
         up._apply_macos(staged, target, lambda *a, **k: None)
-    assert (bundle / "Contents" / "MacOS" / "Waves").read_text() == "LIVE"
+    assert sorted(os.listdir(bundle)) == ["Contents"]
+    assert target.read_text() == "LIVE"
+    assert not (apps / "Waves.app.old").exists()
+
+
+def test_apply_macos_keeps_the_bundle_folder_so_the_dock_pin_holds(tmp_path, monkeypatch):
+    """A Dock pin follows the bundle folder's identity, not only its path.
+    Renaming the folder away sent the pin after the old copy, and the
+    restarted app came up as a second Dock icon, so the folder stays and
+    only what is inside it is replaced."""
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    monkeypatch.setattr(u.subprocess, "run", lambda *a, **k: None)
+    bundle = tmp_path / "Applications" / "Waves.app"
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    target = bundle / "Contents" / "MacOS" / "Waves"
+    target.write_text("OLD")
+    staged = tmp_path / "staging" / "Waves.app"
+    (staged / "Contents" / "MacOS").mkdir(parents=True)
+    (staged / "Contents" / "MacOS" / "Waves").write_text("NEW")
+    ino = os.stat(bundle).st_ino
+
+    up._apply_macos(staged, target, lambda *a, **k: None)
+
+    assert os.stat(bundle).st_ino == ino
+    assert target.read_text() == "NEW"
+    assert sorted(os.listdir(bundle.parent)) == ["Waves.app"]
+
+
+def test_macos_relaunch_waits_for_this_copy_and_reuses_the_dock_tile(tmp_path, monkeypatch):
+    """`open -n` started a second instance next to the quitting one, which
+    got its own Dock tile. The relaunch now waits for this pid to exit and
+    opens the bundle plainly, with the pid and path as arguments only."""
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    monkeypatch.setattr(up, "os_key", "macos")
+    monkeypatch.setattr(u, "_running_appimage", lambda: None)
+    bundle = "/Applications/Odd $(name) & Co/Waves.app"
+    monkeypatch.setattr(u, "_current_exe", lambda: Path(bundle + "/Contents/MacOS/Waves"))
+    monkeypatch.setattr(u.os, "getpid", lambda: 4242)
+    calls = []
+    monkeypatch.setattr(u.subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
+
+    up.relaunch()
+
+    ((args, kw),) = calls
+    assert args[:2] == ["/bin/sh", "-c"]
+    assert "-n" not in args and "-n" not in args[2]
+    assert args[-2:] == ["4242", bundle]
+    assert bundle not in args[2]
+    assert kw["start_new_session"] is True
 
 
 def test_apply_windows_helper_backs_up_and_restores(tmp_path, monkeypatch):
