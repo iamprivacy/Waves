@@ -22,12 +22,18 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.7 (2026-11-18)
+
+### 🐛 Fixed
+
+- 🔑 A sign-in that fails says why on the sign-in panel instead of seeming to do nothing, including when the wrong link is pasted ([issue #63](https://github.com/iamprivacy/Waves/issues/63)).
+- 🔒 Diagnostic logs no longer keep your TIDAL account number.
+
 ## 🗂️ v0.2.6 (2026-11-17)
 
 ### 🐛 Fixed
 
-- ✅ An album by two or more artists shows the in-library mark on its cover when its files are tagged with the first artist only.
-- ✅ Songs from such an album show their in-library mark too, and automatic downloads skip such an album already on disk however its files name the artists.
+- ✅ An album by two or more artists is recognized as in your library however its files name the artists (even the first artist only): its cover and its songs show the in-library mark, and automatic downloads skip it.
 - 🍎 On macOS an update keeps Waves in its Dock spot instead of adding a second icon.
 
 ## 🗂️ v0.2.5 (2026-11-14)
