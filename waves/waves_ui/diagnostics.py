@@ -158,7 +158,8 @@ class _Redactor:
     # value learned at runtime is replaced literally by register_secret.)
     _KV_SECRET = re.compile(
         r"(?i)\b(bearer|authorization|auth|token|api[_-]?key|apikey|secret|password|passwd|"
-        r"cookie|set-cookie|session[_-]?id|access[_-]?token|refresh[_-]?token|client[_-]?secret)\b"
+        r"cookie|set-cookie|session[_-]?id|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+        r"user[_-]?id|account[_-]?id|customer[_-]?id)\b"
         r"(?:"
         r"(['\"]?\s*[:=]\s*)(['\"]?)([^\s'\"&;,]+)"
         r"|"
@@ -202,6 +203,15 @@ class _Redactor:
     # thing goes; the path in front of it stays, which is what makes the line
     # useful. Requires a "=" so ordinary prose ("why? x") is left alone.
     _URL_QUERY = re.compile(r"(?<![\s'\"])\?[^\s'\"<>|]*=[^\s'\"<>|]*")
+    # The TIDAL account id as an API path segment: /v1/users/<id>/subscription,
+    # tidalapi's bare "users/<id>/favorites", or its public playlists read
+    # "user-playlists/<id>/public". The query rule above keeps
+    # paths on purpose, and tidalapi's own "Request resulted in exception"
+    # line (plus urllib3's retries) logs them before the bridge has registered
+    # the id as a secret, or in a sign-in that fails before it ever does.
+    # Digits only: an account id is a number, a word such as "users/manual"
+    # is not one.
+    _ACCOUNT_PATH = re.compile(r"(?i)\b(users/|user-playlists/)(\d{3,})\b")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -258,6 +268,7 @@ class _Redactor:
         for value, placeholder in secrets:
             text = text.replace(value, placeholder)
         text = self._URL_QUERY.sub("?‹query›", text)
+        text = self._ACCOUNT_PATH.sub(r"\1‹account›", text)
         text = self._BEARER.sub("Bearer ‹redacted›", text)
         text = self._KV_SECRET.sub(self._kv_sub, text)
         text = self._MAC.sub("‹mac›", text)
