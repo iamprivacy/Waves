@@ -136,6 +136,8 @@ class _PkceStub:
     def __init__(self, *, finalize_ok: bool = True, page_cache_raises: bool = False, exchange_raises: bool = False):
         self._page_cache_raises = page_cache_raises
         self._busy: list[bool] = []
+        self._login_busy = False
+        self._login_errors: list[str] = []
         self._logged_in_calls: list[bool] = []
         self._statuses: list[str] = []
         self._page_cache_loaded = False
@@ -158,6 +160,12 @@ class _PkceStub:
 
     def _set_busy(self, value: bool) -> None:
         self._busy.append(value)
+
+    def _set_login_error(self, msg: str) -> None:
+        self._login_errors.append(msg)
+
+    def _set_login_busy(self, value: bool) -> None:
+        self._login_busy = value
 
     def _set_status(self, msg: str) -> None:
         self._statuses.append(msg)

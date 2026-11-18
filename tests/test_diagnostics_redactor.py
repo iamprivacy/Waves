@@ -53,6 +53,25 @@ IDENTITY_CORPUS = [
     ),
     ("mount sftp:host=nas01.local,user=carol.s/Music unreachable", ["nas01", "carol.s"]),
     ("gvfs domain=WORKGROUP1,server=nas01,share=mediashare listed", ["WORKGROUP1", "nas01", "mediashare"]),
+    # the TIDAL account id in an API path. The query rule keeps the path, and
+    # tidalapi's own "Request resulted in exception ..." line, its failed
+    # sign-in steps and urllib3's retry lines all name /v1/users/<id>/... before
+    # the bridge has registered the id as a secret (or in a run that never
+    # does, like a sign-in that fails half way).
+    (
+        "Request resulted in exception 401 Client Error: Unauthorized for url: "
+        "https://api.tidal.com/v1/users/198765432/subscription?countryCode=US",
+        ["198765432"],
+    ),
+    ("Retrying (Retry(total=2)) after connection broken: /v1/users/198765432/favorites/tracks", ["198765432"]),
+    ("request: https://api.tidal.com/v1/users/198765432?sessionId=x", ["198765432"]),
+    ("GET users/198765432/playlistsAndFavoritePlaylists -> 500", ["198765432"]),
+    ("GET users/198765432/subscription -> 404", ["198765432"]),
+    ("GET user-playlists/198765432/public -> 404", ["198765432"]),
+    # the same id as a JSON or key=value field in a logged response body
+    ('Login failed: {"userId": 198765432, "status": 401}', ["198765432"]),
+    ("cache key user_id=198765432 stale", ["198765432"]),
+    ("profile accountId: 198765432 refreshed", ["198765432"]),
     # network identifiers
     ("connected from 192.168.1.44 to peer", ["192.168.1.44"]),
     ("listening on fe80::1c2a:3bff:fe4d:5e6f%en0", ["fe80::1c2a:3bff:fe4d:5e6f"]),
@@ -104,6 +123,11 @@ KEEP_CORPUS = [
     # The UNC rule must not eat a URL's scheme separator or a doubled slash
     # inside an ordinary path.
     ("GET https://api.tidal.com/v1/tracks/123 -> 200", ["https://api.tidal.com/v1/tracks/123"]),
+    # Catalog ids are not people: an album, artist or track path stays whole.
+    ("GET https://api.tidal.com/v1/albums/77646168/tracks -> 200", ["/v1/albums/77646168/tracks"]),
+    ("artist 3746724 page built in 120 ms", ["3746724"]),
+    # The account rule names the path segment, not the word on its own.
+    ("3 users reported the bug", ["3 users reported"]),
     ("scanning /Music//Artist/Album took 2s", ["/Music//Artist/Album"]),
     # The download slot ledger's two lines (waves/download_slots.py): a
     # cooldown length and a refusal over disk space, neither naming a path.

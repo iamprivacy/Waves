@@ -32,6 +32,8 @@ class _Stub:
     completeLogin = WavesBridge.completeLogin
 
     def __init__(self):
+        self._login_busy = False
+        self.login_errors: list[str] = []
         self.statuses: list[str] = []
         self.busy: list[bool] = []
         # Booby-trapped on purpose: a paste that fails the guard must never
@@ -44,6 +46,12 @@ class _Stub:
 
     def _set_busy(self, on):
         self.busy.append(bool(on))
+
+    def _set_login_error(self, text):
+        self.login_errors.append(text)
+
+    def _set_login_busy(self, on):
+        self._login_busy = bool(on)
 
 
 def _watching_waves_logger():
@@ -60,7 +68,7 @@ def test_a_stray_clipboard_paste_is_refused_and_never_logged():
         stub = _Stub()
         stub.completeLogin("hunter2 remind mom about tuesday")
 
-        assert stub.statuses and "Copy the full URL" in stub.statuses[-1]
+        assert stub.statuses and "Copy the full link" in stub.statuses[-1]
         assert stub.busy == [], "a refused paste must not cycle the spinner"
         joined = "\n".join(handler.messages)
         assert "hunter2" not in joined and "tuesday" not in joined
@@ -85,7 +93,7 @@ def test_a_real_looking_url_still_goes_through_to_tidalapi():
 
     stub.tidal = SimpleNamespace(session=SimpleNamespace(pkce_get_auth_token=_raise_keyerror))
 
-    stub.completeLogin("https://tidal.com/android/login/auth?weird=1")
+    stub.completeLogin("https://tidal.com/android/login/auth?code=x&weird=1")
 
     assert stub.statuses[-1] == "Sign-in failed. Try again."
     assert stub.busy == [True, False]
