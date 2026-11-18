@@ -505,6 +505,7 @@ _FLAG_FIELDS = [
     "download_delay",
     "extract_flac",
     "metadata_cover_embed",
+    "metadata_cover_rockbox_compatible",
     "cover_album_file",
     # Child of cover_album_file, carried inside its "cover_scope" composite rather
     # than as its own tile; listed here so applySettings persists it as a bool.
@@ -1188,6 +1189,7 @@ _FIELD_LABELS = {
     # Tags & Artwork
     "metadata_cover_dimension": "Embedded cover size",
     "metadata_cover_embed": "Embed cover art",
+    "metadata_cover_rockbox_compatible": "Rockbox-compatible artwork",
     "cover_album_file": "Save cover.jpg",
     "lyrics_embed": "Embed lyrics",
     "lyrics_file": "Save lyrics file",
@@ -20051,6 +20053,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     # Switch tiles, three a row: covers and the explicit mark,
                     # then the three lyrics switches together, then the tags.
                     "metadata_cover_embed",
+                    "metadata_cover_rockbox_compatible",
                     "cover_album_file",
                     "mark_explicit",
                     "lyrics_embed",
