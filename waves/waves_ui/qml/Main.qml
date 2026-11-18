@@ -26127,7 +26127,7 @@ ApplicationWindow {
                     Text { text: "2"; color: root.accent; font.family: root.mono; font.pixelSize: 12; font.bold: true; Layout.alignment: Qt.AlignTop }
                     Text {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        text: "Paste the URL you land on back here."
+                        text: "TIDAL will then show a \"Page not found\" page. That's normal! Copy the link from your browser's address bar and paste it here."
                         color: root.textLo; font.pixelSize: 13
                     }
                 }
@@ -26147,8 +26147,9 @@ ApplicationWindow {
                         anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 8
                         TextField {
                             id: redirectField
+                            objectName: "redirectField"
                             Layout.fillWidth: true
-                            placeholderText: "Paste redirect URL here…"
+                            placeholderText: "Paste the link here…"
                             color: loginDecoder.decoding ? root.accent : root.textHi
                             placeholderTextColor: root.textLo; font.pixelSize: 13; font.family: root.mono
                             background: Rectangle { color: "transparent" }
@@ -26162,11 +26163,27 @@ ApplicationWindow {
                         }
                     }
                 }
+                // The panel's own feedback: the status bar sits under this
+                // overlay, so a failure reported only there read as nothing
+                // happening at all (issues #7, #56, #63).
+                Text {
+                    objectName: "loginErrorText"
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    visible: loginPanel.urlOpened && waves.loginError !== ""
+                    textFormat: Text.PlainText; text: waves.loginError
+                    color: root.redContTx; font.pixelSize: 13
+                }
                 SpecBtn {
+                    objectName: "loginCompleteBtn"
                     Layout.alignment: Qt.AlignHCenter; primary: true
                     visible: loginPanel.urlOpened
-                    label: "COMPLETE SIGN-IN"
-                    onClicked: waves.completeLogin(redirectField.text)
+                    enabled: !waves.loginBusy
+                    opacity: enabled ? 1 : 0.6
+                    label: waves.loginBusy ? "SIGNING IN…" : "COMPLETE SIGN-IN"
+                    // Mid-decode the field holds the link's start plus scramble;
+                    // send the real link, as Enter does (a scrambled code would be
+                    // refused, and the busy guard would then drop the real one).
+                    onClicked: waves.completeLogin(loginDecoder.decoding ? loginDecoder.finish() : redirectField.text)
                 }
             }
         }
