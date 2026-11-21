@@ -126,6 +126,32 @@ def test_launcher_round_trips_a_scan_with_progress(tmp_path, monkeypatch):
     assert w._proc is None
 
 
+def test_launcher_indexes_a_landed_folder(tmp_path, monkeypatch):
+    """A download's folder is indexed in the child, between scans, and a
+    child that is busy answers None at once instead of queueing behind it."""
+    monkeypatch.chdir(_ROOT)
+    root = tmp_path / "music"
+    (root / "A" / "Old").mkdir(parents=True)
+    # Not empty: an empty root is never stamped as scanned, and the index job
+    # refuses a cache that was not scanned for its root.
+    (root / "A" / "Old" / "01.flac").write_bytes(b"")
+    cache = str(tmp_path / "c.sqlite3")
+    w = _worker()
+    try:
+        assert w.run_scan({"cache": cache, "root": str(root), "recover": False}, alive=lambda: True, on_progress=None)
+        landed = root / "A" / "New"
+        landed.mkdir()
+        (landed / "01.flac").write_bytes(b"")
+        job = {"cache": cache, "root": str(root), "folders": [str(landed)]}
+        out = w.run_index(job, alive=lambda: True)
+        assert out is not None and out["ev"] == "index_done" and out["read"] == 1
+        with w._job_lock:
+            assert w.run_index(job, alive=lambda: True) is None
+        assert not w.disabled
+    finally:
+        w.close()
+
+
 def test_launcher_kills_a_superseded_job_and_answers_none(tmp_path, monkeypatch):
     monkeypatch.chdir(_ROOT)
     root = tmp_path / "music"

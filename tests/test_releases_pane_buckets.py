@@ -1536,6 +1536,61 @@ def _run_scenario() -> int:  # noqa: C901
     if q("releasesUnseen") != 0:
         failures.append(f"focus coming back left the badge at {q('releasesUnseen')}")
 
+    # 12. IMPORT LIST and EXPORT LIST (issue #65), in Settings, Releases: a
+    # list's review follows its picks as the user's own, says what went
+    # wrong with a file, and the export's answer is said on its button.
+    from PySide6.QtCore import QObject
+
+    def item(name: str):
+        return root.findChild(QObject, name)
+
+    def dialog_text(name: str) -> str:
+        return str(item(name).property("text") or "")
+
+    from PySide6.QtQuick import QQuickItem  # noqa: F401  (wraps items so childItems() works)
+
+    def visual(name: str):
+        stack = [q("settingsPage")]
+        while stack:
+            it = stack.pop()
+            if it.objectName() == name:
+                return it
+            stack.extend(it.childItems())
+        return None
+
+    q("settingsOpen = true")
+    settle(200)
+    q('settingsPage.showSection("releases")')
+    if not pump(lambda: all(visual(n) is not None for n in ("settingsImportListBtn", "settingsExportListBtn"))):
+        failures.append("Settings, Releases has no IMPORT LIST / EXPORT LIST row")
+    q('settingsPage.followListPicked("file:///nowhere/artists.txt")')
+    if not q("importDialog.fromList") or not q("importDialog.manualPicks") or not q("importDialog.open"):
+        failures.append("IMPORT LIST's pick did not open a hand-follow list review")
+    if q("importDialog.stage") != "error" or q("importDialog.error") != "not-signed-in":
+        failures.append("a signed-out list import did not say so")
+    if dialog_text("importTitle") != "Follow artists from a list":
+        failures.append(f"the list review's title read {dialog_text('importTitle')!r}")
+    for word, line in (("file-unreadable", "could not be read as text"), ("file-empty", "No artist names")):
+        bridge.artistImportError.emit(word)
+        settle(50)
+        if line not in dialog_text("importStatus"):
+            failures.append(f"the {word} error read {dialog_text('importStatus')!r}")
+    q("importDialog.discard()")
+    q("importDialog.show()")
+    if q("importDialog.fromList") or dialog_text("importTitle") != "Follow your library's artists":
+        failures.append("IMPORT LIBRARY kept the list review's wording")
+    q("importDialog.discard()")
+    bridge.artistListExported.emit(3, "")
+    if q("settingsPage.followListWord") != "SAVED 3":
+        failures.append(f"the export answer read {q('settingsPage.followListWord')!r}")
+    bridge.artistListExported.emit(0, "file-unwritable")
+    if q("settingsPage.followListWord") != "NOT SAVED":
+        failures.append(f"a failed export read {q('settingsPage.followListWord')!r}")
+    if not pump(lambda: q("settingsPage.followListWord") == "", 4000):
+        failures.append("the export answer never went back to EXPORT LIST")
+    q("settingsOpen = false")
+    settle(100)
+
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return _EXIT_REGRESSED

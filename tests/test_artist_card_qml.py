@@ -590,6 +590,96 @@ def _run_scenario() -> int:  # (one linear scenario)
     park()
     settle(200)
 
+    # 13. The import review: every artist name in it (a matched row's name,
+    # a close-name tile) opens the card over the review, look only. A name
+    # behind the review opens none, Esc closes the card before the review,
+    # and the review closing takes its card with it.
+    def review_item(name: str, nth: int = 0):
+        top = wrapInstance(getCppPointer(q("importDialog"))[0], QQuickItem)
+        found, stack = [], [top]
+        while stack:
+            it = stack.pop()
+            if it.objectName() == name and it.isVisible():
+                found.append(it)
+            stack.extend(it.childItems())
+        found.sort(key=lambda i: (i.mapToScene(QPointF(0, 0)).y(), i.mapToScene(QPointF(0, 0)).x()))
+        return found[nth] if len(found) > nth else None
+
+    def hover(it) -> None:
+        p = it.mapToScene(QPointF(min(it.width() / 2, 20), it.height() / 2))
+        QTest.mouseMove(root, QPoint(int(p.x()), int(p.y())))
+
+    q('importDialog.open = true; importDialog.manualPicks = true; importDialog.stage = "scan"')
+    bridge.artistImportReady.emit(
+        {
+            "matched": [
+                {
+                    "name": "Base Notion",
+                    "norm": "base notion",
+                    "albums": 0,
+                    "reason": "list",
+                    "artist": {"id": "11", "name": "Base Notion", "art": ""},
+                }
+            ],
+            "fuzzy": [
+                {
+                    "name": "Late Artst",
+                    "norm": "late artst",
+                    "albums": 0,
+                    "candidates": [{"id": "33", "name": "Late Artist", "art": ""}],
+                }
+            ],
+            "unmatched": [],
+            "skipped": 0,
+            "artists": 2,
+        }
+    )
+    settle(300)
+    check(q("importDialog.stage") == "review", f"the review did not come up ({q('importDialog.stage')})")
+    q(
+        "(function () { var t = Qt.createQmlObject('import QtQuick; Text { x: 300; y: 300;"
+        ' text: "Behind"; textFormat: Text.PlainText }\', root.contentItem);'
+        ' root.artistCardFor(t, "11", "Base Notion", ""); return true })()'
+    )
+    settle(650)
+    check(not q("ahcCard.visible"), "a name behind the review opened a card over it")
+    name = review_item("importMatchName")
+    if name is None:
+        check(False, "the review has no matched name")
+    else:
+        hover(name)
+        settle(700)
+        check(bool(q("ahcCard.visible")) and q("root.ahcId") == "11", "a matched name in the review opened no card")
+        check(bool(q("root.ahcInReview")), "the review's card is not in its look-only form")
+        bridge.artistSummaryReady.emit("11", _summary("11", "Base Notion"))
+        settle(200)
+        for hidden in ("ahcFollow", "ahcOpenPage"):
+            it = find(hidden)
+            check(it is None or not it.isVisible(), f"{hidden} shows on the review's card")
+        check(q("ahcCard.z") > q("importDialog.z"), "the card sits under the review")
+        QTest.keyClick(root, Qt.Key_Escape)
+        settle(150)
+        check(not q("ahcCard.visible") and bool(q("importDialog.open")), "Esc did not close the card before the review")
+    park()
+    settle(300)
+    tile = review_item("importCandidate")
+    if tile is None:
+        check(False, "the review has no close-name tile")
+    else:
+        hover(tile)
+        settle(700)
+        check(bool(q("ahcCard.visible")) and q("root.ahcId") == "33", "a close-name tile opened no card")
+        q("importDialog.discard()")
+        settle(150)
+        check(not q("ahcCard.visible") and not q("root.ahcInReview"), "closing the review left its card up")
+    park()
+    settle(300)
+    QTest.mouseMove(root, center(name_at(0)))
+    settle(700)
+    check(bool(q("ahcCard.visible")) and not q("root.ahcInReview"), "a page name after the review opened no full card")
+    park()
+    settle(300)
+
     check(not loops, f"binding loops: {loops[:3]}")
     check(not errors, f"QML errors: {errors[:3]}")
     if failures:

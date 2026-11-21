@@ -62,6 +62,7 @@ _KEYS = {
         "releases_import_min_tracks",
     ],
     "releases": [
+        "releases_follow_list",
         "releases_auto_download",
         "follow_mirror_tidal",
         "releases_fresh_hints",
@@ -77,6 +78,7 @@ _KEYS = {
         "edition_conflict",
         "disco_albums",
         "disco_eps",
+        "disco_skip_covered",
         "disco_featured",
         "disco_appears_on",
         "video_download",
@@ -101,6 +103,8 @@ _KEYS = {
     "metadata": [
         "metadata_cover_dimension",
         "metadata_cover_file_dimension",
+        "metadata_cover_baseline",
+        "cover_file_name",
         "metadata_target_upc",
         "initial_key_format",
         "metadata_genre",

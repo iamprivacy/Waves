@@ -156,6 +156,11 @@ for _m in (
     "_releases_import_alive",
     "_releases_import_scan",
     "_releases_import_run",
+    "_releases_import_rows",
+    "_releases_list_rows",
+    "_releases_export_list",
+    "startArtistImportFile",
+    "exportFollowedArtists",
     "_releases_import_tags",
     "_releases_import_searcher",
     "_releases_import_pacer",
@@ -306,6 +311,8 @@ def _stub(tmp_path, *, prefs=None):
     s.artistImportError = _Signal()
     s.artistImportDone = _Signal()
     s._relImportDone = _Signal()
+    s.artistListExported = _Signal()
+    s._rel_list_pool = _InlinePool()
     s._rel_import_auto = False
     s._rel_lib_stamp_seen = -1
     s._rel_auto_last = 0.0

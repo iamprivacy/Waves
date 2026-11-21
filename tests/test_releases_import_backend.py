@@ -755,3 +755,153 @@ def test_a_library_copy_reads_as_a_short_quality_label():
     assert rel._quality_label("aac", 16, 44100, 256) == "256 AAC"
     assert rel._quality_label("mp3", 0, 48000, 0) == "MP3"
     assert rel._quality_label("", 16, 44100, 0) == ""
+
+
+# --- Import list and Export list (issue #65) --------------------------------------
+
+
+def _run_file(s, path):
+    """Start a list run on a file (a file:// URL, as the dialog hands it over)
+    and land its outcome."""
+    from PySide6.QtCore import QUrl
+
+    _bind(s, "startArtistImportFile")(QUrl.fromLocalFile(str(path)).toString())
+    if s._relImportDone.emits:
+        _bind(s, "_on_rel_import_done")(s._relImportDone.emits[-1])
+
+
+def test_a_list_needs_no_library(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], {"Caribou": [("1", "Caribou")]}, monkeypatch=monkeypatch)
+    s._library_index = None
+    lst = tmp_path / "artists.txt"
+    lst.write_text("Caribou\n", encoding="utf-8")
+    _run_file(s, lst)
+    assert s.artistImportError.emits == []
+    (payload,) = s.artistImportReady.emits
+    assert [r["artist"]["id"] for r in payload["matched"]] == ["1"] and payload["artists"] == 1
+    assert s._rel_import_running is False
+
+
+def test_a_listed_name_the_library_holds_keeps_its_tag(tmp_path, monkeypatch):
+    s = _import_stub(
+        tmp_path,
+        [("Caribou", [["11"]]), ("Low", [])],
+        {"Nils Frahm": [("22", "Nils Frahm")]},
+        monkeypatch=monkeypatch,
+    )
+    lst = tmp_path / "artists.txt"
+    lst.write_text("caribou\nNils Frahm\n", encoding="utf-8")
+    _run_file(s, lst)
+    # Caribou from its files' tag, no request; Low (not listed) never looked at.
+    assert s.asked == ["Nils Frahm"]
+    (payload,) = s.artistImportReady.emits
+    first = payload["matched"][0]
+    assert (first["artist"]["id"], first.get("reason")) == ("11", "tag")
+    assert sorted(r["artist"]["id"] for r in payload["matched"]) == ["11", "22"]
+
+
+def test_a_list_ignores_the_floor_and_forget_and_leaves_the_tray_alone(tmp_path, monkeypatch):
+    s = _import_stub(
+        tmp_path,
+        [("Thin", [])],
+        {"Thin": [("1", "Thin")], "Gone": [("2", "Gone")], "Nobody": []},
+        tracks={"Thin": 1},
+        monkeypatch=monkeypatch,
+    )
+    s._releases.tray_record([{"norm": "gone", "name": "Gone", "reason": "unmatched"}])
+    _bind(s, "dismissArtistImportTray")("gone")
+    before = s._releases.tray_count()
+    lst = tmp_path / "artists.txt"
+    lst.write_text("Thin\nGone\nNobody\n", encoding="utf-8")
+    _run_file(s, lst)
+    (payload,) = s.artistImportReady.emits
+    assert sorted(r["artist"]["id"] for r in payload["matched"]) == ["1", "2"]
+    assert [r["name"] for r in payload["unmatched"]] == ["Nobody"]
+    assert s._releases.tray_count() == before
+    # Nothing from a list counts as a library artist looked at.
+    assert _bind(s, "_releases_seen_norms")() == set()
+
+
+def test_an_unreadable_list_says_so_without_the_path(tmp_path, monkeypatch, caplog):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    s._library_index = None
+    caplog.set_level("DEBUG")
+    _run_file(s, tmp_path / "secret-folder" / "missing.txt")
+    assert s.artistImportError.emits == ["file-unreadable"]
+    assert "secret-folder" not in caplog.text
+    assert s._rel_import_running is False
+
+
+def test_a_binary_list_is_unreadable(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    png = tmp_path / "cover.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    _run_file(s, png)
+    assert s.artistImportError.emits == ["file-unreadable"]
+
+
+def test_an_empty_list_says_so(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    lst = tmp_path / "artists.csv"
+    lst.write_text("Artist\n\n", encoding="utf-8")
+    _run_file(s, lst)
+    assert s.artistImportError.emits == ["file-empty"] and s.asked == []
+
+
+def test_a_list_signed_out_refuses(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    s._logged_in = False
+    lst = tmp_path / "artists.txt"
+    lst.write_text("Caribou\n", encoding="utf-8")
+    _run_file(s, lst)
+    assert s.artistImportError.emits == ["not-signed-in"]
+
+
+def test_a_list_confirm_follows_as_the_users_own(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], {"Caribou": [("1", "Caribou")]}, monkeypatch=monkeypatch)
+    lst = tmp_path / "artists.txt"
+    lst.write_text("Caribou\n", encoding="utf-8")
+    _run_file(s, lst)
+    _bind(s, "confirmArtistPicks")([{"id": "1", "name": "Caribou", "art": "", "norm": "caribou"}])
+    (row,) = s._releases.followed_artists()
+    assert row["origin"] == "manual"
+
+
+def test_export_writes_every_follow(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    s._releases.follow_many(
+        [{"id": "11", "name": "Caribou", "art": ""}, {"id": "22", "name": "Earth, Wind & Fire", "art": ""}]
+    )
+    from PySide6.QtCore import QUrl
+
+    out = tmp_path / "following.csv"
+    _bind(s, "exportFollowedArtists")(QUrl.fromLocalFile(str(out)).toString())
+    assert s.artistListExported.emits == [(2, "")]
+    assert out.read_text(encoding="utf-8-sig").splitlines() == [
+        "Artist,TIDAL artist id",
+        "Caribou,11",
+        '"Earth, Wind & Fire",22',
+    ]
+
+
+def test_export_to_an_unwritable_place_says_so_without_the_path(tmp_path, monkeypatch, caplog):
+    s = _import_stub(tmp_path, [], monkeypatch=monkeypatch)
+    s._releases.follow_many([{"id": "11", "name": "Caribou", "art": ""}])
+    caplog.set_level("DEBUG")
+    _bind(s, "exportFollowedArtists")(str(tmp_path / "secret-folder" / "no" / "following.csv"))
+    assert s.artistListExported.emits == [(0, "file-unwritable")]
+    assert "secret-folder" not in caplog.text
+
+
+def test_an_exported_list_comes_back_with_no_search(tmp_path, monkeypatch):
+    s = _import_stub(tmp_path, [], {}, monkeypatch=monkeypatch)
+    s._releases.follow_many([{"id": "11", "name": "Caribou", "art": ""}])
+    out = tmp_path / "following.csv"
+    out.write_text("Artist,TIDAL artist id\nCaribou,11\nNils Frahm,22\nLow,\n", encoding="utf-8")
+    s.asked.clear()
+    _run_file(s, out)
+    (payload,) = s.artistImportReady.emits
+    # Nils Frahm by its id, no request; Caribou already followed; Low searched.
+    assert s.asked == ["Low"]
+    assert [(r["artist"]["id"], r["reason"]) for r in payload["matched"]] == [("22", "list")]
+    assert payload["skipped"] >= 1
