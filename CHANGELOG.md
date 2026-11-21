@@ -22,6 +22,20 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.8 (2026-11-21)
+
+### ✨ Added
+
+- 🖼️ **Baseline JPEG covers** (Settings → Tags & Artwork, off by default): saves the embedded art and the cover file as baseline JPEG for players that cannot show progressive covers, such as Rockbox, as **Smaller files** or **Closest to original**. Thanks to EndoVendor for the idea and the first version ([pull request 64](https://github.com/iamprivacy/Waves/pull/64)).
+- 🏷️ **Cover file name** (Settings → Tags & Artwork): the saved cover can be named something other than cover.jpg, such as folder.jpg for Windows Explorer and players that look for it; a cover already saved under another name is kept ([issue #66](https://github.com/iamprivacy/Waves/issues/66)).
+- 💿 **Skip ones an album holds** (Settings → Discography & Editions, under EPs & singles, off by default): Download discography leaves out an EP or single whose every track is already on a bigger release in the same download, so pre-release singles stop doubling up ([issue #67](https://github.com/iamprivacy/Waves/issues/67)).
+- 📄 **Import list** and **Export list** (Settings → Releases): export the artists you follow to a .csv or .txt file, or follow everyone named in one (one name per line, or an Artist column) after reviewing the matches, with or without a library ([issue #65](https://github.com/iamprivacy/Waves/issues/65)).
+- ☕ A note from the developer opens at each launch, with a way to support Waves and a link for job offers.
+
+### 🐛 Fixed
+
+- ⚡ A song you just downloaded shows its in-library mark within a few seconds, instead of only after a rescan of your whole library.
+
 ## 🗂️ v0.2.7 (2026-11-18)
 
 ### 🐛 Fixed
