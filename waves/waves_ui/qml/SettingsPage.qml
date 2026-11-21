@@ -3,6 +3,7 @@ import QtQuick.Controls.Basic
 import QtQuick.Effects
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtCore
 import QtQuick.Shapes
 import "HeartGib.js" as HeartGib
 
@@ -25,6 +26,8 @@ Item {
     // page asks, Main.qml confirms with the count and calls the backend.
     signal flacFixRequested(int count, string where)
     signal flacResumeRequested(string where)
+    // IMPORT LIST's pick: Main opens the import review over that file.
+    signal followListPicked(string url)
     function externalReset() { editMap = ({}); unsaved = ({}); dirty = false; refreshSchema(); syncLibraryMirrors(); flacRefresh() }
 
     // Waves palette (kept local so this file is self-contained)
@@ -1641,6 +1644,36 @@ Item {
         property string targetKey: ""
         onAccepted: page.setv(targetKey, page.urlToPath(selectedFile))
     }
+    // Artist list (Releases): only the file the user picks is read or
+    // written. Export's answer is said on its button for a moment.
+    property string followListWord: ""
+    Timer { id: followListWordTimer; interval: 2200; onTriggered: page.followListWord = "" }
+    FileDialog {
+        id: followListOpenDlg
+        objectName: "followListOpenDlg"
+        title: "Import a list of artists"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Artist lists (*.txt *.csv)", "All files (*)"]
+        onAccepted: page.followListPicked("" + selectedFile)
+    }
+    FileDialog {
+        id: followListSaveDlg
+        objectName: "followListSaveDlg"
+        title: "Export the artists you follow"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "csv"
+        nameFilters: ["CSV file (*.csv)", "Text file (*.txt)"]
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        selectedFile: currentFolder + "/waves-following.csv"
+        onAccepted: waves.exportFollowedArtists("" + selectedFile)
+    }
+    Connections {
+        target: waves
+        function onArtistListExported(count, error) {
+            page.followListWord = error !== "" ? "NOT SAVED" : "SAVED " + count
+            followListWordTimer.restart()
+        }
+    }
 
     // ---- Section rail ---------------------------------------------------
     // Left of the pane, under the sticky header. Click a section to show it;
@@ -1952,96 +1985,16 @@ Item {
             }
         }
 
-        // Buy Me a Coffee, above the credit; opens the page in the browser.
-        // No box: a white ceramic mug with the coffee showing through an
-        // open rim, and the label in Buy Me a Coffee's own yellow. The mug
-        // steams all the time, and the steam climbs higher and quicker
-        // while hovered. The mug's body sits on the middle of the label's
-        // capitals, not on the canvas middle (the steam headroom would push
-        // it low).
-        Item {
+        // Buy Me a Coffee, above the credit (CoffeeButton.qml, shared with
+        // the launch note). The steam runs only while Settings shows.
+        CoffeeButton {
             id: coffee
             objectName: "settingsCoffee"
             anchors.horizontalCenter: parent.horizontalCenter
             y: 4
-            readonly property color yellow:    "#ffdd00"
-            readonly property color yellowHot: "#ffe94d"
-            readonly property color ceramic:   "#f6f1e8"   // lip, outline and handle
-            readonly property color glaze:     "#ece4d6"   // body
-            readonly property color brew:      "#6b4024"
-            readonly property color steam:     "#d9d4cc"
-            readonly property real  ms: 1.1                // mug scale over its 22-unit drawing
-            width: mug.width + 7 + coffeeTxt.implicitWidth
-            height: Math.max(coffeeTxt.implicitHeight + page.btnPadV * 2 + 2, 30)
-            // 0 at rest, 1 hovered; eases so the steam speeds up smoothly.
-            property real h: coffeeMa.containsMouse ? 1 : 0
-            Behavior on h { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-            // Steam clock, in seconds; runs only while Settings shows.
-            property real t: 0
-            FrameAnimation {
-                running: coffee.visible && page.active
-                onTriggered: { coffee.t += frameTime * (0.6 + 0.75 * coffee.h); mug.requestPaint() }
-            }
-            scale: coffeeMa.pressed ? 0.97 : 1
-            Behavior on scale { NumberAnimation { duration: 90 } }
-
-            FontMetrics { id: coffeeFm; font: coffeeTxt.font }
-            Canvas {
-                id: mug
-                width: 22 * coffee.ms; height: 22 * coffee.ms
-                // The body's middle (y 15 in mug units) on the capitals' middle.
-                y: coffeeTxt.y + coffeeTxt.baselineOffset + coffeeFm.tightBoundingRect("B").y
-                   + coffeeFm.tightBoundingRect("B").height / 2 - 15 * coffee.ms
-                function body(c) {
-                    c.beginPath(); c.moveTo(4, 10); c.lineTo(4, 16.5); c.arcTo(4, 20, 7.5, 20, 3.5)
-                    c.lineTo(11.5, 20); c.arcTo(15, 20, 15, 16.5, 3.5); c.lineTo(15, 10); c.closePath()
-                }
-                function handle(c) { c.beginPath(); c.moveTo(15, 11.6); c.bezierCurveTo(19.4, 11.6, 19.4, 17.4, 15, 17.4); c.stroke() }
-                // One curl of steam from the rim (y 8.6) up to `top`, fading as it rises.
-                function wisp(c, x0, ph, amp, top, a) {
-                    var g = coffee.steam, gr = c.createLinearGradient(0, 8.6, 0, top)
-                    gr.addColorStop(0, Qt.rgba(g.r, g.g, g.b, a)); gr.addColorStop(1, Qt.rgba(g.r, g.g, g.b, 0))
-                    c.strokeStyle = gr; c.lineWidth = 1.4; c.beginPath()
-                    for (var y = 8.6; y >= top; y -= 0.4) {
-                        var k = (8.6 - y) / (8.6 - top)
-                        var x = x0 + Math.sin((8.6 - y) * 0.85 - ph * 6.283) * amp * (0.3 + k)
-                        if (y === 8.6) c.moveTo(x, y); else c.lineTo(x, y)
-                    }
-                    c.stroke()
-                }
-                onPaint: {
-                    var c = getContext("2d"); c.reset()
-                    c.scale(coffee.ms, coffee.ms)
-                    var t = coffee.t, h = coffee.h
-                    c.lineCap = "round"; c.lineJoin = "round"; c.lineWidth = 1.6
-                    // Handle first so the body's fill covers its root.
-                    c.strokeStyle = coffee.ceramic; handle(c)
-                    c.fillStyle = coffee.glaze; body(c); c.fill(); c.stroke()
-                    // The open rim: the lip, then the coffee inside it.
-                    c.fillStyle = coffee.ceramic
-                    c.beginPath(); c.ellipse(3.2, 7.1, 12.6, 5.8); c.fill()
-                    c.fillStyle = coffee.brew
-                    c.beginPath(); c.ellipse(4.6, 8.1, 9.8, 3.8); c.fill()
-                    wisp(c, 7.2, t * 0.9, 1.15 + 0.25 * h, 2.6 - 1.6 * h, 1)
-                    wisp(c, 11.4, t * 0.9 + 0.45, 1.15 + 0.25 * h, 3.0 - 1.6 * h, 1)
-                    // A third wisp joins while hovered.
-                    if (h > 0.02) wisp(c, 9.3, t * 1.1 + 0.2, 1.1, 2.2, 0.6 * h)
-                }
-            }
-            Text {
-                id: coffeeTxt
-                x: mug.width + 7
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: "Buy me a coffee"
-                color: Qt.tint(coffee.yellow, Qt.rgba(coffee.yellowHot.r, coffee.yellowHot.g, coffee.yellowHot.b, coffee.h))
-                font.family: page.uiFont; font.pixelSize: 14; font.bold: true
-            }
-            MouseArea {
-                id: coffeeMa
-                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally("https://www.buymeacoffee.com/iamprivacy")
-            }
+            uiFont: page.uiFont
+            padV: page.btnPadV
+            steaming: page.active
         }
         }
         }
@@ -3842,7 +3795,8 @@ Item {
                                             visible: (modelData.type !== "str" || modelData.inline === true)
                                                      && modelData.type !== "cover_sizes" && modelData.type !== "library"
                                             width: parent.width; columnSpacing: 14; rowSpacing: 10
-                                            readonly property real ctrlW: modelData.type === "enum" ? inlineChoice.implicitWidth
+                                            readonly property real ctrlW: modelData.type === "follow_list" ? followListRow.implicitWidth
+                                                                        : modelData.type === "enum" ? inlineChoice.implicitWidth
                                                                         : modelData.type === "kinds" ? kindsRow.implicitWidth
                                                                         : modelData.type === "range" ? rangeRow.implicitWidth
                                                                         : 0
@@ -3920,6 +3874,34 @@ Item {
                                                     }
                                                 }
                                             }
+                                            // Import list / Export list: two buttons in the
+                                            // Browse… button's clothes (this page has no SpecBtn).
+                                            Row {
+                                                id: followListRow
+                                                visible: modelData.type === "follow_list"; Layout.alignment: Qt.AlignVCenter
+                                                spacing: 8
+                                                Repeater {
+                                                    model: followListRow.visible ? ["import", "export"] : []
+                                                    delegate: Rectangle {
+                                                        id: listBtn
+                                                        required property string modelData
+                                                        objectName: modelData === "import" ? "settingsImportListBtn" : "settingsExportListBtn"
+                                                        height: 32; width: listBtnTxt.width + 24; radius: 8
+                                                        color: listBtnMa.containsMouse ? page.surface3 : page.surface2; border.color: page.border1
+                                                        Text {
+                                                            id: listBtnTxt; anchors.centerIn: parent; textFormat: Text.PlainText
+                                                            text: listBtn.modelData === "import" ? "IMPORT LIST"
+                                                                : page.followListWord !== "" ? page.followListWord : "EXPORT LIST"
+                                                            color: page.textLo; font.family: page.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2
+                                                        }
+                                                        MouseArea {
+                                                            id: listBtnMa
+                                                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: listBtn.modelData === "import" ? followListOpenDlg.open() : followListSaveDlg.open()
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             SChoice {
                                                 id: inlineChoice
                                                 visible: modelData.type === "enum"; Layout.alignment: Qt.AlignVCenter
@@ -3938,8 +3920,10 @@ Item {
                                                 visible: modelData.type === "str" && modelData.inline === true
                                                 Layout.alignment: Qt.AlignVCenter
                                                 // The stepper's value-box scale, so the short-value
-                                                // rows share one control vocabulary.
-                                                Layout.preferredWidth: 64; Layout.preferredHeight: 32
+                                                // rows share one control vocabulary. A short word
+                                                // (the cover file name) asks for a wider box.
+                                                Layout.preferredWidth: modelData.box_width !== undefined ? modelData.box_width : 64
+                                                Layout.preferredHeight: 32
                                                 text: page.val(modelData)
                                                 invalid: page.sanitizeDirty(modelData)
                                                 Component.onCompleted: if (modelData.sanitize === true) page.sanitizeKeys[modelData.key] = modelData
@@ -4029,7 +4013,7 @@ Item {
                                             }
                                             Text {
                                                 textFormat: Text.PlainText
-                                                text: (coverCol.expanded ? "▾  " : "▸  ") + "Separate cover.jpg size"
+                                                text: (coverCol.expanded ? "▾  " : "▸  ") + (modelData.file_label ? modelData.file_label : "Separate cover file size")
                                                 color: page.accent; font.pixelSize: 12
                                                 MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: coverCol.expanded = !coverCol.expanded }
                                             }
@@ -4039,8 +4023,8 @@ Item {
                                                 columns: width - coverFileChoice.implicitWidth - 14 < page.rowWordsMinW ? 1 : 2
                                                 ColumnLayout {
                                                     Layout.fillWidth: true; spacing: 2
-                                                    Text { textFormat: Text.PlainText; text: modelData.file_label ? modelData.file_label : "Separate cover.jpg size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
-                                                    Text { text: "Size of the saved cover.jpg. \"Same as embedded\" matches the size above."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                                    Text { textFormat: Text.PlainText; text: modelData.file_label ? modelData.file_label : "Separate cover file size"; color: page.textHi; font.pixelSize: 13; font.weight: Font.Medium }
+                                                    Text { text: "Size of the saved cover file. \"Same as embedded\" matches the size above."; color: page.textDim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                                 }
                                                 SChoice {
                                                     id: coverFileChoice

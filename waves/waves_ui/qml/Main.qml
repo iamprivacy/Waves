@@ -355,6 +355,11 @@ ApplicationWindow {
     property var artistsById: ({})        // artistId -> name, for link resolution
     property bool artistOpen: false
     property bool settingsOpen: false
+    // The launch note (supportNoteGate) shows every launch and stores
+    // nothing, so no saved flag can clear it out of a harness's frame. An
+    // offscreen run has no one to read it: off there unless a scenario
+    // turns it on.
+    property bool supportNoteEnabled: Qt.platform.pluginName !== "offscreen"
     property bool libraryOpen: false
     // A newer release found by the updater (startup check or a manual one on
     // the Settings page). Drives the gold notice in the status bar's right
@@ -418,8 +423,8 @@ ApplicationWindow {
     onWidthChanged:      if (_geomReady) winGeomSaveTimer.restart()
     onHeightChanged:     if (_geomReady) winGeomSaveTimer.restart()
     onVisibilityChanged: {
-        if (visibility !== Window.Minimized && visibility !== Window.Hidden)
-            root._shownVisibility = root._shownStateOf(visibility)
+        if (root.visibility !== Window.Minimized && root.visibility !== Window.Hidden)
+            root._shownVisibility = root._shownStateOf(root.visibility)
         if (_geomReady) winGeomSaveTimer.restart()
     }
     onClosing: function (close) {
@@ -3922,7 +3927,13 @@ ApplicationWindow {
     // in the hover slot when it is not cached yet).
     property bool artistCards: waves.wavesPref("artist_hover_cards") !== false
     readonly property bool ahcBlocked: !signedIn || !artistCards || nowCardOpen || videoNow !== null
-                                       || peekNow !== null || followDialog.open || importDialog.open
+                                       || peekNow !== null || followDialog.open || (importDialog.open && !ahcInReview)
+                                       || supportNoteGate.onTop
+    // The armed (or shown) name sits in the import review: the card opens
+    // over the review to tell namesakes apart, look only. Its actions
+    // (follow, download, an album, the artist page) would act behind the
+    // review, so it leaves them out; ticking a pick is the review's job.
+    property bool ahcInReview: false
     readonly property bool ahcOpen: ahcCard.visible
     onAhcBlockedChanged: if (ahcBlocked) root.ahcClose()
     // The name under the pointer (armed), and the name the open card is for.
@@ -4002,20 +4013,21 @@ ApplicationWindow {
     function ahcDlIdle(st) { return st === "" || st === "cancelled" || st === "failed" }
     function ahcDownload(kind, id) {
         ahcTouch.restart()
-        if (!id || !root.ahcDlIdle(root.dlSt("" + id))) return
+        if (root.ahcInReview || !id || !root.ahcDlIdle(root.dlSt("" + id))) return
         if (kind === "album") waves.downloadAlbum("" + id)
         else waves.downloadTrack("" + id)
     }
     // A cover or a title: the card goes, the album page opens (a track
     // highlighted on it).
     function ahcGoAlbum(albumId, highlight, title, art) {
-        if (!albumId) return
+        if (!albumId || root.ahcInReview) return
         ahcTouch.stop()
         root.ahcClose()
         root.openAlbumPage("" + albumId, highlight || "", title || "", art || "")
     }
     function ahcMenu(kind, item, x, y) {
         ahcTouch.restart()
+        if (root.ahcInReview) return
         root.ahcMenuFor = { kind: kind, t: item }
         root.ahcMenuX = x; root.ahcMenuY = y
         root.ahcMenuOpen = true
@@ -4032,8 +4044,15 @@ ApplicationWindow {
         }
     }
 
-    function artistCardFor(item, id, name, art) {
-        if (!item || !id || root.ahcBlocked || root.onArtistPage(id)) return
+    function artistCardFor(item, id, name, art, inReview) {
+        if (!item || !id) return
+        // Behind an open review only its own names arm.
+        if (importDialog.open && inReview !== true) return
+        if (root.ahcInReview !== (inReview === true)) {
+            if (ahcCard.visible) root.ahcClose()
+            root.ahcInReview = inReview === true
+        }
+        if (root.ahcBlocked || root.onArtistPage(id)) return
         root.ahcOwner = item
         root.ahcPend = { id: "" + id, name: "" + (name || ""), art: "" + (art || "") }
         var at = item.mapToItem(null, 0, 0)
@@ -4134,7 +4153,7 @@ ApplicationWindow {
     }
     function ahcToggleFollow() {
         ahcTouch.restart()
-        if (!root.ahcId) return
+        if (!root.ahcId || root.ahcInReview) return
         if (root.ahcFollowed) waves.unfollowArtist(root.ahcId)
         else waves.followArtist(root.ahcId, root.ahcNameText, root.ahcPicUrl)
     }
@@ -4215,7 +4234,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Esc"
         enabled: root.ahcOpen && root.peekNow === null && root.videoNow === null
-                 && !followDialog.open && !importDialog.open
+                 && !followDialog.open && (!importDialog.open || root.ahcInReview) && !supportNoteGate.onTop
         onActivated: if (root.ahcMenuOpen) root.ahcMenuOpen = false; else root.ahcClose()
     }
 
@@ -4451,6 +4470,7 @@ ApplicationWindow {
     // (same width).
     component AhcFollow: Rectangle {
         id: ahfw
+        visible: !root.ahcInReview
         objectName: "ahcFollow"
         readonly property bool on: root.ahcFollowed
         readonly property bool hot: ahfwMa.containsMouse
@@ -4496,7 +4516,7 @@ ApplicationWindow {
         // The switch that fills it, one click away (it is off by default).
         Text {
             objectName: "ahcBioFill"
-            visible: root.ahcKnown && root.ahcBio === "" && !root.artistBioOn
+            visible: root.ahcKnown && root.ahcBio === "" && !root.artistBioOn && !root.ahcInReview
             textFormat: Text.PlainText; text: "FILL MISSING BIOS"
             color: ahbFillMa.containsMouse ? root.accent : root.accentDim
             font.family: root.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.2
@@ -4571,6 +4591,7 @@ ApplicationWindow {
     component AhcOpenRow: Rectangle {
         id: ahor
         objectName: "ahcOpenPage"
+        visible: !root.ahcInReview
         implicitHeight: 34
         // The last row: its fill follows the card's rounded bottom corners.
         bottomLeftRadius: 12; bottomRightRadius: 12
@@ -4604,6 +4625,7 @@ ApplicationWindow {
         readonly property real pct: root.dlPct(mid)
         readonly property bool waiting: st === "queued" || st === "preparing"
         objectName: "ahcDl_" + mid
+        visible: !root.ahcInReview
         implicitWidth: 24; implicitHeight: 22; radius: 5
         color: solid ? Qt.rgba(0.03, 0.04, 0.05, 0.78)
              : ahdlMa.containsMouse && root.ahcDlIdle(st) ? root.surfaceHi : "transparent"
@@ -4888,6 +4910,9 @@ ApplicationWindow {
         id: ahcCard
         objectName: "artistCard"
         parent: Overlay.overlay
+        // Above the import review, the one dialog it opens over; under
+        // every other prompt in the overlay, as before the review card.
+        z: root.ahcInReview ? 1300 : 0
         modal: false; focus: false
         // Esc goes through the Shortcut above (the card never takes focus
         // from the search field).
@@ -4977,12 +5002,16 @@ ApplicationWindow {
                             }
                         }
                         Item { width: 1; height: 12 }
+                        // Over the import review FOLLOW is left out: the row
+                        // goes too unless the library badge is in it.
                         Item {
+                            id: ahcActRow
                             x: 14; width: parent.width - 28; height: ahcFol.implicitHeight
+                            visible: !root.ahcInReview || ahcLibTag.shown
                             AhcFollow { id: ahcFol }
-                            AhcLib { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter }
+                            AhcLib { id: ahcLibTag; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter }
                         }
-                        Item { width: 1; height: 14 }
+                        Item { width: 1; height: 14; visible: ahcActRow.visible }
                         AhcMissing { x: 14; width: parent.width - 28 }
                         Column {
                             objectName: "ahcBody"
@@ -7411,8 +7440,8 @@ ApplicationWindow {
             onWheel: function(w){ root.peekClose(); w.accepted = false }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null; onActivated: root.peekClose() }
-    Shortcut { sequence: "Esc"; enabled: root.videoNow !== null; onActivated: root.closeVideo() }
+    Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null && !supportNoteGate.onTop; onActivated: root.peekClose() }
+    Shortcut { sequence: "Esc"; enabled: root.videoNow !== null && !supportNoteGate.onTop; onActivated: root.closeVideo() }
     Shortcut {
         sequence: "Space"; enabled: root.videoNow !== null && !root.videoLoading && !root.videoError
         onActivated: root.vPlayer.playbackState === MediaPlayer.PlayingState ? root.vPlayer.pause() : root.vPlayer.play()
@@ -21623,6 +21652,7 @@ ApplicationWindow {
             onFactoryResetRequested: root.confirmFactoryReset = true
             onFlacFixRequested: function(count, where) { root.flacFixResume = false; root.flacFixCount = count; root.flacFixWhere = where; root.confirmFlacFix = true }
             onFlacResumeRequested: function(where) { root.flacFixResume = true; root.flacFixWhere = where; root.confirmFlacFix = true }
+            onFollowListPicked: function(url) { importDialog.startFile(url) }
         }
 
         // ---- Releases page ---------------------------------------------
@@ -21926,6 +21956,7 @@ ApplicationWindow {
                             sequence: "Esc"
                             enabled: relSearchField.activeFocus && root.peekNow === null && root.videoNow === null
                                      && !followDialog.open && !importDialog.open && !root.ahcOpen
+                                     && !supportNoteGate.onTop
                             onActivated: relSearch.dismiss()
                         }
                         Shortcut {
@@ -27535,6 +27566,211 @@ ApplicationWindow {
         }
     }
 
+    // A note from the developer, at every launch: Waves is free, its
+    // developer lost their income, and the note ends in the Buy Me a Coffee
+    // button. Nothing is stored: closing it holds for this run only
+    // (dismissed), so the next launch shows it again, while reopening the
+    // window from the background does not. Last in the launch queue, behind
+    // every first-run prompt, the update prompt and the FLAC notice, and
+    // only after the app has been usable for a few seconds (delayMs).
+    Rectangle {
+        id: supportNoteGate
+        objectName: "supportNoteGate"
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1200
+        color: "transparent"
+        // Read from the other prompts' eligibility, never their visible,
+        // for the reason given on flacNoticeGate.
+        readonly property bool promptsClear: root.signedIn && setupSettings.ffmpegSetupDone && root.termsCurrentAccepted
+            && bootOverlay.done
+            && !ffmpegGate.wanted
+            && !updateOptInGate.shouldShow
+            && !flacNoticeGate.shouldShow && !flacNoticeGate.shown
+        readonly property bool shouldShow: root.supportNoteEnabled && promptsClear && !dismissed
+        property bool dismissed: false
+        // Five seconds of the app first, so the note never lands on the
+        // launch itself. The wait restarts if the queue fills up again, and
+        // the latch re-reads shouldShow when it ends.
+        property int delayMs: 5000
+        property bool shown: false
+        function latch() { if (shouldShow && !shown) { shown = true; waves.uiLog("support", "note shown", -1) } }
+        Timer {
+            id: supportNoteDelay
+            interval: supportNoteGate.delayMs
+            running: supportNoteGate.shouldShow && !supportNoteGate.shown
+            onTriggered: supportNoteGate.latch()
+        }
+        // Never stacked: steps aside while another prompt holds the frame,
+        // whether it sits under the note in the overlay (the folder, FFmpeg
+        // and library prompts, which a download Waves starts on its own can
+        // raise at launch) or above it (the follow and import dialogs, and
+        // the close and exit prompts a close of the window raises).
+        // While the note is up, every other Esc shortcut stands down: Qt
+        // fires neither of two live shortcuts with one key.
+        readonly property bool onTop: shown && promptsClear
+            && !updateOptInGate.visible && !flacNoticeGate.visible
+            && !folderGate.visible && !folderUnreachableGate.visible
+            && !ffmpegBlockGate.visible && !libraryClaimGate.visible
+            && !followDialog.open && !importDialog.open
+            && !closeGate.open && !exitGate.open
+        // CLOSE, a click on the backdrop and Escape wait closeLockMs after the
+        // note arrives; the CLOSE button fills as the wait runs out. The
+        // coffee button works at once.
+        property int closeLockMs: 5000
+        property real lockP: 0
+        readonly property bool canClose: lockP >= 1
+        NumberAnimation on lockP {
+            id: supportNoteLock; running: false; from: 0; to: 1
+            duration: supportNoteGate.closeLockMs; easing.type: Easing.Linear
+        }
+        function close(how) {
+            if (!onTop) return
+            if (!canClose && how !== "coffee opened") return
+            dismissed = true
+            shown = false
+            waves.uiLog("support", how, -1)
+        }
+
+        // The entrance is one dial, 0 to 1, that every part reads its own
+        // slice of: the backdrop dims, the card drifts up and fades in with a
+        // brief accent glow on its edge, then the title, each
+        // paragraph and the buttons settle in one after another. Leaving
+        // runs the same dial back, quicker.
+        property real reveal: 0
+        NumberAnimation on reveal {
+            id: supportNoteIn; running: false; to: 1; duration: 1700; easing.type: Easing.Linear
+        }
+        NumberAnimation on reveal {
+            id: supportNoteOut; running: false; to: 0; duration: 420; easing.type: Easing.Linear
+        }
+        onOnTopChanged: {
+            supportNoteIn.stop(); supportNoteOut.stop()
+            if (onTop) { supportNoteIn.start(); supportNoteLock.restart() }
+            else supportNoteOut.start()
+        }
+        // Eased (out cubic) progress of the slice a..b of the dial.
+        function slice(a, b) {
+            var x = Math.max(0, Math.min(1, (reveal - a) / (b - a)))
+            return 1 - Math.pow(1 - x, 3)
+        }
+        readonly property real scrimP: slice(0.0, 0.5)
+        readonly property real cardP: slice(0.08, 0.62)
+        readonly property real glowP: slice(0.3, 0.62) * (1 - slice(0.62, 1.0))
+        visible: reveal > 0
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#cc06070e"
+            opacity: supportNoteGate.scrimP
+        }
+        MouseArea { anchors.fill: parent; enabled: supportNoteGate.onTop; onClicked: supportNoteGate.close("note closed") }
+        Rectangle {
+            id: supportNoteCard
+            anchors.centerIn: parent; width: 500
+            implicitHeight: snCol.implicitHeight + 40
+            radius: 14; color: root.surface2
+            border.color: Qt.tint(root.outline, Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.55 * supportNoteGate.glowP))
+            opacity: supportNoteGate.cardP
+            scale: 0.965 + 0.035 * supportNoteGate.cardP
+            anchors.verticalCenterOffset: 28 * (1 - supportNoteGate.cardP)
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: snCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text {
+                    id: snTitle
+                    readonly property real p: supportNoteGate.slice(0.3, 0.68)
+                    opacity: p; transform: Translate { y: 8 * (1 - snTitle.p) }
+                    textFormat: Text.PlainText; Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.red; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap
+                    text: "I need your help"
+                }
+                // Set left: a letter, not a prompt. The hire line is the one
+                // link: a page on the site, so the way to reach out can change
+                // without a release.
+                Repeater {
+                    model: [
+                        "I recently lost my job and my source of income. I don't know if I will be able to continue developing Waves, or pay my bills for rent and food.",
+                        "I really hate asking. The only reason I am is that software development is my passion. I have already spent hundreds of dollars on my projects, all of them free and open source, because I hope this can one day become a job that pays the bills. This has been my way of giving back to the open source community that has given me so much over the years.",
+                        "I am also open to employment offers. If you have a job opportunity, please reach out at",
+                        "If Waves is useful to you, please consider a donation. A recurring one, if you can, helps the most. Thank you for using Waves."
+                    ]
+                    // A Flow of words so the link runs on at the end of its
+                    // sentence and wraps like the rest of the paragraph, while
+                    // every piece stays plain text.
+                    Flow {
+                        id: snPara
+                        required property string modelData
+                        required property int index
+                        readonly property bool hire: modelData.indexOf("reach out at") >= 0
+                        readonly property string link: "getwaves.dev/hire"
+                        readonly property real p: supportNoteGate.slice(0.36 + 0.06 * index, 0.7 + 0.06 * index)
+                        opacity: p; transform: Translate { y: 8 * (1 - snPara.p) }
+                        Layout.fillWidth: true
+                        Repeater {
+                            model: snPara.hire ? snPara.modelData.split(" ") : [snPara.modelData]
+                            Text {
+                                required property string modelData
+                                textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                                width: snPara.hire ? implicitWidth : snPara.width
+                                color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                                text: snPara.hire ? modelData + " " : modelData
+                            }
+                        }
+                        Text {
+                            visible: snPara.hire
+                            textFormat: Text.PlainText
+                            color: snLinkMa.containsMouse ? root.textHi : root.accent
+                            font.pixelSize: 13; lineHeight: 1.3
+                            font.underline: snLinkMa.containsMouse
+                            text: snPara.link
+                            MouseArea {
+                                id: snLinkMa
+                                anchors.fill: parent
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: Qt.openUrlExternally("https://" + snPara.link)
+                            }
+                        }
+                    }
+                }
+                RowLayout {
+                    id: snButtons
+                    readonly property real p: supportNoteGate.slice(0.66, 1.0)
+                    opacity: p; transform: Translate { y: 8 * (1 - snButtons.p) }
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 4; spacing: 18
+                    CoffeeButton {
+                        objectName: "supportNoteCoffee"
+                        uiFont: root.uiFont; padV: root.btnPadV
+                        label: "Support me and Waves"
+                        steaming: supportNoteGate.onTop
+                        onOpened: supportNoteGate.close("coffee opened")
+                    }
+                    SpecBtn {
+                        id: snClose
+                        objectName: "supportNoteClose"; label: "CLOSE"
+                        enabled: supportNoteGate.canClose
+                        opacity: enabled ? 1 : 0.5
+                        Behavior on opacity { NumberAnimation { duration: 260 } }
+                        onClicked: supportNoteGate.close("note closed")
+                        // The wait, as a fill sweeping across the button
+                        // (under its border and label); it fades once full.
+                        Rectangle {
+                            z: -1
+                            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                            width: parent.width * supportNoteGate.lockP
+                            radius: parent.radius
+                            color: Qt.alpha(root.accent, 0.22)
+                            opacity: supportNoteGate.canClose ? 0 : 1
+                            Behavior on opacity { NumberAnimation { duration: 420 } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Shortcut { sequence: "Esc"; enabled: supportNoteGate.onTop; onActivated: supportNoteGate.close("note closed") }
+
     // Follow an artist by name (the Releases pane's FOLLOW ARTIST). Artists
     // only, one request per settled needle; each row follows or unfollows in
     // place, and a click anywhere else on a row opens that artist.
@@ -27689,7 +27925,7 @@ ApplicationWindow {
             }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: followDialog.open; onActivated: followDialog.close() }
+    Shortcut { sequence: "Esc"; enabled: followDialog.open && !supportNoteGate.onTop; onActivated: followDialog.close() }
 
     // Follow the library's artists in one go (IMPORT LIBRARY on the Releases
     // pane). Nothing is followed until the review is confirmed: the run
@@ -27705,6 +27941,7 @@ ApplicationWindow {
         z: 1200
         visible: open
         property bool open: false
+        onOpenChanged: if (!open && root.ahcInReview) { root.ahcClose(); root.ahcInReview = false }
         // start | tags | scan | review | error | done
         property string stage: "start"
         property int done: 0
@@ -27727,6 +27964,9 @@ ApplicationWindow {
         // A run over names the user asked for one by one (the EXCLUDED
         // page): its picks are followed as the user's own.
         property bool manualPicks: false
+        // A run over a list file the user picked (IMPORT LIST): no library
+        // needed, and its picks are followed as the user's own.
+        property bool fromList: false
         // The review: {kind: head|match|fuzzy|none, key, name, ...}.
         property var rows: []
         // The list shows rows through importModel, brought to them in place:
@@ -27769,7 +28009,7 @@ ApplicationWindow {
             parked = false
             // A review still on the table comes back as it was left.
             if (stage === "review" && rows.length > 0) { open = true; return }
-            stage = "start"; error = ""; rows = []; picks = ({}); pickCount = 0
+            stage = "start"; error = ""; rows = []; picks = ({}); pickCount = 0; fromList = false
             trayCount = waves.artistImportTrayCount()
             open = true
         }
@@ -27780,9 +28020,22 @@ ApplicationWindow {
         }
         function discard() { stage = "start"; rows = []; picks = ({}); pickCount = 0; close() }
         function start() {
-            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false; fromList = false
             stage = "tags"
             waves.startArtistImport()
+        }
+        // IMPORT LIST's pick (Settings, Releases): the review over the
+        // names in that file.
+        function startFile(url) {
+            if (running) { open = true; return }
+            if (handReviewKept()) { show(); return }
+            parked = false; rows = []; picks = ({}); pickCount = 0
+            trayCount = 0
+            open = true
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false
+            manualPicks = true; fromList = true
+            stage = "tags"
+            waves.startArtistImportFile("" + url)
         }
         // The EXCLUDED page's FOLLOW: the review over just those names.
         function startNames(names, manual) {
@@ -27791,7 +28044,7 @@ ApplicationWindow {
             parked = false; rows = []; picks = ({}); pickCount = 0
             trayCount = 0
             open = true
-            done = 0; total = 0; error = ""; fromTray = false; scanning = false
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false; fromList = false
             manualPicks = !!manual
             stage = "tags"
             waves.startArtistImportNames(names)
@@ -27806,7 +28059,7 @@ ApplicationWindow {
             parked = false; rows = []; picks = ({}); pickCount = 0
             trayCount = 0
             open = true
-            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false
+            done = 0; total = 0; error = ""; fromTray = false; scanning = false; manualPicks = false; fromList = false
             stage = "tags"
             waves.startArtistImportMore()
         }
@@ -27815,7 +28068,8 @@ ApplicationWindow {
         // and why (the titles of yours this artist has). A row weighed
         // before the library had a say, or one it could not read, says so.
         function candidateWhy(c) {
-            if (!c || c.checked !== true) return "Not checked"
+            // A listed name the library does not hold has nothing to weigh.
+            if (!c || c.checked !== true) return fromList ? "Close name" : "Not checked"
             var n = c.owned_n || 0
             if (n === 0) return c.conf + "% \u00b7 none of yours"
             var names = (c.owned || []).join(", ")
@@ -27892,7 +28146,7 @@ ApplicationWindow {
                 else un.push(tray[i])
             }
             // Tray names come from library runs: their picks are library follows.
-            fromTray = true; skipped = 0; manualPicks = false
+            fromTray = true; skipped = 0; manualPicks = false; fromList = false
             build([], fz, un)
         }
         function confirm() {
@@ -27946,11 +28200,13 @@ ApplicationWindow {
             ColumnLayout {
                 id: idCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
                 Text {
+                    objectName: "importTitle"
                     textFormat: Text.PlainText; Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     color: root.textHi; font.pixelSize: 18; font.bold: true
                     text: importDialog.stage === "review" && importDialog.fromTray ? "Artists to look at"
                         : importDialog.stage === "done" ? "Following"
+                        : importDialog.fromList ? "Follow artists from a list"
                         : "Follow your library's artists"
                 }
                 Text {
@@ -27963,7 +28219,7 @@ ApplicationWindow {
                         var d = importDialog
                         if (d.stage === "start")
                             return "Waves finds each artist in your library on TIDAL. Artists you downloaded with Waves are recognized from their files at once; the rest are searched one a second, so a big library takes a few minutes. Nothing is followed until you say so, and your TIDAL favorites are not changed."
-                        if (d.stage === "tags") return "Reading your files… " + d.done + " of " + d.total
+                        if (d.stage === "tags") return (d.fromList ? "Reading the list… " : "Reading your files… ") + d.done + " of " + d.total
                         if (d.stage === "scan") {
                             // One search a second, so what is left is the time left.
                             var mins = Math.round((d.total - d.done) / 60)
@@ -27972,6 +28228,8 @@ ApplicationWindow {
                         }
                         if (d.stage === "error")
                             return d.error === "not-signed-in" ? "Sign in to TIDAL first."
+                                 : d.error === "file-unreadable" ? "That file could not be read as text. Pick a .txt or .csv file of artist names."
+                                 : d.error === "file-empty" ? "No artist names were found in that file. Put one name on each line."
                                  : d.error === "no-library" ? "Turn on your library in Settings and let it finish scanning first."
                                  : d.error === "library-scanning" ? "Your library is still being scanned. Its first artists are ready in a moment, so try again shortly."
                                  : d.error === "rate-limited" ? "TIDAL asked Waves to slow down. Try again in a little while."
@@ -27983,6 +28241,7 @@ ApplicationWindow {
                                  : "Now following " + d.followedNow + (d.followedNow === 1 ? " more artist" : " more artists") + ". Their releases show up as each one is checked."
                         // An empty review.
                         return d.fromTray ? "Nothing left to look at."
+                             : d.fromList ? "You already follow every artist on the list."
                              : d.scanning ? "Every artist found so far is already followed" + (d.skipped > 0 ? " or set aside." : ".")
                              : "Every artist in your library is already followed" + (d.skipped > 0 ? " or set aside." : ".")
                     }
@@ -28077,17 +28336,32 @@ ApplicationWindow {
                                     radius: 6; url: idRow.kind === "match" ? (idRow.rowData.artist.art || "") : ""
                                 }
                                 ColumnLayout {
+                                    id: matchCol
                                     Layout.fillWidth: true; spacing: 2
+                                    // As wide as the name, so the card arms on the name only.
                                     Text {
-                                        Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
+                                        id: matchName
+                                        objectName: "importMatchName"
+                                        Layout.maximumWidth: matchCol.width
+                                        textFormat: Text.PlainText; elide: Text.ElideRight
                                         text: idRow.rowData.name || ""
                                         color: root.textHi; font.pixelSize: 14; font.bold: true
+                                        HoverHandler {
+                                            enabled: idRow.kind === "match"
+                                            onHoveredChanged: {
+                                                var a = idRow.rowData.artist || {}
+                                                if (hovered) root.artistCardFor(matchName, a.id, a.name, a.art, true)
+                                                else root.artistCardOff(matchName)
+                                            }
+                                        }
                                     }
                                     Text {
                                         Layout.fillWidth: true; textFormat: Text.PlainText; elide: Text.ElideRight
                                         text: idRow.kind !== "match" ? ""
                                             : idRow.rowData.reason === "tag" ? "From your files' tags"
+                                            : idRow.rowData.reason === "list" ? "From the TIDAL id on your list"
                                             : idRow.rowData.reason === "library" ? "Matches your library: " + (idRow.rowData.owned || []).join(", ")
+                                            : (idRow.rowData.albums || 0) === 0 ? "Same name on TIDAL"
                                             : (idRow.rowData.albums || 0) + ((idRow.rowData.albums || 0) === 1 ? " album" : " albums") + " in your library"
                                         color: root.textDim; font.pixelSize: 12
                                     }
@@ -28126,6 +28400,10 @@ ApplicationWindow {
                                         MouseArea {
                                             id: cMa; anchors.fill: parent; hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
+                                            onContainsMouseChanged: {
+                                                if (containsMouse) root.artistCardFor(cand, cand.modelData.id, cand.modelData.name, cand.modelData.art, true)
+                                                else root.artistCardOff(cand)
+                                            }
                                             onClicked: importDialog.setPick(idRow.rowData.key, cand.on ? null
                                                 : { id: "" + cand.modelData.id, name: "" + (cand.modelData.name || ""), art: "" + (cand.modelData.art || "") })
                                         }
@@ -28210,7 +28488,7 @@ ApplicationWindow {
             }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open; onActivated: importDialog.close() }
+    Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open && !root.ahcOpen && !supportNoteGate.onTop; onActivated: importDialog.close() }
 
     // Exit warning: a real quit (the app menu, Cmd+Q, the Dock, the tray, or
     // the close button set to exit) was vetoed in onClosing because downloads
