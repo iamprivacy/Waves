@@ -1888,6 +1888,114 @@ class LibraryIndex:
         finally:
             self._scan_busy.release()
 
+    def index_folders(
+        self,
+        root: str,
+        folders: Iterable[str],
+        should_continue: Callable[[], bool] | None = None,
+        *,
+        timeout: float = 0.0,
+    ) -> int | None:
+        """Walk and read just these folders under ``root`` (where a download
+        just landed), so its badge lights now instead of after the next full
+        walk. Returns how many album folders were read (0 when nothing could be
+        done), or None when a scan holds the cache (the caller keeps the
+        folders for the next publish).
+
+        The same machinery probe_folders uses: each folder walks as a subtree,
+        stamped with the CURRENT generation and written under its parent. No
+        prune: only a completed walk of the root prunes, and that walk reaches
+        these folders anyway (their parent's mtime moved), finds their rows
+        current and re-stamps them.
+
+        Every album under these folders is listed and read again, never
+        skipped as unchanged: the caller knows they just changed. A folder
+        mtime only moves when a name is added, and on a share with whole-second
+        stamps a track renamed in within the same second as the last listing
+        leaves it equal; a track copied in place across volumes is visible
+        half-written before its own landing, and its later landing changes
+        neither the mtime nor the count. Either way an unchanged verdict would
+        keep the stale read until some later walk.
+
+        Refused (0, nothing written) unless the cache was scanned for this very
+        root, for a folder that is not strictly inside it (the root itself is
+        the full scan's job), and for one under a folder the walk never enters.
+        Each path segment is matched against the stored tree first, folded the
+        way the filesystem folds names, so a folder the walk already knows is
+        never written again under a second spelling."""
+        root = os.path.expanduser(str(root or "")).rstrip(os.sep)
+        wanted = [str(f) for f in folders if str(f or "").strip()]
+        if not root or not wanted:
+            return 0
+        if not self._scan_busy.acquire(timeout=max(0.0, float(timeout))):
+            return None
+        try:
+            with self._lock:
+                stamped = self._meta_get("scan_gen")
+            if stamped is None or not self.matches_scan_root(root):
+                return 0
+            gen = int(stamped)
+            alive = should_continue or (lambda: True)
+            emit = _RateLimitedEmit(None, 0.15)
+            known, children = self._load_dir_tree()
+            targets: list[str] = []
+            for folder in wanted:
+                path = self._stored_spelling(root, folder, known, children)
+                if path is not None and path not in targets:
+                    targets.append(path)
+            found: list[_Candidate] = []
+            for path in targets:
+                if not alive():
+                    return 0
+                try:
+                    if not stat_mod.S_ISDIR(os.stat(path).st_mode):
+                        continue
+                except OSError:
+                    continue
+                walked = self._walk_album_dirs(path, alive, emit, gen, force_full=True, subtree=True)
+                if walked is not None:
+                    found.extend(walked[0])
+            seen: set[str] = set()
+            to_read = []
+            for c in found:
+                if c[0] not in seen:
+                    seen.add(c[0])
+                    to_read.append(c)
+            self._read_and_upsert(to_read, alive, emit)
+            logger.info("library landed: %d folders asked, %d albums read", len(targets), len(to_read))
+            return len(to_read)
+        finally:
+            self._scan_busy.release()
+
+    @staticmethod
+    def _stored_spelling(root: str, folder: str, known: dict[str, tuple], children: dict[str, list[str]]) -> str | None:
+        """``folder`` spelled the way the stored tree spells it, or None when
+        it is not strictly inside ``root`` or sits under a folder the walk
+        never enters. The root's own segments compare folded, on normalized
+        copies of both sides (a Windows dialog hands back "C:/Music", which
+        the walk keeps as given); the result is built on ``root`` exactly as
+        spelled, which is how the walk wrote every row under it. Below the
+        root, each segment takes the stored child's spelling when one folds to
+        the same name (an exact match first), else its own (a folder the walk
+        has not met yet)."""
+        parts = os.path.abspath(os.path.expanduser(str(folder))).split(os.sep)
+        base = os.path.abspath(root).split(os.sep)
+        if len(parts) <= len(base):
+            return None
+        if any(_name_key(a) != _name_key(b) for a, b in zip(parts[: len(base)], base, strict=True)):
+            return None
+        cur = root
+        for seg in parts[len(base) :]:
+            if not seg or _is_skipped_dir_name(seg):
+                return None
+            exact = os.path.join(cur, seg)
+            if exact in known:
+                cur = exact
+                continue
+            key = _name_key(seg)
+            cur = next((c for c in children.get(cur, ()) if _name_key(os.path.basename(c)) == key), exact)
+        return cur
+
     def _walk_album_dirs(
         self,
         root: str,

@@ -20,6 +20,7 @@ from tidalapi.media import AudioExtensions
 
 from waves import __config_dirname__
 from waves.constants import (
+    COVER_STEM_DEFAULT,
     DOT_SEGMENT_STANDIN,
     FILENAME_LENGTH_MAX,
     FILENAME_SANITIZE_PLACEHOLDER,
@@ -388,6 +389,30 @@ def sanitize_name_component(
     result = sanitize_filename(result, replacement_text=illegal_replacement)
 
     return _tidy_spacing(result) if tidy_spacing else result
+
+
+# Longest cover file stem kept from the setting. A cover is named once per album
+# folder, so a long name only costs path length on every album.
+_COVER_STEM_MAX = 64
+_COVER_EXT_RE = re.compile(r"\.jpe?g$", re.IGNORECASE)
+
+
+def cover_file_stem(value: str | None) -> str:
+    """The saved cover's name without its extension, as the engine will use it.
+
+    What the user typed in Settings, with a typed ".jpg" or ".jpeg" taken off
+    (Waves adds the extension), letters no file name can hold removed by the
+    same rules every library name follows, leading dots and spaces dropped (a
+    cover is never a hidden file), and the shipped "cover" when nothing is left.
+    """
+    stem = _COVER_EXT_RE.sub("", value.strip() if isinstance(value, str) else "")
+    stem = sanitize_name_component(stem)[:_COVER_STEM_MAX].strip(" .")
+    return sanitize_name_component(stem) or COVER_STEM_DEFAULT
+
+
+def cover_file_name(value: str | None) -> str:
+    """The saved cover's full file name (stem plus ``.jpg``), see :func:`cover_file_stem`."""
+    return cover_file_stem(value) + ".jpg"
 
 
 def folder_name_candidates(

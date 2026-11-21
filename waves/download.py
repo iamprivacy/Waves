@@ -50,7 +50,6 @@ from waves import flac_verify
 from waves.config import ApiCallStopped, Settings, Tidal, api_waits_wake_for
 from waves.constants import (
     CHUNK_SIZE,
-    COVER_NAME,
     EXTENSION_LYRICS,
     FILENAME_LENGTH_MAX,
     METADATA_EXPLICIT,
@@ -61,6 +60,7 @@ from waves.constants import (
     REQUESTS_TIMEOUT_SEC,
     UNIQUIFY_THRESHOLD,
     AudioExtensionsValid,
+    CoverBaseline,
     CoverDimensions,
     DownsampleTarget,
     MediaType,
@@ -75,6 +75,7 @@ from waves.helper.path import (
     PATH_LENGTH_MAX,
     _text_length,
     check_file_exists,
+    cover_file_name,
     format_path_media,
     name_comparison_key,
     path_file_sanitize,
@@ -128,6 +129,9 @@ _PATH_LENGTH_MAX: int = PATH_LENGTH_MAX
 # Child of "waves", so it inherits the app's handlers and its INFO records join
 # the always-on breadcrumb ring crash reports are stitched from.
 logger = logging.getLogger("waves.download")
+# Cover art handling, as its own subsystem logger: what it logs at INFO (a
+# cover kept as served instead of rewritten) joins the same breadcrumb ring.
+logger_covers = logging.getLogger("waves.covers")
 
 # The engine's two fan-outs, as gauges for the verbose perf sampler: the
 # executors themselves are job-scoped (segments) or built per fan-out (items),
@@ -4092,8 +4096,11 @@ class Download:
         Returns:
             bool: True if moved, False otherwise.
         """
-        # Build tmp lyrics filename
-        path_file_cover: pathlib.Path = file_media_dst.parent / COVER_NAME
+        # Named by Settings ("cover" unless changed, issue #66). A folder that
+        # already holds a cover under another name keeps it: nothing is
+        # renamed or removed, the new name is simply written beside it.
+        name = cover_file_name(getattr(self.settings.data, "cover_file_name", None))
+        path_file_cover: pathlib.Path = file_media_dst.parent / name
         result: bool = self._move_file(path_cover, path_file_cover, overwrite=False, skip_if_exists=True)
 
         return result
@@ -4209,6 +4216,46 @@ class Download:
                     self._cover_cache.popitem(last=False)
         return fetched
 
+    def _cover_baseline_mode(self) -> str:
+        """The baseline-JPEG rewrite to apply to covers: "small", "faithful",
+        or "" for off. An exact membership test, so anything else (an unknown
+        value, a test double standing in for the settings) reads as off."""
+        mode = getattr(self.settings.data, "metadata_cover_baseline", CoverBaseline.OFF)
+        if isinstance(mode, str) and mode in (CoverBaseline.SMALL, CoverBaseline.FAITHFUL):
+            return str(mode)
+        return ""
+
+    def _cover_baseline(self, url: str | None, data, mode: str):
+        """``data`` (the cover fetched from ``url``) rewritten as baseline JPEG.
+
+        Converted once per job: the result rides the cover cache under a key
+        derived from the URL, beside the untouched original. Whatever goes
+        wrong, the original bytes come back, so the option can only ever
+        match "off" or better it, and it never fails a track.
+        """
+        if not mode or not data or not url:
+            return data
+        key = f"baseline:{mode}:{url}"
+        with self._cover_cache_lock:
+            cached = self._cover_cache.get(key)
+            if cached is not None:
+                self._cover_cache.move_to_end(key)
+                return cached
+        try:
+            from waves.waves_ui.cover_baseline import to_baseline
+
+            result, outcome = to_baseline(data, mode)
+        except Exception:
+            logger_covers.info("Cover kept as served: the baseline rewrite could not run.")
+            return data
+        if outcome not in ("converted", "already-baseline"):
+            logger_covers.info("Cover kept as served (%s).", outcome)
+        with self._cover_cache_lock:
+            self._cover_cache[key] = result
+            while len(self._cover_cache) > self._COVER_CACHE_MAX:
+                self._cover_cache.popitem(last=False)
+        return result
+
     @staticmethod
     def _want_cover_file(save_cover: bool, is_parent_album: bool, single_track: bool) -> bool:
         """Whether to write the separate cover.jpg. The master toggle (save_cover)
@@ -4237,6 +4284,18 @@ class Download:
         if file_dim == embedded_dim:
             return embedded_data
         return self.cover_data_cached(track.album.image(int(file_dim)))
+
+    def _album_cover_file_baseline(
+        self, track: Track, embedded_data, embedded_dim: CoverDimensions, file_dim: CoverDimensions, mode: str
+    ):
+        """``_album_cover_file_data`` with the opt-in baseline rewrite. At the
+        embedded size it is the embedded bytes, already rewritten; at its own
+        size it came from its own fetch, so it gets its own rewrite."""
+        data = self._album_cover_file_data(track, embedded_data, embedded_dim, file_dim)
+        if not mode or not data or data is embedded_data:
+            return data
+        size = CoverDimensions.PxORIGIN if file_dim == CoverDimensions.PxORIGIN else int(file_dim)
+        return self._cover_baseline(track.album.image(size), data, mode)
 
     def _retrieve_lyrics(self, track: Track) -> tuple[str, str, str]:
         """Fetch lyrics for a track, LRCLIB first, TIDAL as the fallback.
@@ -4368,6 +4427,7 @@ class Download:
         lyrics_synced: str = ""
         lyrics_unsynced: str = ""
         cover_data: bytes = None
+        url_cover: str | None = None
         release_type: str = (
             track.album.type.lower()
             if hasattr(track, "album") and hasattr(track.album, "type") and track.album.type
@@ -4408,9 +4468,14 @@ class Download:
             )
             cover_data = self.cover_data_cached(url_cover)
 
+        # Opt-in: rewrite the cover as baseline JPEG for players that cannot
+        # decode progressive ones. Off (the default) hands the bytes through.
+        baseline_mode = self._cover_baseline_mode()
+        cover_data = self._cover_baseline(url_cover, cover_data, baseline_mode)
+
         if cover_data and want_cover_file:
-            cover_data_album_file = self._album_cover_file_data(
-                track, cover_data, cover_dimension, cover_file_dimension
+            cover_data_album_file = self._album_cover_file_baseline(
+                track, cover_data, cover_dimension, cover_file_dimension, baseline_mode
             )
             # Its own fetch at the file size can fail ('' back) while the
             # embedded one worked: the track still lands, without cover.jpg.

@@ -183,6 +183,17 @@ class _Worker:
         )
         self._writer.send({"ev": "probe_done", "id": job_id, "found": None if found is None else int(found)})
 
+    def index(self, job: dict) -> None:
+        job_id = job.get("id")
+        lib = self._lib(str(job["cache"]))
+        read = lib.index_folders(
+            str(job.get("root") or ""),
+            [str(f) for f in job.get("folders") or []],
+            self._alive,
+            timeout=float(job.get("timeout", 0.0)),
+        )
+        self._writer.send({"ev": "index_done", "id": job_id, "read": None if read is None else int(read)})
+
 
 def _serve_one(worker: _Worker, writer: _EventWriter, raw: bytes) -> bool:
     """Run the job on one protocol line; False when it was the quit."""
@@ -204,6 +215,8 @@ def _serve_one(worker: _Worker, writer: _EventWriter, raw: bytes) -> bool:
             worker.scan(job)
         elif op == "probe":
             worker.probe(job)
+        elif op == "index":
+            worker.index(job)
         else:
             writer.send({"ev": "error", "id": job.get("id"), "message": f"unknown op {op!r}"})
     except Exception as exc:  # the job failed; the process serves on

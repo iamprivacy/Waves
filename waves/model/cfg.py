@@ -3,7 +3,14 @@ from dataclasses import dataclass, field
 from dataclasses_json import dataclass_json
 from tidalapi import Quality
 
-from waves.constants import CoverDimensions, DownsampleTarget, InitialKey, MetadataTargetUPC, QualityVideo
+from waves.constants import (
+    CoverBaseline,
+    CoverDimensions,
+    DownsampleTarget,
+    InitialKey,
+    MetadataTargetUPC,
+    QualityVideo,
+)
 
 # The whole-number engine settings that have a real floor and ceiling, as the
 # stepper shows them, the save clamps them and every load clamps them (a value
@@ -112,6 +119,9 @@ class Settings:
     # is a CoverDimensions member name (e.g. "Px640", "PxORIGIN") applied only to
     # the saved file, so the embedded art and the on-disk cover can differ.
     metadata_cover_file_dimension: str = "follow"
+    # Off by default: covers are saved exactly as served. On, the embedded art
+    # and cover.jpg are rewritten as baseline JPEG (see CoverBaseline).
+    metadata_cover_baseline: CoverBaseline = CoverBaseline.OFF
     metadata_cover_embed: bool = True
     mark_explicit: bool = False
     cover_album_file: bool = True
@@ -119,6 +129,9 @@ class Settings:
     # as part of a full album). Off by default: the historical behaviour only
     # saved cover.jpg for album/collection downloads.
     cover_single_track_file: bool = False
+    # Name of the saved cover file, without the extension (Waves adds .jpg).
+    # "folder" suits Windows Explorer and players that look for folder.jpg.
+    cover_file_name: str = "cover"
     extract_flac: bool = True
     downsample_enabled: bool = False
     downsample_target: DownsampleTarget = DownsampleTarget.BIT16_48
@@ -249,13 +262,21 @@ class HelpSettings:
         "The square dimensions of the cover image embedded into the track. Possible values: 80, 160, 320, 640, 1280, origin."
     )
     metadata_cover_file_dimension: str = (
-        "Size of the saved 'cover.jpg'. 'Same as embedded' matches the embedded cover size; "
+        "Size of the saved cover file. 'Same as embedded' matches the embedded cover size; "
         "otherwise pick an independent size (80, 160, 320, 640, 1280, origin)."
+    )
+    metadata_cover_baseline: str = (
+        "For players such as Rockbox that cannot show progressive JPEG covers. Rewrites the embedded art and "
+        "the cover file as baseline JPEG; small players also want the 320 size. A cover already in a folder is kept."
     )
     metadata_cover_embed: str = "Embed album cover into file."
     mark_explicit: str = "Mark explicit tracks with '🅴' in track title (only applies to metadata)."
-    cover_album_file: str = "Save cover to 'cover.jpg', if an album is downloaded."
-    cover_single_track_file: str = "Also save cover.jpg when downloading a single track on its own."
+    cover_album_file: str = "Save the cover as its own file in the album folder."
+    cover_single_track_file: str = "Also save the cover file when downloading a single track on its own."
+    cover_file_name: str = (
+        "Name of the saved cover file. Waves adds .jpg, and drops letters a file name cannot hold. "
+        "Use 'folder' for Windows Explorer and players that look for folder.jpg."
+    )
     extract_flac: str = "Extract FLAC audio tracks from MP4 containers and save them as `*.flac` (uses FFmpeg)."
     downsample_enabled: str = "Lowers hi-res FLAC toward the downsample target, never upsampling, for smaller files."
     downsample_target: str = (

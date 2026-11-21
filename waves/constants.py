@@ -15,7 +15,11 @@ FILENAME_SANITIZE_PLACEHOLDER: str = "_"
 # out of the download folder. Fullwidth full stop for the same reason "?" takes
 # "？": the folder still reads as the release's own name.
 DOT_SEGMENT_STANDIN: str = "．"
-COVER_NAME: str = "cover.jpg"
+# The saved cover's shipped name. Settings can rename it ("folder" for Windows
+# Explorer and players that look for folder.jpg, issue #66); the engine asks
+# helper.path.cover_file_name for the name in use.
+COVER_STEM_DEFAULT: str = "cover"
+COVER_NAME: str = COVER_STEM_DEFAULT + ".jpg"
 BLOCK_SIZE: int = 4096
 BLOCKS: int = 1024
 CHUNK_SIZE: int = BLOCK_SIZE * BLOCKS
@@ -146,6 +150,17 @@ METADATA_LOOKUP_UPC: dict[str, dict[str, str]] = {
 class InitialKey(StrEnum):
     ALPHANUMERIC = "alphanumeric"
     CLASSIC = "classic"
+
+
+class CoverBaseline(StrEnum):
+    """Whether cover art is rewritten as baseline (non-progressive) JPEG for
+    players that cannot decode progressive ones, and which way the rewrite
+    leans: SMALL always stores color at half resolution (4:2:0), FAITHFUL
+    keeps full-resolution color where the source has it, at a larger size."""
+
+    OFF = "off"
+    SMALL = "small"
+    FAITHFUL = "faithful"
 
 
 class DownsampleTarget(StrEnum):
