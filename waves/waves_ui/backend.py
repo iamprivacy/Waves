@@ -67,6 +67,7 @@ from waves.config import Settings, Tidal, _replace_with_retry, api_waits_wake_fo
 from waves.constants import (
     ATMOS_REQUEST_QUALITY,
     DEFAULT_ILLEGAL_MAP,
+    CoverBaseline,
     CoverDimensions,
     DownsampleTarget,
     InitialKey,
@@ -82,6 +83,7 @@ from waves.helper.exceptions import DownloadIncomplete
 from waves.helper.folders import FOLDER_PATH_TOKEN, apply_folder_path, walk_playlist_tree
 from waves.helper.path import (
     ILLEGAL_FILENAME_CHARS,
+    cover_file_stem,
     format_path_media,
     format_str_media,
     path_config_base,
@@ -127,6 +129,7 @@ from .bridge_flac import REPORTS_DIR, FlacCheckMixin
 from .bridge_library import (
     _LIBRARY_DEEP_SWEEP_MS,
     _LIBRARY_DL_DEBOUNCE_MS,
+    _LIBRARY_LANDED_SETTLE_MS,
     _LIBRARY_POLL_MS,
     _LIBRARY_WATCH_DEBOUNCE_MS,
     LibraryMixin,
@@ -137,6 +140,8 @@ from .library_proc import LibraryWorker
 from .updater import AppUpdater, UpdateCancelled, user_facing_error
 
 logger = logging.getLogger("waves")
+# What a discography sweep leaves out and why (breadcrumbs at INFO).
+_disco_logger = logging.getLogger("waves.discography")
 
 
 def _volume_mounted(path: os.PathLike | str, volumes_root: str = "/Volumes") -> bool | None:
@@ -527,6 +532,7 @@ _CHOICE_FIELDS = [
     ("quality_audio", Quality),
     ("quality_video", QualityVideo),
     ("metadata_cover_dimension", CoverDimensions),
+    ("metadata_cover_baseline", CoverBaseline),
     # FFmpeg & FLAC, Tags & Artwork
     ("downsample_target", DownsampleTarget),
     ("metadata_target_upc", MetadataTargetUPC),
@@ -938,6 +944,8 @@ _INLINE_STR_FIELDS = {
     "filename_delimiter_album_artist",
     "metadata_delimiter_genre",
     "filename_illegal_replacement",
+    # A short word rather than a character, so its box is wider (box_width).
+    "cover_file_name",
 }
 # Fields the engine launders before use: the page warns in red while the typed
 # value would not survive it, and holds the save rather than storing text that
@@ -1187,8 +1195,10 @@ _FIELD_LABELS = {
     "playlist_create": "Create .m3u8 playlist",
     # Tags & Artwork
     "metadata_cover_dimension": "Embedded cover size",
+    "metadata_cover_baseline": "Baseline JPEG covers",
     "metadata_cover_embed": "Embed cover art",
-    "cover_album_file": "Save cover.jpg",
+    "cover_album_file": "Save cover file",
+    "cover_file_name": "Cover file name",
     "lyrics_embed": "Embed lyrics",
     "lyrics_file": "Save lyrics file",
     "lyrics_file_synced_only": "Only synced lyrics files",
@@ -1233,6 +1243,7 @@ _ENUM_LABELS = {
         "Px1280": "1280×1280",
         "PxORIGIN": "Original",
     },
+    "metadata_cover_baseline": {"OFF": "Off", "SMALL": "Smaller files", "FAITHFUL": "Closest to original"},
     "downsample_target": {"BIT16_48": "16-bit / 48 kHz", "BIT24_48": "24-bit / 48 kHz"},
     "metadata_target_upc": {"UPC": "UPC", "BARCODE": "Barcode", "EAN": "EAN"},
     "initial_key_format": {"ALPHANUMERIC": "Alphanumeric (Camelot)", "CLASSIC": "Classic"},
@@ -3975,6 +3986,63 @@ def _collapse_editions_by_side(albums, recs_of, tracks_of, quality_of, conflict,
     return [a for a in albums if id(a) in kept]
 
 
+# How big a release's shape is, for "a bigger release already holds this one":
+# an album can hold an EP or a single, an EP can hold a single.
+_RELEASE_SIZE = {"single": 0, "ep": 1, "album": 2}
+
+
+def _drop_covered_releases(albums, recs_of, complete_of, quality_of, extra_coverers=()) -> tuple[list, list]:
+    """``(kept, dropped)``: leave out each EP or single whose every track is on
+    ONE bigger release of the same sweep (issue #67, the pre-release singles an
+    album later collects).
+
+    Edition collapsing cannot see these: it groups by title, and a single
+    never shares its album's title. So every EP and single is matched against
+    each bigger release here, track by track, with the merge matcher
+    (:func:`_align_edition`): ISRC first, where a differing code proves a
+    different recording, then the exact normalized title plus a length within
+    a second. Explicit and clean cuts never match, so a clean album never
+    stands in for an explicit single, and a remix or radio edit with its own
+    code never passes for the album cut.
+
+    Kept whenever unsure: a release whose track read is empty or short, a
+    coverer of another Atmos kind, one with no more tracks than the release,
+    or one of a lower audio quality (the single is the better copy then). A
+    single is only measured against EPs that are themselves kept, so a song
+    is never lost to a chain of two drops. ``extra_coverers`` (a sweep's
+    merge identities) can hold a release but are never dropped themselves.
+    Input order is preserved."""
+    kinds = {id(a): _release_type(a) for a in albums}
+    extra = [a for a in extra_coverers if all(a is not b for b in albums)]
+    dropped: set = set()
+
+    def covered(cand) -> bool:
+        recs = recs_of(cand)
+        if not recs or not complete_of(cand):
+            return False
+        size = _RELEASE_SIZE.get(kinds[id(cand)], 2)
+        for big in [*albums, *extra]:
+            if big is cand or id(big) in dropped:
+                continue
+            if _RELEASE_SIZE.get(kinds.get(id(big)) or _release_type(big), 2) <= size:
+                continue
+            if _atmos_kind(big) != _atmos_kind(cand) or quality_of(big) < quality_of(cand):
+                continue
+            big_recs = recs_of(big)
+            if len(big_recs) <= len(recs):
+                continue
+            if len(_align_edition(recs, big_recs)) == len(recs):
+                return True
+        return False
+
+    # EPs first, so a single is only ever measured against an EP that stays.
+    for kind in ("ep", "single"):
+        for a in albums:
+            if kinds[id(a)] == kind and covered(a):
+                dropped.add(id(a))
+    return [a for a in albums if id(a) not in dropped], [a for a in albums if id(a) in dropped]
+
+
 # --- Best-of-both-worlds merge: assemble one album from several editions -------
 # When a higher-quality edition is a subset of a lower-quality "complete" edition,
 # the merge takes each shared recording from the highest-quality edition that has
@@ -5548,6 +5616,15 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._library_dl_debounce.setSingleShot(True)
         self._library_dl_debounce.setInterval(_LIBRARY_DL_DEBOUNCE_MS)
         self._library_dl_debounce.timeout.connect(self._rebuild_library_index)
+        # The landed-folder index beside it (bridge_library._library_note_landed):
+        # a fixed window from the first track, so a batch republishes steadily.
+        self._library_landed: dict[str, None] = {}
+        self._library_landed_deferred: dict[str, None] = {}
+        self._library_landed_draining = False
+        self._library_landed_timer = QtCore.QTimer(self)
+        self._library_landed_timer.setSingleShot(True)
+        self._library_landed_timer.setInterval(_LIBRARY_LANDED_SETTLE_MS)
+        self._library_landed_timer.timeout.connect(self._library_landed_settled)
         # (2) Hourly full incremental sweep: stats every folder incl. album leaves.
         self._library_rescan_timer = QtCore.QTimer(self)
         self._library_rescan_timer.setInterval(60 * 60 * 1000)
@@ -10980,9 +11057,17 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 self._own_cache[str(ev.get("id"))] = (time.monotonic(), rec)
                 self._evict_own_cache_locked()
             self.ownershipChanged.emit(str(ev.get("id")))
-            # Cross to the GUI thread (queued): when the library IS the download
-            # folder, the landed file means the scan index is stale, so the
-            # debounced rebuild lights the album's badge soon after the batch.
+            # Cross to the GUI thread (queued): the landed file means the scan
+            # index is stale. Its folder is queued first, so the GUI side can
+            # index just that folder within a moment; the debounced rebuild
+            # still runs after the batch as the reconciler. getattr: partial
+            # test stubs drive this without the library family.
+            # The path as written, not `real`: in symlink-to-track mode the
+            # realpath is the track folder's file, while the album folder the
+            # library walks holds the link.
+            note = getattr(self, "_library_note_landed", None)
+            if note is not None:
+                note(os.path.abspath(path))
             self._downloadRecorded.emit()
         except Exception:
             logger.debug("Could not record ownership", exc_info=True)
@@ -12132,6 +12217,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             "edition_conflict": "merge",
             "disco_albums": True,
             "disco_eps": True,
+            # Leave out an EP or single a bigger release of the same sweep
+            # already holds whole (issue #67). Off: it reads every release's
+            # track list, so a discography scan takes longer.
+            "disco_skip_covered": False,
             "disco_featured": True,
             "disco_appears_on": False,
             # Stamp for the one-time video_download force-off in __init__ (the
@@ -13149,6 +13238,79 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         )
         devlog.event("collapse_editions", inp=len(albums), out=len(out), conflict=conflict)
         return out
+
+    def _skip_covered_releases(
+        self, albums: list, extra_coverers: list, stop_check: Callable[[], None] | None = None
+    ) -> list:
+        """``albums`` without the EPs and singles a bigger release of the
+        same sweep already holds whole (see :func:`_drop_covered_releases`).
+
+        Every release in play needs its track list, so the reads go out
+        together, through the same session cache the artist page fills (a
+        page just browsed costs nothing again). ``stop_check`` runs on this
+        thread only, before the reads and as each one lands, never inside a
+        worker or a failure guard, so STOP ends the scan at once and the
+        reads not started yet are canceled. A failed read is not cached and
+        keeps its release."""
+        if not any(_release_type(a) in ("ep", "single") for a in albums):
+            return albums
+        if not any(_release_type(a) != "single" for a in [*albums, *extra_coverers]):
+            return albums  # only singles: nothing is big enough to hold one
+        t0 = devlog.clock()
+        everything = [*albums, *extra_coverers]
+        todo, seen = [], set()
+        for a in everything:
+            key = str(getattr(a, "id", "") or "")
+            if key and key not in seen and key not in self._edition_tracks_cache:
+                seen.add(key)
+                todo.append(a)
+
+        def _read(album):
+            key = str(getattr(album, "id", "") or "")
+            try:
+                with EDITION_GAUGE.working():
+                    entry = _edition_track_rows(album)
+            except Exception:
+                logger.debug("Could not load tracks for the covered-release check", exc_info=True)
+                devlog.event("covered_releases", "release tracks unavailable")
+                return  # unknown content is not cached: the next sweep retries
+            self._remember_capped(self._edition_tracks_cache, key, entry, self._EDITION_TRACKS_CACHE_MAX)
+
+        if todo:
+            if stop_check is not None:
+                stop_check()
+            workers = min(_EDITION_WORKERS, len(todo))
+            EDITION_GAUGE.limit(workers)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(_read, a) for a in todo]
+                try:
+                    for _ in as_completed(futs):
+                        if stop_check is not None:
+                            stop_check()
+                except BaseException:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+
+        def entry_of(album):
+            return self._edition_tracks_cache.get(str(getattr(album, "id", "") or ""), ([], True, []))
+
+        kept, dropped = _drop_covered_releases(
+            albums,
+            lambda a: entry_of(a)[2] if len(entry_of(a)) > 2 else [],
+            lambda a: entry_of(a)[1],
+            _quality_rank,
+            extra_coverers,
+        )
+        if dropped:
+            _disco_logger.info("Discography left out %d EPs and singles an album already holds", len(dropped))
+        devlog.event(
+            "covered_releases",
+            inp=len(albums),
+            dropped=len(dropped),
+            fetched=len(todo),
+            ms=round((devlog.clock() - t0) * 1000),
+        )
+        return kept
 
     def _artist_page_collapses_editions(self) -> bool:
         """Whether an artist page hides editions the discography sweep would
@@ -17596,6 +17758,13 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     deduped, plans = self._merge_editions(deduped, stop_check=stop_check)
                 else:
                     deduped = self._collapse_editions(deduped, stop_check=stop_check)
+            # 'Skip ones an album holds' (issue #67): an EP or single
+            # whose every track is on one album (or a single on one EP) of this
+            # sweep stays out. A merge identity can hold one but is never
+            # dropped; it only ever leaves through the library gate below.
+            if self._waves_pref_bool("disco_eps") and self._waves_pref_bool("disco_skip_covered"):
+                self._set_status("Checking singles against albums…")
+                deduped = self._skip_covered_releases(deduped, [i for i, _ in plans], stop_check=stop_check)
             # The bulk claim gate, album-grained: leave out whole albums the
             # library scan fully claims (the same bar that turns their buttons
             # gold) before anything is queued, so a discography neither
@@ -18245,6 +18414,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             self._releases_stop()
         for _t in (
             "_library_dl_debounce",
+            "_library_landed_timer",
             "_library_rescan_timer",
             "_library_poll_timer",
             "_library_deep_timer",
@@ -18299,6 +18469,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         with contextlib.suppress(Exception):
             self._rel_tidal_pool.clear()
             self._rel_tidal_pool.waitForDone(1000)
+        # An Export list write: one small file.
+        with contextlib.suppress(Exception):
+            self._rel_list_pool.clear()
+            self._rel_list_pool.waitForDone(1000)
         # The fresh-releases read: a stop already dropped its answer, and it
         # checks the generation before each write; a short wait is enough.
         with contextlib.suppress(Exception):
@@ -19348,7 +19522,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 # separator is on its own (under the Genre row, shown while
                 # that is on), so it keeps the row's full width.
                 extra["inline"] = True
-                extra["third"] = key != "metadata_delimiter_genre"
+                extra["third"] = key not in ("metadata_delimiter_genre", "cover_file_name")
+            if key == "cover_file_name":
+                # A word, not a character: a box wide enough to read it, on a
+                # row of its own beside its help (issue #66).
+                extra["box_width"] = 160
             if key in _SANITIZED_FIELDS:
                 extra["sanitize"] = True
             return field(key, "str", str(getattr(d, key)), extra)
@@ -19802,6 +19980,19 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "options": _enum_options("releases_arrivals", ["seen", "visit"]),
                 },
                 {
+                    # Not a pref: two buttons (Import list, Export list). The
+                    # page reads and writes the file through the bridge, and
+                    # a reset has nothing to restore here.
+                    "key": "releases_follow_list",
+                    "label": "Artist list",
+                    "help": (
+                        "Follow the artists named in a .txt or .csv file, after a review, no library needed. "
+                        "Or save your follows to a file Import list reads back."
+                    ),
+                    "type": "follow_list",
+                    "value": "",
+                },
+                {
                     "key": "ffmpeg_auto_update",
                     "label": "Check for updates automatically",
                     "help": (
@@ -19834,7 +20025,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 f["type"] = "cover_sizes"
                 f["file_key"] = "metadata_cover_file_dimension"
                 f["file_value"] = getattr(d, "metadata_cover_file_dimension", "follow") or "follow"
-                f["file_label"] = "Separate cover.jpg size"
+                f["file_label"] = "Separate cover file size"
                 f["file_options"] = [
                     {"value": "follow", "label": "Same as embedded"},
                     *_enum_options("metadata_cover_dimension", _ENUM_BY_FIELD["metadata_cover_dimension"]),
@@ -19842,12 +20033,22 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             if key == "cover_album_file":
                 # Stays a normal on/off tile, but carries a nested child: a
                 # check for single-track downloads in a strip along the tile's
-                # bottom edge while "Save cover.jpg" is on. The tile keeps its
+                # bottom edge while "Save cover file" is on. The tile keeps its
                 # fixed size, so the niche option adds no separate tile.
                 f["child_key"] = "cover_single_track_file"
                 f["child_value"] = bool(getattr(d, "cover_single_track_file", False))
                 f["child_label"] = "Also save for single tracks"
-                f["child_help"] = "Write cover.jpg for a single track downloaded on its own, not just full albums."
+                f["child_help"] = "Write the cover file for a single track downloaded on its own, not just full albums."
+            if key == "disco_eps":
+                # Only means anything while EPs and singles are swept, so it
+                # rides inside their tile rather than taking a seventh one.
+                f["child_key"] = "disco_skip_covered"
+                f["child_value"] = self._waves_pref_bool("disco_skip_covered")
+                f["child_label"] = "Skip ones an album holds"
+                f["child_help"] = (
+                    "Leave out an EP or single whose tracks are all on one bigger release in the same "
+                    "download. Scans take longer."
+                )
             if key == "collapse_editions":
                 # Artist pages hide the editions a discography download
                 # would skip; listing them anyway only means anything while
@@ -19984,6 +20185,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 "id": "releases",
                 "desc": "New releases from the artists you follow, and what Waves does when one lands.",
                 "fields": [
+                    "releases_follow_list",
                     "releases_auto_download",
                     "follow_mirror_tidal",
                     "releases_fresh_hints",
@@ -20040,6 +20242,12 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 "desc": "Tags, cover art and lyrics written into your files.",
                 "fields": [
                     "metadata_cover_dimension",
+                    # Opt-in rewrite of covers as baseline JPEG, a choice row
+                    # right under the sizes it applies to (never a tenth tile).
+                    "metadata_cover_baseline",
+                    # What the saved cover file is called (issue #66): a text
+                    # row with the cover rows, not a tile.
+                    "cover_file_name",
                     "metadata_target_upc",
                     "initial_key_format",
                     # The Genre row (switch on the right) and, while it is on,
@@ -20319,6 +20527,11 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     if laundered and not self._waves_prefs.get("illegal_map_offer_done"):
                         self._waves_prefs["illegal_map_offer_done"] = True
                         self._save_waves_prefs()
+                elif key == "cover_file_name":
+                    # Stored as the engine will use it (issue #66), so the config
+                    # file and the next visit to Settings show the name the next
+                    # cover really gets. The box keeps what was typed until then.
+                    setattr(data, key, cover_file_stem(str(value)))
                 elif key in _FLAG_FIELDS:
                     setattr(data, key, bool(value))
                     # Track the user's real preference for ffmpeg-gated toggles

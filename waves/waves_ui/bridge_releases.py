@@ -98,8 +98,9 @@ from PySide6 import QtCore
 from PySide6.QtCore import Signal, Slot
 from tidalapi.artist import Artist
 
-from waves import artist_import, fresh_releases, musicbrainz
+from waves import artist_import, artist_list, fresh_releases, musicbrainz
 from waves.follows import DL_QUEUED, DL_WAITING, ORIGIN_LIBRARY, ORIGIN_MANUAL, ORIGIN_TIDAL
+from waves.helper.path import cover_file_name
 from waves.mb_service import default_user_agent
 from waves.metadata import ALBUM_ARTIST_ID_TAG, read_custom_ids
 from waves.release_delta import collapse_atmos_twins
@@ -313,6 +314,41 @@ def _releases_fresh_known(seen: set, kept, today: str) -> dict:
     return {k: v for k, v in days.items() if v >= floor}
 
 
+def _list_path(url) -> str:
+    """A file dialog's pick as a local path: a file:// URL (drive letters
+    and shares included, on every platform) or a plain path as is."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    qurl = QtCore.QUrl(text)
+    return qurl.toLocalFile() if qurl.isLocalFile() else text
+
+
+def _list_id_matches(listed: list, followed_ids: set) -> tuple[list, int]:
+    """The rows of a list file that carry a TIDAL id (an Export list file),
+    matched by it with no search: ``(matched, already followed)``."""
+    matched: list = []
+    known = 0
+    for r in listed:
+        aid = str(r.get("id") or "")
+        if not aid:
+            continue
+        if aid in followed_ids:
+            known += 1
+            continue
+        name = str(r.get("name") or "")
+        matched.append(
+            {
+                "name": name,
+                "albums": 0,
+                "norm": artist_import.name_key(name),
+                "reason": "list",
+                "artist": {"id": aid, "name": name, "art": ""},
+            }
+        )
+    return matched, known
+
+
 def _tagged_artist_id(cache, folders: list) -> str:
     """The one TIDAL album-artist id an artist's album files carry (the tag a
     Waves download writes), trying the first file of up to three of its
@@ -363,6 +399,8 @@ class ReleasesMixin:
     artistImportError = Signal(str)
     artistImportDone = Signal(int)
     _relImportDone = Signal("QVariant")  # internal: the import worker's outcome
+    # Export list's outcome: (artists written, "" or "file-unwritable").
+    artistListExported = Signal(int, str)
     # The Releases tab's library line: {kind: "" | "more" | "look", n}. "more"
     # offers the artists the library gained since the last import, "look"
     # the names an automatic import could not settle.
@@ -376,6 +414,11 @@ class ReleasesMixin:
         self._rel_pool = QtCore.QThreadPool()
         self._rel_pool.setMaxThreadCount(1)
         diagnostics.register_pool("releases", self._rel_pool)
+        # Export list writes here, never on the sweep's pool: the file may
+        # sit on a slow share, and the sweep must not wait for it.
+        self._rel_list_pool = QtCore.QThreadPool()
+        self._rel_list_pool.setMaxThreadCount(1)
+        diagnostics.register_pool("releases-list", self._rel_list_pool)
         self._rel_gen = 0
         self._rel_step_running = False
         self._rel_import_running = False
@@ -2677,11 +2720,48 @@ class ReleasesMixin:
         if clean:
             self._releases_import_begin(only_new=False, auto=False, names=clean)
 
-    def _releases_import_begin(self, *, only_new: bool, auto: bool, names: list | None = None) -> bool:
+    @Slot(str)
+    def startArtistImportFile(self, url: str) -> None:
+        """The same review, over the names in a .txt or .csv list the user
+        picked (Import list). No library is needed: a name the library also
+        holds is weighed by what it holds there, the rest by name alone,
+        and a row that carries a TIDAL id (an Export list file) needs no
+        search at all. The file is read on the worker (it may sit on a
+        share); only the user's own pick is ever read."""
+        path = _list_path(url)
+        if path:
+            self._releases_import_begin(only_new=False, auto=False, file=path)
+
+    @Slot(str)
+    def exportFollowedArtists(self, url: str) -> None:
+        """Save every follow (name and TIDAL id) to the file the user picked
+        (Export list): a .csv with a header that Import list reads back,
+        anything else one name a line. Answers with artistListExported."""
+        path = _list_path(url)
+        if not path:
+            self.artistListExported.emit(0, "file-unwritable")
+            return
+        rows = [{"name": r.get("name") or "", "id": r.get("artist_id") or ""} for r in self._releases.follows()]
+        self._rel_list_pool.start(Worker(lambda: self._releases_export_list(path, rows)))
+
+    def _releases_export_list(self, path: str, rows: list) -> None:
+        """(worker) The write behind Export list. A failure is reported by
+        its word alone: an OSError's text carries the path."""
+        try:
+            n = artist_list.write_artists(path, rows)
+        except OSError:
+            logger.warning("follow list export failed")
+            self.artistListExported.emit(0, "file-unwritable")
+            return
+        logger.info("follow list exported: %d artist(s)", n)
+        self.artistListExported.emit(n, "")
+
+    def _releases_import_begin(self, *, only_new: bool, auto: bool, names: list | None = None, file: str = "") -> bool:
         """Start a run. ``auto`` is the automatic import: it follows
         what it matches by itself, reports nothing to the dialog, and gives
         way to a run the user starts by hand. ``names`` narrows the run to
-        those library artists, floor or no floor."""
+        those library artists, floor or no floor. ``file`` is a list the
+        user picked, which needs no library at all."""
         running = bool(getattr(self, "_rel_import_running", False))
         if running and (auto or not getattr(self, "_rel_import_auto", False)):
             return False
@@ -2693,7 +2773,7 @@ class ReleasesMixin:
             return False
         cache = self._releases_library_cache()
         scanning = bool(getattr(self, "_library_index_building", False))
-        if cache is None:
+        if cache is None and not file:
             if not auto:
                 # Before a first scan has saved anything, say it is coming.
                 self.artistImportError.emit("library-scanning" if scanning else "no-library")
@@ -2709,8 +2789,8 @@ class ReleasesMixin:
         self._rel_import_auto = auto
         self._rel_import_gen = getattr(self, "_rel_import_gen", 0) + 1
         gen, igen = self._rel_gen, self._rel_import_gen
-        opts = {"only_new": only_new, "auto": auto, "scanning": scanning, "names": list(names or [])}
-        logger.info("library import started%s", " (automatic)" if auto else "")
+        opts = {"only_new": only_new, "auto": auto, "scanning": scanning, "names": list(names or []), "file": file}
+        logger.info("%s started%s", "list import" if file else "library import", " (automatic)" if auto else "")
         self._rel_pool.start(Worker(lambda: self._releases_import_scan(cache, gen, igen, opts)))
         return True
 
@@ -2936,7 +3016,11 @@ class ReleasesMixin:
         try:
             with os.scandir(folder) as it:
                 names = {e.name.lower(): e.name for e in it if e.is_file()}
-            for stem in _REL_COVER_NAMES:
+            # The name Waves saves covers under comes first when it was
+            # changed in Settings (issue #66), then the usual ones.
+            data = getattr(getattr(self, "settings", None), "data", None)
+            own = cover_file_name(getattr(data, "cover_file_name", None)).lower()
+            for stem in (own, *_REL_COVER_NAMES):
                 if stem in names:
                     found = pathlib.Path(folder, names[stem]).as_uri()
                     break
@@ -2995,26 +3079,10 @@ class ReleasesMixin:
     def _releases_import_run(self, cache, gen: int, igen: int, opts: dict) -> None:
         auto = bool(opts.get("auto"))
         result: dict = {"gen": gen, "igen": igen, "error": "", "auto": auto, "scanning": bool(opts.get("scanning"))}
-        rows = list(cache.distinct_artists())
-        result["artists"] = len(rows)
-        # Under the track floor: left out of this run and not remembered as
-        # looked at, so a lower floor (or more of their tracks) brings them.
-        # A run over named artists (the Excluded page) is the user asking
-        # for exactly those, so the floor does not apply.
-        thin = 0
-        wanted = {artist_import.name_key(str(n)) for n in opts.get("names") or []}
-        if wanted:
-            rows = [r for r in rows if artist_import.name_key(str(r.get("name") or "")) in wanted]
-        else:
-            floor = self._releases_min_tracks()
-            thin = sum(1 for r in rows if not self._releases_enough_tracks(r, floor))
-            rows = [r for r in rows if self._releases_enough_tracks(r, floor)]
-        if opts.get("only_new"):
-            seen = self._releases_seen_norms()
-            rows = [r for r in rows if artist_import.name_key(str(r.get("name") or "")) not in seen]
-        # What this run looks at, remembered once it lands (never on a
-        # cancel or a rate limit, so those artists come round again).
-        result["norms"] = sorted({n for n in (artist_import.name_key(str(r.get("name") or "")) for r in rows) if n})
+        picked = self._releases_import_rows(cache, opts, result)
+        if picked is None:
+            return
+        rows, wanted, thin, listed = picked
         followed = self._releases.follows()
         followed_ids = {str(r.get("artist_id") or "") for r in followed}
         followed_norms = {artist_import.name_key(str(r.get("name") or "")) for r in followed}
@@ -3024,8 +3092,9 @@ class ReleasesMixin:
 
         def alive() -> bool:
             # The library folder changed or was turned off: its files are
-            # no longer Waves' to read (the two-folder rule).
-            return self._releases_import_alive(gen, igen) and self._releases_library_still(cache)
+            # no longer Waves' to read (the two-folder rule). A list run
+            # with no library reads no library files at all.
+            return self._releases_import_alive(gen, igen) and (cache is None or self._releases_library_still(cache))
 
         tagged = self._releases_import_tags(
             cache, rows, followed_ids, followed_norms | dismissed, alive, report=not auto
@@ -3036,6 +3105,9 @@ class ReleasesMixin:
             return
         matched, rest, skipped = tagged
         skipped += thin
+        by_id, known = _list_id_matches(listed, followed_ids)
+        matched += by_id
+        skipped += known
         limited = [False]
         wait = self._releases_import_pacer()
         out = artist_import.resolve(
@@ -3073,6 +3145,60 @@ class ReleasesMixin:
         )
         result["tagged"] = len(matched)
         self._relImportDone.emit(result)
+
+    def _releases_import_rows(self, cache, opts: dict, result: dict):
+        """(worker) What a run looks at: ``(rows, wanted, thin, listed)``,
+        or None once a list file could not be used (already reported).
+        ``wanted`` is the name keys the user asked for by name (no floor,
+        no FORGET), ``thin`` how many the floor left out, ``listed`` a list
+        file's own rows (those with a TIDAL id need no search)."""
+        if opts.get("file"):
+            try:
+                listed = artist_list.read_artists(str(opts["file"]))
+            except (OSError, ValueError):
+                # Its word alone: an OSError's text carries the path.
+                self._relImportDone.emit({**result, "error": "file-unreadable"})
+                return None
+            if not listed:
+                self._relImportDone.emit({**result, "error": "file-empty"})
+                return None
+            logger.info("list import: %d name(s) read", len(listed))
+            result["artists"] = len(listed)
+            # A list never feeds the library's "more artists" memory.
+            result["norms"] = []
+            wanted = {artist_import.name_key(r["name"]) for r in listed}
+            return self._releases_list_rows(cache, [r for r in listed if not r.get("id")]), wanted, 0, listed
+        rows = list(cache.distinct_artists())
+        result["artists"] = len(rows)
+        # Under the track floor: left out of this run and not remembered as
+        # looked at, so a lower floor (or more of their tracks) brings them.
+        # A run over named artists (the Excluded page) is the user asking
+        # for exactly those, so the floor does not apply.
+        thin = 0
+        wanted = {artist_import.name_key(str(n)) for n in opts.get("names") or []}
+        if wanted:
+            rows = [r for r in rows if artist_import.name_key(str(r.get("name") or "")) in wanted]
+        else:
+            floor = self._releases_min_tracks()
+            thin = sum(1 for r in rows if not self._releases_enough_tracks(r, floor))
+            rows = [r for r in rows if self._releases_enough_tracks(r, floor)]
+        if opts.get("only_new"):
+            seen = self._releases_seen_norms()
+            rows = [r for r in rows if artist_import.name_key(str(r.get("name") or "")) not in seen]
+        # What this run looks at, remembered once it lands (never on a
+        # cancel or a rate limit, so those artists come round again).
+        result["norms"] = sorted({n for n in (artist_import.name_key(str(r.get("name") or "")) for r in rows) if n})
+        return rows, wanted, thin, []
+
+    def _releases_list_rows(self, cache, listed: list) -> list:
+        """(worker) A list's names as import rows: the library's own row for
+        a name it also holds (so the tag pass and the album weighing still
+        apply), a bare name otherwise. With no library, all bare names."""
+        by_key: dict = {}
+        if cache is not None:
+            for r in cache.distinct_artists():
+                by_key.setdefault(artist_import.name_key(str(r.get("name") or "")), r)
+        return [by_key.get(artist_import.name_key(r["name"])) or {"name": r["name"]} for r in listed]
 
     def _releases_import_tags(
         self, cache, rows: list, followed_ids: set, skip_norms: set, alive, *, report: bool = True

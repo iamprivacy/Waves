@@ -48,7 +48,7 @@ from PySide6.QtCore import Signal, Slot
 
 import waves.matching as matching
 from waves.helper.path import folder_name_candidates, safe_filename_replacement, safe_filename_replacement_map
-from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, JoinedLibrary, root_comparison_key
+from waves.library_index import SCAN_MISSING, SCAN_OK, SCAN_UNREADABLE, JoinedLibrary, _is_audio, root_comparison_key
 from waves.library_recover import recover_untrusted
 from waves.ownership import path_under
 from waves.worker import Worker
@@ -89,6 +89,14 @@ _LIBRARY_DL_DEBOUNCE_MS = 15 * 1000  # coalesce a bulk download's per-track owne
 # watcher's 30s: this fires while downloads are actively competing for the same
 # disk, so once every two minutes is the right trade against scanning cost.
 _LIBRARY_DL_MAX_DEBOUNCE_S = 120.0
+# The landed-folder index (see _library_note_landed): the folder a download
+# just wrote is indexed on its own, so its badge lights at once instead of
+# after the rebuild above. Started by the first track and NOT restarted by the
+# ones after it. After a publish the next one waits out the gap: every publish
+# resets the presence memos and makes every badge on screen ask again, so a
+# long batch republishes on a slower beat than its first track.
+_LIBRARY_LANDED_SETTLE_MS = 1500
+_LIBRARY_LANDED_MIN_GAP_S = 5.0
 # The probe by name (see the "Probe by name" section): how long a miss for one
 # artist is remembered before the disk is asked again (a folder can appear in
 # the meantime, so it is a rest, not a verdict), and how long a download gate
@@ -421,9 +429,10 @@ class SqlArtistRollup:
 def _rearm(bridge) -> None:
     """Re-ask whatever a running scan made the probe defer. Guarded because the
     partial stubs the bridge tests build bind a fixed list of methods."""
-    hook = getattr(bridge, "_library_probe_rearm", None)
-    if hook is not None:
-        hook()
+    for name in ("_library_probe_rearm", "_library_landed_rearm"):
+        hook = getattr(bridge, name, None)
+        if hook is not None:
+            hook()
 
 
 class LibraryMixin:
@@ -584,6 +593,9 @@ class LibraryMixin:
             # empty queue and stand down by itself.
             self._library_probe_pending = {}
             self._library_probe_deferred = {}
+            # The same for downloads that landed under the old folder.
+            self._library_landed = {}
+            self._library_landed_deferred = {}
         self._library_scan_progress = {}
         self._bump_library_stamp()
         self.libraryPresenceChanged.emit()
@@ -1381,6 +1393,158 @@ class LibraryMixin:
                 self._rebuild_library_index()
             else:
                 self._library_dl_debounce.start()  # restart the settle window
+        # The fast path beside it: index just the landed folder (see
+        # _library_note_landed). getattr: the partial test stubs have no timer.
+        timer = getattr(self, "_library_landed_timer", None)
+        if timer is not None and getattr(self, "_library_landed", None) and not timer.isActive():
+            since = time.monotonic() - getattr(self, "_library_landed_published", float("-inf"))
+            timer.start(int(max(_LIBRARY_LANDED_SETTLE_MS, (_LIBRARY_LANDED_MIN_GAP_S - since) * 1000)))
+
+    # ---- The landed folder: a download lights its badge at once -----------------
+    # The debounced rebuild above is the reconciler, and it is slow on purpose
+    # (a settle window, then a walk of the WHOLE library, minutes on a share).
+    # The folder a download just wrote is known exactly, so it is indexed on
+    # its own (LibraryIndex.index_folders) and the indexes republish: the
+    # track pill, the album pill and the artist badge all re-ask together.
+    # A cache held by a scan is not an answer: the folders wait for the
+    # publish that scan ends with (_rearm), the same rule as the probe.
+
+    def _library_note_landed(self, path: str) -> None:
+        """(ownership pool) A downloaded file landed: queue its folder for the
+        landed-folder index, when it is an audio file under one of the two
+        folders the library scans. The GUI thread's _on_download_recorded,
+        queued right after this, starts the settle timer."""
+        path = str(path or "")
+        if not path or not _is_audio(os.path.basename(path)):
+            return
+        root = self._library_root()
+        if not root:
+            return
+        extra_root = self._library_extra_root()
+        if not (path_under(path, root) or (extra_root and path_under(path, extra_root))):
+            return
+        with self._library_probe_gate:
+            pending = getattr(self, "_library_landed", None)
+            if pending is None:
+                pending = self._library_landed = {}
+            if len(pending) < _LIBRARY_PROBE_QUEUE_MAX:
+                pending[os.path.dirname(path)] = None
+
+    def _library_landed_settled(self) -> None:
+        """(GUI thread) The settle window closed: start the one drainer."""
+        with self._library_probe_gate:
+            if getattr(self, "_library_landed_draining", False) or not getattr(self, "_library_landed", None):
+                return
+            self._library_landed_draining = True
+        # Raised like the launch seed: the pool is shared with the download
+        # work, and the badge must not wait behind the queue it reports on.
+        self.threadpool.start(Worker(self._library_index_landed), 10)
+
+    def _library_index_landed(self) -> None:
+        """(worker thread) Index every queued folder, in rounds, until none is
+        left. One drainer at a time, so a burst coalesces into one round."""
+        try:
+            while True:
+                with self._library_probe_gate:
+                    pending = getattr(self, "_library_landed", None) or {}
+                    self._library_landed = {}
+                    if not pending:
+                        self._library_landed_draining = False
+                        return
+                self._library_index_landed_in(list(pending))
+        except Exception:
+            logger.debug("Indexing a landed download failed; the rebuild will catch it", exc_info=True)
+            with self._library_probe_gate:
+                self._library_landed_draining = False
+
+    def _library_landed_rearm(self) -> None:
+        """(worker thread, after any publish) Ask again for the folders a
+        running scan held the cache over."""
+        with self._library_probe_gate:
+            deferred = getattr(self, "_library_landed_deferred", None)
+            if not deferred:
+                return
+            self._library_landed_deferred = {}
+            pending = getattr(self, "_library_landed", None)
+            if pending is None:
+                pending = self._library_landed = {}
+            pending.update(deferred)
+            if getattr(self, "_library_landed_draining", False):
+                return
+            self._library_landed_draining = True
+        self._library_index_landed()
+
+    def _library_index_landed_in(self, folders: list[str]) -> None:
+        """(worker thread) One round: each folder goes to the cache of the
+        folder it sits under, and the indexes republish when anything was
+        written. Captured under the index lock like every scan, so a library
+        change mid-round discards the round instead of publishing it."""
+        with self._library_index_lock:
+            gen = self._library_gen
+            lib = self._library
+            extra = getattr(self, "_library_extra", None)
+        root = self._library_root()
+        extra_root = self._library_extra_root() if extra is not None else ""
+        if not root or lib is None:
+            return
+        mine = [f for f in folders if path_under(f, root)]
+        theirs = [f for f in folders if extra_root and f not in mine and path_under(f, extra_root)]
+        wrote = 0
+        held: list[str] = []
+        for cache, cache_root, group in ((lib, root, mine), (extra, extra_root, theirs)):
+            read = self._library_index_landed_one(cache, cache_root, group, gen)
+            if read is None:
+                held.extend(group)
+            else:
+                wrote += read
+        if gen != self._library_gen:
+            return
+        if held:
+            with self._library_probe_gate:
+                deferred = getattr(self, "_library_landed_deferred", None)
+                if deferred is None:
+                    deferred = self._library_landed_deferred = {}
+                if len(deferred) < _LIBRARY_PROBE_QUEUE_MAX:
+                    deferred.update(dict.fromkeys(held))
+        if not wrote:
+            return
+        # Over the same joined source every scan publishes (see _library_probe_run).
+        fresh, fresh_tracks = self._build_presence_indexes(self._joined_source(lib, extra, extra_root))
+        if gen != self._library_gen:
+            return
+        self._publish_index(fresh, fresh_tracks)
+        self._library_landed_published = time.monotonic()
+        self._emit_from_worker("libraryPresenceChanged")
+        logger.info("library: %d downloaded albums indexed, badges republished", wrote)
+
+    def _library_index_landed_one(self, cache, root: str, folders: list[str], gen: int) -> int | None:
+        """(worker thread) index_folders on one cache, in the scanner process
+        when it runs one: albums written, or None while a scan holds it."""
+        if not folders or cache is None:
+            return 0
+        read = self._library_worker_index(cache, root, folders, gen)
+        if read is _IN_PROCESS:
+            read = cache.index_folders(root, folders, lambda: gen == self._library_gen, timeout=0.0)
+        return None if read is None else int(read)
+
+    def _library_worker_index(self, lib, root: str, folders: list[str], gen: int):
+        """(worker thread) index_folders in the scanner process: the count
+        read, None while it is busy (or the job was superseded), or
+        _IN_PROCESS to run it here. See _library_worker_probe."""
+        worker = getattr(self, "_library_worker", None)
+        if not isinstance(worker, LibraryWorker) or worker.disabled:
+            return _IN_PROCESS
+        path = getattr(lib, "path", "")
+        if not path or path == ":memory:":
+            return _IN_PROCESS
+        job = {"cache": path, "root": root, "folders": list(folders), "timeout": 0.0}
+        try:
+            out = worker.run_index(job, alive=lambda: gen == self._library_gen)
+        except WorkerFailed:
+            return _IN_PROCESS
+        if out is None:
+            return None
+        return out.get("read")
 
     @Slot(result=str)
     def libraryScanStatus(self) -> str:

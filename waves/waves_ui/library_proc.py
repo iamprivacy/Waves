@@ -180,7 +180,7 @@ class LibraryWorker:
                 ev = msg.get("ev")
                 if ev == "log":
                     self._relay_log(msg)
-                elif ev in ("progress", "done", "probe_done", "error"):
+                elif ev in ("progress", "done", "probe_done", "index_done", "error"):
                     # Progress goes on the queue like every other reply rather
                     # than being handled here. The scan's handler republishes
                     # both presence indexes on a committed flush, and running
@@ -385,3 +385,11 @@ class LibraryWorker:
         if self._job_lock.locked():
             return None
         return self._run(dict(job, op="probe"), alive=alive, kinds=("probe_done",))
+
+    def run_index(self, job: dict, *, alive) -> dict | None:
+        """index_folders in the child, for a download that just landed. None
+        at once while a scan holds the child, like run_probe: the bridge keeps
+        the folders for the publish that scan ends with."""
+        if self._job_lock.locked():
+            return None
+        return self._run(dict(job, op="index"), alive=alive, kinds=("index_done",))
