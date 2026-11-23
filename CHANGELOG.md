@@ -22,6 +22,29 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.9 (2026-11-23)
+
+### ✨ Added
+
+- 👥 When you follow the wrong one of several TIDAL artists with the same name, Waves switches the follow to the one your library's albums belong to and says so on that artist's page, naming those albums, with UNDO; when it is less sure, the page asks first with SWITCH and KEEP. Both are marked in your Following list. Your TIDAL favorites are not changed.
+- 🏷️ The in-library mark on an artist shows only for the one your library holds, not for other artists with the same name, and their artist page says the one in your library is a different artist, with a button to open it.
+- 🗂️ When one TIDAL profile holds several artists with the same name, the releases that do not belong to the one in your library stay out of Releases, notifications and automatic downloads, and sit in a folded **Other artists named …** section at the bottom of the artist page.
+
+### 🐛 Fixed
+
+- 🏷️ Explicit songs downloaded with "Mark explicit in title" turned on now show as in your library, instead of offering a download while the album said it was in your library.
+- 🔄 An update that cannot clear a folder left by an earlier update now stops with a message, instead of leaving an app that will not open.
+- 🔔 New releases are no longer missed when a releases check fails partway through.
+- ⬇️ Releases set to download automatically are still downloaded when Waves is quit during a releases check.
+- ⚙️ Waves settings are no longer reset to defaults when the settings file cannot be read for a moment.
+- 🎬 A video whose last part failed to download is no longer marked as finished.
+- 💿 Two editions with the same name downloading at the same time no longer overwrite each other or fail at random.
+- 🔗 With **Symlink into track folder** and **Track-number padding** on, tracks are no longer downloaded a second time.
+- 📃 A playlist with a very long name now keeps its .m3u8 extension.
+- 🪟 On Windows, a playlist track copied instead of linked is no longer left cut off when the disk fills up.
+- 🩺 Diagnostics reports now hide your user name in Linux removable-drive paths (/media and /run/media).
+- ☕ The developer note at launch now keeps the app behind it from reacting to typing, scrolling or shortcuts until it is closed.
+
 ## 🗂️ v0.2.8 (2026-11-21)
 
 ### ✨ Added
