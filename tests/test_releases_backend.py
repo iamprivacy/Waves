@@ -232,6 +232,28 @@ for _m in (
     "_releases_heads_judge",
     "_releases_heads_settle",
     "_on_rel_heads_done",
+    "_releases_anchor_due",
+    "_releases_anchor_turn",
+    "_releases_anchor_folds",
+    "_releases_anchor_library",
+    "_releases_anchor_judge",
+    "_releases_anchor_maps",
+    "_releases_ties_pass",
+    "_releases_anchor_classify",
+    "_releases_anchor_search",
+    "_releases_anchor_catalog",
+    "_releases_anchor_others",
+    "_releases_anchor_outcome",
+    "_releases_anchor_check",
+    "_on_rel_anchor_done",
+    "_on_rel_anchor_classified",
+    "_releases_anchor_for",
+    "artistMoves",
+    "_releases_moved",
+    "undoArtistMove",
+    "acceptArtistMove",
+    "dismissArtistMove",
+    "artistNamesake",
 ):
     if hasattr(WavesBridge, _m):
         setattr(_Stub, _m, getattr(WavesBridge, _m))
@@ -2577,3 +2599,38 @@ def test_switching_featured_on_reseeds_and_off_drops_the_waiting(tmp_path):
     assert s._releases.guests_due("2099-01-01") == []
     switched(True)
     assert s._releases.record_guests("A", [{"id": "g2", "date": "2026-01-02"}]) == []
+
+
+def test_a_new_release_still_downloads_when_the_app_quit_before_queueing_it(tmp_path):
+    """The step marks a release seen on the worker; the GUI queues it a moment
+    later. A quit in between used to lose the download for good (the release
+    is seen, so no later step finds it new). Now it waits in the store and
+    the next step's drain takes it; an ordinary step queues it exactly once."""
+    s = _releases_stub(_stub(tmp_path, prefs={"releases_auto_download": True}), _fake_artist())
+    s._releases.follow("A", "Artist", "")
+    _sweep_step(s, [{"id": "a", "date": "2026-01-01"}])
+    rows = [{"id": "a", "date": "2026-01-01"}, {"id": "b", "date": "2026-01-02"}]
+
+    s._artist_recent_releases = lambda _aid: (rows, [], False)
+    _bind(s, "_releases_check_one")({"artist_id": "A", "name": "Artist"}, s._rel_gen)
+    # ... and the app quits before _on_rel_step_done runs.
+    assert s.queued == []
+    _sweep_step(s, rows)
+    assert s.queued == ["b"]
+
+    _sweep_step(s, [*rows, {"id": "c", "date": "2026-01-03"}])
+    assert s.queued == ["b", "c"]
+
+
+def test_a_new_featured_release_waits_in_the_same_save_that_marks_it_seen(tmp_path):
+    s = _stub(tmp_path, prefs={"releases_auto_download": True, "releases_auto_kinds": "featured"})
+    s._releases.follow("A", "Artist", "")
+    s._releases.record_guests("A", [{"id": "g1", "date": "2026-01-01"}], wait=True)  # the baseline
+    fresh = s._releases.record_guests(
+        "A", [{"id": "g1", "date": "2026-01-01"}, {"id": "g2", "date": "2026-01-02"}], wait=True
+    )
+    assert s._releases.guests_due("9999-12-31") == [("g2", "A")]
+    s._releases.guest_wait("g2", "2026-01-02", "A")
+    _bind(s, "_releases_auto_download_guests")(fresh)
+    _bind(s, "_releases_drain_auto_downloads")()
+    assert s.queued_tracks == ["g2:A"]

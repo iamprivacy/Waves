@@ -192,6 +192,16 @@ def test_tar_rejects_escaping_symlink(tmp_path):
         AppUpdater._safe_extractall_tar(tf, out)
 
 
+def test_tar_rejects_a_link_a_later_link_turns_outward(tmp_path):
+    # "d" -> "e/f/../.." stays inside while "e" is missing; "e" -> "." then
+    # makes "d" point outside. Each link alone passes the check when written.
+    archive = tmp_path / "order.tar.gz"
+    _tar_gz(archive, [("d", "e/f/../..", "sym", 0o777), ("e", ".", "sym", 0o777)])
+    out = tmp_path / "out"
+    with tarfile.open(archive, "r:gz") as tf, pytest.raises(UpdaterError, match="unsafe symlink"):
+        AppUpdater._safe_extractall_tar(tf, out)
+
+
 def test_tar_rejects_absolute_symlink(tmp_path):
     archive = tmp_path / "asym.tar.gz"
     _tar_gz(archive, [("evil", "/etc/passwd", "sym", 0o777)])

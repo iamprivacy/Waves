@@ -241,3 +241,44 @@ class TestSymlinkStepNeverTouchesAStrangerInThePlaylistFolder:
         assert not untagged.is_symlink()
         assert untagged.read_bytes() == b"old-library"
         assert occupant.read_bytes() == b"id-111"
+
+
+def _padded_name(fmt, media, pad, **_kw):
+    """format_path_media stand-in: track 3 of a 7-track album."""
+    return "Tracks/03. Song" if pad >= 2 else "Tracks/3. Song"
+
+
+class TestTrackFolderKeepsTheNumberPadding:
+    def test_a_new_track_lands_with_the_padding_the_user_set(self, tmp_path):
+        # Every other name honors album_track_num_pad_min; the track folder did
+        # not, so a track downloaded alone ("03.") and the same track reached
+        # through a playlist ("3.") became two files.
+        dl = _make_download(tmp_path)
+        dl.settings.data.album_track_num_pad_min = 2
+        source = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-111")
+
+        with (
+            patch("waves.download.format_path_media", side_effect=_padded_name),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-111": "111"})),
+        ):
+            destination = dl.media_move_and_symlink(_track(111), source, ".flac")
+
+        assert destination == tmp_path / "Tracks" / "03. Song.flac"
+        assert source.is_symlink()
+
+    def test_a_track_an_older_build_filed_unpadded_is_reused(self, tmp_path):
+        # Older builds wrote "3." here. Asking only for "03." would fetch the
+        # track again and leave the old file behind for good.
+        dl = _make_download(tmp_path)
+        dl.settings.data.album_track_num_pad_min = 2
+        old = _plant(tmp_path / "Tracks" / "3. Song.flac", b"id-111")
+
+        with (
+            patch("waves.download.format_path_media", side_effect=_padded_name),
+            patch("waves.download.read_item_id", _ids_by_payload({b"id-111": "111"})),
+        ):
+            assert dl._track_dir_path(_track(111), ".flac") == old
+            source = _plant(tmp_path / "Playlists" / "Party" / "Song.flac", b"id-111")
+            assert dl.media_move_and_symlink(_track(111), source, ".flac") == old
+
+        assert sorted(p.name for p in (tmp_path / "Tracks").iterdir()) == ["3. Song.flac"]

@@ -59,6 +59,19 @@ class TestTheM3uStagingNameIsBudgeted:
         assert not list(tmp_path.glob(".*.tmp")), "no staging leftover"
 
 
+class TestALongPlaylistNameKeepsItsExtension:
+    def test_a_long_japanese_title_still_ends_in_m3u8(self, tmp_path):
+        # 90 three-byte characters plus "_" and ".m3u8" pass 255 bytes; the
+        # extra cut before path_file_sanitize left the file named "....m".
+        dl = _make_download(tmp_path)
+
+        paths = Download.playlist_populate(dl, {tmp_path}, "あ" * 90, True, True)
+
+        assert len(paths) == 1 and paths[0].name.endswith(".m3u8"), paths
+        assert len(os.fsencode(paths[0].name)) <= 255
+        assert paths[0].is_file()
+
+
 class TestTheM3uKeepsItsOldName:
     """The new name funnel respelled an existing library's m3u, leaving two
     files a library scanner both ingests, and nothing may ever delete one."""

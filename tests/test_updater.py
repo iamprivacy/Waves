@@ -96,6 +96,27 @@ def test_apply_unix_tree_rolls_back_on_swap_failure(tmp_path, monkeypatch):
     assert install_root.exists() and (install_root / "Waves").read_text() == "LIVE"
 
 
+def test_a_landing_folder_that_cannot_be_cleared_stops_the_update(tmp_path, monkeypatch):
+    """A Waves.new that survives the clear (a file antivirus holds open) must
+    stop the update: shutil.move would nest the new build inside it."""
+    up = AppUpdater(tmp_path, "1.0.0", repo="owner/Waves")
+    install_root = tmp_path / "app"
+    install_root.mkdir()
+    (install_root / "Waves").write_text("LIVE")
+    stuck = tmp_path / "app.new"
+    stuck.mkdir()
+    (stuck / "Waves").write_text("LOCKED")
+    staged = tmp_path / "staging" / "Waves.dist"
+    staged.mkdir(parents=True)
+    (staged / "Waves").write_text("NEW")
+    monkeypatch.setattr(u, "_rmtree", lambda p: None)
+
+    with pytest.raises(UpdaterError, match="Could not clear"):
+        up._apply_unix_tree(staged, install_root / "Waves", lambda *a, **k: None)
+    assert (install_root / "Waves").read_text() == "LIVE"
+    assert not (stuck / "Waves.dist").exists()
+
+
 # ---- the install folder is not only ours (foreign-file rescue) --------------
 def _install_with_foreign_files(tmp_path):
     """An install folder holding the build AND things the user put there: a
@@ -1058,8 +1079,8 @@ def test_select_arch_agnostic_appimage_still_needs_the_flag():
 
 def test_select_shipped_macos_names():
     # Pin the REAL CI asset names: "intel" is an amd64 token, so the Intel zip
-    # matches amd64 and is skipped on arm64; the apple-silicon zip carries no
-    # arch token and is picked on arm64 via the arch-agnostic fallback.
+    # matches amd64 and is skipped on arm64; "silicon" is an arm64 token, so
+    # the apple-silicon zip is picked on arm64 and never on an Intel Mac.
     assets = [
         {"name": "waves_macos-intel.zip", "browser_download_url": "mac-intel"},
         {"name": "waves_macos-intel.zip.sha256", "browser_download_url": "mac-intel-sha"},
@@ -1078,6 +1099,16 @@ def test_select_shipped_macos_names():
         "mac-intel",
         "mac-intel-sha",
     )
+
+
+def test_an_intel_mac_never_takes_the_apple_silicon_zip():
+    # A release missing the Intel zip must offer nothing, not the arm64 build.
+    assets = [
+        {"name": "waves_macos-apple-silicon.zip", "browser_download_url": "mac-as"},
+        {"name": "waves_macos-apple-silicon.zip.sha256", "browser_download_url": "mac-as-sha"},
+    ]
+    assert u._select_asset(assets, "macos", "amd64", want_legacy=False)[0] == ""
+    assert u._select_asset(assets, "macos", "arm64", want_legacy=False)[0] == "waves_macos-apple-silicon.zip"
 
 
 # The four macOS assets a dual-flavor release actually ships. The "_legacy"
@@ -1484,6 +1515,16 @@ def test_safe_extractall_rejects_path_traversal(tmp_path):
 def test_safe_extractall_rejects_escaping_symlink(tmp_path):
     zp = tmp_path / "s.zip"
     zp.write_bytes(_zip_with([("evil", b"/etc/passwd", 0o120755)]))  # absolute symlink target
+    out = tmp_path / "out"
+    with zipfile.ZipFile(zp) as zf, pytest.raises(UpdaterError, match="unsafe symlink"):
+        AppUpdater._safe_extractall(zf, out)
+
+
+def test_safe_extractall_rejects_a_link_a_later_link_turns_outward(tmp_path):
+    # "d" -> "e/f/../.." stays inside while "e" is missing; "e" -> "." then
+    # makes "d" point outside. Each link alone passes the check when written.
+    zp = tmp_path / "o.zip"
+    zp.write_bytes(_zip_with([("d", b"e/f/../..", 0o120755), ("e", b".", 0o120755)]))
     out = tmp_path / "out"
     with zipfile.ZipFile(zp) as zf, pytest.raises(UpdaterError, match="unsafe symlink"):
         AppUpdater._safe_extractall(zf, out)

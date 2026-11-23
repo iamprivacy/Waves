@@ -333,6 +333,8 @@ def test_an_untaggable_file_is_not_filed_as_done(tmp_path):
 
 class _SymlinkDl:
     _symlink_after_move = download_mod.Download._symlink_after_move
+    _copy_file_contents = download_mod.Download._copy_file_contents
+    _COPY_BUFFER_BYTES = download_mod.Download._COPY_BUFFER_BYTES
 
     def __init__(self):
         self.filled = []

@@ -401,3 +401,28 @@ def test_retry_wait_wakes_on_stop():
 
     assert Download._retry_wait(b, 5.0, event_stop) is True
     assert time.monotonic() - t0 < 1.0
+
+
+def test_a_video_never_forgives_its_last_segment(tmp_path, monkeypatch):
+    """A video's HLS playlist lists only real segments (no manifest arithmetic),
+    so a failed last one is a cut video, not padding: it must reach the
+    segment loop as required (0), never as unproven (None)."""
+    from tidalapi import Video
+
+    b = Download.__new__(Download)
+    b.progress_gui = None
+    seen = {}
+
+    def fake_segments(urls, *a):
+        seen["n"] = a[-1]
+        return False, []
+
+    monkeypatch.setattr(b, "_get_media_urls", lambda *a: ["u0", "u1"], raising=False)
+    monkeypatch.setattr(b, "_download_segments", fake_segments, raising=False)
+    monkeypatch.setattr(b, "_download_postprocess", lambda *a: (False, tmp_path / "v"), raising=False)
+    monkeypatch.setattr(b, "_note_progress_task", lambda *a: None, raising=False)
+    b.progress = MagicMock()
+    video = MagicMock(spec=Video)
+    video.name = "clip"
+    Download._download(b, video, tmp_path / "v.ts")
+    assert seen["n"] == 0

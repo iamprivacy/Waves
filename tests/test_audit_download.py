@@ -141,10 +141,20 @@ class TestSegmentsMerge:
         good = tmp_path / "seg_0"
         good.write_bytes(b"data")
         seg_good = DownloadSegmentResult(result=True, url="u0", path_segment=good, id_segment=0)
-        seg_tail = DownloadSegmentResult(result=True, url="u1", path_segment=tmp_path / "seg_1_missing", id_segment=1)
+        seg_tail = DownloadSegmentResult(result=False, url="u1", path_segment=tmp_path / "seg_1_missing", id_segment=1)
 
-        # The trailing segment is missing but it's a multi-segment track -> lenient.
+        # The trailing segment never arrived but it's a multi-segment track -> lenient.
         assert dl._segments_merge(tmp_path / "out.m4a", [seg_good, seg_tail]) is True
+
+    def test_a_tail_that_arrived_but_will_not_merge_is_real(self, tmp_path):
+        # A tail that downloaded fine is real audio: losing it at merge (a disk
+        # error) is a cut file, not a spurious padding URL.
+        dl = _make_download()
+        good = tmp_path / "seg_0"
+        good.write_bytes(b"data")
+        seg_good = DownloadSegmentResult(result=True, url="u0", path_segment=good, id_segment=0)
+        seg_tail = DownloadSegmentResult(result=True, url="u1", path_segment=tmp_path / "seg_1_gone", id_segment=1)
+        assert dl._segments_merge(tmp_path / "out.m4a", [seg_good, seg_tail]) is False
 
 
 class TestMetadataUnreadableGuard:

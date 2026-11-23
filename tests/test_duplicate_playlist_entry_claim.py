@@ -112,3 +112,15 @@ def test_a_landed_file_still_holds_its_name_against_a_stranger(tmp_path):
 
     assert dl._claim_destination(dst, "43")[0] == tmp_path / "Song_01.flac"
     assert dl._claim_destination(dst, "42")[0] == dst, "an item may retake a name it wrote itself"
+
+
+def test_two_jobs_at_once_never_pick_the_same_name(tmp_path):
+    """The pool runs more than one queued item at a time: two editions of one
+    album, each its own Download, must not both take Song.flac."""
+    first_job, second_job = _make_download(tmp_path), _make_download(tmp_path)
+    dst = tmp_path / "Song.flac"
+
+    a, claim = first_job._claim_destination(dst, "42")
+    b, _ = second_job._claim_destination(dst, "43")
+    assert (a, b) == (dst, tmp_path / "Song_01.flac")
+    first_job._release_name(claim)

@@ -83,3 +83,18 @@ class _InlineWriter:
 
     def flush(self, timeout: float = 0.0) -> None:
         pass
+
+
+import sys  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _download_name_claims_start_empty():
+    """Download keeps its claimed names on the class (shared by every job), so
+    a test that leaves one held must not leak it into the next."""
+    mod = sys.modules.get("waves.download")
+    if mod is not None:
+        mod.Download._names_reserved.clear()
+    yield

@@ -235,6 +235,25 @@ def test_on_progress_rate_limited_by_default(tmp_path):
     assert [(e["done"], e["indexed"]) for e in committed] == [(200, 200), (250, 250)]
 
 
+def test_the_read_counts_the_index_per_commit_not_per_album(tmp_path, monkeypatch):
+    # A COUNT(*) ran for every album read, even when the rate limit then
+    # dropped the event: 50,000 counts over a growing table on a first scan.
+    lib = _mk(tmp_path, "lib", [])
+    tags = {}
+    for i in range(250):
+        d = _mk(tmp_path, f"lib/A/Album{i:03d}", ["1.flac"])
+        tags[d] = {"album": f"Album{i:03d}", "artist": "A", "date": "2000"}
+    idx = _index(tmp_path, tags)
+    counts = []
+    real = idx._count
+    monkeypatch.setattr(idx, "_count", lambda: counts.append(1) or real())
+    events: list[dict] = []
+    assert idx.refresh(lib, on_progress=events.append, progress_interval=0) == 250
+    assert len(counts) < 10
+    reads = [e for e in events if e["phase"] == "read"]
+    assert [e["indexed"] for e in reads if e["done"] in (199, 201)] == [0, 200]
+
+
 class _Overlap:
     """Counts calls in flight at once; a peak above one proves they overlap,
     whatever the machine's load does to the wall clock."""
@@ -2157,6 +2176,28 @@ def test_a_quit_stops_the_backfill_instead_of_outliving_the_app(tmp_path):
     assert idx.keys_missing() == missing, "a scan that was already dead keyed nothing"
 
 
+def test_a_rekeyed_cache_says_so_before_the_walk(tmp_path):
+    """Keys dropped at open (a key-version bump) are rebuilt first, and the scan
+    reports that as a committed flush, so the badges light before the walk
+    instead of after a whole warm scan that reads nothing."""
+    lib = _mk(tmp_path, "lib", [])
+    d1 = _mk(tmp_path, "lib/Lorna Shore/Pain Remains", ["01.flac"])
+    idx = _index(tmp_path, {d1: {"album": "Pain Remains", "artist": "Lorna Shore", "date": "2022"}})
+    idx.refresh(lib, force_full=True)
+    _strip_keys(idx)
+    events = []
+
+    idx.refresh(lib, on_progress=events.append)
+
+    first = events[0]
+    assert first["committed"] and first["indexed"] == 1, events
+    assert not idx.keys_missing()
+
+    events.clear()
+    idx.refresh(lib, on_progress=events.append)
+    assert not any(e.get("phase") == "read" and e.get("total") == 0 for e in events), "a keyed cache says nothing extra"
+
+
 # --- a compilation never earns a real artist's badge ------------------------
 
 
@@ -2300,3 +2341,23 @@ def test_a_reader_whose_thread_has_gone_is_dropped_at_the_next_read(tmp_path):
 
     assert len(idx._readers.connections()) == before, "a dead thread's reader is held open by the cache"
     idx.close()
+
+
+def test_a_condemned_folder_takes_its_subtree_and_nothing_beside_it(tmp_path):
+    # The prune matches whole path segments: Album1 going must not take
+    # Album10, and it takes its own disc folders with it.
+    lib = _mk(tmp_path, "lib", [])
+    tags = {}
+    for rel in ("lib/A/Album1", "lib/A/Album1/CD1", "lib/A/Album10"):
+        d = _mk(tmp_path, rel, ["1.flac"])
+        tags[d] = {"album": rel, "artist": "A", "date": "2000"}
+    idx = _index(tmp_path, tags)
+    idx.refresh(lib)
+    gen = idx._conn.execute("SELECT MAX(seen_gen) FROM dirs").fetchone()[0]
+    album1 = os.path.join(lib, "A", "Album1")
+
+    idx._prune_by_gen(gen, condemned=[album1])
+
+    left = {p for (p,) in idx._conn.execute("SELECT path FROM dirs")}
+    assert not {p for p in left if p == album1 or p.startswith(album1 + os.sep)}
+    assert os.path.join(lib, "A", "Album10") in left

@@ -358,6 +358,28 @@ def test_prefs_that_could_not_be_kept_are_never_saved_over(tmp_path, monkeypatch
     assert broken.read_text(encoding="utf-8") == "{ not valid json"
 
 
+def test_a_prefs_file_that_cannot_be_opened_is_neither_moved_nor_saved_over(tmp_path, monkeypatch):
+    """An open that fails (a permission, a Windows lock) says nothing about the
+    file itself: it stays where it is, untouched, and this run keeps defaults
+    in memory."""
+    good = tmp_path / "waves.json"
+    good.write_text('{"win_w": 1200}', encoding="utf-8")
+    real_open = open
+
+    def _locked(path, *a, **k):
+        if str(path) == str(good):
+            raise PermissionError("locked")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", _locked)
+    stub = _PrefsStub(tmp_path)
+    monkeypatch.undo()
+    assert stub._prefs_unsavable is True
+    stub.windowSaveGeometry(10, 20, 900, 700, False)
+    assert good.read_text(encoding="utf-8") == '{"win_w": 1200}'
+    assert not (tmp_path / "waves.json.bak").exists()
+
+
 # ---------------------------------------------------------------------------
 # The live-screen glue: _fit_geometry_to_screens reads QScreen.availableGeometry
 # ---------------------------------------------------------------------------

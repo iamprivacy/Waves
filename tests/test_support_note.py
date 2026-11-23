@@ -116,10 +116,7 @@ def test_note_closes_by_button_scrim_escape_and_the_coffee_button():
     assert "enabled: supportNoteGate.canClose" in gate
     assert "if (onTop) { supportNoteIn.start(); supportNoteLock.restart() }" in gate
     assert "property int delayMs: 5000" in gate
-    assert (
-        'MouseArea { anchors.fill: parent; enabled: supportNoteGate.onTop; onClicked: supportNoteGate.close("note closed") }'
-        in gate
-    )
+    assert 'onBackdropClicked: supportNoteGate.close("note closed")' in gate
     assert 'onOpened: supportNoteGate.close("coffee opened")' in gate
     assert (
         'Shortcut { sequence: "Esc"; enabled: supportNoteGate.onTop; onActivated: supportNoteGate.close("note closed") }'
@@ -135,7 +132,42 @@ def test_every_other_esc_shortcut_stands_down_while_the_note_is_up():
     for body in shortcuts:
         if "supportNoteGate.close" in body or "enabled: supportNoteGate.onTop;" in body:
             continue
-        assert "!supportNoteGate.onTop" in body, f"an Esc shortcut stays live under the note: {body.strip()!r}"
+        assert "!root.noteUp" in body, f"an Esc shortcut stays live under the note: {body.strip()!r}"
+
+
+def test_every_window_shortcut_stands_down_on_one_switch():
+    # One root switch (noteUp) is the only thing outside the note that
+    # names it, so removing the note is: delete the gate and its Esc, set
+    # noteUp false. Every other Shortcut, whatever its key, carries it.
+    assert "readonly property bool noteUp: supportNoteGate.onTop" in MAIN
+    outside = MAIN.replace(_gate(), "").replace(
+        'Shortcut { sequence: "Esc"; enabled: supportNoteGate.onTop; onActivated: supportNoteGate.close("note closed") }',
+        "",
+    )
+    code = re.sub(r"//[^\n]*", "", outside.replace("readonly property bool noteUp: supportNoteGate.onTop", ""))
+    assert "supportNoteGate" not in code, "only root.noteUp may name the note outside it"
+    bodies = re.findall(r"Shortcut \{(.*?)onActivated", outside, re.S)
+    assert len(bodies) >= 8, "the Shortcuts moved; re-read this guard"
+    for body in bodies:
+        assert "!root.noteUp" in body, f"a Shortcut stays live under the note: {body.strip()!r}"
+
+
+def test_the_note_blocks_input_through_note_shield():
+    # The backdrop holds every button, the wheel, hover and the keyboard;
+    # the card swallows clicks so they neither close the note nor fall
+    # through. Future notes reuse the same shield.
+    gate = _gate()
+    assert "NoteShield {\n            anchors.fill: parent; active: supportNoteGate.onTop" in gate
+    assert 'onBackdropClicked: supportNoteGate.close("note closed")' in gate
+    assert "NoteShield { anchors.fill: parent; holdsKeys: false }" in gate
+    shield = (QML / "NoteShield.qml").read_text(encoding="utf-8")
+    for clause in (
+        "acceptedButtons: Qt.AllButtons; hoverEnabled: true",
+        "onWheel: function(w) { w.accepted = true }",
+        "Keys.onPressed: function(e) { e.accepted = true }",
+        "if (m.button === Qt.LeftButton) shield.backdropClicked()",
+    ):
+        assert clause in shield, f"NoteShield lost {clause!r}"
 
 
 def test_the_artist_card_stays_under_the_note_and_every_prompt():
@@ -145,7 +177,7 @@ def test_the_artist_card_stays_under_the_note_and_every_prompt():
     card = re.search(r"id: ahcCard\n(.*?)modal: false", MAIN, re.S).group(1)
     assert "z: root.ahcInReview ? 1300 : 0" in card
     blocked = re.search(r"readonly property bool ahcBlocked:(.*?)\n    //", MAIN, re.S).group(1)
-    assert "supportNoteGate.onTop" in blocked
+    assert "root.noteUp" in blocked
 
 
 def test_note_leaves_breadcrumbs_without_user_data():

@@ -37,6 +37,7 @@ def _downloader(tmp_path: pathlib.Path) -> Download:
     d.settings = SimpleNamespace(
         data=SimpleNamespace(
             format_track="Tracks/{artist_name} - {track_title}",
+            album_track_num_pad_min=1,
             filename_delimiter_artist=", ",
             filename_delimiter_album_artist=", ",
             use_primary_album_artist=False,
@@ -94,6 +95,48 @@ def test_a_failed_symlink_is_logged_and_never_raises(tmp_path: pathlib.Path) -> 
 
     assert out == dst
     assert d.fn_logger.error.called, "the failure is diagnosable"
+
+
+def test_a_copy_that_breaks_off_never_sits_under_the_playlist_name(tmp_path: pathlib.Path) -> None:
+    # No symlinks allowed, so a real copy is kept instead. A full disk mid-copy
+    # left a cut-off file under the real name that the m3u then listed.
+    d = _downloader(tmp_path)
+    dst = tmp_path / "Tracks" / "song.flac"
+    dst.parent.mkdir()
+    dst.write_text("audio", encoding="utf-8")
+    src = tmp_path / "Playlists" / "PL" / "song.flac"
+
+    def half_then_full(path_source, path_destination):
+        path_destination.write_text("au", encoding="utf-8")
+        raise OSError(28, "No space left on device")
+
+    with (
+        patch("waves.download.format_path_media", return_value="Tracks/song"),
+        patch.object(pathlib.Path, "symlink_to", side_effect=OSError("no symlinks here")),
+        patch.object(d, "_copy_file_contents", side_effect=half_then_full),
+    ):
+        d.media_move_and_symlink(SimpleNamespace(), src, ".flac")
+
+    assert not src.exists(), "no cut-off copy under the real name"
+    assert list(src.parent.iterdir()) == [], "and no staging leftover"
+    assert dst.read_text(encoding="utf-8") == "audio"
+
+
+def test_a_copy_kept_instead_of_a_symlink_lands_whole(tmp_path: pathlib.Path) -> None:
+    d = _downloader(tmp_path)
+    dst = tmp_path / "Tracks" / "song.flac"
+    dst.parent.mkdir()
+    dst.write_text("audio", encoding="utf-8")
+    src = tmp_path / "Playlists" / "PL" / "song.flac"
+
+    with (
+        patch("waves.download.format_path_media", return_value="Tracks/song"),
+        patch.object(pathlib.Path, "symlink_to", side_effect=OSError("no symlinks here")),
+    ):
+        d.media_move_and_symlink(SimpleNamespace(), src, ".flac")
+
+    assert src.read_text(encoding="utf-8") == "audio" and not src.is_symlink()
+    assert [p.name for p in src.parent.iterdir()] == ["song.flac"]
 
 
 # Finding 25: the sizing probe rides the pooled session and never fails the track.

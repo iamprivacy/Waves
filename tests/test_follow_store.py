@@ -1186,3 +1186,40 @@ def test_release_kind_names_a_follows_own_release(tmp_path):
     s.record_check("1", [_rel("a"), _rel("s", rtype="single")])
     assert s.release_kind("s") == "single"
     assert s.release_kind("nope") == ""
+
+
+def test_a_check_that_fails_halfway_leaves_nothing_behind(tmp_path, monkeypatch):
+    """A step that raises after writing some rows must roll back: otherwise the
+    next commit (record_failure) publishes the half step, the new release lands
+    among the ones already seen, and it is never announced."""
+    s = _store(tmp_path)
+    _seed(s)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(s, "_prune_after_check", boom)
+    with pytest.raises(RuntimeError):
+        s.record_check("1", [_rel("a"), _rel("b", date="2026-10-02")])
+    monkeypatch.undo()
+    s.record_failure("1")
+
+    fresh = s.record_check("1", [_rel("a"), _rel("b", date="2026-10-02")])
+    assert [r["id"] for r in fresh] == ["b"]
+    s.close()
+
+
+def test_new_releases_and_videos_can_wait_in_the_save_that_marks_them_seen(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.record_videos("1", [{"id": 7, "title": "Clip", "date": "2026-10-01"}])  # the video baseline
+    s.record_check("1", [_rel("a"), _rel("b", date="2026-10-02")], wait=True)
+    s.record_videos(
+        "1",
+        [{"id": 7, "title": "Clip", "date": "2026-10-01"}, {"id": 8, "title": "New", "date": "2026-10-02"}],
+        wait=True,
+    )
+    s.record_check("1", [_rel("a"), _rel("b", date="2026-10-02"), _rel("c", date="2026-10-03")])
+    got = {(r["id"], r["kind"]) for r in s.pending_auto_downloads("2026-12-31")}
+    assert got == {("b", "album"), ("8", "video")}, "c came without wait and stays out of line"
+    s.close()

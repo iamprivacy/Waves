@@ -39,6 +39,10 @@ IDENTITY_CORPUS = [
     ("opened /home/Ann Lee Park/Music/a.flac", ["Ann", "Lee", "Park"]),
     (r"share path \\SERVER01\Users\frank\music unreachable", ["frank"]),
     ("mixed style C:/Users/gina.h/Downloads failed", ["gina.h"]),
+    # a Linux removable drive is mounted under the login, even a two-letter one
+    ("could not write /media/jo/Jo Passport/Music/a.flac", ["jo/"]),
+    ("could not write /run/media/carol/MUSIC/a.flac", ["carol"]),
+    ("open failed: '/media/jo/Jo Passport/a.flac'", ["jo/"]),
     # a network share named by its host: Windows UNC (both slash spellings,
     # and the doubled form a repr produces) and a GNOME gvfs mount segment.
     # None of these goes through the /Volumes mount-point registration, so the
@@ -129,6 +133,12 @@ KEEP_CORPUS = [
     # The account rule names the path segment, not the word on its own.
     ("3 users reported the bug", ["3 users reported"]),
     ("scanning /Music//Artist/Album took 2s", ["/Music//Artist/Album"]),
+    # the drive rule needs "media" at the start of a path, as a whole segment:
+    # a NAS share or a URL segment of that name keeps the folder after it
+    ("converted /opt/multimedia/codecs/x.so", ["/opt/multimedia/codecs/x.so"]),
+    ("scanning /Volumes/Media/Music/a.flac", ["/Volumes/Media/Music/a.flac"]),
+    ("scanning /mnt/media/music/a.flac", ["/mnt/media/music/a.flac"]),
+    ("GET https://host.example/media/abc/def -> 200", ["/media/abc/def"]),
     # The download slot ledger's two lines (waves/download_slots.py): a
     # cooldown length and a refusal over disk space, neither naming a path.
     ("Next download will start in 3.5 seconds.", ["3.5 seconds"]),

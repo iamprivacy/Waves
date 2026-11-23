@@ -3,7 +3,7 @@ the Releases library import reads out of the scan cache."""
 
 from __future__ import annotations
 
-from waves.library_index import LibraryIndex
+from waves.library_index import JoinedLibrary, LibraryIndex
 
 
 def _row(folder, album, artist, tracks=()):
@@ -127,3 +127,75 @@ def test_artist_albums_lists_each_keys_albums_newest_first(tmp_path):
     first = got[keys["Caribou"]][0]
     assert (first["tracks"], first["codec"], first["bits"], first["rate"]) == (10, "flac", 16, 44100)
     assert idx.artist_albums([]) == {}
+
+
+def _file_tags(idx, folder, name, tags):
+    import json
+
+    with idx._lock:
+        idx._conn.execute(
+            "INSERT OR REPLACE INTO file_tags (folder_path, name, tags) VALUES (?, ?, ?)",
+            (folder, name, json.dumps(tags)),
+        )
+        idx._conn.commit()
+
+
+def test_artist_tidal_ids_reads_the_id_waves_wrote_in_every_format(tmp_path):
+    idx = _index(
+        tmp_path,
+        [
+            ("/m/Adept/Sleepless", "Sleepless", "Adept"),
+            ("/m/Adept/Death Dealers", "Death Dealers", "Adept"),
+            ("/m/Air/Moon Safari", "Moon Safari", "Air"),
+        ],
+    )
+    # FLAC keeps the tag under its own name, an MP3 as a user text frame.
+    _file_tags(idx, "/m/Adept/Sleepless", "1.flac", {"easy": {"waves_tidal_album_artist_id": ["34868882"]}})
+    _file_tags(
+        idx, "/m/Adept/Death Dealers", "1.mp3", {"easy": {}, "raw": {"TXXX:WAVES_TIDAL_ALBUM_ARTIST_ID": ["34868882"]}}
+    )
+    _file_tags(
+        idx,
+        "/m/Air/Moon Safari",
+        "1.m4a",
+        {"easy": {}, "raw": {"----:com.apple.iTunes:WAVES_TIDAL_ALBUM_ARTIST_ID": ["123"]}},
+    )
+    assert idx.artist_tidal_ids() == {"adept": "34868882", "air": "123"}
+
+
+def test_two_tidal_ids_under_one_name_settle_to_none(tmp_path):
+    idx = _index(
+        tmp_path,
+        [("/m/Adept/Sleepless", "Sleepless", "Adept"), ("/m/Adept/Techno", "Techno", "Adept")],
+    )
+    _file_tags(idx, "/m/Adept/Sleepless", "1.flac", {"easy": {"waves_tidal_album_artist_id": ["34868882"]}})
+    _file_tags(idx, "/m/Adept/Techno", "1.flac", {"easy": {"waves_tidal_album_artist_id": ["3581093"]}})
+    assert idx.artist_tidal_ids() == {}
+    assert idx.artist_tidal_id_sets() == {"adept": {"34868882", "3581093"}}
+
+
+def test_a_file_naming_two_tidal_artists_says_nothing(tmp_path):
+    idx = _index(tmp_path, [("/m/Adept/Duets", "Duets", "Adept")])
+    _file_tags(idx, "/m/Adept/Duets", "1.flac", {"easy": {"waves_tidal_album_artist_id": ["1", "2"]}})
+    assert idx.artist_tidal_ids() == {}
+    _file_tags(idx, "/m/Adept/Duets", "1.flac", {"easy": {"waves_tidal_album_artist_id": ["not-an-id"]}})
+    assert idx.artist_tidal_ids() == {}
+
+
+def test_artist_upcs_reads_every_upc_tag_name_and_view(tmp_path):
+    idx = _index(
+        tmp_path,
+        [
+            ("/m/Band/One", "One", "Band"),
+            ("/m/Band/Two", "Two", "Band"),
+            ("/m/Band/Three", "Three", "Band"),
+            ("/m/Air/Moon Safari", "Moon Safari", "Air"),
+        ],
+    )
+    _file_tags(idx, "/m/Band/One", "1.flac", {"easy": {"upc": ["00881453348211"]}})
+    _file_tags(idx, "/m/Band/Two", "1.mp3", {"easy": {}, "raw": {"TXXX:BARCODE": ["12345"]}})
+    _file_tags(idx, "/m/Band/Three", "1.m4a", {"easy": {}, "raw": {"----:com.apple.iTunes:EAN": ["0000", "x9"]}})
+    _file_tags(idx, "/m/Air/Moon Safari", "1.flac", {"easy": {"upc": ["777"]}})
+    assert idx.artist_upcs("band") == {"881453348211", "12345"}
+    assert idx.artist_upcs("") == set()
+    assert JoinedLibrary(idx).artist_upcs("air") == {"777"}

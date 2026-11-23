@@ -365,3 +365,25 @@ def test_a_library_winner_already_followed_is_skipped():
 def test_title_key_meets_editions_and_spellings():
     assert artist_import.title_key("Hollow (Deluxe Edition)") == artist_import.title_key("Hollow")
     assert artist_import.title_key("Café Bleu") == artist_import.title_key("Cafe Bleu")
+
+
+def test_library_albums_splits_strong_weak_and_songs():
+    lib = {"albums": ["Hollow", "Adept", "Greatest Hits", "Hollow (Deluxe)"], "tracks": ["Hollow", "Grow Old"]}
+    albums, songs, weak = artist_import.library_albums("Adept", lib)
+    assert set(albums) == {artist_import.title_key(t) for t in ("Hollow", "Adept", "Greatest Hits")}
+    assert weak == {artist_import.title_key("Adept"), artist_import.title_key("Greatest Hits")}
+    # A song whose title is also an album's is left to the album.
+    assert list(songs) == [artist_import.title_key("Grow Old")]
+
+
+def test_weigh_candidates_is_the_old_weigh_row():
+    assert artist_import._weigh_row is artist_import.weigh_candidates
+
+
+def test_an_unread_followed_profile_blocks_a_winner():
+    lib = {"albums": ["Sleepless", "Death Dealers"], "tracks": []}
+    cands = [
+        {"id": "cur", "name": "Adept", "releases": None},
+        {"id": "new", "name": "Adept", "releases": ["Sleepless", "Death Dealers"]},
+    ]
+    assert artist_import.clear_winner(artist_import.weigh("Adept", lib, cands)) is None

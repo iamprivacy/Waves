@@ -130,10 +130,101 @@ def _scenario() -> int:
 
     q("supportNoteGate.delayMs = 200")
     q("supportNoteGate.closeLockMs = 300")
+
+    # The page behind, as a probe: a focused text field and a full-window
+    # area that counts every press and wheel and reports hover. With the
+    # note up, real events must reach none of it.
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent, QWheelEvent
+
+    q(
+        "(function () { Qt.createQmlObject('import QtQuick; import QtQuick.Controls;"
+        ' Item { objectName: "notePageProbe"; anchors.fill: parent; z: 100; property int presses: 0; property int wheels: 0;'
+        " property alias hovered: probeMa.containsMouse;"
+        " MouseArea { id: probeMa; anchors.fill: parent; acceptedButtons: Qt.AllButtons; hoverEnabled: true;"
+        " onPressed: parent.presses++; onWheel: function(w) { parent.wheels++ } }"
+        ' TextField { id: probeField; objectName: "notePageField"; x: 20; y: 20; width: 200 } }\', root.contentItem); return true })()'
+    )
+    probe = root.findChild(QObject, "notePageProbe")
+    if probe is None:
+        print("the page probe was not built", file=sys.stderr)
+        return _EXIT_PRECONDITION
+    field = probe.findChild(QObject, "notePageField")
+
+    def pp(name: str):
+        return probe.property(name)
+
+    root.requestActivate()
+    QMetaObject.invokeMethod(field, "forceActiveFocus")
+    settle(100)
+    if not field.property("activeFocus"):
+        print("the probe field could not take focus", file=sys.stderr)
+        return _EXIT_PRECONDITION
+
     q("supportNoteGate.dismissed = false")
     settle(1200)
     check(q("supportNoteGate.onTop") is True, "the re-armed note did not come back")
     check(q("supportNoteGate.canClose") is True, "the short close lock did not run out")
+
+    def key(k: Qt.Key, text: str = "") -> None:
+        for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QGuiApplication.sendEvent(root, QKeyEvent(kind, k, Qt.KeyboardModifier.NoModifier, text))
+        settle(50)
+
+    def mouse(kind: QEvent.Type, button: Qt.MouseButton, x: float = 40, y: float = 300) -> None:
+        held = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseButtonRelease else button
+        ev = QMouseEvent(
+            kind,
+            QPointF(x, y),
+            QPointF(root.mapToGlobal(QPoint(int(x), int(y)))),
+            button,
+            held,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QGuiApplication.sendEvent(root, ev)
+
+    check(field.property("activeFocus") is False, "the page kept the keyboard under the note")
+    key(Qt.Key.Key_A, "a")
+    key(Qt.Key.Key_Tab)
+    key(Qt.Key.Key_Space, " ")
+    check(field.property("text") == "", "typing reached the page behind the note")
+    # A left click on the backdrop closes the note by design; every other button must do nothing.
+    for button in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton, Qt.MouseButton.BackButton):
+        mouse(QEvent.Type.MouseButtonPress, button)
+        mouse(QEvent.Type.MouseButtonRelease, button)
+        settle(50)
+    check(pp("presses") == 0, "a click reached the page behind the note")
+    check(q("supportNoteGate.onTop") is True, "a right or back click closed the note")
+    mouse(QEvent.Type.MouseMove, Qt.MouseButton.NoButton, 60, 320)
+    settle(50)
+    check(pp("hovered") is False, "hover reached the page behind the note")
+    wheel = QWheelEvent(
+        QPointF(40, 300),
+        QPointF(root.mapToGlobal(QPoint(40, 300))),
+        QPoint(0, -40),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QGuiApplication.sendEvent(root, wheel)
+    settle(50)
+    check(pp("wheels") == 0, "the wheel reached the page behind the note")
+
+    # Closed: the page gets its keyboard back where it was, and works again.
+    escape()
+    settle(600)
+    check(q("supportNoteGate.dismissed") is True, "Esc did not close the note after the probe")
+    check(field.property("activeFocus") is True, "the page did not get its focus back")
+    mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+    mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton)
+    settle(50)
+    check(pp("presses") == 1, "the page stayed blocked after the note closed")
+    probe.deleteLater()
+    q("supportNoteGate.dismissed = false")
+    settle(1200)
+    check(q("supportNoteGate.onTop") is True, "the note did not come back after the probe")
 
     # A dialog above the note in the overlay: the note steps aside, and Esc
     # closes the dialog, not the note.

@@ -58,3 +58,20 @@ def test_buckets_pool_one_album_held_in_both(tmp_path):
     buckets = joined.artist_buckets(key)
     assert len(buckets) == 1 and len(buckets[0]) == 2
     assert len(list(joined.iter_albums())) == 2
+
+
+def test_tidal_ids_must_agree_across_both_folders(tmp_path):
+    import json
+
+    lib = _cache(tmp_path, "lib", [("Adept", "Sleepless")])
+    dl = _cache(tmp_path, "dl", [("Adept", "Death Dealers")])
+    for idx, ident in ((lib, "34868882"), (dl, "3581093")):
+        folder = idx._read("SELECT folder_path FROM albums")[0][0]
+        with idx._lock:
+            idx._conn.execute(
+                "INSERT OR REPLACE INTO file_tags (folder_path, name, tags) VALUES (?, ?, ?)",
+                (folder, "1.flac", json.dumps({"easy": {"waves_tidal_album_artist_id": [ident]}})),
+            )
+            idx._conn.commit()
+    assert lib.artist_tidal_ids() == {"adept": "34868882"}
+    assert JoinedLibrary(lib, dl).artist_tidal_ids() == {}
