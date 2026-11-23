@@ -43,7 +43,6 @@ issue. A test enforces it.
 - 📃 A playlist with a very long name now keeps its .m3u8 extension.
 - 🪟 On Windows, a playlist track copied instead of linked is no longer left cut off when the disk fills up.
 - 🩺 Diagnostics reports now hide your user name in Linux removable-drive paths (/media and /run/media).
-- ☕ The developer note at launch now keeps the app behind it from reacting to typing, scrolling or shortcuts until it is closed.
 
 ## 🗂️ v0.2.8 (2026-11-21)
 
