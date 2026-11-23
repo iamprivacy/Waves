@@ -624,6 +624,76 @@ def _without_lyrics(tags: dict) -> dict:
     }
 
 
+_TIDAL_ALBUM_ARTIST_ID_KEY = "waves_tidal_album_artist_id"
+# The tag names a release's UPC is written under (constants.METADATA_LOOKUP_UPC).
+_UPC_KEYS = frozenset({"upc", "barcode", "ean"})
+
+
+def _tag_upcs(blob) -> set[str]:
+    """The UPCs one file_tags ``tags`` value carries, from either view (an
+    MP3 keeps it as a user text frame, an MP4 as a freeform atom), digits
+    only and with leading zeros dropped."""
+    try:
+        tags = json.loads(blob or "{}")
+    except (TypeError, ValueError):
+        return set()
+    out: set[str] = set()
+    if not isinstance(tags, dict):
+        return out
+    for view in ("easy", "raw"):
+        keys = tags.get(view)
+        if not isinstance(keys, dict):
+            continue
+        for key, values in keys.items():
+            low = str(key).strip().lower()
+            if low.startswith("txxx:"):
+                low = low[5:]
+            elif low.startswith("----:"):
+                low = low.rsplit(":", 1)[-1]
+            if low not in _UPC_KEYS:
+                continue
+            for v in values if isinstance(values, list) else [values]:
+                code = str(v).strip()
+                if code.isdigit() and code.strip("0"):
+                    out.add(code.lstrip("0"))
+    return out
+
+
+def _tidal_album_artist_ids(blob) -> list[str] | None:
+    """The TIDAL album-artist ids one file_tags ``tags`` value carries, from
+    either view: FLAC and Ogg keep the tag under its own name, an MP3 as a
+    user text frame ("TXXX:WAVES_TIDAL_ALBUM_ARTIST_ID") and an MP4 as a
+    freeform atom. None when the value cannot be read or holds no such tag;
+    only all-digit ids count."""
+    try:
+        tags = json.loads(blob or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(tags, dict):
+        return None
+    for view in ("easy", "raw"):
+        keys = tags.get(view)
+        if not isinstance(keys, dict):
+            continue
+        for key, values in keys.items():
+            low = str(key).strip().lower()
+            if low.startswith("txxx:"):
+                low = low[5:]
+            elif low.startswith("----:"):
+                low = low.rsplit(":", 1)[-1]
+            if low != _TIDAL_ALBUM_ARTIST_ID_KEY or not isinstance(values, list):
+                continue
+            ids = []
+            for v in values:
+                # One value may hold "a; b" when a tagger joined them.
+                ids.extend(p.strip() for p in str(v).replace("/", ";").split(";"))
+            ids = list(dict.fromkeys(i for i in ids if i))
+            if ids and all(i.isdigit() for i in ids):
+                return ids
+            return None
+    return None
+
+
 def _is_lyrics_key(key: str) -> bool:
     low = str(key).strip().lower()
     # A free-form tag names its field after a prefix: an ID3 user text frame
@@ -1363,7 +1433,12 @@ class LibraryIndex:
         # there are two scan paths (the scanner process and the in-process
         # fallback) and only refresh() is on both; it costs two counts against
         # the cache, and on every scan after the first upgrade it does nothing.
-        self._backfill_missing_keys(alive)
+        if self._backfill_missing_keys(alive):
+            # A committed flush, so the app lights the badges from the rekeyed
+            # rows now instead of after the walk (a key-version bump drops every
+            # key at open, and a warm scan that reads nothing publishes only at
+            # its end).
+            emit({"phase": "read", "done": 0, "total": 0, "indexed": self._count(), "committed": True}, force=True)
         # The write phase runs under the scan lock probe_folders also takes, so
         # a probe by name never interleaves with a walk of the same cache.
         with self._scan_busy:
@@ -2487,8 +2562,14 @@ class LibraryIndex:
         total = len(to_read)
         done = 0
         batch: list[tuple] = []
+        # Only a commit moves the count, so it is read then: a COUNT(*) per
+        # album read cost a first scan of a big library tens of seconds.
+        indexed = self._count()
 
         def progress(row: tuple | None, *, committed: bool = False) -> None:
+            nonlocal indexed
+            if committed:
+                indexed = self._count()
             # Prefer the tags; a tagless folder still shows something readable.
             name = os.path.basename(row[0]) if row else ""
             emit(
@@ -2496,7 +2577,7 @@ class LibraryIndex:
                     "phase": "read",
                     "done": done,
                     "total": total,
-                    "indexed": self._count(),
+                    "indexed": indexed,
                     "artist": (row[2] if row else "") or "",
                     "album": (row[1] if row else "") or name,
                     "committed": committed,
@@ -2951,6 +3032,36 @@ class LibraryIndex:
             k: next(iter(v)) for k, v in seen.items() if len(v) == 1 and "*" not in v and _MBID_RE.match(next(iter(v)))
         }
 
+    def artist_tidal_ids(self) -> dict[str, str]:
+        """The TIDAL album-artist id a Waves download wrote into each library
+        artist's files, by artist key: only when every such file of that
+        artist names the same single id. Files from two profiles, or a file
+        naming two artists, say nothing. Read from file_tags, so it costs no
+        file open."""
+        return self.settled_tidal_ids(self.artist_tidal_id_sets())
+
+    def artist_tidal_id_sets(self, seen: dict[str, set[str]] | None = None) -> dict[str, set[str]]:
+        """artist_tidal_ids before the settling: every id each artist's files
+        carry ("*" for a file naming several). Adds into ``seen`` when given,
+        so two caches must agree on an artist's id (see JoinedLibrary)."""
+        rows = self._read(
+            "SELECT a.pkey_artist, f.tags FROM file_tags f JOIN albums a ON a.folder_path = f.folder_path"
+            " WHERE a.pkey_artist IS NOT NULL AND a.pkey_artist != ''"
+            " AND f.tags LIKE '%waves_tidal_album_artist_id%'"
+        )
+        seen = {} if seen is None else seen
+        for key, blob in rows:
+            ids = _tidal_album_artist_ids(blob)
+            if ids is None:
+                continue
+            seen.setdefault(str(key), set()).update(ids if len(ids) == 1 else ["*"])
+        return seen
+
+    @staticmethod
+    def settled_tidal_ids(seen: dict[str, set[str]]) -> dict[str, str]:
+        """The artist_tidal_ids answer for artist_tidal_id_sets' tally."""
+        return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1 and "*" not in v}
+
     def artist_titles(self, key: str) -> dict:
         """What the library holds under one artist key (a ``distinct_artists``
         row's ``key``): ``{"albums": [title, ...], "tracks": [title, ...]}``,
@@ -2966,6 +3077,22 @@ class LibraryIndex:
             "SELECT DISTINCT title FROM tracks WHERE tkey_artist = ? AND title IS NOT NULL AND title != ''", (key,)
         )
         return {"albums": [str(r[0]) for r in albums], "tracks": [str(r[0]) for r in tracks]}
+
+    def artist_upcs(self, key: str) -> set[str]:
+        """The release UPCs the files under one artist key carry (leading
+        zeros dropped), read from file_tags, so it costs no file open."""
+        key = str(key or "")
+        if not key:
+            return set()
+        rows = self._read(
+            "SELECT f.tags FROM file_tags f JOIN albums a ON a.folder_path = f.folder_path"
+            " WHERE a.pkey_artist = ? AND (f.tags LIKE '%upc%' OR f.tags LIKE '%barcode%' OR f.tags LIKE '%ean%')",
+            (key,),
+        )
+        out: set[str] = set()
+        for (blob,) in rows:
+            out |= _tag_upcs(blob)
+        return out
 
     _ARTIST_ALBUM_COLUMNS = "pkey_artist, folder_path, album, year, track_count, codec, bits, rate, bitrate, dir_mtime"
 
@@ -3460,12 +3587,20 @@ class LibraryIndex:
         live."""
         with self._lock:
             if condemned:
-                doomed = [
-                    p
-                    for (p,) in self._conn.execute("SELECT path FROM dirs").fetchall()
-                    for c in condemned
-                    if p == c or p.startswith(c + os.sep)
-                ]
+                # Each folder walks up its own parents against a set: comparing
+                # every folder with every condemned one was minutes after a
+                # big rename (5,000 albums in a 60,000-folder tree).
+                gone = set(condemned)
+
+                def under_gone(p: str) -> bool:
+                    while p not in gone:
+                        parent = os.path.dirname(p)
+                        if parent == p:
+                            return False
+                        p = parent
+                    return True
+
+                doomed = [p for (p,) in self._conn.execute("SELECT path FROM dirs").fetchall() if under_gone(p)]
                 self._conn.executemany("DELETE FROM dirs WHERE path = ?", [(p,) for p in doomed])
             self._conn.execute("DELETE FROM dirs WHERE seen_gen < ?", (gen - 1,))
             self._conn.execute("DELETE FROM albums WHERE folder_path NOT IN (SELECT path FROM dirs WHERE is_album = 1)")
@@ -3573,6 +3708,12 @@ class JoinedLibrary:
             c.artist_tag_id_sets(seen)
         return LibraryIndex.settled_tag_ids(seen)
 
+    def artist_tidal_ids(self) -> dict[str, str]:
+        seen: dict[str, set[str]] = {}
+        for c in self._each():
+            c.artist_tidal_id_sets(seen)
+        return LibraryIndex.settled_tidal_ids(seen)
+
     def artist_titles(self, key: str) -> dict:
         albums: dict[str, None] = {}
         tracks: dict[str, None] = {}
@@ -3581,6 +3722,12 @@ class JoinedLibrary:
             albums.update(dict.fromkeys(one["albums"]))
             tracks.update(dict.fromkeys(one["tracks"]))
         return {"albums": list(albums), "tracks": list(tracks)}
+
+    def artist_upcs(self, key: str) -> set[str]:
+        out: set[str] = set()
+        for c in self._each():
+            out |= c.artist_upcs(key)
+        return out
 
     def artist_albums(self, keys: Iterable[str]) -> dict[str, list[dict]]:
         keys = list(keys)

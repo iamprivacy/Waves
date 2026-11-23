@@ -163,7 +163,9 @@ def norm_artist(name: str) -> str:
 
 # --- Identity: titles ----------------------------------------------------------
 
-_VERSION_TOKEN_RE = re.compile(r"[\[(]\s*(explicit|clean|e)\s*[\])]", re.IGNORECASE)
+# The negative squared E glyph is Waves' own explicit marker (METADATA_EXPLICIT), which
+# the "Mark explicit in title" setting appends to a file's title tag.
+_VERSION_TOKEN_RE = re.compile(r"[\[(]\s*(explicit|clean|e)\s*[\])]|\U0001F174", re.IGNORECASE)
 
 
 def norm_title(title: str) -> str:
@@ -320,7 +322,7 @@ def strip_edition_quals_ext(title: str) -> str:
 # has its stored keys dropped once at open and rebuilt from the raw tags, so
 # a change here never leaves an unchanged folder filed under a key the app no
 # longer derives. BUMP THIS whenever any of those folds changes.
-KEY_NORMALISER_VERSION = "1"
+KEY_NORMALISER_VERSION = "2"
 
 
 def presence_key(title: str, artist: str) -> tuple[str, str]:

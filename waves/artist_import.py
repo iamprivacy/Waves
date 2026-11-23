@@ -105,6 +105,31 @@ def title_key(title: str) -> str:
     return presence_key(title or "", "")[0]
 
 
+def library_albums(name: str, library: dict) -> tuple[dict[str, str], dict[str, str], frozenset[str]]:
+    """What the library holds under ``name``, keyed the way ``weigh`` compares.
+
+    ``library`` is ``{"albums": [title, ...], "tracks": [title, ...]}``.
+    Returns ``(albums, songs, weak)``: ``albums`` and ``songs`` map a title
+    key to the title as the library spells it (a song whose key is also an
+    album's is left to the album), and ``weak`` is the album keys that prove
+    little on their own (self-titled and generic albums). The strong albums
+    are ``albums`` less ``weak``.
+    """
+    wanted = name_key(name)
+    albums: dict[str, str] = {}
+    for t in library.get("albums") or []:
+        k = title_key(str(t))
+        if k:
+            albums.setdefault(k, str(t))
+    songs: dict[str, str] = {}
+    for t in library.get("tracks") or []:
+        k = title_key(str(t))
+        if k and k not in albums:
+            songs.setdefault(k, str(t))
+    weak = frozenset(k for k in albums if k in _GENERIC_TITLES or name_key(albums[k]) == wanted)
+    return albums, songs, weak
+
+
 def weigh(name: str, library: dict, candidates: list[dict]) -> list[dict]:
     """Score each candidate against what the library holds under ``name``.
 
@@ -119,17 +144,7 @@ def weigh(name: str, library: dict, candidates: list[dict]) -> list[dict]:
     verdict, not the catalog.
     """
     wanted = name_key(name)
-    albums: dict[str, str] = {}
-    for t in library.get("albums") or []:
-        k = title_key(str(t))
-        if k:
-            albums.setdefault(k, str(t))
-    songs: dict[str, str] = {}
-    for t in library.get("tracks") or []:
-        k = title_key(str(t))
-        if k and k not in albums:
-            songs.setdefault(k, str(t))
-    weak_keys = {k for k in albums if k in _GENERIC_TITLES or name_key(albums[k]) == wanted}
+    albums, songs, weak_keys = library_albums(name, library)
     lib_n = len(albums)
     out = []
     for orig in candidates:
@@ -144,6 +159,7 @@ def weigh(name: str, library: dict, candidates: list[dict]) -> list[dict]:
                     "owned": [],
                     "owned_n": 0,
                     "albums_n": 0,
+                    "albums_owned": [],
                     "checked": False,
                 }
             )
@@ -166,6 +182,9 @@ def weigh(name: str, library: dict, candidates: list[dict]) -> list[dict]:
                 "owned": (strong + weak + sung)[:_OWNED_SHOWN],
                 "owned_n": len(strong) + len(weak) + len(sung),
                 "albums_n": len(strong),
+                # Every distinctive album it carries, as the library spells
+                # them: the move notice names them.
+                "albums_owned": list(strong),
                 "checked": True,
             }
         )
@@ -195,7 +214,9 @@ def _read_titles(catalog, artist_id: str, singles: bool) -> list[str] | None:
     return None if titles is None else [str(t) for t in titles]
 
 
-def _weigh_row(name: str, library: dict, candidates: list[dict], *, catalog, stop) -> tuple[list[dict], dict | None]:
+def weigh_candidates(
+    name: str, library: dict, candidates: list[dict], *, catalog, stop=None
+) -> tuple[list[dict], dict | None]:
     """Weigh a fuzzy row's candidates against the library: their albums
     first, then (only while no candidate stands alone) their EPs and singles
     too, so a row an album settles costs one read per candidate. Returns
@@ -222,6 +243,10 @@ def _weigh_row(name: str, library: dict, candidates: list[dict], *, catalog, sto
         weighed = weigh(name, library, rows)
         winner = clear_winner(weighed)
     return weighed, winner
+
+
+# The import's own name for it, kept so older call sites read the same.
+_weigh_row = weigh_candidates
 
 
 def resolve_one(

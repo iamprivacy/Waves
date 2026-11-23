@@ -37,6 +37,7 @@ counts are logged here: never an artist's name or a release title.
 from __future__ import annotations
 
 import calendar
+import contextlib
 import json
 import logging
 import os
@@ -47,6 +48,7 @@ from threading import Lock
 from waves import db, musicbrainz
 from waves.matching import canon
 from waves.release_delta import _twin_key, all_group_ids, collapse_atmos_twins, edition_group_ids, split_fresh
+from waves.release_ties import Ties
 
 logger = logging.getLogger("waves.follows")
 
@@ -198,7 +200,38 @@ _SCHEMA = (
            release_id TEXT NOT NULL DEFAULT '',
            PRIMARY KEY (artist_id, rgid)
        )""",
+    # A follow found on the wrong one of several same-name profiles (see
+    # waves.artist_anchor): moved to the profile the library vouches for, or
+    # a move only suggested. One row per old id ever, so a move undone or a
+    # suggestion dismissed is never made again.
+    """CREATE TABLE IF NOT EXISTS follow_moves (
+           old_id        TEXT PRIMARY KEY,
+           new_id        TEXT NOT NULL,
+           name_key      TEXT NOT NULL DEFAULT '',
+           old_json      TEXT NOT NULL DEFAULT '{}',
+           new_json      TEXT NOT NULL DEFAULT '{}',
+           evidence_json TEXT NOT NULL DEFAULT '{}',
+           state         TEXT NOT NULL DEFAULT 'suggested',
+           seen          INTEGER NOT NULL DEFAULT 0,
+           at            INTEGER NOT NULL DEFAULT 0,
+           settled_at    INTEGER NOT NULL DEFAULT 0
+       )""",
 )
+
+# follow_moves states.
+MOVE_SUGGESTED = "suggested"
+MOVE_MOVED = "moved"
+MOVE_UNDONE = "undone"
+MOVE_DISMISSED = "dismissed"
+
+# followed.anchor_state: what the library says about a follow's profile.
+# "" never judged; anchored and silent need nothing; suspect asks for a live
+# check (name search and catalogs); checked means that check ran on the
+# evidence anchor_sig fingerprints.
+ANCHOR_ANCHORED = "anchored"
+ANCHOR_SILENT = "silent"
+ANCHOR_SUSPECT = "suspect"
+ANCHOR_CHECKED = "checked"
 
 # Columns a store from before them grows on open (the way deep_read did).
 _FOLLOWED_GROWN = (
@@ -221,6 +254,33 @@ _FOLLOWED_GROWN = (
     # The release ids the heads read has shown for this follow (a JSON list,
     # newest kept): an id not among them is news. See waves.fresh_releases.
     ("head_ids", "TEXT NOT NULL DEFAULT ''"),
+    # The library anchor (see ANCHOR_*): its state, the fingerprint of the
+    # evidence it was judged by, and when a live check may next run.
+    ("anchor_state", "TEXT NOT NULL DEFAULT ''"),
+    ("anchor_sig", "TEXT NOT NULL DEFAULT ''"),
+    ("anchor_at", "INTEGER NOT NULL DEFAULT 0"),
+    # A profile holding several same-name artists (see waves.release_ties):
+    # whether it is judged shared, what ties a release to the library's
+    # artist there (Ties as JSON, so a new release is judged on arrival),
+    # and the fingerprint of the verdict.
+    ("shared", "INTEGER NOT NULL DEFAULT 0"),
+    ("shared_json", "TEXT NOT NULL DEFAULT ''"),
+    ("shared_sig", "TEXT NOT NULL DEFAULT ''"),
+    # Rows put on record before releases kept their copyright line and UPC
+    # get them from one deep read: whether it ran to the end, and when one
+    # was last tried (a failed one waits a day).
+    ("ties_filled", "INTEGER NOT NULL DEFAULT 0"),
+    ("ties_tried", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+# Release columns a store from before them grows on open. ``copyright`` and
+# ``upc`` are catalog facts the shared-profile judge reads; ``apart`` marks a
+# release on a shared profile that nothing ties to the library's artist: kept
+# on record and on the artist page, never in the feed, its badge or downloads.
+_RELEASES_GROWN = (
+    ("copyright", "TEXT NOT NULL DEFAULT ''"),
+    ("upc", "TEXT NOT NULL DEFAULT ''"),
+    ("apart", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # How many head ids a follow remembers (fresh_releases.HEADS_KEEP).
@@ -239,12 +299,12 @@ def _head_list(raw) -> list[str]:
 _RELEASE_COLS = (
     "artist_id, release_id, title, artist_name, primary_artist_id, artists_json, art, date, listed, year, "
     "rtype, explicit, tracks, audio_tracks, duration_sec, quality, atmos, sibling_json, detected_at, "
-    "acknowledged, dl_state, updated_at"
+    "acknowledged, dl_state, updated_at, copyright, upc"
 )
 # A refreshed row keeps its acknowledged, dl_state and detected_at: those are
 # the user's and the sweep's bookkeeping, not catalog facts.
 _UPSERT_HEAD = "INSERT INTO releases (" + _RELEASE_COLS + ")"
-_UPSERT_VALUES = " VALUES (" + ", ".join(["?"] * 22) + ")"
+_UPSERT_VALUES = " VALUES (" + ", ".join(["?"] * 24) + ")"
 _UPSERT_SET = (
     " ON CONFLICT(artist_id, release_id) DO UPDATE SET"
     " title = excluded.title, artist_name = excluded.artist_name,"
@@ -253,7 +313,7 @@ _UPSERT_SET = (
     " rtype = excluded.rtype, explicit = excluded.explicit, tracks = excluded.tracks,"
     " audio_tracks = excluded.audio_tracks, duration_sec = excluded.duration_sec,"
     " quality = excluded.quality, atmos = excluded.atmos, sibling_json = excluded.sibling_json,"
-    " updated_at = excluded.updated_at"
+    " updated_at = excluded.updated_at, copyright = excluded.copyright, upc = excluded.upc"
 )
 _UPSERT_RELEASE = _UPSERT_HEAD + _UPSERT_VALUES + _UPSERT_SET
 
@@ -263,7 +323,7 @@ _UPSERT_RELEASE = _UPSERT_HEAD + _UPSERT_VALUES + _UPSERT_SET
 # the connection's temp schema, so it lives and dies with the store.
 _FEED_SHOWN = (
     "artist_id, release_id, title, artist_name, primary_artist_id, artists_json, art, date, listed, year, "
-    "rtype, explicit, tracks, audio_tracks, duration_sec, quality, atmos, detected_at, acknowledged, dl_state"
+    "rtype, explicit, tracks, audio_tracks, duration_sec, quality, atmos, detected_at, acknowledged, dl_state, apart"
 )
 _FEED_GEN_DDL = (
     "CREATE TEMP TABLE IF NOT EXISTS feed_gen (n INTEGER NOT NULL)",
@@ -341,6 +401,10 @@ def _is_album(r: dict) -> bool:
 _GUEST_CLAUSE = (
     " AND (? = 1 OR COALESCE(primary_artist_id, '') = '' OR primary_artist_id IN (SELECT artist_id FROM followed))"
 )
+# A release set apart on a shared profile (see _RELEASES_GROWN) is left out of
+# every read the feed, its badge and the Following views make.
+_APART_CLAUSE = " AND apart = 0"
+_UNACKED_SHOWN = "SELECT DISTINCT release_id FROM releases WHERE acknowledged = 0" + _APART_CLAUSE  # noqa: S608
 
 
 def _date_key(r: dict) -> str:
@@ -399,6 +463,10 @@ class FollowStore:
                 for col, decl in _FOLLOWED_GROWN:
                     if col not in cols:
                         self._conn.execute(f"ALTER TABLE followed ADD COLUMN {col} {decl}")
+                cols = {r[1] for r in self._conn.execute("PRAGMA table_info(releases)")}
+                for col, decl in _RELEASES_GROWN:
+                    if col not in cols:
+                        self._conn.execute(f"ALTER TABLE releases ADD COLUMN {col} {decl}")
                 for stmt in _FEED_GEN_DDL:
                     self._conn.execute(stmt)
                 self._conn.commit()
@@ -448,7 +516,7 @@ class FollowStore:
         if origin not in _ORIGINS:
             origin = ORIGIN_MANUAL
         now = int(time.time())
-        with self._lock:
+        with self._lock, self._conn:
             existed = self._conn.execute("SELECT 1 FROM followed WHERE artist_id = ?", (aid,)).fetchone()
             self._conn.execute(
                 """INSERT INTO followed (artist_id, name, art, origin, touched, tidal_fav, added_at)
@@ -474,7 +542,7 @@ class FollowStore:
             origin = ORIGIN_MANUAL
         now = int(time.time())
         added = 0
-        with self._lock:
+        with self._lock, self._conn:
             for r in rows:
                 aid = str(r.get("id") or r.get("artist_id") or "")
                 if not aid:
@@ -496,17 +564,22 @@ class FollowStore:
         ``remember_tidal`` records that the user dropped a TIDAL favorite HERE,
         so the mirror does not bring it straight back on its next walk."""
         aid = str(artist_id)
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM followed WHERE artist_id = ?", (aid,))
-            self._conn.execute("DELETE FROM seen WHERE artist_id = ?", (aid,))
-            self._conn.execute("DELETE FROM releases WHERE artist_id = ?", (aid,))
-            self._conn.execute("DELETE FROM mb_releases WHERE artist_id = ?", (aid,))
+            self._forget_follow(aid)
             if remember_tidal:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO tidal_unfollowed (artist_id, at) VALUES (?, ?)", (aid, int(time.time()))
                 )
             self._conn.commit()
         logger.info("follow removed")
+
+    def _forget_follow(self, aid: str) -> None:
+        """(caller holds the lock) Everything kept for a follow besides its
+        row: its baseline, feed rows and MusicBrainz marks."""
+        self._conn.execute("DELETE FROM seen WHERE artist_id = ?", (aid,))
+        self._conn.execute("DELETE FROM releases WHERE artist_id = ?", (aid,))
+        self._conn.execute("DELETE FROM mb_releases WHERE artist_id = ?", (aid,))
 
     def tidal_unfollowed_ids(self) -> set[str]:
         """Artists the user dropped here while they were TIDAL favorites."""
@@ -605,6 +678,7 @@ class FollowStore:
                     "SELECT artist_id, title, rtype, MAX(COALESCE(NULLIF(listed, ''), date)) FROM releases"  # noqa: S608 (fixed clause)
                     " WHERE COALESCE(NULLIF(listed, ''), date) != '' AND (? = 1 OR rtype != 'video')"
                     + _GUEST_CLAUSE
+                    + _APART_CLAUSE
                     + " GROUP BY artist_id",
                     (int(videos), int(guests)),
                 )
@@ -613,9 +687,9 @@ class FollowStore:
             # (they match the whole career), each told apart as shown or not.
             held = self._conn.execute(
                 "SELECT artist_id, release_id, title, artist_name, art, date, listed, rtype, tracks, quality,"  # noqa: S608 (fixed clause)
-                " (1 = 1" + _GUEST_CLAUSE + ")"
+                " (1 = 1" + _GUEST_CLAUSE + _APART_CLAUSE + ")"
                 " FROM releases WHERE COALESCE(NULLIF(listed, ''), date) != '' AND (? = 1 OR rtype != 'video')"
-                + ("" if marks else _GUEST_CLAUSE)
+                + ("" if marks else _GUEST_CLAUSE + _APART_CLAUSE)
                 + " ORDER BY artist_id, COALESCE(NULLIF(listed, ''), date) DESC, title COLLATE NOCASE, release_id",
                 (int(guests), int(videos), *(() if marks else (int(guests),))),
             ).fetchall()
@@ -744,7 +818,7 @@ class FollowStore:
         rows = [r for r in rows if r[0]]
         ids = {r[0] for r in rows}
         added = removed = 0
-        with self._lock:
+        with self._lock, self._conn:
             blocked = {r[0] for r in self._conn.execute("SELECT artist_id FROM tidal_unfollowed")}
             for aid, name, art in rows:
                 if aid in blocked:
@@ -775,9 +849,7 @@ class FollowStore:
                     )
                     if cur.rowcount:
                         removed += 1
-                        self._conn.execute("DELETE FROM seen WHERE artist_id = ?", (aid,))
-                        self._conn.execute("DELETE FROM releases WHERE artist_id = ?", (aid,))
-                        self._conn.execute("DELETE FROM mb_releases WHERE artist_id = ?", (aid,))
+                        self._forget_follow(aid)
                 for aid in blocked - ids:
                     self._conn.execute("DELETE FROM tidal_unfollowed WHERE artist_id = ?", (aid,))
             self._conn.commit()
@@ -981,7 +1053,14 @@ class FollowStore:
             self._conn.commit()
 
     def record_videos(
-        self, artist_id: str, videos: list[dict], *, complete: bool = True, whole: bool = False, keep_from: str = ""
+        self,
+        artist_id: str,
+        videos: list[dict],
+        *,
+        complete: bool = True,
+        whole: bool = False,
+        keep_from: str = "",
+        wait: bool = False,
     ) -> list[dict]:
         """Record a followed artist's music videos (bare TIDAL ids, as the
         sweep read them) and return the new ones, each with its bare id and
@@ -1001,7 +1080,7 @@ class FollowStore:
             if v.get("id") is not None and str(v.get("id"))
         ]
         fresh: list[dict] = []
-        with self._lock:
+        with self._lock, self._conn:
             row = self._conn.execute("SELECT video_seeded FROM followed WHERE artist_id = ?", (aid,)).fetchone()
             if row is None:
                 return []
@@ -1016,6 +1095,8 @@ class FollowStore:
                     self._upsert_release(aid, rid, r, is_fresh=is_fresh, now=now, inherit=inherit)
             if complete and whole:
                 self._prune_videos(aid, [r["id"] for r in rows])
+            if wait:
+                self._wait_fresh(video_rid(r["id"]) for r in fresh)
             self._conn.execute("UPDATE followed SET video_checked = ? WHERE artist_id = ?", (now, aid))
             self._conn.commit()
         if fresh:
@@ -1044,7 +1125,9 @@ class FollowStore:
             self._conn.execute("UPDATE followed SET guest_seeded = 0, guest_empty = 0")
             self._conn.commit()
 
-    def record_guests(self, artist_id: str, releases: list[dict], *, keep_from: str = "") -> list[dict]:
+    def record_guests(
+        self, artist_id: str, releases: list[dict], *, keep_from: str = "", wait: bool = False
+    ) -> list[dict]:
         """Record the releases a follow is featured on (as the sweep read
         them, newest first) and return the new ones, each with its bare id
         and ``guest_of`` the follow. The first answer (or the second empty
@@ -1063,7 +1146,7 @@ class FollowStore:
             if r.get("id") is not None and str(r.get("id"))
         ]
         fresh: list[dict] = []
-        with self._lock:
+        with self._lists_lock, self._lock, self._conn:
             row = self._conn.execute("SELECT guest_seeded FROM followed WHERE artist_id = ?", (aid,)).fetchone()
             if row is None:
                 return []
@@ -1097,6 +1180,20 @@ class FollowStore:
                     if keep_from and day and day < str(keep_from)[:10]:
                         continue
                     fresh.append({**r, "id": str(r["id"])[len(GUEST_PREFIX) :], "guest_of": aid})
+            if wait and fresh:
+                # In the save that marks them seen: they have no feed row, so a
+                # quit before the GUI queues them would lose them for good.
+                got = self._conn.execute("SELECT value FROM meta WHERE key = 'guest_waiting'").fetchone()
+                try:
+                    waiting = json.loads(got[0]) if got and got[0] else {}
+                except ValueError:
+                    waiting = {}
+                waiting = waiting if isinstance(waiting, dict) else {}
+                waiting.update({r["id"]: [_date_key(r), aid] for r in fresh})
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('guest_waiting', ?)",
+                    (json.dumps(waiting, sort_keys=True),),
+                )
             self._conn.execute("UPDATE followed SET guest_checked = ? WHERE artist_id = ?", (int(time.time()), aid))
             self._conn.commit()
         if fresh:
@@ -1105,10 +1202,15 @@ class FollowStore:
 
     def release_kind(self, release_id: str) -> str:
         """The kind (album, ep, single) a release is on record as, as one of
-        a follow's own releases; empty when no follow lists it as its own."""
+        a follow's own releases; empty when no follow lists it as its own (a
+        row set apart on a shared profile is another artist's, so it does
+        not count)."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT rtype FROM releases WHERE release_id = ? ORDER BY updated_at DESC LIMIT 1", (str(release_id),)
+                "SELECT rtype FROM releases WHERE release_id = ?"  # noqa: S608 (fixed clause)
+                + _APART_CLAUSE
+                + " ORDER BY updated_at DESC LIMIT 1",
+                (str(release_id),),
             ).fetchone()
         return str(row[0] or "") if row else ""
 
@@ -1122,6 +1224,7 @@ class FollowStore:
         prune_from: str | None = None,
         full: dict | None = None,
         joined: list[dict] | None = None,
+        wait: bool = False,
     ) -> list[dict]:
         """Record what a sweep step fetched for a followed artist and return the
         genuinely new releases. A no-op (``[]``) for an artist no longer
@@ -1162,10 +1265,15 @@ class FollowStore:
         aid = str(artist_id)
         now = int(time.time())
         fresh: list[dict] = []
-        with self._lock:
-            row = self._conn.execute("SELECT seeded FROM followed WHERE artist_id = ?", (aid,)).fetchone()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT seeded, shared, shared_json FROM followed WHERE artist_id = ?", (aid,)
+            ).fetchone()
             if row is None:
                 return []
+            # On a shared profile a release nothing ties to the library's
+            # artist is set apart on arrival: never news, never downloaded.
+            ties = Ties.from_json(row[2]) if int(row[1] or 0) else None
             fresh_ids = self._grow_baseline(
                 aid, releases, seeded=bool(int(row[0] or 0)), complete=complete, joined=joined
             )
@@ -1180,13 +1288,16 @@ class FollowStore:
                 # before the fold is not withdrawn.
                 fetched_ids.update(str(t) for t in r.get("atmos_ids") or [] if t is not None)
                 day = _date_key(r)
-                is_fresh, inherit = self._fresh_verdict(aid, rid, r, rid in fresh_ids, day, keep_from)
+                apart = ties is not None and not ties.keeps(r)
+                is_fresh, inherit = self._fresh_verdict(aid, rid, r, rid in fresh_ids and not apart, day, keep_from)
                 if is_fresh:
                     fresh.append({**r, "id": rid, "fresh": True, "detected_at": now})
                 if not day:
                     continue
                 fetched_days[_is_album(r)].append(_order_day(r))
                 self._upsert_release(aid, rid, r, is_fresh=is_fresh, now=now, inherit=inherit)
+                if apart:
+                    self._set_apart_row(aid, rid)
             self._prune_after_check(
                 aid,
                 fetched_ids,
@@ -1194,6 +1305,8 @@ class FollowStore:
                 keep_from if prune_from is None else prune_from,
                 full=full,
             )
+            if wait:
+                self._wait_fresh(r["id"] for r in fresh)
             self._conn.execute(
                 "UPDATE followed SET last_checked = ?, fail_count = 0, hinted = 0 WHERE artist_id = ?", (now, aid)
             )
@@ -1201,6 +1314,16 @@ class FollowStore:
         if fresh:
             logger.info("sweep step: %d new release(s) detected", len(fresh))
         return fresh
+
+    def _wait_fresh(self, release_ids: Iterable[str]) -> None:
+        """(under _lock) Put new releases in line for the auto-download in the
+        same save that marks them seen, so a quit before the GUI decides loses
+        nothing: the next step's drain applies the live rules to whatever the
+        GUI did not queue (or turn down) first."""
+        self._conn.executemany(
+            "UPDATE releases SET dl_state = ? WHERE release_id = ? AND dl_state = 0",
+            [(DL_WAITING, rid) for rid in release_ids],
+        )
 
     def _grow_baseline(
         self, aid: str, releases: list[dict], *, seeded: bool, complete: bool, joined: list[dict] | None = None
@@ -1268,7 +1391,9 @@ class FollowStore:
                 [(eid, now) for eid, _ in late],
             )
             marks = ",".join("?" * len(known))
-            q = f"SELECT MAX(dl_state) FROM releases WHERE release_id IN ({marks})"  # noqa: S608 (placeholders)
+            # A release set apart on a shared profile is another artist's:
+            # its late edition follows no download of it.
+            q = f"SELECT MAX(dl_state) FROM releases WHERE release_id IN ({marks}){_APART_CLAUSE}"  # noqa: S608 (placeholders)
             state = self._conn.execute(q, sorted(known)).fetchone()[0]
             for eid, atmos in late:
                 out.append(
@@ -1352,6 +1477,8 @@ class FollowStore:
                 acknowledged,
                 dl_state,
                 now,
+                str(r.get("copyright") or ""),
+                str(r.get("upc") or ""),
             ),
         )
 
@@ -1411,7 +1538,7 @@ class FollowStore:
         aid = str(artist_id)
         now = int(time.time())
         added = 0
-        with self._lock:
+        with self._lock, self._conn:
             if self._conn.execute("SELECT 1 FROM followed WHERE artist_id = ?", (aid,)).fetchone() is None:
                 return 0
             self._conn.executemany(
@@ -1419,21 +1546,45 @@ class FollowStore:
                 [(aid, rid) for rid in sorted(all_group_ids(releases))],
             )
             held = {r[0] for r in self._conn.execute("SELECT release_id FROM releases WHERE artist_id = ?", (aid,))}
+            ties = self._ties_of(aid)
             for r in releases:
                 if r.get("id") is None or not _date_key(r):
                     continue
                 rid = str(r.get("id"))
-                if rid in held or any(str(s) in held for s in r.get("sibling_ids") or []):
+                group = {rid, *(str(s) for s in r.get("sibling_ids") or [] if s)}
+                if group & held:
+                    # On record already: only the catalog facts a row stored
+                    # before them lacks are filled in.
+                    if r.get("copyright") or r.get("upc"):
+                        marks = ", ".join("?" for _ in group)
+                        self._conn.execute(
+                            "UPDATE releases SET copyright = ?, upc = ? WHERE artist_id = ? AND copyright = ''"  # noqa: S608
+                            " AND release_id IN (" + marks + ")",
+                            (str(r.get("copyright") or ""), str(r.get("upc") or ""), aid, *sorted(group)),
+                        )
                     continue
                 self._upsert_release(aid, rid, r, is_fresh=False, now=now)
+                if ties is not None and not ties.keeps(r):
+                    self._set_apart_row(aid, rid)
                 held.add(rid)
                 added += 1
             if complete:
-                self._conn.execute("UPDATE followed SET deep_read = ? WHERE artist_id = ?", (now, aid))
+                self._conn.execute("UPDATE followed SET deep_read = ?, ties_filled = 1 WHERE artist_id = ?", (now, aid))
+            self._conn.execute("UPDATE followed SET ties_tried = ? WHERE artist_id = ?", (now, aid))
             self._conn.commit()
         if added:
             logger.info("deep read: %d older release(s) on record", added)
         return added
+
+    def ties_fill_due(self, artist_id: str, now: int, retry_s: int) -> bool:
+        """Whether this follow's rows still wait for the one deep read that
+        fills in their copyright line and UPC (see _FOLLOWED_GROWN), and no
+        try is more recent than ``retry_s``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ties_filled, ties_tried FROM followed WHERE artist_id = ?", (str(artist_id),)
+            ).fetchone()
+        return bool(row) and not int(row[0] or 0) and int(now) - int(row[1] or 0) >= int(retry_s)
 
     def deep_touch(self, artist_id: str, at: int) -> None:
         """Stamp the follow's deep read at ``at`` without a read to its end
@@ -1474,7 +1625,7 @@ class FollowStore:
         False, and nothing recorded, for an artist no longer followed."""
         aid = str(artist_id)
         now = int(time.time())
-        with self._lock:
+        with self._lock, self._conn:
             if self._conn.execute("SELECT 1 FROM followed WHERE artist_id = ?", (aid,)).fetchone() is None:
                 return False
             career = self._career_of(aid)
@@ -1556,13 +1707,12 @@ class FollowStore:
                 " detected_at, dl_state, MAX(updated_at) FROM releases"
                 " WHERE COALESCE(NULLIF(listed, ''), date) >= ? AND (? = 1 OR rtype != 'video')"
                 + _GUEST_CLAUSE
+                + _APART_CLAUSE
                 + " GROUP BY release_id"
                 " ORDER BY COALESCE(NULLIF(listed, ''), date) DESC, title COLLATE NOCASE, release_id",
                 (day_from, int(videos), int(guests)),
             ).fetchall()
-            fresh = {
-                r[0] for r in self._conn.execute("SELECT DISTINCT release_id FROM releases WHERE acknowledged = 0")
-            }
+            fresh = {r[0] for r in self._conn.execute(_UNACKED_SHOWN)}
         out = []
         for r in rows:
             try:
@@ -1664,6 +1814,7 @@ class FollowStore:
                 "SELECT 1 FROM releases WHERE COALESCE(NULLIF(listed, ''), date) < ?"  # noqa: S608 (fixed clause)
                 " AND COALESCE(NULLIF(listed, ''), date) >= ? AND (? = 1 OR rtype != 'video')"
                 + _GUEST_CLAUSE
+                + _APART_CLAUSE
                 + " LIMIT 1",
                 (str(before or "")[:10], str(keep_from or "")[:10], int(videos), int(guests)),
             ).fetchone()
@@ -1681,7 +1832,10 @@ class FollowStore:
                 "SELECT release_id, title, artist_name, listed, date, tracks, quality, MAX(updated_at)"  # noqa: S608 (fixed clause)
                 " FROM releases WHERE COALESCE(NULLIF(listed, ''), date) >= ? AND (? = 1 OR rtype != 'video')"
                 + _GUEST_CLAUSE
-                + " AND release_id IN (SELECT release_id FROM releases WHERE acknowledged = 0)"
+                + _APART_CLAUSE
+                + " AND release_id IN (SELECT release_id FROM releases WHERE acknowledged = 0"
+                + _APART_CLAUSE
+                + ")"
                 " GROUP BY release_id",
                 (day_from, int(videos), int(guests)),
             ).fetchall()
@@ -1689,8 +1843,10 @@ class FollowStore:
             stereo = []
             for day in days:
                 stereo += self._conn.execute(
-                    "SELECT release_id, title, artist_name, listed, date, tracks, quality, MAX(updated_at)"
-                    " FROM releases WHERE COALESCE(NULLIF(listed, ''), date) = ? GROUP BY release_id"
+                    "SELECT release_id, title, artist_name, listed, date, tracks, quality, MAX(updated_at)"  # noqa: S608 (fixed clause)
+                    " FROM releases WHERE COALESCE(NULLIF(listed, ''), date) = ?"
+                    + _APART_CLAUSE
+                    + " GROUP BY release_id"
                     " ORDER BY title COLLATE NOCASE, release_id",
                     (day,),
                 ).fetchall()
@@ -1725,7 +1881,7 @@ class FollowStore:
         Returns the release ids it just acknowledged (the pane keeps their
         dots for the visit), a music video's with its ``v:`` mark: a video's
         bare id can be an album's too, and the album must not light up."""
-        with self._lock:
+        with self._lock, self._conn:
             ids = sorted({r[0] for r in self._conn.execute("SELECT release_id FROM releases WHERE acknowledged = 0")})
             if ids:
                 self._conn.execute("UPDATE releases SET acknowledged = 1 WHERE acknowledged = 0")
@@ -1736,7 +1892,7 @@ class FollowStore:
     def arrivals(self) -> list[str]:
         """The arrivals the pane still marks (ids as ``acknowledge_all``
         returns them). One whose release left the feed is dropped."""
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM arrivals WHERE release_id NOT IN (SELECT release_id FROM releases)")
             self._conn.commit()
             return sorted(r[0] for r in self._conn.execute("SELECT release_id FROM arrivals"))
@@ -1745,7 +1901,7 @@ class FollowStore:
         """The user opened this release: it is no longer an arrival, and no
         longer on the badge either. True when it was one."""
         rid = str(release_id)
-        with self._lock:
+        with self._lock, self._conn:
             n = self._conn.execute("DELETE FROM arrivals WHERE release_id = ?", (rid,)).rowcount
             n += self._conn.execute(
                 "UPDATE releases SET acknowledged = 1 WHERE release_id = ? AND acknowledged = 0", (rid,)
@@ -1836,9 +1992,11 @@ class FollowStore:
     def atmos_due(self, upto: str) -> list[tuple[str, str, str]]:
         """The waiting Atmos twins whose day has come, as ``(id, kind,
         lead)`` (kind and lead "" when they were not kept), taken off the
-        list."""
+        list. A twin of a release set apart since it started waiting is
+        taken off and not returned, as its stereo row is held back."""
         with self._lists_lock:
             waiting = self._atmos_waiting()
+            apart = self._apart_editions()
             due = []
             for k, v in waiting.items():
                 row = [*v, "", ""][:3] if isinstance(v, list) and v else [v, "", ""]
@@ -1848,6 +2006,7 @@ class FollowStore:
             due.sort()
             if due:
                 gone = {k for k, *_ in due}
+                due = [d for d in due if d[0] not in apart]
                 self.meta_set(
                     "atmos_waiting", json.dumps({k: v for k, v in waiting.items() if k not in gone}, sort_keys=True)
                 )
@@ -1859,8 +2018,10 @@ class FollowStore:
         "video"``."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT release_id, title, artist_name, rtype, MAX(updated_at), primary_artist_id FROM releases"
-                " WHERE dl_state = ? AND COALESCE(NULLIF(listed, ''), date) <= ? GROUP BY release_id",
+                "SELECT release_id, title, artist_name, rtype, MAX(updated_at), primary_artist_id FROM releases"  # noqa: S608 (fixed clause)
+                " WHERE dl_state = ? AND COALESCE(NULLIF(listed, ''), date) <= ?"
+                + _APART_CLAUSE
+                + " GROUP BY release_id",
                 (DL_WAITING, str(upto)[:10]),
             ).fetchall()
         return [
@@ -1923,7 +2084,7 @@ class FollowStore:
 
     def tray_dismiss(self, norm: str) -> None:
         """Drop a tray row for good: later imports skip the name."""
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM import_tray WHERE norm = ?", (str(norm),))
             self._conn.execute(
                 "INSERT OR REPLACE INTO import_dismissed (norm, ts) VALUES (?, ?)", (str(norm), int(time.time()))
@@ -1939,6 +2100,481 @@ class FollowStore:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) FROM import_tray").fetchone()
         return int(row[0] or 0)
+
+    # ----- the library anchor (same-name profiles) ---------------------------
+
+    def anchor_inputs(self) -> list[dict]:
+        """Every follow with what the library anchor judges it by: ``{id,
+        name, origin, touched, state, sig, titles}``, ``titles`` the titles of
+        its own releases on record (videos and featured rows left out)."""
+        with self._lock:
+            follows = self._conn.execute(
+                "SELECT artist_id, name, origin, touched, anchor_state, anchor_sig FROM followed"
+                " ORDER BY name COLLATE NOCASE, artist_id"
+            ).fetchall()
+            titles: dict[str, list[str]] = {}
+            for aid, title in self._conn.execute(
+                "SELECT artist_id, title FROM releases WHERE rtype != ? AND release_id NOT LIKE ?",
+                (VIDEO_RTYPE, GUEST_PREFIX + "%"),
+            ):
+                if title:
+                    titles.setdefault(str(aid), []).append(str(title))
+        return [
+            {
+                "id": str(aid),
+                "name": name or "",
+                "origin": origin or ORIGIN_MANUAL,
+                "touched": bool(touched),
+                "state": state or "",
+                "sig": sig or "",
+                "titles": titles.get(str(aid), []),
+            }
+            for aid, name, origin, touched, state, sig in follows
+        ]
+
+    def anchor_note(self, artist_id: str, state: str, sig: str, *, at: int = 0) -> None:
+        """Record a follow's anchor ``state`` and the ``sig`` of the evidence
+        it was judged by; ``at`` holds a live check off until then."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE followed SET anchor_state = ?, anchor_sig = ?, anchor_at = ? WHERE artist_id = ?",
+                (str(state), str(sig), int(at), str(artist_id)),
+            )
+            self._conn.commit()
+
+    # ----- shared profiles (several same-name artists on one profile) -------
+
+    def _ties_of(self, aid: str) -> Ties | None:
+        """(caller holds the lock) A shared follow's Ties, None otherwise."""
+        row = self._conn.execute("SELECT shared, shared_json FROM followed WHERE artist_id = ?", (aid,)).fetchone()
+        return Ties.from_json(row[1]) if row and int(row[0] or 0) else None
+
+    def _set_apart_row(self, aid: str, rid: str) -> None:
+        """(caller holds the lock) Set one release apart: also acknowledged,
+        so it never lights the badge if the profile is judged clean later."""
+        self._conn.execute(
+            "UPDATE releases SET apart = 1, acknowledged = 1 WHERE artist_id = ? AND release_id = ?", (aid, rid)
+        )
+
+    def ties_inputs(self) -> list[dict]:
+        """Every follow the library anchors, and every one judged shared
+        before (so a follow the library no longer anchors is judged again and
+        its releases come back), with what the shared-profile judge reads:
+        ``{id, name, sig, rows}``, ``rows`` its own releases on record
+        (videos and featured rows left out) as ``{id, title, copyright, upc,
+        artists}``."""
+        with self._lock:
+            follows = self._conn.execute(
+                "SELECT artist_id, name, shared_sig FROM followed WHERE anchor_state = ? OR shared = 1"
+                " ORDER BY name COLLATE NOCASE, artist_id",
+                (ANCHOR_ANCHORED,),
+            ).fetchall()
+            rows: dict[str, list[dict]] = {}
+            for aid, rid, title, copy, upc, artists in self._conn.execute(
+                "SELECT artist_id, release_id, title, copyright, upc, artists_json FROM releases"
+                " WHERE rtype != ? AND release_id NOT LIKE ?",
+                (VIDEO_RTYPE, GUEST_PREFIX + "%"),
+            ):
+                try:
+                    credited = json.loads(artists or "[]")
+                except ValueError:
+                    credited = []
+                rows.setdefault(str(aid), []).append(
+                    {
+                        "id": str(rid),
+                        "title": title or "",
+                        "copyright": copy or "",
+                        "upc": upc or "",
+                        "artists": credited if isinstance(credited, list) else [],
+                    }
+                )
+        return [
+            {"id": str(aid), "name": name or "", "sig": sig or "", "rows": rows.get(str(aid), [])}
+            for aid, name, sig in follows
+        ]
+
+    def set_apart(self, artist_id: str, ties: Ties | None, apart_ids: Iterable[str], sig: str) -> bool:
+        """Record one follow's shared-profile verdict in one transaction:
+        ``ties`` None for a profile that is not shared (every release comes
+        back), else the releases in ``apart_ids`` are set apart and every
+        other one comes back. Returns whether any release changed sides; a
+        follow that is gone changes nothing."""
+        aid = str(artist_id)
+        ids = sorted({str(i) for i in apart_ids})
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM followed WHERE artist_id = ?", (aid,)).fetchone() is None:
+                return False
+            before = {
+                r[0]
+                for r in self._conn.execute("SELECT release_id FROM releases WHERE artist_id = ? AND apart = 1", (aid,))
+            }
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "UPDATE followed SET shared = ?, shared_json = ?, shared_sig = ? WHERE artist_id = ?",
+                    (1 if ties is not None else 0, ties.to_json() if ties is not None else "", str(sig), aid),
+                )
+                self._conn.execute("UPDATE releases SET apart = 0 WHERE artist_id = ? AND apart = 1", (aid,))
+                if ties is not None:
+                    for rid in ids:
+                        self._set_apart_row(aid, rid)
+                after = {
+                    r[0]
+                    for r in self._conn.execute(
+                        "SELECT release_id FROM releases WHERE artist_id = ? AND apart = 1", (aid,)
+                    )
+                }
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return before != after
+
+    def apart_ids(self, artist_id: str, *, editions: bool = False) -> set[str]:
+        """The releases set apart on a follow's profile (empty unless shared).
+        With ``editions`` each one's other editions come too, so a page that
+        picked another edition of the same release still finds it."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT release_id, sibling_json FROM releases WHERE artist_id = ? AND apart = 1", (str(artist_id),)
+            ).fetchall()
+        out = {str(r[0]) for r in rows}
+        if editions:
+            for _rid, siblings in rows:
+                with contextlib.suppress(TypeError, ValueError):
+                    out.update(str(s) for s in json.loads(siblings or "[]") if s)
+        return out
+
+    def _apart_editions(self) -> set[str]:
+        """Every release set apart on any shared profile, with each one's
+        other editions (its folded Atmos twin among them)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT release_id, sibling_json FROM releases WHERE apart = 1").fetchall()
+        out = {str(r[0]) for r in rows}
+        for _rid, siblings in rows:
+            with contextlib.suppress(TypeError, ValueError):
+                out.update(str(s) for s in json.loads(siblings or "[]") if s)
+        return out
+
+    def is_shared(self, artist_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT shared FROM followed WHERE artist_id = ?", (str(artist_id),)).fetchone()
+        return bool(row and int(row[0] or 0))
+
+    def anchor_of(self, artist_id: str) -> tuple[str, str] | None:
+        """A follow's ``(anchor_state, anchor_sig)``, None when not followed."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT anchor_state, anchor_sig FROM followed WHERE artist_id = ?", (str(artist_id),)
+            ).fetchone()
+        return (row[0] or "", row[1] or "") if row else None
+
+    def anchor_next(self, now: int) -> dict | None:
+        """The suspect follow due for a live check (``anchor_at`` reached),
+        oldest first, never one a move was ever made or suggested for:
+        ``{id, name, origin, touched, sig}``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT artist_id, name, origin, touched, anchor_sig FROM followed"
+                " WHERE anchor_state = ? AND anchor_at <= ?"
+                " AND artist_id NOT IN (SELECT old_id FROM follow_moves)"
+                " ORDER BY anchor_at, artist_id LIMIT 1",
+                (ANCHOR_SUSPECT, int(now)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row[0]),
+            "name": row[1] or "",
+            "origin": row[2] or ORIGIN_MANUAL,
+            "touched": bool(row[3]),
+            "sig": row[4] or "",
+        }
+
+    def _follow_snapshot(self, aid: str) -> dict | None:
+        """(caller holds the lock) The parts of a follow row an undo puts back."""
+        row = self._conn.execute(
+            "SELECT name, art, origin, touched, tidal_fav, added_at FROM followed WHERE artist_id = ?", (aid,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": aid,
+            "name": row[0] or "",
+            "art": row[1] or "",
+            "origin": row[2] or ORIGIN_MANUAL,
+            "touched": bool(row[3]),
+            "tidal_fav": bool(row[4]),
+            "added_at": int(row[5] or 0),
+        }
+
+    def _drop_waiting_for(self, aid: str) -> None:
+        """(caller holds _lists_lock, then the lock) Take the follow's entries
+        off the featured and Atmos waiting lists, so a moved-away profile's
+        releases are never downloaded later."""
+        for key, slot in (("guest_waiting", 1), ("atmos_waiting", 2)):
+            row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            try:
+                waiting = json.loads(row[0]) if row and row[0] else {}
+            except ValueError:
+                continue
+            if not isinstance(waiting, dict):
+                continue
+            kept = {
+                k: v for k, v in waiting.items() if not (isinstance(v, list) and len(v) > slot and str(v[slot]) == aid)
+            }
+            if len(kept) != len(waiting):
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(kept, sort_keys=True))
+                )
+
+    def _move_row(self, old_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT old_id, new_id, name_key, old_json, new_json, evidence_json, state, seen, at, settled_at"
+            " FROM follow_moves WHERE old_id = ?",
+            (old_id,),
+        ).fetchone()
+        return self._move_dict(row) if row else None
+
+    @staticmethod
+    def _move_dict(r) -> dict:
+        def _obj(raw) -> dict:
+            try:
+                got = json.loads(raw or "{}")
+            except ValueError:
+                return {}
+            return got if isinstance(got, dict) else {}
+
+        return {
+            "old_id": str(r[0]),
+            "new_id": str(r[1]),
+            "name_key": r[2] or "",
+            "old": _obj(r[3]),
+            "new": _obj(r[4]),
+            "evidence": _obj(r[5]),
+            "state": r[6] or MOVE_SUGGESTED,
+            "seen": bool(r[7]),
+            "at": int(r[8] or 0),
+            "settled_at": int(r[9] or 0),
+        }
+
+    def suggest_move(self, old_id: str, new: dict, *, name_key: str = "", evidence: dict | None = None) -> bool:
+        """Record that ``new`` (``{id, name, art}``) looks like the profile the
+        library vouches for instead of the followed ``old_id``, for the user
+        to confirm. Returns False when the follow is gone or a move was ever
+        made or suggested for it (never repeated)."""
+        oid, nid = str(old_id), str(new.get("id") or "")
+        if not oid or not nid or oid == nid:
+            return False
+        with self._lock:
+            old = self._follow_snapshot(oid)
+            if old is None:
+                return False
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO follow_moves (old_id, new_id, name_key, old_json, new_json, evidence_json,"
+                " state, seen, at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (
+                    oid,
+                    nid,
+                    str(name_key),
+                    json.dumps(old, sort_keys=True),
+                    json.dumps(dict(new), sort_keys=True),
+                    json.dumps(evidence or {}, sort_keys=True),
+                    MOVE_SUGGESTED,
+                    int(time.time()),
+                ),
+            )
+            self._conn.commit()
+        if cur.rowcount:
+            logger.info("follow move suggested")
+        return bool(cur.rowcount)
+
+    def move_follow(self, old_id: str, new: dict, *, name_key: str = "", evidence: dict | None = None) -> bool:
+        """Move the follow ``old_id`` to the profile ``new`` (``{id, name,
+        art}``) in one transaction: the old follow and everything kept for
+        it go, its id is remembered as unfollowed here so the TIDAL mirror
+        cannot bring it back, and its waiting downloads are dropped. The new
+        follow starts unseeded (its first complete check is absorbed
+        silently, so the move announces no back catalog), as a library
+        follow the user never touched. TIDAL itself is never written.
+
+        Takes a suggestion for ``old_id`` forward; refuses (False) a follow
+        that is gone, or one already moved, undone or dismissed."""
+        oid, nid = str(old_id), str(new.get("id") or "")
+        if not oid or not nid or oid == nid:
+            return False
+        now = int(time.time())
+        with self._lists_lock, self._lock:
+            prior = self._move_row(oid)
+            if prior is not None and prior["state"] != MOVE_SUGGESTED:
+                return False
+            old = self._follow_snapshot(oid)
+            if old is None:
+                return False
+            new_had = self._follow_snapshot(nid)
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM followed WHERE artist_id = ?", (oid,))
+                self._forget_follow(oid)
+                self._conn.execute("INSERT OR REPLACE INTO tidal_unfollowed (artist_id, at) VALUES (?, ?)", (oid, now))
+                self._drop_waiting_for(oid)
+                if new_had is None:
+                    self._conn.execute(
+                        """INSERT INTO followed (artist_id, name, art, origin, touched, tidal_fav, added_at,
+                               anchor_state)
+                           VALUES (?, ?, ?, ?, 0, 0, ?, ?)""",
+                        (
+                            nid,
+                            new.get("name") or old["name"],
+                            new.get("art") or "",
+                            ORIGIN_LIBRARY,
+                            now,
+                            ANCHOR_CHECKED,
+                        ),
+                    )
+                new_json = {**dict(new), "id": nid, "was_followed": new_had is not None}
+                self._conn.execute(
+                    """INSERT INTO follow_moves (old_id, new_id, name_key, old_json, new_json, evidence_json,
+                           state, seen, at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                       ON CONFLICT(old_id) DO UPDATE SET new_id = excluded.new_id,
+                           new_json = excluded.new_json, state = excluded.state, seen = 0, at = excluded.at""",
+                    (
+                        oid,
+                        nid,
+                        str(name_key or (prior or {}).get("name_key") or ""),
+                        json.dumps(old, sort_keys=True),
+                        json.dumps(new_json, sort_keys=True),
+                        json.dumps(
+                            evidence if evidence is not None else (prior or {}).get("evidence") or {}, sort_keys=True
+                        ),
+                        MOVE_MOVED,
+                        now,
+                    ),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        logger.info("follow moved to the profile the library vouches for (%s)", old["origin"])
+        return True
+
+    def undo_move(self, old_id: str) -> bool:
+        """Put a move back: the old follow returns as it was (unseeded, so
+        its catalog is taken in again silently), the new one goes unless it
+        was followed before the move, and the move is never made again."""
+        oid = str(old_id)
+        now = int(time.time())
+        with self._lists_lock, self._lock:
+            mv = self._move_row(oid)
+            if mv is None or mv["state"] != MOVE_MOVED:
+                return False
+            old, nid = mv["old"], mv["new_id"]
+            # Another move onto the same profile still stands on it: the
+            # profile stays, and the newest such move takes over this one's
+            # memory that it was not followed before (its own undo removes it).
+            heir = self._conn.execute(
+                "SELECT old_id, new_json FROM follow_moves WHERE new_id = ? AND old_id != ? AND state = ?"
+                " ORDER BY at DESC, old_id LIMIT 1",
+                (nid, oid, MOVE_MOVED),
+            ).fetchone()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not mv["new"].get("was_followed"):
+                    if heir is not None:
+                        try:
+                            heir_new = json.loads(heir[1] or "{}")
+                        except ValueError:
+                            heir_new = {}
+                        if not isinstance(heir_new, dict):
+                            heir_new = {}
+                        heir_new["was_followed"] = False
+                        self._conn.execute(
+                            "UPDATE follow_moves SET new_json = ? WHERE old_id = ?",
+                            (json.dumps(heir_new, sort_keys=True), heir[0]),
+                        )
+                    else:
+                        self._conn.execute("DELETE FROM followed WHERE artist_id = ?", (nid,))
+                        self._forget_follow(nid)
+                        self._drop_waiting_for(nid)
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO followed (artist_id, name, art, origin, touched, tidal_fav, added_at,
+                           anchor_state)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        oid,
+                        old.get("name") or "",
+                        old.get("art") or "",
+                        old.get("origin") if old.get("origin") in _ORIGINS else ORIGIN_MANUAL,
+                        1 if old.get("touched") else 0,
+                        1 if old.get("tidal_fav") else 0,
+                        int(old.get("added_at") or now),
+                        ANCHOR_CHECKED,
+                    ),
+                )
+                self._conn.execute("DELETE FROM tidal_unfollowed WHERE artist_id = ?", (oid,))
+                self._conn.execute(
+                    "UPDATE follow_moves SET state = ?, seen = 1, settled_at = ? WHERE old_id = ?",
+                    (MOVE_UNDONE, now, oid),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        logger.info("follow move undone")
+        return True
+
+    def accept_move(self, old_id: str) -> bool:
+        """The user's OK: a made move is kept and leaves the pane's notice;
+        a suggestion is carried out (see move_follow)."""
+        oid = str(old_id)
+        with self._lock:
+            mv = self._move_row(oid)
+            if mv is None:
+                return False
+            if mv["state"] == MOVE_MOVED:
+                self._conn.execute(
+                    "UPDATE follow_moves SET seen = 1, settled_at = ? WHERE old_id = ?", (int(time.time()), oid)
+                )
+                self._conn.commit()
+                return True
+        if mv["state"] != MOVE_SUGGESTED:
+            return False
+        if not self.move_follow(oid, mv["new"], name_key=mv["name_key"], evidence=mv["evidence"]):
+            return False
+        with self._lock:
+            self._conn.execute(
+                "UPDATE follow_moves SET seen = 1, settled_at = ? WHERE old_id = ?", (int(time.time()), oid)
+            )
+            self._conn.commit()
+        return True
+
+    def dismiss_move(self, old_id: str) -> bool:
+        """The user keeps the follow as it is: a suggestion is set aside and
+        never made again."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE follow_moves SET state = ?, seen = 1, settled_at = ? WHERE old_id = ? AND state = ?",
+                (MOVE_DISMISSED, int(time.time()), str(old_id), MOVE_SUGGESTED),
+            )
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    def moves(self, *, settled: bool = False) -> list[dict]:
+        """The moves the pane shows, newest first: suggestions still open
+        (for a follow still here: one unfollowed since has nothing to move)
+        and moves not yet acknowledged (while their target is still
+        followed); with ``settled`` every row ever kept."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT old_id, new_id, name_key, old_json, new_json, evidence_json, state, seen, at, settled_at"
+                " FROM follow_moves WHERE ? = 1"
+                " OR (state = ? AND old_id IN (SELECT artist_id FROM followed))"
+                " OR (state = ? AND seen = 0 AND new_id IN (SELECT artist_id FROM followed))"
+                " ORDER BY at DESC, old_id",
+                (1 if settled else 0, MOVE_SUGGESTED, MOVE_MOVED),
+            ).fetchall()
+        return [self._move_dict(r) for r in rows]
 
     # ----- bookkeeping ------------------------------------------------------
 

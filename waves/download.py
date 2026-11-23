@@ -20,7 +20,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from concurrent import futures
 from threading import Event, Lock, local
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from uuid import uuid4
 
 import certifi
@@ -571,6 +571,27 @@ class Download:
     _pace_holds: int = 0
     _pace_until: float = 0.0
 
+    # Final destination names claimed by a download that is between picking
+    # its unique name and moving the file there. Nothing is on disk for that
+    # stretch (metadata, the lyrics fetch and the cover all run first), so
+    # without this two colliding same-name tracks both pick the same free name
+    # and one silently overwrites or loses the other (issue #15 follow-up).
+    # On the CLASS, not the instance: the GUI's pool runs more than one queued
+    # item at once (1 + downloads_finishing_max), and two editions of one
+    # album aim at the same names from two jobs. The lock also guards each
+    # instance's _names_written.
+    #
+    # Held per NAME against the item that holds it, and counted: a collection
+    # may list the SAME track twice (TIDAL allows it), both occurrences run at
+    # once, and an ownerless claim made the second one step aside onto "X_01"
+    # for a file that is its own. That left two identical files tagged with
+    # one item id, the twin orphaned forever (the app never deletes user
+    # files) and skipped past by every later run. An item never has to make
+    # way for itself: both occurrences aim at one name, and the post-stream
+    # existing-file check settles which one actually writes it.
+    _names_reserved: ClassVar[dict[str, tuple[str, int]]] = {}
+    _names_reserved_lock: ClassVar[Lock] = Lock()
+
     @property
     def path_base(self) -> str:
         return getattr(self, "_path_base", "")
@@ -700,26 +721,7 @@ class Download:
         self._cover_cache_hits = 0
         self._cover_cache_fetches = 0
 
-        # Final destination names claimed by a download that is between picking
-        # its unique name and moving the file there. Nothing is on disk for that
-        # stretch (metadata, the lyrics fetch and the cover all run first), so
-        # without this two colliding same-name tracks both pick the same free
-        # name and one silently overwrites or loses the other (issue #15
-        # follow-up). One instance serves all of a queued item's concurrent
-        # track workers (`items` fans `self.item` across the pool), and the GUI
-        # runs one queued item at a time, so instance scope covers every
-        # in-process collision.
-        #
-        # Held per NAME against the item that holds it, and counted: a
-        # collection may list the SAME track twice (TIDAL allows it), both
-        # occurrences run at once, and an ownerless claim made the second one
-        # step aside onto "X_01" for a file that is its own. That left two
-        # identical files tagged with one item id, the twin orphaned forever
-        # (the app never deletes user files) and skipped past by every later
-        # run. An item never has to make way for itself: both occurrences aim
-        # at one name, and the post-stream existing-file check settles which
-        # one actually writes it.
-        self._names_reserved: dict[str, tuple[str, int]] = {}
+        # Claimed names (_names_reserved) live on the class; see there.
         # Final destination names this run has already WRITTEN, against the item
         # each one now holds. A claim covers only the stretch between picking a
         # name and moving the file there, which is the whole answer while the
@@ -730,7 +732,6 @@ class Download:
         # different four each run). This ledger is what a landed file would have
         # said, and it is never released.
         self._names_written: dict[str, str] = {}
-        self._names_reserved_lock: Lock = Lock()
 
         # Directories this run actually put a file into, and nothing else.
         # The m3u writer's scope: it REPLACES the playlist file a directory
@@ -1148,9 +1149,12 @@ class Download:
 
         # How many trailing URLs the manifest arithmetic proves are
         # over-generated padding (tracks only; see waves_ui/manifest.py).
-        # None means unproven (video m3u8, BTS, or an unparseable manifest)
-        # and preserves the legacy last-segment leniency downstream.
-        n_tail_spurious: int | None = overgenerated_tail_urls(stream_manifest) if stream_manifest else None
+        # None means unproven (BTS or an unparseable manifest) and preserves
+        # the legacy last-segment leniency downstream. A video's HLS playlist
+        # lists only real segments, so its last one is always required.
+        n_tail_spurious: int | None = (
+            overgenerated_tail_urls(stream_manifest) if stream_manifest else (0 if isinstance(media, Video) else None)
+        )
 
         # Set the correct progress output channel.
         if self.progress_gui is None:
@@ -1231,6 +1235,7 @@ class Download:
                 len(dl_segment_results) > 1
                 and dl_segment_result is not None
                 and dl_segment_result is dl_segment_results[-1]
+                and not dl_segment_result.result  # one that arrived fine is real audio
                 and (n_tail_spurious is None or n_tail_spurious > 0)
             )
 
@@ -2592,20 +2597,7 @@ class Download:
                 path_media_dst = path_media_found
 
             if self.settings.data.symlink_to_track and not isinstance(media, Video):
-                # Compute symlink tracks path, sanitize and check if file exists
-                file_name_track_dir_relative: str = format_path_media(
-                    self.settings.data.format_track,
-                    media,
-                    delimiter_artist=self.settings.data.filename_delimiter_artist,
-                    delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
-                    use_primary_album_artist=self.settings.data.use_primary_album_artist,
-                    illegal_replacement=self._illegal_replacement(),
-                    illegal_map=self._illegal_map(),
-                )
-                path_media_track_dir: pathlib.Path = (
-                    pathlib.Path(self.path_base).expanduser() / (file_name_track_dir_relative + file_extension_dummy)
-                ).absolute()
-                path_media_track_dir = pathlib.Path(path_file_sanitize(path_media_track_dir, adapt=True))
+                path_media_track_dir: pathlib.Path = self._track_dir_path(media, file_extension_dummy)
                 # Identity, not just the name: a DIFFERENT track whose name
                 # collides used to make this one look downloaded, so nothing was
                 # fetched and the playlist entry ended up pointing at the
@@ -3514,6 +3506,40 @@ class Download:
         if quality_video_old is not None:
             self.adjust_quality_video(quality_video_old)
 
+    def _track_dir_path(self, media: Track | Video, file_extension: str) -> pathlib.Path:
+        """The track-folder name for ``media``, shared by the symlink branch's
+        existence check and the move so the two always agree.
+
+        Spelled with the track-number padding the user set, like every other
+        name. Older builds left the padding out here, so a track they filed as
+        "3. ..." where "03. ..." is asked for keeps its file instead of being
+        fetched again beside it."""
+
+        def build(pad: int) -> pathlib.Path:
+            relative: str = format_path_media(
+                self.settings.data.format_track,
+                media,
+                pad,
+                delimiter_artist=self.settings.data.filename_delimiter_artist,
+                delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
+                use_primary_album_artist=self.settings.data.use_primary_album_artist,
+                illegal_replacement=self._illegal_replacement(),
+                illegal_map=self._illegal_map(),
+            )
+            path = (pathlib.Path(self.path_base).expanduser() / (relative + file_extension)).absolute()
+            return pathlib.Path(path_file_sanitize(path, adapt=True))
+
+        padded: pathlib.Path = build(self.settings.data.album_track_num_pad_min)
+        unpadded: pathlib.Path = build(0)
+        if (
+            unpadded != padded
+            and not check_file_exists(padded, extension_ignore=False)
+            and check_file_exists(unpadded, extension_ignore=False)
+            and self._existing_same_item_at(unpadded, media) is not None
+        ):
+            return unpadded
+        return padded
+
     def media_move_and_symlink(
         self, media: Track | Video, path_media_src: pathlib.Path, file_extension: str
     ) -> pathlib.Path:
@@ -3527,23 +3553,7 @@ class Download:
         Returns:
             pathlib.Path: Destination path.
         """
-        # Compute tracks path, sanitize and ensure path exists
-        # Same spelling as the existence check in
-        # _prepare_file_paths_and_skip_logic's symlink branch: the two must
-        # agree or a track could be checked in one folder and moved to another.
-        file_name_relative: str = format_path_media(
-            self.settings.data.format_track,
-            media,
-            delimiter_artist=self.settings.data.filename_delimiter_artist,
-            delimiter_album_artist=self.settings.data.filename_delimiter_album_artist,
-            use_primary_album_artist=self.settings.data.use_primary_album_artist,
-            illegal_replacement=self._illegal_replacement(),
-            illegal_map=self._illegal_map(),
-        )
-        path_media_dst: pathlib.Path = (
-            pathlib.Path(self.path_base).expanduser() / (file_name_relative + file_extension)
-        ).absolute()
-        path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
+        path_media_dst: pathlib.Path = self._track_dir_path(media, file_extension)
 
         self._ensure_directory(path_media_dst.parent)
 
@@ -3713,12 +3723,18 @@ class Download:
             # path with no file behind it. A real copy keeps the folder, the
             # playlist and the record truthful; the audio stays in the track
             # folder either way.
+            # Through a temp sibling and a swap, like every other file: a full
+            # disk mid-copy must never leave a cut-off file under the real name.
             if not path_media_src.exists() and path_media_dst.is_file():
+                path_copy_tmp: pathlib.Path = _staging_path(path_media_src)
                 try:
-                    shutil.copy2(path_media_dst, path_media_src)
+                    self._copy_file_contents(path_media_dst, path_copy_tmp)
+                    path_copy_tmp.replace(path_media_src)
                     self._note_dir_filled(path_media_src)
                     self.fn_logger.info(f"Kept a copy in the playlist folder instead: {log_content(path_media_src)}")
                 except OSError as copy_error:
+                    with contextlib.suppress(OSError):
+                        path_copy_tmp.unlink(missing_ok=True)
                     self.fn_logger.error(  # noqa: TRY400
                         f"Could not keep a copy in the playlist folder either: {_os_error_text(copy_error)}"
                     )
@@ -5096,7 +5112,10 @@ class Download:
             # with no stand-ins at all, so a playlist called "?" came out as the
             # bare prefix while an album called "?" kept its name (issue #16).
             name_sanitized: str = sanitize_name_component(name_list, self._illegal_replacement(), self._illegal_map())
-            path_playlist = dir_scoped / sanitize_filename(PLAYLIST_PREFIX + name_sanitized + PLAYLIST_EXTENSION)
+            # Not through sanitize_filename first: its 255-byte cut ran before
+            # path_file_sanitize could see the extension, so a long title lost
+            # ".m3u8" (a 90-character Japanese name came out with no extension).
+            path_playlist = dir_scoped / (PLAYLIST_PREFIX + name_sanitized + PLAYLIST_EXTENSION)
             path_playlist = pathlib.Path(path_file_sanitize(path_playlist, adapt=True))
 
             # A playlist file the library already holds keeps its name: older
