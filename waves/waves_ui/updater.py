@@ -82,7 +82,7 @@ _OS_TOKENS = {
     "windows": ("windows", "win"),
 }
 _ARCH_TOKENS = {
-    "arm64": ("arm64", "aarch64", "arm"),
+    "arm64": ("arm64", "aarch64", "arm", "silicon"),
     "amd64": ("amd64", "x86_64", "x86-64", "x64", "intel"),
 }
 # Real installable payloads (not checksums / metadata sidecars). Only formats
@@ -1567,6 +1567,7 @@ class AppUpdater:
             rp = p.resolve()
             return rp == root or root in rp.parents
 
+        links: list[Path] = []
         for info in zf.infolist():
             out_path = root / info.filename
             if not _within(out_path):
@@ -1581,6 +1582,7 @@ class AppUpdater:
                 if out_path.is_symlink() or out_path.exists():
                     out_path.unlink()
                 os.symlink(link_target, out_path)
+                links.append(out_path)
             elif info.is_dir():
                 out_path.mkdir(parents=True, exist_ok=True)
             else:
@@ -1589,6 +1591,10 @@ class AppUpdater:
                     shutil.copyfileobj(src, dst)
                 if mode & 0o111:  # carry over the executable bit for binaries
                     out_path.chmod(out_path.stat().st_mode | 0o755)
+        # A later link can turn an earlier one outward (a -> b/x, then b -> ..).
+        for link in links:
+            if not _within(link):
+                raise UpdaterError(f"Refusing unsafe symlink {link.relative_to(root).as_posix()!r}")
 
     @staticmethod
     def _safe_extractall_tar(tf: tarfile.TarFile, dest: Path) -> None:
@@ -1608,6 +1614,7 @@ class AppUpdater:
             rp = p.resolve()
             return rp == root or root in rp.parents
 
+        links: list[Path] = []
         for member in tf.getmembers():
             out_path = root / member.name
             if os.path.isabs(member.name) or not _within(out_path):
@@ -1625,6 +1632,7 @@ class AppUpdater:
                     out_path.unlink()
                 if member.issym():
                     os.symlink(member.linkname, out_path)
+                    links.append(out_path)
                 else:
                     try:
                         os.link(root / member.linkname, out_path)
@@ -1644,6 +1652,10 @@ class AppUpdater:
                 if member.mode & 0o111:  # carry over the executable bit for binaries
                     out_path.chmod(out_path.stat().st_mode | 0o755)
             # else: skip device/fifo/char nodes, never part of a build payload.
+        # A later link can turn an earlier one outward (a -> b/x, then b -> ..).
+        for link in links:
+            if not _within(link):
+                raise UpdaterError(f"Refusing unsafe symlink {link.relative_to(root).as_posix()!r}")
 
     def _find_executable(self, root: Path) -> Path:
         """Locate the app executable (or ``.app`` bundle) inside ``root``."""
@@ -1715,7 +1727,7 @@ class AppUpdater:
             _chmod_exec(new_exe)
         # 1. Land the new tree on the install volume so the final swap is same-device.
         staged_same_dev = _spare_sibling(install_root, ".new", target.name)
-        _rmtree(staged_same_dev)
+        _clear_staging(staged_same_dev)
         try:
             shutil.move(str(new_tree), str(staged_same_dev))  # rename if same-dev, copy if cross-dev
         except OSError:
@@ -1812,7 +1824,7 @@ class AppUpdater:
         install_root = target.parent
         staged_same_dev = _spare_sibling(install_root, ".new", target.name)
         log("preparing the swap")
-        _rmtree(staged_same_dev)
+        _clear_staging(staged_same_dev)
         try:
             # rename if the staging dir and the install share a volume, copy if
             # they do not; either way the helper's move is same-volume.
@@ -1938,7 +1950,7 @@ class AppUpdater:
             # same-device renames, rolling the live bundle back if the swap fails.
             inside = "Contents/MacOS"
             staged_same_dev = _spare_sibling(bundle, ".new", inside)
-            _rmtree(staged_same_dev)
+            _clear_staging(staged_same_dev)
             try:
                 shutil.move(str(staged), str(staged_same_dev))
             except OSError:
@@ -2414,6 +2426,14 @@ def _rmtree(path: Path) -> None:
             path.unlink()
     except Exception:
         logger.debug("could not remove %s", os.path.basename(str(path)), exc_info=True)
+
+
+def _clear_staging(path: Path) -> None:
+    """Empty the landing spot for the new build, or stop: ``shutil.move`` into a
+    folder that survived (a file locked by antivirus) nests the build inside it."""
+    _rmtree(path)
+    if path.exists() or path.is_symlink():
+        raise UpdaterError(f"Could not clear {path.name} beside the app; remove it and update again.")
 
 
 def _chmod_exec(path: Path) -> None:
