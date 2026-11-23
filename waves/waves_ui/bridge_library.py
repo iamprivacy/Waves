@@ -2708,7 +2708,13 @@ class LibraryMixin:
             return {"present": False, "albums": 0, "tracks": 0}
         hit = self._library_artist_index.get(matching.norm_artist(matching.canon(name)))
         if hit:
-            return hit
+            # The one TIDAL profile the library vouches for under this name,
+            # when known (see waves.artist_anchor): the badges light on that
+            # profile only, not on every artist sharing the name. The
+            # rollup's dict is shared, so it is never written into.
+            anchor_for = getattr(self, "_releases_anchor_for", None)
+            anchor = anchor_for(name) if anchor_for is not None else ""
+            return {**hit, "anchor": anchor} if anchor else hit
         probe = getattr(self, "_library_probe_async", None)  # a miss on an untrusted listing: ask the disk
         if probe is not None:
             probe(name)

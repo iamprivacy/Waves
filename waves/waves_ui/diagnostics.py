@@ -175,11 +175,14 @@ class _Redactor:
     # Any OS's user-directory form, including ones from *other* machines that
     # arrive in server messages: /Users/<x>, /home/<x>, C:\Users\<x>,
     # \\host\Users\<x>, and the %USERPROFILE% expansion style.
+    # Linux mounts a removable drive under the login too: /media/<x>/<label>
+    # and /run/media/<x>/<label>. Only at the start of a path, so a share or
+    # URL segment that happens to be called "media" (/Volumes/Media/...) stays.
     # A Windows profile name can hold spaces ("Eve Adams"): inside a path (a
     # separator follows) the name runs to that separator, or the surname after
     # the space survived the scrub.
     _USER_PATH = re.compile(
-        r"(?i)((?:[A-Z]:)?[\\/](?:Users|home)[\\/]+)([^\\/\s\"';]+(?: [^\\/\s\"';]+)*(?=[\\/])|[^\\/\s\"';]+)"
+        r"(?i)((?:(?:[A-Z]:)?[\\/](?:Users|home)|(?<![^\s\"'(=:/])/(?:run/)?media)[\\/]+)([^\\/\s\"';]+(?: [^\\/\s\"';]+)*(?=[\\/])|[^\\/\s\"';]+)"
     )
     # A network share named by its host: the Windows UNC form \\host\share
     # (also doubled in a repr, \\\\host\\share) and the forward-slash form

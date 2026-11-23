@@ -98,8 +98,18 @@ from PySide6 import QtCore
 from PySide6.QtCore import Signal, Slot
 from tidalapi.artist import Artist
 
-from waves import artist_import, artist_list, fresh_releases, musicbrainz
-from waves.follows import DL_QUEUED, DL_WAITING, ORIGIN_LIBRARY, ORIGIN_MANUAL, ORIGIN_TIDAL
+from waves import artist_anchor, artist_import, artist_list, fresh_releases, musicbrainz, release_ties
+from waves.follows import (
+    ANCHOR_ANCHORED,
+    ANCHOR_CHECKED,
+    ANCHOR_SILENT,
+    ANCHOR_SUSPECT,
+    DL_QUEUED,
+    DL_WAITING,
+    ORIGIN_LIBRARY,
+    ORIGIN_MANUAL,
+    ORIGIN_TIDAL,
+)
 from waves.helper.path import cover_file_name
 from waves.mb_service import default_user_agent
 from waves.metadata import ALBUM_ARTIST_ID_TAG, read_custom_ids
@@ -108,6 +118,11 @@ from waves.waves_ui import diagnostics
 from waves.worker import Worker
 
 logger = logging.getLogger("waves.releases")
+# Same-name profiles: which one the library vouches for (artist_anchor).
+anchor_log = logging.getLogger("waves.releases.anchor")
+# Shared profiles (several same-name artists on one TIDAL profile): which
+# releases there are set apart, see waves.release_ties.
+apart_log = logging.getLogger("waves.releases.apart")
 
 # Every followed artist is checked again at least this often. New releases
 # mostly go live at midnight, so two checks a day still catch them that day.
@@ -229,6 +244,9 @@ _REL_FIND_LIMIT = 400
 # An excluded artist's albums shown on the Excluded page, and the cover
 # files looked for in each album folder, in order (lower case).
 _REL_HELD_CAP = 8
+# The library albums a same-name move remembers it was judged by (the
+# artist page names them; a longer list only grows the store row).
+_REL_MOVE_TITLES_CAP = 40
 _REL_COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png", "front.jpg", "front.png")
 
 
@@ -270,6 +288,46 @@ _REL_IMPORT_SEEN_KEY = "import_seen"
 # (each run takes only the artists found since the one before); the scan's
 # end always gets a run of its own.
 _REL_AUTO_IMPORT_GAP_S = 120.0
+
+# The library anchor (see waves.artist_anchor). Each follow is judged from
+# what the store and the library hold (no request) at most this often, and
+# again whenever the library is rescanned. A follow that looks like the
+# wrong one of several same-name profiles gets one live check: a name
+# search, a page of fifty at a time while a page still holds the name, then
+# the whole catalog of the followed profile and of up to this many others
+# of the same name, a page at a time at one request a second. A catalog
+# longer than the page cap is not known whole, so it decides nothing; it
+# will not be shorter tomorrow, so the follow counts as checked until its
+# evidence changes. A check that failed is tried again a day later.
+_REL_ANCHOR_CLASSIFY_EVERY_S = 1800.0
+# A library publish (every download lands one) asks for the judging again
+# at most this often; a move made or undone asks at once.
+_REL_ANCHOR_CLASSIFY_GAP_S = 300.0
+_REL_ANCHOR_PAGE = 50
+_REL_ANCHOR_SEARCH_PAGES = 3
+_REL_ANCHOR_CANDIDATES = 16
+_REL_ANCHOR_CATALOG_PAGES = 6
+_REL_ANCHOR_RETRY_S = 86400
+# Where the last published anchor map is kept for the next launch.
+_REL_ANCHOR_SAVED_KEY = "anchor_map"
+# What a live check's catalog read answers once it must stop (a rate limit,
+# the follow gone, a sign-out): not a catalog, known whole or not.
+_ANCHOR_STOP = object()
+# What a catalog read answers for a section longer than the page cap.
+_ANCHOR_TOO_LONG = object()
+
+
+def _anchor_unread(found, current, others: list, alive) -> str:
+    """Why a live check's reads decide nothing, as the outcome's flag: a
+    failed page ("failed": tried again in a day, rather than taken as
+    "nothing to do" for good), a catalog past the page cap ("too_long":
+    reading it again gives the same, so settled with no move until the
+    follow's evidence changes), or "" when every catalog was read whole."""
+    if found is None or current is None or not alive() or any(o["releases"] is None for o in others):
+        return "failed"
+    if current is _ANCHOR_TOO_LONG or any(o["releases"] is _ANCHOR_TOO_LONG for o in others):
+        return "too_long"
+    return ""
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
@@ -380,6 +438,12 @@ class ReleasesMixin:
     # The follow dialog's answer: (the needle it answers, artist rows, ok).
     artistSearchResults = Signal(str, "QVariant", bool)
     _relStepDone = Signal("QVariant")  # internal: one sweep step's outcome
+    # A follow was moved to the same-name profile the library vouches for,
+    # a move was suggested, undone or settled: the Releases notice re-reads.
+    artistMovesChanged = Signal()
+    # Which profile the library vouches for under each name changed: the
+    # library badges and the artist page's namesake line re-read.
+    artistAnchorsChanged = Signal()
     _relMirrorDone = Signal(int, int, bool)  # internal: the walk's (added, removed, rate limited)
     _relFreshDone = Signal("QVariant")  # internal: one fresh-releases read's outcome
     _relHeadsDone = Signal("QVariant")  # internal: one heads request's outcome
@@ -391,6 +455,9 @@ class ReleasesMixin:
     followFloorChanged = Signal()
     # The library artists the track floor leaves out, for the Excluded page.
     excludedLoaded = Signal("QVariant")
+    # (old id, {held, covers, total}): the library albums a same-name move
+    # stands on, for the artist page's panel.
+    artistMoveAlbumsLoaded = Signal(str, "QVariant")
     _relTidalDone = Signal("QVariant")  # internal: one favorites write's outcome
     # The library import: (done, total, stage) while it runs, then the
     # review payload or an error word; (followed) once confirmed.
@@ -446,6 +513,15 @@ class ReleasesMixin:
         self._rel_extra_spent = False
         self._rel_step_at = 0.0
         self._rel_mb_client = None
+        # The library anchor: per name key (and punctuation-folded key) the
+        # one followed profile the library vouches for; when it was last
+        # worked out, and over which library scan. The last one published
+        # stands in until this launch's first judging lands, so a namesake's
+        # badge does not light meanwhile.
+        self._rel_anchor_map, self._rel_anchor_fold = self._releases_anchor_saved()
+        self._rel_anchor_stamp = None
+        self._rel_anchor_at = 0.0
+        self._rel_anchor_cache = None
         self._rel_timer = QtCore.QTimer(self)
         self._rel_timer.setSingleShot(True)
         self._rel_timer.timeout.connect(self._releases_tick)
@@ -576,6 +652,8 @@ class ReleasesMixin:
         self._rel_deep_queue = collections.deque()
         self._rel_extra_spent = False
         self._rel_step_at = 0.0
+        # The next account's follows are judged afresh.
+        self._rel_anchor_stamp = None
         with contextlib.suppress(Exception):
             self._rel_timer.stop()
         with contextlib.suppress(Exception):
@@ -696,7 +774,10 @@ class ReleasesMixin:
     def _releases_extra_turn(self) -> bool:
         """(GUI thread) Dispatch the extra beat's work: a deep read or a
         MusicBrainz check, the two taking turns while both wait. True when
-        one was dispatched."""
+        one was dispatched. The library anchor's work, rare and short,
+        goes ahead of both."""
+        if self._releases_anchor_turn():
+            return True
         deep = self._releases_deep_due()
         due = self._releases_mb_due()
         if not deep and due is None:
@@ -725,7 +806,9 @@ class ReleasesMixin:
     def _releases_extra_pending(self) -> bool:
         """(GUI thread) A deep read or a MusicBrainz check would take the next
         beat (see _releases_tick)."""
-        return self._releases_deep_due() or self._releases_mb_due() is not None
+        return (
+            self._releases_anchor_due() is not None or self._releases_deep_due() or self._releases_mb_due() is not None
+        )
 
     def _releases_deep_due(self) -> bool:
         """(GUI thread) A deep read is in line and may run: the first round
@@ -772,6 +855,7 @@ class ReleasesMixin:
                     prune_from="",
                     full={True: "get_albums" in cut, False: "get_ep_singles" in cut},
                     joined=result["joined"],
+                    wait=self._waves_pref_bool("releases_auto_download"),
                 )
                 if not failures:
                     self._releases_heads_settle(aid, started)
@@ -784,9 +868,15 @@ class ReleasesMixin:
                 if getattr(self, "_rel_video_limited", False) or getattr(self, "_rel_guest_limited", False):
                     result["video_limited"] = True
                 # A section that came back full has more behind it: the
-                # deep read fetches the rest, once a season.
+                # deep read fetches the rest, once a season, and once more
+                # for rows stored before releases kept their copyright line
+                # (the shared-profile judge reads it, see release_ties).
                 full = list(getattr(self, "_rel_head_full", []) or [])
-                if full and time.time() - self._releases.deep_read_at(aid) >= _REL_DEEP_AGAIN_S:
+                now = int(time.time())
+                if full and (
+                    now - self._releases.deep_read_at(aid) >= _REL_DEEP_AGAIN_S
+                    or self._releases.ties_fill_due(aid, now, _REL_DEEP_RETRY_S)
+                ):
                     result["deep"] = full
         except Exception:
             logger.debug("releases: step failed", exc_info=True)
@@ -812,7 +902,13 @@ class ReleasesMixin:
             return []
         if not ok:
             return []
-        return self._releases.record_videos(aid, videos, whole=whole, keep_from=self._releases_keep_from())
+        return self._releases.record_videos(
+            aid,
+            videos,
+            whole=whole,
+            keep_from=self._releases_keep_from(),
+            wait=self._waves_pref_bool("releases_auto_download"),
+        )
 
     def _releases_check_guests(self, aid: str) -> list:
         """(worker) Read and record the releases a follow is featured on
@@ -831,7 +927,7 @@ class ReleasesMixin:
             return []
         if not ok:
             return []
-        return self._releases.record_guests(aid, rows, keep_from=self._releases_keep_from())
+        return self._releases.record_guests(aid, rows, keep_from=self._releases_keep_from(), wait=True)
 
     def _artist_recent_guests(self, artist_id: str) -> tuple[list, bool, bool]:
         """(worker) The newest releases by other named artists that this one
@@ -1224,6 +1320,10 @@ class ReleasesMixin:
                 d["sibling_ids"] = [i for i in groups.get(self._album_key(a), []) if i]
             except Exception:
                 d["sibling_ids"] = []
+            # What the shared-profile judge ties releases by (in the listing
+            # already, so no request): see waves.release_ties.
+            d["copyright"] = str(getattr(a, "copyright", "") or "")
+            d["upc"] = str(getattr(a, "upc", "") or "")
             out.append(d)
         return out
 
@@ -1251,17 +1351,22 @@ class ReleasesMixin:
     def _on_rel_step_done(self, result) -> None:
         """(GUI thread) A step landed: back off on a rate limit, else count it,
         announce what was new, and arm the next step. A step that lands after
-        a sign-out or reset announces, downloads and re-arms nothing."""
+        a sign-out, reset or quit announces and re-arms nothing; what it put in
+        line for the auto-download stays in the store, and the next step that
+        lands (after sign-in, or at the next launch) drains it."""
         result = dict(result or {})
         if int(result.get("gen", self._rel_gen)) != self._rel_gen:
             return
         self._rel_step_running = False
-        if result.get("deep_done"):
-            self._on_rel_deep_done(result)
-            return
-        if result.get("mb_done"):
-            self._on_rel_mb_done(result)
-            return
+        # The extra beat's work lands here too, each to its own handler.
+        for flag, handler in (
+            ("deep_done", self._on_rel_deep_done),
+            ("mb_done", self._on_rel_mb_done),
+            ("anchor_done", self._on_rel_anchor_done),
+        ):
+            if result.get(flag):
+                handler(result)
+                return
         if result.get("rate_limited"):
             self._releases_back_off()
             return
@@ -1355,6 +1460,465 @@ class ReleasesMixin:
         if result.get("changed") and self._waves_pref_bool("releases_musicbrainz"):
             self.releasesChanged.emit()
         self._releases_extra_rearm()
+
+    # ----- the library anchor (same-name profiles) ---------------------------
+
+    def _releases_anchor_due(self) -> str | None:
+        """(GUI thread) Which anchor work the extra beat would take: "classify"
+        (judge every follow from the store and the library, no request),
+        "check" (one suspect follow's live check) or None. Only once the
+        first round has seeded every follow, with a published library and
+        no scan running (a half-scanned library holds too little to judge)."""
+        if self._releases_library_cache() is None or getattr(self, "_library_scanning", None) is not None:
+            return None
+        if self._releases.never_checked_count() > 0:
+            return None
+        stamp = int(getattr(self, "_library_stamp", 0))
+        last = getattr(self, "_rel_anchor_stamp", None)
+        age = time.time() - float(getattr(self, "_rel_anchor_at", 0.0) or 0.0)
+        if last is None or age >= _REL_ANCHOR_CLASSIFY_EVERY_S or (stamp != last and age >= _REL_ANCHOR_CLASSIFY_GAP_S):
+            return "classify"
+        if self._releases.anchor_next(int(time.time())) is not None:
+            return "check"
+        return None
+
+    def _releases_anchor_turn(self) -> bool:
+        """(GUI thread) Dispatch the anchor's work on the sweep's pool. True
+        when something was dispatched."""
+        due = self._releases_anchor_due()
+        if due is None:
+            return False
+        cache = self._releases_library_cache()
+        gen = self._rel_gen
+        self._rel_anchor_cache = cache
+        if due == "classify":
+            stamp = int(getattr(self, "_library_stamp", 0))
+            # Stamped now, so a classify that fails is not run on every beat.
+            self._rel_anchor_stamp = stamp
+            self._rel_anchor_at = time.time()
+            self._rel_step_running = True
+            self._rel_pool.start(Worker(lambda: self._releases_anchor_classify(cache, gen)))
+            return True
+        row = self._releases.anchor_next(int(time.time()))
+        if row is None:
+            return False
+        self._rel_step_running = True
+        self._rel_pool.start(Worker(lambda: self._releases_anchor_check(row, cache, gen)))
+        return True
+
+    def _releases_anchor_folds(self, cache) -> dict:
+        """(worker) The library's artist keys by punctuation-folded key, so a
+        follow named "Static X" finds a library tagged "Static-X"."""
+        out: dict = {}
+        with contextlib.suppress(Exception):
+            for r in cache.distinct_artists():
+                out.setdefault(artist_anchor.fold_key(str(r.get("name") or "")), set()).add(str(r.get("key") or ""))
+        out.pop("", None)
+        return out
+
+    def _releases_anchor_library(self, cache, name: str, folds: dict) -> tuple[str, dict]:
+        """(worker) ``(library key, {albums, tracks})`` the library holds
+        under ``name``: its own key first, else the one library key its
+        folded spelling meets (two keys meeting there say nothing)."""
+        key = artist_import.name_key(name)
+        read = getattr(cache, "artist_titles", None)
+        if read is None or not key:
+            return key, {"albums": [], "tracks": []}
+        lib = dict(read(key) or {})
+        if lib.get("albums") or lib.get("tracks"):
+            return key, lib
+        keys = folds.get(artist_anchor.fold_key(name)) or set()
+        if len(keys) == 1:
+            other = next(iter(keys))
+            if other and other != key:
+                return other, dict(read(other) or {})
+        return key, lib
+
+    def _releases_anchor_judge(self, f: dict, cache, folds: dict, tags: dict) -> tuple:
+        """(worker) One follow's verdict from the store and the library:
+        ``(state, sig, keys, pinned)``, ``keys`` the name keys the follow
+        stands under (its own and the library's) and ``pinned`` those it
+        pins for the anchor map: all of them when it carries one of the
+        library's albums or is the profile the library's files name, else
+        none."""
+        aid, name = f["id"], f["name"]
+        key, library = self._releases_anchor_library(cache, name, folds)
+        tag = str(tags.get(key) or "")
+        tag_ids = {tag} if tag else set()
+        v = artist_anchor.verdict(name, library, f["titles"], catalog_whole=False, profile_id=aid, tag_ids=tag_ids)
+        sig = artist_anchor.evidence_sig(name, library, f["titles"], catalog_whole=False, tag_ids=tag_ids)
+        keys = {key, artist_import.name_key(name)}
+        if v["state"] == artist_anchor.ANCHORED:
+            return ANCHOR_ANCHORED, sig, keys, keys if (v["albums_n"] or v["reason"] == "tag") else set()
+        # Store rows alone never decide a move (they may not be the whole
+        # catalog): a miss on two or more of the library's distinctive
+        # albums only asks for the live check, which reads it whole.
+        if v["state"] == artist_anchor.UNANCHORED or v["reason"] == "partial":
+            return ANCHOR_SUSPECT, sig, keys, set()
+        return ANCHOR_SILENT, sig, keys, set()
+
+    def _releases_anchor_maps(self, vouched: dict, tags: dict, followed_keys: set) -> tuple[dict, dict]:
+        """(worker) The anchor map and its punctuation-folded twin: per name
+        key, the one followed profile the library vouches for (two say
+        nothing); for a name nobody here follows, the profile the library's
+        downloaded files name."""
+        anchors = {k: next(iter(ids)) for k, ids in vouched.items() if len(ids) == 1}
+        for k, tag in tags.items():
+            if k not in followed_keys and k not in anchors and tag:
+                anchors[k] = str(tag)
+        fold: dict = {}
+        for k, aid in anchors.items():
+            fold.setdefault(artist_anchor.fold_key(k), set()).add(aid)
+        return anchors, {k: next(iter(v)) for k, v in fold.items() if k and len(v) == 1}
+
+    def _releases_anchor_classify(self, cache, gen: int) -> None:
+        """(worker) Judge every follow (see _releases_anchor_judge), put each
+        verdict on record and work out the anchor map. A follow already
+        checked on the same evidence stays checked."""
+        result: dict = {"anchor_done": True, "classified": True, "gen": gen, "map": {}, "fold": {}, "counts": {}}
+        try:
+            tags = cache.artist_tidal_ids() if hasattr(cache, "artist_tidal_ids") else {}
+            folds = self._releases_anchor_folds(cache)
+            vouched: dict[str, set] = {}
+            followed_keys: set = set()
+            counts: dict = collections.Counter()
+            for f in self._releases.anchor_inputs():
+                if gen != self._rel_gen or not self._releases_library_still(cache):
+                    # The library changed under the pass: judged again over
+                    # the new one (the outcome still lands, so the sweep's
+                    # step flag clears).
+                    result["failed"] = result["again"] = True
+                    break
+                state, sig, keys, pinned = self._releases_anchor_judge(f, cache, folds, tags)
+                followed_keys.update(keys)
+                for k in pinned:
+                    vouched.setdefault(k, set()).add(f["id"])
+                counts[state] += 1
+                kept = state == ANCHOR_SUSPECT and f["state"] in (ANCHOR_SUSPECT, ANCHOR_CHECKED) and f["sig"] == sig
+                if not kept and (f["state"], f["sig"]) != (state, sig):
+                    self._releases.anchor_note(f["id"], state, sig)
+            if not result.get("failed"):
+                result["map"], result["fold"] = self._releases_anchor_maps(vouched, tags, followed_keys)
+                result["counts"] = dict(counts)
+                result["apart"] = self._releases_ties_pass(cache, folds, gen)
+        except Exception:
+            anchor_log.debug("library anchor: the follows could not be judged", exc_info=True)
+            result["failed"] = True
+        if gen == self._rel_gen:
+            self._relStepDone.emit(result)
+
+    def _releases_apart_for(self, artist_id: str) -> set:
+        """(any thread) The release ids (every edition) set apart on a
+        followed shared profile; empty for any other artist."""
+        store = getattr(self, "_releases", None)
+        if store is None or not artist_id:
+            return set()
+        try:
+            return store.apart_ids(str(artist_id), editions=True) if store.is_shared(str(artist_id)) else set()
+        except Exception:
+            apart_log.debug("shared profile: the set-apart releases could not be read", exc_info=True)
+            return set()
+
+    def _releases_ties_pass(self, cache, folds: dict, gen: int) -> dict:
+        """(worker) Judge every follow the library anchors for releases by
+        other same-name artists on its profile (see waves.release_ties) and
+        put each changed verdict on record. Costs no request: the store's
+        rows and the library's titles and UPCs. ``{shared, changed}``: how
+        many profiles are judged shared, and whether any release changed
+        sides (the feed reads again)."""
+        out = {"shared": 0, "changed": False}
+        upcs_of = getattr(cache, "artist_upcs", None)
+        for f in self._releases.ties_inputs():
+            if gen != self._rel_gen or not self._releases_library_still(cache):
+                break
+            key, library = self._releases_anchor_library(cache, f["name"], folds)
+            upcs = upcs_of(key) if callable(upcs_of) else set()
+            v = release_ties.judge(f["id"], f["name"], f["rows"], library, upcs)
+            out["shared"] += v.shared
+            if v.sig == f["sig"]:
+                continue
+            if self._releases.set_apart(f["id"], v.ties, v.apart, v.sig):
+                out["changed"] = True
+                apart_log.info(
+                    "shared profile: %s, %d release(s) set apart",
+                    diagnostics.content(f["name"]),
+                    len(v.apart),
+                )
+        return out
+
+    def _releases_anchor_search(self, name: str, wait, limited: list, alive) -> tuple[list, bool] | None:
+        """(worker) The artists TIDAL finds for ``name``, ranked from 1, a page
+        at a time while a page still holds a profile of that name, up to
+        the page cap: ``(rows, cut)`` with ``cut`` when the last page read
+        still held one (more may lie past it). None on a failure."""
+        query = " ".join(name.split())[:99]
+        ranked: list = []
+        for page in range(_REL_ANCHOR_SEARCH_PAGES):
+            if not alive():
+                return None
+            wait()
+            try:
+                found = self.tidal.session.search(
+                    query, models=[Artist], limit=_REL_ANCHOR_PAGE, offset=page * _REL_ANCHOR_PAGE
+                )
+            except Exception as exc:
+                limited[0] = limited[0] or _is_rate_limit(exc)
+                anchor_log.debug("library anchor: a search page failed", exc_info=True)
+                return None
+            rows = list((found or {}).get("artists") or [])
+            hit = False
+            for artist in rows:
+                d = self._fav_artist_dict(artist)
+                if not d.get("id"):
+                    continue
+                n = str(d.get("name") or "")
+                hit = hit or artist_anchor.same_name(name, n)
+                ranked.append({"id": str(d["id"]), "name": n, "art": str(d.get("art") or ""), "rank": len(ranked) + 1})
+            if len(rows) < _REL_ANCHOR_PAGE or not hit:
+                return ranked, False
+        return ranked, True
+
+    def _releases_anchor_catalog(self, artist_id: str, wait, limited: list, alive) -> list | None:
+        """(worker) A profile's whole catalog as titles (albums, then EPs and
+        singles), a page at a time. None after a failed page;
+        _ANCHOR_TOO_LONG for a section longer than the page cap."""
+        artist = self._releases_artist_obj(str(artist_id))[0]
+        if artist is None:
+            return None
+        titles: list = []
+        for getter in ("get_albums", "get_ep_singles"):
+            fn = getattr(artist, getter, None)
+            if not callable(fn):
+                return None
+            offset = 0
+            for _page in range(_REL_ANCHOR_CATALOG_PAGES):
+                if not alive():
+                    return None
+                wait()
+                try:
+                    page = list(fn(limit=_REL_ANCHOR_PAGE, offset=offset) or [])
+                except Exception as exc:
+                    limited[0] = limited[0] or _is_rate_limit(exc)
+                    anchor_log.debug("library anchor: a catalog page failed", exc_info=True)
+                    return None
+                titles.extend(str(getattr(a, "name", "") or "") for a in page)
+                if len(page) < _REL_ANCHOR_PAGE:
+                    break
+                offset += len(page)
+            else:
+                return _ANCHOR_TOO_LONG
+        return titles
+
+    def _releases_anchor_others(self, name: str, aid: str, found: tuple, read) -> tuple[list, bool]:
+        """(worker) The other profiles of ``name`` in a search answer, each
+        with its whole catalog read by ``read`` (None when not known
+        whole), in TIDAL's order and up to _REL_ANCHOR_CANDIDATES: ``(rows,
+        cut)``, ``cut`` when the search or the cap may have left some out.
+        Stops early (fewer rows) when ``read`` reports it must."""
+        ranked, cut = found
+        same = [r for r in ranked if r["id"] != aid and artist_anchor.same_name(name, r["name"])]
+        if len(same) > _REL_ANCHOR_CANDIDATES:
+            same, cut = same[:_REL_ANCHOR_CANDIDATES], True
+        others: list = []
+        for r in same:
+            titles = read(r["id"])
+            if titles is _ANCHOR_STOP:
+                break
+            others.append({"id": r["id"], "name": r["name"], "art": r["art"], "releases": titles})
+        return others, cut
+
+    def _releases_anchor_outcome(self, out: dict, others: list, ranks: dict, aid: str, cut: bool) -> dict:
+        """(worker) pick_move's answer as the GUI thread acts on it."""
+        w = out["winner"]
+        wid = str(w.get("id"))
+        return {
+            "grade": out["grade"],
+            "winner": {
+                "id": wid,
+                "name": str(w.get("name") or ""),
+                "art": next((o["art"] for o in others if o["id"] == wid), ""),
+            },
+            "albums_n": int(w.get("albums_n") or 0),
+            "titles": [str(t) for t in w.get("albums_owned") or []][:_REL_MOVE_TITLES_CAP],
+            "rank": ranks.get(wid, 0),
+            "followed_rank": ranks.get(aid, 0),
+            "profiles": len(others) + 1,
+            "cut": bool(cut),
+        }
+
+    def _releases_anchor_check(self, row: dict, cache, gen: int) -> None:
+        """(worker) One suspect follow's live check: search its name, read the
+        whole catalog of the followed profile and of the other profiles of
+        that name (see _releases_anchor_others), and ask
+        artist_anchor.pick_move which one the library vouches for. Nothing
+        is written here: the GUI thread acts on the outcome."""
+        aid, name = str(row.get("id") or ""), str(row.get("name") or "")
+        result: dict = {
+            "anchor_done": True,
+            "artist_id": aid,
+            "name": name,
+            "sig": str(row.get("sig") or ""),
+            "gen": gen,
+            "failed": False,
+            "rate_limited": False,
+            "out": None,
+        }
+        limited = [False]
+        wait = self._releases_import_pacer()
+
+        def alive() -> bool:
+            return gen == self._rel_gen and self._releases.is_followed(aid)
+
+        def read(artist_id: str):
+            titles = self._releases_anchor_catalog(artist_id, wait, limited, alive)
+            return _ANCHOR_STOP if limited[0] or not alive() else titles
+
+        try:
+            _key, library = self._releases_anchor_library(cache, name, self._releases_anchor_folds(cache))
+            found = self._releases_anchor_search(name, wait, limited, alive)
+            current = None if found is None else read(aid)
+            # One empty answer is not trusted while the store holds rows for
+            # the profile (see FollowStore._seed_if_empty_twice): an empty
+            # followed profile moves whatever its rank, so a glitch must not.
+            if current == [] and self._releases.career_rows(aid):
+                current = None
+            others, cut = (
+                ([], False)
+                if found is None or not isinstance(current, list)
+                else (self._releases_anchor_others(name, aid, found, read))
+            )
+            if gen != self._rel_gen:
+                return
+            if limited[0]:
+                result["rate_limited"] = True
+            elif unread := _anchor_unread(found, current, others, alive):
+                result[unread] = True
+            else:
+                ranks = {r["id"]: r["rank"] for r in found[0]}
+                cur = {"id": aid, "name": name, "releases": current}
+                out = artist_anchor.pick_move(name, library, cur, others, cut=cut, ranks=ranks)
+                if out is not None:
+                    result["out"] = self._releases_anchor_outcome(out, others, ranks, aid, cut)
+        except Exception:
+            anchor_log.debug("library anchor: the check failed", exc_info=True)
+            result["failed"] = True
+        if gen == self._rel_gen:
+            self._relStepDone.emit(result)
+
+    def _releases_anchor_saved(self) -> tuple[dict, dict]:
+        """(GUI thread) The anchor map and its folded twin as the last
+        judging published them (``({}, {})`` when none was kept)."""
+        try:
+            got = json.loads(self._releases.meta_get(_REL_ANCHOR_SAVED_KEY, "{}") or "{}")
+        except Exception:
+            return {}, {}
+        if not isinstance(got, dict):
+            return {}, {}
+        amap, fold = got.get("map"), got.get("fold")
+        if not isinstance(amap, dict) or not isinstance(fold, dict):
+            return {}, {}
+        return {str(k): str(v) for k, v in amap.items()}, {str(k): str(v) for k, v in fold.items()}
+
+    def _on_rel_anchor_classified(self, result: dict) -> None:
+        """(GUI thread) A judging pass landed: publish its anchor map, and
+        tell the badges only when the map changed. A pass the library
+        changed under is run again over the new one."""
+        if result.get("again"):
+            self._rel_anchor_stamp = None
+        if not result.get("failed"):
+            amap, fold = dict(result.get("map") or {}), dict(result.get("fold") or {})
+            changed = (amap, fold) != (self._rel_anchor_map, self._rel_anchor_fold)
+            self._rel_anchor_map, self._rel_anchor_fold = amap, fold
+            counts = dict(result.get("counts") or {})
+            anchor_log.info(
+                "library anchor: %d anchored, %d silent, %d suspect, %d name(s) pinned",
+                int(counts.get(ANCHOR_ANCHORED, 0)),
+                int(counts.get(ANCHOR_SILENT, 0)),
+                int(counts.get(ANCHOR_SUSPECT, 0)),
+                len(self._rel_anchor_map),
+            )
+            if changed:
+                with contextlib.suppress(Exception):
+                    self._releases.meta_set(
+                        _REL_ANCHOR_SAVED_KEY, json.dumps({"map": amap, "fold": fold}, sort_keys=True)
+                    )
+                # Every library badge re-reads on this: only for news.
+                self.artistAnchorsChanged.emit()
+            apart = dict(result.get("apart") or {})
+            if apart.get("changed"):
+                apart_log.info("shared profiles: %d judged shared", int(apart.get("shared") or 0))
+                self.releasesChanged.emit()
+        self._releases_extra_rearm()
+
+    def _on_rel_anchor_done(self, result: dict) -> None:
+        """(GUI thread) Anchor work landed. A classify publishes the anchor
+        map. A check acts on its outcome only while nothing moved under it:
+        the follow is still suspect on the evidence the check judged and the
+        library is the one it read. A sure outcome (grade ``move``) moves the
+        follow without asking, wherever it came from, and the Releases notice
+        offers UNDO; a less sure one is only suggested. A move goes through
+        the store alone, so TIDAL itself is
+        never written. A rate limit backs the sweep off and leaves the
+        follow suspect; any other failure tries again a day later."""
+        if result.get("classified"):
+            self._on_rel_anchor_classified(result)
+            return
+        if result.get("rate_limited"):
+            self._releases_back_off()
+            return
+        self._rel_backoff_level = 0
+        aid, sig = str(result.get("artist_id") or ""), str(result.get("sig") or "")
+        name = diagnostics.content(str(result.get("name") or ""))
+        if result.get("failed"):
+            if self._releases.anchor_of(aid) == (ANCHOR_SUSPECT, sig):
+                self._releases.anchor_note(aid, ANCHOR_SUSPECT, sig, at=int(time.time()) + _REL_ANCHOR_RETRY_S)
+            anchor_log.info("library anchor: the check for %s could not be made, again in a day", name)
+            self._releases_extra_rearm()
+            return
+        out = result.get("out")
+        still = self._releases.anchor_of(aid) == (ANCHOR_SUSPECT, sig) and self._releases_library_still(
+            self._rel_anchor_cache
+        )
+        if not still:
+            anchor_log.info("library anchor: %s changed during its check, judged again later", name)
+            self._releases_extra_rearm()
+            return
+        self._releases.anchor_note(aid, ANCHOR_CHECKED, sig)
+        if result.get("too_long"):
+            anchor_log.info("library anchor: a catalog for %s is too long to read whole, left as it is", name)
+            self._releases_extra_rearm()
+            return
+        if not out:
+            anchor_log.info("library anchor: %s is on the right profile, or no single other one is", name)
+            self._releases_extra_rearm()
+            return
+        info = self._releases.follow_info(aid) or {}
+        new = dict(out.get("winner") or {})
+        evidence = {k: out.get(k) for k in ("grade", "albums_n", "titles", "rank", "followed_rank", "profiles", "cut")}
+        auto = out.get("grade") == artist_anchor.MOVE
+        key = artist_import.name_key(str(info.get("name") or result.get("name") or ""))
+        if auto and self._releases.move_follow(aid, new, name_key=key, evidence=evidence):
+            anchor_log.info(
+                "library anchor: moved %s to the profile holding %d of the library's albums",
+                name,
+                int(out.get("albums_n") or 0),
+            )
+            self._releases_moved(aid, str(new.get("id") or ""), old_followed=False, new_followed=True)
+            return
+        if self._releases.suggest_move(aid, new, name_key=key, evidence=evidence):
+            anchor_log.info("library anchor: suggested another profile for %s", name)
+            self.artistMovesChanged.emit()
+        self._releases_extra_rearm()
+
+    def _releases_anchor_for(self, name: str) -> str:
+        """(any thread) The TIDAL id of the one profile the library vouches
+        for under ``name``, "" when none is known."""
+        amap = getattr(self, "_rel_anchor_map", None) or {}
+        got = amap.get(artist_import.name_key(str(name or "")))
+        if got:
+            return str(got)
+        fold = getattr(self, "_rel_anchor_fold", None) or {}
+        return str(fold.get(artist_anchor.fold_key(str(name or ""))) or "")
 
     def _releases_musicbrainz_switched(self, on: bool) -> None:
         """(GUI thread) The MusicBrainz setting flipped: the marks show or
@@ -1963,16 +2527,15 @@ class ReleasesMixin:
         featured on, the day it is out; one dated ahead waits for its day."""
         if not fresh or not self._releases_guest_on():
             return
-        today = self._releases_today()
+        # Each is usually in line already (record_guests put it there in the
+        # save that marked it seen); queued from the line, it is never queued
+        # twice, and the drain after this finds nothing left of it.
         for r in fresh:
             rid, aid = str(r.get("id") or ""), str(r.get("guest_of") or "")
-            if not rid or not aid:
-                continue
-            day = str(r.get("listed") or r.get("date") or "")[:10]
-            if day and day > today:
-                self._releases.guest_wait(rid, day, aid)
-            else:
-                self._releases_queue_guest(rid, aid)
+            if rid and aid:
+                self._releases.guest_wait(rid, str(r.get("listed") or r.get("date") or "")[:10], aid)
+        for rid, aid in self._releases.guests_due(self._releases_today()):
+            self._releases_queue_guest(rid, aid)
 
     def _releases_queue_guest(self, rid: str, aid: str) -> None:
         """(GUI thread) Queue the tracks a follow is credited on from a
@@ -2268,6 +2831,138 @@ class ReleasesMixin:
         self.followStateChanged.emit(aid, False)
         self.releasesChanged.emit()
         self._releases_mirror_to_tidal(aid, False, was_fav=bool(info.get("tidal_fav")))
+
+    # ----- same-name moves (the library anchor) ------------------------------
+
+    @Slot(result="QVariant")
+    def artistMoves(self) -> list:
+        """The moves the Releases pane tells about, newest first: ``{oldId,
+        newId, name, state ("moved" or "suggested"), at, albums}``."""
+        out = []
+        for m in self._releases.moves():
+            out.append(
+                {
+                    "oldId": m["old_id"],
+                    "newId": m["new_id"],
+                    "name": str(m["new"].get("name") or m["old"].get("name") or ""),
+                    "state": m["state"],
+                    "at": int(m["at"]),
+                    "albums": int(m["evidence"].get("albums_n") or 0),
+                }
+            )
+        return out
+
+    def _releases_moved(self, old_id: str, new_id: str, *, old_followed: bool, new_followed: bool) -> None:
+        """(GUI thread) A move was made or undone: every view re-reads, and
+        the anchor map is worked out again at the next beat."""
+        self._rel_anchor_stamp = None
+        self._releases_followed_forget()
+        self.followStateChanged.emit(str(old_id), old_followed)
+        self.followStateChanged.emit(str(new_id), new_followed)
+        self.releasesChanged.emit()
+        self.artistMovesChanged.emit()
+        if not getattr(self, "_rel_step_running", False):
+            self._releases_rearm(0)
+
+    @Slot(str, result=bool)
+    def undoArtistMove(self, old_id: str) -> bool:
+        """UNDO on a move: the old follow comes back and the move is never
+        made again. TIDAL is not written, as it was not for the move."""
+        mv = next((m for m in self._releases.moves(settled=True) if m["old_id"] == str(old_id)), None)
+        if mv is None or not self._releases.undo_move(str(old_id)):
+            return False
+        anchor_log.info("library anchor: a move was undone")
+        kept = self._releases.is_followed(str(mv["new_id"]))  # another move may still stand on it
+        self._releases_moved(mv["old_id"], mv["new_id"], old_followed=True, new_followed=kept)
+        return True
+
+    @Slot(str, result=bool)
+    def acceptArtistMove(self, old_id: str) -> bool:
+        """OK on a move (it stays, the notice goes) or SWITCH on a
+        suggestion (the move is made now)."""
+        mv = next((m for m in self._releases.moves() if m["old_id"] == str(old_id)), None)
+        if mv is None or not self._releases.accept_move(str(old_id)):
+            # Gone under the pane (the follow was unfollowed meanwhile):
+            # the pane reads its notices again, so the stale one leaves.
+            self.artistMovesChanged.emit()
+            return False
+        if mv["state"] == "suggested":
+            anchor_log.info("library anchor: a suggested move was made")
+            self._releases_moved(mv["old_id"], mv["new_id"], old_followed=False, new_followed=True)
+        else:
+            self.artistMovesChanged.emit()
+        return True
+
+    @Slot(str, result=bool)
+    def dismissArtistMove(self, old_id: str) -> bool:
+        """KEEP on a suggestion: the follow stays and it is never suggested
+        again."""
+        if not self._releases.dismiss_move(str(old_id)):
+            return False
+        anchor_log.info("library anchor: a suggested move was declined")
+        self.artistMovesChanged.emit()
+        return True
+
+    @Slot(str)
+    def loadArtistMoveAlbums(self, old_id: str) -> None:
+        """The library albums the move of ``old_id`` stands on, through
+        ``artistMoveAlbumsLoaded``: the ones the check matched when it
+        remembered them (moves made before it did fall back to every album
+        the library holds under the name). Read on the pool, covers known
+        first, then once more with every cover when a folder was never
+        listed."""
+        oid = str(old_id or "")
+        mv = next((m for m in self._releases.moves() if m["old_id"] == oid), None)
+        if mv is None:
+            return
+        self.threadpool.start(Worker(lambda: self._releases_move_albums_run(oid, mv)))
+
+    def _releases_move_albums_run(self, oid: str, mv: dict) -> None:
+        """(worker) loadArtistMoveAlbums' read."""
+        cache = self._releases_library_cache()
+        if cache is None:
+            return
+        name = str(mv["new"].get("name") or mv["old"].get("name") or "")
+        try:
+            key, _lib = self._releases_anchor_library(cache, name, {})
+            if not _lib.get("albums") and not _lib.get("tracks"):
+                key, _lib = self._releases_anchor_library(cache, name, self._releases_anchor_folds(cache))
+            albums = (cache.artist_albums([key]) or {}).get(key) or []
+            titles = mv["evidence"].get("titles") or []
+            want = {artist_import.title_key(str(t)) for t in titles}
+            want.discard("")
+            if want:  # only the albums the check matched, plus those past the titles cap
+                picked = [a for a in albums if artist_import.title_key(str(a.get("title") or "")) in want]
+                total = len(picked) + max(0, int(mv["evidence"].get("albums_n") or 0) - len(titles))
+            else:
+                picked = albums
+                total = len(picked)
+            dressed = self._releases_held(picked, look=False)
+        except Exception:
+            logger.debug("releases: the albums behind a same-name move could not be read", exc_info=True)
+            return
+        unlisted = dressed.pop("unlisted")
+        self.artistMoveAlbumsLoaded.emit(oid, {**dressed, "total": total})
+        if not unlisted:
+            return
+        try:
+            dressed = self._releases_held(picked, look=True)
+        except Exception:
+            return
+        dressed.pop("unlisted")
+        self.artistMoveAlbumsLoaded.emit(oid, {**dressed, "total": total})
+
+    @Slot(str, str, result="QVariant")
+    def artistNamesake(self, artist_id: str, name: str) -> dict:
+        """For the artist page: ``{"other": id}`` when the library vouches
+        for a different profile of this name than ``artist_id``, else {}.
+        Nothing while the library is off: the saved map outlives it."""
+        if self._releases_library_cache() is None:
+            return {}
+        anchor = self._releases_anchor_for(name)
+        if not anchor or anchor == str(artist_id or ""):
+            return {}
+        return {"other": anchor}
 
     @Slot()
     def loadFollowed(self) -> None:
