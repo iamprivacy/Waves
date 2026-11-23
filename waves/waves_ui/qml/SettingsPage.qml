@@ -3874,8 +3874,8 @@ Item {
                                                     }
                                                 }
                                             }
-                                            // Import list / Export list: two buttons in the
-                                            // Browse… button's clothes (this page has no SpecBtn).
+                                            // Import list / Export list: the page's green button
+                                            // recipe (EXPORT REPORT, BROWSE), caps hugging the label.
                                             Row {
                                                 id: followListRow
                                                 visible: modelData.type === "follow_list"; Layout.alignment: Qt.AlignVCenter
@@ -3886,13 +3886,17 @@ Item {
                                                         id: listBtn
                                                         required property string modelData
                                                         objectName: modelData === "import" ? "settingsImportListBtn" : "settingsExportListBtn"
-                                                        height: 32; width: listBtnTxt.width + 24; radius: 8
-                                                        color: listBtnMa.containsMouse ? page.surface3 : page.surface2; border.color: page.border1
+                                                        implicitWidth: listBtnTxt.implicitWidth + page.btnPadH * 2
+                                                        implicitHeight: listBtnTxt.implicitHeight + page.btnPadV * 2
+                                                        width: implicitWidth; height: implicitHeight; radius: page.btnRad
+                                                        color: page.accentCont
+                                                        border.color: listBtnMa.containsMouse ? page.accent : page.accentDim
                                                         Text {
                                                             id: listBtnTxt; anchors.centerIn: parent; textFormat: Text.PlainText
                                                             text: listBtn.modelData === "import" ? "IMPORT LIST"
                                                                 : page.followListWord !== "" ? page.followListWord : "EXPORT LIST"
-                                                            color: page.textLo; font.family: page.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2
+                                                            color: page.followListWord === "NOT SAVED" && listBtn.modelData === "export" ? page.red : page.accent
+                                                            font.family: page.uiFont; font.pixelSize: 13; font.bold: true; font.letterSpacing: page.btnTrack
                                                         }
                                                         MouseArea {
                                                             id: listBtnMa

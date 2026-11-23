@@ -360,6 +360,12 @@ ApplicationWindow {
     // offscreen run has no one to read it: off there unless a scenario
     // turns it on.
     property bool supportNoteEnabled: Qt.platform.pluginName !== "offscreen"
+    // True while a developer note is on top. Every window Shortcut (except
+    // the note's own Esc) and the artist card stand down on it, and each
+    // note blocks the rest with NoteShield.qml. Removing the note: delete
+    // supportNoteGate and its Esc Shortcut, and set this to false. A new
+    // note ORs its own onTop in here and reuses NoteShield.
+    readonly property bool noteUp: supportNoteGate.onTop
     property bool libraryOpen: false
     // A newer release found by the updater (startup check or a manual one on
     // the Settings page). Drives the gold notice in the status bar's right
@@ -951,6 +957,9 @@ ApplicationWindow {
     property bool artistAlbumsExpanded: waves.wavesPref("artist_sec_albums_expanded") === true
     property bool artistEpsExpanded: waves.wavesPref("artist_sec_eps_expanded") === true
     property bool artistVideosExpanded: waves.wavesPref("artist_sec_videos_expanded") === true
+    // The section of other same-name artists' releases on a shared profile
+    // (see waves.release_ties): folded on every page, and built only open.
+    property bool artistApartOpen: false
     function toggleArtistExpand(which) {
         // SHOW ALL builds the rows it reveals: the screenful right under the
         // rows already shown in this click, the rest incubating below (see
@@ -1896,9 +1905,11 @@ ApplicationWindow {
             reconcileById(artistEpModel, eps, true)
             reconcileById(artistTracksModel, tracks, true)
             reconcileById(artistVideosModel, videos, true)
+            reconcileById(artistApartModel, p.apart || [], true)
             return
         }
         artistAlbumsModel.clear(); artistEpModel.clear(); artistTracksModel.clear(); artistVideosModel.clear()
+        artistApartModel.clear(); artistApartOpen = false
         _artistPlanSync(p, atY)
         // A section that opens expanded keeps its rows through SHOW LESS
         // exactly as one expanded by a click does.
@@ -1910,6 +1921,7 @@ ApplicationWindow {
         appendMedia(artistEpModel, eps)
         appendMedia(artistTracksModel, tracks)
         appendMedia(artistVideosModel, videos)
+        appendMedia(artistApartModel, p.apart || [])
     }
     // --- My Tidal build veil ----------------------------------------------
     // The library half of the search veil, and only that half. A category's
@@ -3308,6 +3320,22 @@ ApplicationWindow {
     }
     // The library line on the tab: {kind: "" | "more" | "look", n}.
     property var releasesImportNotice: ({ kind: "", n: 0 })
+    // Follows moved to (or suggested for) the same-name profile the library
+    // belongs to: [{oldId, newId, name, state, at, albums}], newest first.
+    property var releasesMoves: []
+    // The move an artist page tells about: a move made shows on the profile
+    // now followed, a suggestion on the one still followed. null for none.
+    function relMoveForPage(id) {
+        var aid = "" + (id || "")
+        if (aid === "") return null
+        for (var i = 0; i < root.releasesMoves.length; i++) {
+            var m = root.releasesMoves[i]
+            if (("" + m.state) === "moved" ? ("" + m.newId) === aid : ("" + m.oldId) === aid) return m
+        }
+        return null
+    }
+    // The library albums each move stands on, by old id (artistMoveAlbumsLoaded).
+    property var relMoveAlbums: ({})
     property bool releasesHaveFeed: false     // a feed payload has arrived
     property var releasesRows: []             // the last feed payload
     // The feed pages back a few months at a time, like the other endless
@@ -3715,10 +3743,19 @@ ApplicationWindow {
         root.artistTidalFav = !!(info && info.tidal_fav)
         root.artistTidalPending = id !== "" && waves.tidalFavouritePending(id)
     }
+    // Another profile of this name is the one the library belongs to (its
+    // id), or "": the artist page then says so under the name.
+    property string artistNamesakeId: ""
+    function artistNamesakeRead() {
+        var a = root.artistData
+        var got = a && a.id ? waves.artistNamesake("" + a.id, "" + (a.name || "")) : null
+        root.artistNamesakeId = got && got.other ? "" + got.other : ""
+    }
     onArtistDataChanged: {
         root.artistFollowed = !!(root.artistData && root.artistData.id)
                               && waves.isFollowed("" + root.artistData.id)
         root.artistTidalRead()
+        root.artistNamesakeRead()
         if (root.artistData && root.artistData.id && !root.artistData.bio) root.askBio(root.artistData.id)
     }
     // Card rows of the feed list by row uid. Mutated in place and never
@@ -3928,7 +3965,7 @@ ApplicationWindow {
     property bool artistCards: waves.wavesPref("artist_hover_cards") !== false
     readonly property bool ahcBlocked: !signedIn || !artistCards || nowCardOpen || videoNow !== null
                                        || peekNow !== null || followDialog.open || (importDialog.open && !ahcInReview)
-                                       || supportNoteGate.onTop
+                                       || root.noteUp
     // The armed (or shown) name sits in the import review: the card opens
     // over the review to tell namesakes apart, look only. Its actions
     // (follow, download, an album, the artist page) would act behind the
@@ -4219,6 +4256,9 @@ ApplicationWindow {
         function onLibraryPresenceChanged() {
             if (ahcCard.visible) root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
         }
+        function onArtistAnchorsChanged() {
+            if (ahcCard.visible) root.ahcLib = waves.artistLibraryPresence(root.ahcNameText) || ({})
+        }
         function onLoggedInChanged() {
             root.ahcClose()
             // A logout drops lookups in flight without an answer.
@@ -4234,7 +4274,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Esc"
         enabled: root.ahcOpen && root.peekNow === null && root.videoNow === null
-                 && !followDialog.open && (!importDialog.open || root.ahcInReview) && !supportNoteGate.onTop
+                 && !followDialog.open && (!importDialog.open || root.ahcInReview) && !root.noteUp
         onActivated: if (root.ahcMenuOpen) root.ahcMenuOpen = false; else root.ahcClose()
     }
 
@@ -4576,7 +4616,8 @@ ApplicationWindow {
     component AhcLib: Rectangle {
         id: ahlb
         objectName: "ahcLib"
-        readonly property bool shown: !!(root.ahcLib && root.ahcLib.present)
+        readonly property bool shown: !!(root.ahcLib && root.ahcLib.present
+            && (!root.ahcLib.anchor || root.ahcId === "" || ("" + root.ahcLib.anchor) === root.ahcId))
         visible: shown
         implicitWidth: ahlbTxt.implicitWidth + 14; implicitHeight: 20; radius: 5
         color: root.libCont; border.color: root.libDim
@@ -5413,6 +5454,7 @@ ApplicationWindow {
         root.releasesUnchecked = waves.releasesUnchecked()
         root.releasesCheckReady = waves.releasesCheckNowReady()
         root.releasesImportNotice = waves.artistImportNoticeNow()
+        root.releasesMoves = waves.artistMoves()
     }
     // The pane is being looked at: whatever arrived is seen now (the badge
     // clears), and the store keeps it marked as an arrival until it is
@@ -5624,6 +5666,15 @@ ApplicationWindow {
             }
         }
     }
+    function relMoveOpenPage() { return root.artistOpen && root.artistData ? root.relMoveForPage(root.artistData.id) : null }
+    Timer {
+        id: relMoveReloadTimer
+        interval: 1000
+        onTriggered: {
+            var mv = root.relMoveOpenPage()
+            if (mv) waves.loadArtistMoveAlbums("" + mv.oldId)
+        }
+    }
     Connections {
         target: waves
         function onReleasesChanged() {
@@ -5678,6 +5729,7 @@ ApplicationWindow {
             // now rather than after the debounce, so a release another follow
             // also holds, or a featured row, settles by the store's rule.
             if (!on) {
+                root.releasesMoves = waves.artistMoves()  // a move notice for this profile leaves with it
                 var keep = function (r) { return ("" + r.via) !== ("" + aid) }
                 var before = root.releasesRows.length + root.relFindRows.length
                 root.releasesRows = root.releasesRows.filter(keep)
@@ -5698,6 +5750,23 @@ ApplicationWindow {
             if (root.releasesOpen && root.releasesView !== "feed") root.releasesExcludedLoad()
         }
         function onArtistImportNotice(notice) { root.releasesImportNotice = notice }
+        function onArtistMovesChanged() { root.releasesMoves = waves.artistMoves() }
+        function onArtistMoveAlbumsLoaded(oldId, got) {
+            var next = Object.assign({}, root.relMoveAlbums)
+            next["" + oldId] = got
+            root.relMoveAlbums = next
+        }
+        function onArtistAnchorsChanged() { root.artistNamesakeRead() }
+        // The library changed (or came up after launch): the move albums are
+        // read again, the open page's a second after the last change (a scan
+        // publishes many times), the others when next shown.
+        function onLibraryPresenceChanged() {
+            var mv = root.relMoveOpenPage()
+            var keep = {}
+            if (mv && root.relMoveAlbums["" + mv.oldId]) keep["" + mv.oldId] = root.relMoveAlbums["" + mv.oldId]
+            root.relMoveAlbums = keep
+            if (mv) relMoveReloadTimer.restart()
+        }
         function onFollowTidalChanged(aid, fav) {
             if (root.artistData && ("" + root.artistData.id) === ("" + aid)) root.artistTidalRead()
         }
@@ -7440,10 +7509,10 @@ ApplicationWindow {
             onWheel: function(w){ root.peekClose(); w.accepted = false }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null && !supportNoteGate.onTop; onActivated: root.peekClose() }
-    Shortcut { sequence: "Esc"; enabled: root.videoNow !== null && !supportNoteGate.onTop; onActivated: root.closeVideo() }
+    Shortcut { sequence: "Esc"; enabled: root.peekNow !== null && root.videoNow === null && !root.noteUp; onActivated: root.peekClose() }
+    Shortcut { sequence: "Esc"; enabled: root.videoNow !== null && !root.noteUp; onActivated: root.closeVideo() }
     Shortcut {
-        sequence: "Space"; enabled: root.videoNow !== null && !root.videoLoading && !root.videoError
+        sequence: "Space"; enabled: root.videoNow !== null && !root.videoLoading && !root.videoError && !root.noteUp
         onActivated: root.vPlayer.playbackState === MediaPlayer.PlayingState ? root.vPlayer.pause() : root.vPlayer.play()
     }
     Rectangle {
@@ -9710,6 +9779,12 @@ ApplicationWindow {
     component ArtistBadges: Item {
         id: arb
         property string artistName: ""
+        // The TIDAL profile this strip stands on. When the library is known
+        // to belong to one profile of the name (presence.anchor, see
+        // waves.artist_anchor), only that profile's strip lights: the others
+        // are artists who merely share the name. Left empty, it lights by
+        // name alone, as it always has.
+        property string artistId: ""
         property var presence: null
         // Draw as the strip on artwork. The caller sets the width and parents
         // it inside the Art, which clips to its box, so the strip takes the
@@ -9787,11 +9862,13 @@ ApplicationWindow {
             // per card per committed batch of a running scan.
             enabled: arb.artistName !== ""
             function onLibraryPresenceChanged() { arb._resolvePresence(true) }
+            function onArtistAnchorsChanged() { arb._resolvePresence(true) }
         }
         // The strip's own verdict, for the reason LibraryTag.shown spells out:
         // `visible` is effective visibility, so a hidden pane would fade every
         // strip on it back in the next time the reader opened that pane.
-        readonly property bool shown: !!(presence && presence.present)
+        readonly property bool shown: !!(presence && presence.present
+            && (!presence.anchor || arb.artistId === "" || ("" + presence.anchor) === arb.artistId))
         visible: arb.shown
         // The badge hides at the top, so nothing inside it ever sees a
         // visibility change of its own.
@@ -11239,7 +11316,10 @@ ApplicationWindow {
                     // so an artist button never opens the claim gate either.
                     var ap = waves.artistLibraryPresence(db.libArtist)
                     libPresent = false
-                    libPartial = !!(ap && ap.present === true)
+                    // Only on the profile the library is known to belong to,
+                    // when one is (ap.anchor): a namesake's button stays plain.
+                    libPartial = !!(ap && ap.present === true
+                        && (!ap.anchor || ("" + db.mediaId) === "" || ("" + db.mediaId) === ("" + ap.anchor)))
                     libSure = false
                     libPath = ""
                     return
@@ -11353,7 +11433,14 @@ ApplicationWindow {
         // then would animate a flip the user reads as every button changing
         // its mind (reported from livetesting an owned album page).
         Component.onCompleted: { refreshOwned(); _libCompleted = true; refreshLibPresent(false); syncGhost(); if (!ownPending) rollReady = true }
-        onMediaIdChanged: { if (rollReady) { rollReady = false; dbSettle.restart() } refreshOwned() }
+        onMediaIdChanged: {
+            if (rollReady) { rollReady = false; dbSettle.restart() }
+            refreshOwned()
+            // The artist grain answers per profile once the library's own is
+            // known (ap.anchor): two profiles of one name share libArtist, so
+            // the id alone changing must re-ask.
+            if (_libCompleted && libArtist !== "") refreshLibPresent(false)
+        }
         onOwnedCheckChanged: refreshOwned()
         onCollectionIdsChanged: refreshOwned()
         onCollectionCheckChanged: refreshOwned()
@@ -11367,6 +11454,7 @@ ApplicationWindow {
             target: waves
             enabled: db.libTitle !== "" || db.libArtist !== ""
             function onLibraryPresenceChanged() { db.refreshLibPresent(true) }
+            function onArtistAnchorsChanged() { if (db.libArtist !== "") db.refreshLibPresent(true) }
         }
         Connections {
             target: waves
@@ -15449,6 +15537,7 @@ ApplicationWindow {
                     anchors.bottom: parent.bottom
                     radius: parent.faceRadius
                     artistName: aName
+                    artistId: "" + aId
                 }
             }
             Text {
@@ -16253,6 +16342,18 @@ ApplicationWindow {
             color: root.textHi
             font.family: root.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2
         }
+    }
+    // A follow with a same-name move to look at on its artist page: MOVED for
+    // one Waves made, SAME NAME for one it suggests.
+    component RelMoveMark: RelChip {
+        id: rmm
+        property string artistId: ""
+        readonly property var move: (root.releasesMoves, root.relMoveForPage(rmm.artistId))
+        readonly property bool implicitVisible: !!rmm.move
+        objectName: "relMoveMark"
+        visible: rmm.implicitVisible
+        accent: true
+        text: rmm.move && ("" + rmm.move.state) === "moved" ? "MOVED" : "SAME NAME"
     }
     // The covers an Excluded artist's library albums carry, in one tile: one
     // fills it, two split it, three are a half and two quarters, four are
@@ -17064,6 +17165,7 @@ ApplicationWindow {
                 // always-shown strip.
                 artistName: ac.kind === "artist"
                             ? ("" + (ac.card.name || ac.card.title || "")) : ""
+                artistId: ac.kind === "artist" ? ("" + (ac.card.id || "")) : ""
             }
             // Hover controls. Collections (album / playlist / mix) get the
             // full stacked pair on the art, Preview (a random track for
@@ -18424,6 +18526,7 @@ ApplicationWindow {
     ListModel { id: artistAlbumsModel }
     ListModel { id: artistVideosModel }
     ListModel { id: artistEpModel }
+    ListModel { id: artistApartModel }
     ListModel { id: artistTracksModel }
     ListModel { id: libAlbumsModel }
     ListModel { id: libTracksModel }
@@ -21316,11 +21419,34 @@ ApplicationWindow {
                         // two voices standing on the page rather than on the
                         // photograph.
                         ArtistBadges {
+                            objectName: "artistPageBadges"
                             artistName: root.artistData.name || ""
+                            artistId: "" + (root.artistData.id || "")
+                        }
+                        // A namesake: the albums the library holds under this
+                        // name are on another profile, so this is someone else.
+                        Row {
+                            objectName: "artistNamesakeLine"
+                            visible: root.artistNamesakeId !== "" && !artistMovePanel.visible
+                            spacing: 10
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(implicitWidth, artistCol.width - 170 - anlGo.width - 10)
+                                textFormat: Text.PlainText; elide: Text.ElideRight
+                                color: root.textLo; font.pixelSize: 13
+                                text: "The " + (root.artistData.name || "") + " in your library is a different artist with the same name."
+                            }
+                            SpecBtn {
+                                id: anlGo
+                                objectName: "artistNamesakeGo"
+                                compact: true; label: "OPEN THAT ARTIST"
+                                onClicked: waves.loadArtist(root.artistNamesakeId)
+                            }
                         }
                         Row {
                             spacing: 12
                             DownloadButton {
+                                objectName: "artistDlBtn"
                                 mediaId: root.artistData.id || ""
                                 label: "Download discography"
                                 // The badge directly above says what is held;
@@ -21373,6 +21499,96 @@ ApplicationWindow {
                             Text {
                                 text: "Copy link"; color: root.textLo; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("artist", root.artistData.id || "") }
+                            }
+                        }
+                        // Same-name move: this page is the profile a follow was
+                        // moved to (OK, UNDO) or the one still followed while
+                        // another profile holds the library's albums (SWITCH,
+                        // KEEP). It names those albums, so the reason is seen.
+                        Rectangle {
+                            id: artistMovePanel
+                            objectName: "artistMovePanel"
+                            readonly property var move: root.signedIn ? root.relMoveForPage(root.artistData.id) : null
+                            readonly property bool moved: !!artistMovePanel.move && ("" + artistMovePanel.move.state) === "moved"
+                            readonly property string oldId: artistMovePanel.move ? "" + artistMovePanel.move.oldId : ""
+                            readonly property var got: artistMovePanel.oldId !== "" ? (root.relMoveAlbums[artistMovePanel.oldId] || null) : null
+                            readonly property var held: artistMovePanel.got ? (artistMovePanel.got.held || []) : []
+                            readonly property int total: artistMovePanel.got ? (artistMovePanel.got.total || 0)
+                                                                             : (artistMovePanel.move ? (artistMovePanel.move.albums || 0) : 0)
+                            readonly property string name: root.artistData.name || ""
+                            visible: !!artistMovePanel.move
+                            width: parent.width
+                            implicitHeight: ampCol.implicitHeight + 24
+                            radius: 10; color: root.surface; border.color: root.accentDim
+                            onOldIdChanged: if (artistMovePanel.oldId !== "" && !root.relMoveAlbums[artistMovePanel.oldId]) waves.loadArtistMoveAlbums(artistMovePanel.oldId)
+                            Component.onCompleted: if (artistMovePanel.oldId !== "" && !root.relMoveAlbums[artistMovePanel.oldId]) waves.loadArtistMoveAlbums(artistMovePanel.oldId)
+                            Column {
+                                id: ampCol
+                                x: 14; y: 12; width: parent.width - 28; spacing: 10
+                                Text {
+                                    objectName: "artistMoveText"
+                                    width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
+                                    color: root.textHi; font.pixelSize: 13
+                                    readonly property string count: artistMovePanel.total === 1 ? "This album" : artistMovePanel.total > 1 ? "These " + artistMovePanel.total + " albums" : "The songs"
+                                    text: artistMovePanel.moved
+                                        ? "Waves moved your follow here from another " + artistMovePanel.name + ". " + count
+                                          + " in your library " + (artistMovePanel.total === 1 ? "is" : "are") + " on this profile."
+                                        : "Another " + artistMovePanel.name + " profile has " + count.charAt(0).toLowerCase() + count.slice(1)
+                                          + " from your library. You can follow that one instead."
+                                }
+                                Flow {
+                                    objectName: "artistMoveAlbums"
+                                    visible: artistMovePanel.held.length > 0
+                                    width: parent.width; spacing: 8
+                                    Repeater {
+                                        model: artistMovePanel.held.slice(0, 6)
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            width: Math.min(ampAlb.implicitWidth + 52, 260); height: 40
+                                            radius: 6; color: root.surface2
+                                            Art { x: 4; y: 4; width: 32; height: 32; radius: 4; url: "" + (modelData.cover || "") }
+                                            Text {
+                                                id: ampAlb
+                                                x: 44; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 52
+                                                textFormat: Text.PlainText; elide: Text.ElideRight
+                                                text: "" + (modelData.title || "") + (modelData.year ? "  " + modelData.year : "")
+                                                color: root.textLo; font.pixelSize: 12
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        visible: artistMovePanel.total > Math.min(6, artistMovePanel.held.length) && artistMovePanel.held.length > 0
+                                        height: 40; verticalAlignment: Text.AlignVCenter
+                                        textFormat: Text.PlainText
+                                        text: "+ " + (artistMovePanel.total - Math.min(6, artistMovePanel.held.length)) + " more"
+                                        color: root.textDim; font.pixelSize: 12
+                                    }
+                                }
+                                Row {
+                                    spacing: 8
+                                    SpecBtn {
+                                        objectName: "artistMoveGo"
+                                        compact: true; primary: true
+                                        label: artistMovePanel.moved ? "OK" : "SWITCH"
+                                        onClicked: {
+                                            var m = artistMovePanel.move
+                                            if (!m) return
+                                            var wasMoved = artistMovePanel.moved
+                                            if (waves.acceptArtistMove("" + m.oldId) && !wasMoved) waves.loadArtist("" + m.newId)
+                                        }
+                                    }
+                                    SpecBtn {
+                                        objectName: "artistMoveBack"
+                                        compact: true
+                                        label: artistMovePanel.moved ? "UNDO" : "KEEP"
+                                        onClicked: {
+                                            var m = artistMovePanel.move
+                                            if (!m) return
+                                            if (artistMovePanel.moved) waves.undoArtistMove("" + m.oldId)
+                                            else waves.dismissArtistMove("" + m.oldId)
+                                        }
+                                    }
+                                }
                             }
                         }
                         // Collapsed bio preview (never taller than the photo)
@@ -21635,6 +21851,38 @@ ApplicationWindow {
                     expanded: root.artistVideosExpanded
                     count: artistVideosModel.count
                     onToggled: root.toggleArtistExpand("videos")
+                }
+
+                // A profile TIDAL shares between same-name artists: the
+                // releases nothing ties to the artist in the library sit here,
+                // folded, out of the feed and the discography download.
+                SectionHeader {
+                    id: artistApartHead
+                    objectName: "artistApartHead"
+                    visible: artistApartModel.count > 0
+                    label: "OTHER ARTISTS NAMED " + ("" + (root.artistData.name || "")).toUpperCase()
+                    count: artistApartModel.count
+                    collapsible: true; collapsed: !root.artistApartOpen
+                    onToggled: root.artistApartOpen = !root.artistApartOpen
+                }
+                Text {
+                    id: artistApartNote
+                    objectName: "artistApartNote"
+                    visible: artistApartHead.visible && root.artistApartOpen
+                    width: artistCol.width
+                    textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13
+                    text: "Same TIDAL profile, not linked to your library. Kept out of Releases and downloads."
+                }
+                Repeater {
+                    id: artistApartRep
+                    model: root.artistApartOpen ? artistApartModel : null
+                    delegate: AlbumBlock {
+                        width: artistCol.width
+                        albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
+                        art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
+                        explicit: model.explicit === true
+                    }
                 }
             }
             }
@@ -21956,13 +22204,13 @@ ApplicationWindow {
                             sequence: "Esc"
                             enabled: relSearchField.activeFocus && root.peekNow === null && root.videoNow === null
                                      && !followDialog.open && !importDialog.open && !root.ahcOpen
-                                     && !supportNoteGate.onTop
+                                     && !root.noteUp
                             onActivated: relSearch.dismiss()
                         }
                         Shortcut {
                             sequences: [StandardKey.Find]
                             enabled: releasesPane.visible && root.peekNow === null && root.videoNow === null
-                                     && !followDialog.open && !importDialog.open
+                                     && !followDialog.open && !importDialog.open && !root.noteUp
                             onActivated: relSearch.show()
                         }
                     }
@@ -22556,13 +22804,20 @@ ApplicationWindow {
                                 anchors.right: parent.right; anchors.rightMargin: 12
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 6
-                                Text {
-                                    textFormat: Text.PlainText; text: raCell.row.name || ""
-                                    color: root.textHi; font.pixelSize: 15; font.bold: true
-                                    elide: Text.ElideRight; width: parent.width - (raHover.hovered ? raUnfollow.width + 8 : 0)
+                                Row {
+                                    spacing: 8
+                                    Text {
+                                        textFormat: Text.PlainText; text: raCell.row.name || ""
+                                        color: root.textHi; font.pixelSize: 15; font.bold: true
+                                        elide: Text.ElideRight
+                                        width: Math.min(implicitWidth, parent.parent.width - (raHover.hovered ? raUnfollow.width + 8 : 0)
+                                                        - (raMark.visible ? raMark.width + 8 : 0))
+                                    }
+                                    RelMoveMark { id: raMark; artistId: raCell.uid; anchors.verticalCenter: parent.verticalCenter }
                                 }
                                 ArtistBadges {
                                     artistName: "" + (raCell.row.name || "")
+                                    artistId: "" + (raCell.row.id || "")
                                     libBaked: raCell.row.lib; libStamp: raCell.row.libStamp
                                 }
                                 // The latest release on record: its day, kind and title.
@@ -22656,8 +22911,10 @@ ApplicationWindow {
                                         color: root.textHi; font.pixelSize: 16; font.bold: true
                                         wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; width: parent.width
                                     }
+                                    RelMoveMark { artistId: sbRow.uid }
                                     ArtistBadges {
                                         artistName: "" + (sbRow.row.name || "")
+                                        artistId: "" + (sbRow.row.id || "")
                                         libBaked: sbRow.row.lib; libStamp: sbRow.row.libStamp
                                         fitWidth: parent.width
                                     }
@@ -22827,7 +23084,14 @@ ApplicationWindow {
                                     textFormat: Text.PlainText; text: lgRow.row.name || ""
                                     color: root.textHi; font.pixelSize: 14; font.bold: true
                                     elide: Text.ElideRight
-                                    width: Math.min(implicitWidth, parent.width - (lgUnfollow.visible ? lgUnfollow.width + 10 : 0))
+                                    width: Math.min(implicitWidth, parent.width - (lgUnfollow.visible ? lgUnfollow.width + 10 : 0)
+                                                    - (lgMark.visible ? lgMark.width + 8 : 0))
+                                }
+                                RelMoveMark {
+                                    id: lgMark
+                                    x: lgName.width + 8; anchors.verticalCenter: lgName.verticalCenter
+                                    visible: implicitVisible && !lgUnfollow.visible
+                                    artistId: lgRow.uid
                                 }
                                 SpecBtn {
                                     id: lgUnfollow
@@ -23813,6 +24077,7 @@ ApplicationWindow {
                                             anchors.bottom: parent.bottom
                                             radius: parent.faceRadius
                                             artistName: "" + (model.name || "")
+                                            artistId: "" + (model.id || "")
                                             libBaked: model.lib; libStamp: model.libStamp
                                         }
                                     }
@@ -27664,7 +27929,12 @@ ApplicationWindow {
             color: "#cc06070e"
             opacity: supportNoteGate.scrimP
         }
-        MouseArea { anchors.fill: parent; enabled: supportNoteGate.onTop; onClicked: supportNoteGate.close("note closed") }
+        // Nothing behind the note reacts while it is on top (NoteShield.qml);
+        // a left click on the backdrop closes it.
+        NoteShield {
+            anchors.fill: parent; active: supportNoteGate.onTop
+            onBackdropClicked: supportNoteGate.close("note closed")
+        }
         Rectangle {
             id: supportNoteCard
             anchors.centerIn: parent; width: 500
@@ -27674,7 +27944,7 @@ ApplicationWindow {
             opacity: supportNoteGate.cardP
             scale: 0.965 + 0.035 * supportNoteGate.cardP
             anchors.verticalCenterOffset: 28 * (1 - supportNoteGate.cardP)
-            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            NoteShield { anchors.fill: parent; holdsKeys: false }   // a click on the card must not dismiss
             ColumnLayout {
                 id: snCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
                 Text {
@@ -27925,7 +28195,7 @@ ApplicationWindow {
             }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: followDialog.open && !supportNoteGate.onTop; onActivated: followDialog.close() }
+    Shortcut { sequence: "Esc"; enabled: followDialog.open && !root.noteUp; onActivated: followDialog.close() }
 
     // Follow the library's artists in one go (IMPORT LIBRARY on the Releases
     // pane). Nothing is followed until the review is confirmed: the run
@@ -28488,7 +28758,7 @@ ApplicationWindow {
             }
         }
     }
-    Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open && !root.ahcOpen && !supportNoteGate.onTop; onActivated: importDialog.close() }
+    Shortcut { sequence: "Esc"; enabled: importDialog.open && !followDialog.open && !root.ahcOpen && !root.noteUp; onActivated: importDialog.close() }
 
     // Exit warning: a real quit (the app menu, Cmd+Q, the Dock, the tray, or
     // the close button set to exit) was vetoed in onClosing because downloads
