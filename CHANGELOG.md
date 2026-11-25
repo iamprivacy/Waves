@@ -22,6 +22,28 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.10 (2026-11-25)
+
+### ✨ Added
+
+- 📜 A **Download history** page, opened with **HISTORY** at the bottom of the queue, lists what Waves saved and when, and each album or playlist opens to show every track and when its file was saved. Search it by album, artist or song, filter it by kind, sort it newest or oldest first, and empty it with **CLEAR HISTORY**, which never deletes your files.
+- 🌊 The logo in the top bar now moves with the music while a preview plays. **Logo equalizer** (Settings → Appearance) picks the look (rolling water, dot bars or scrolling dots) or turns it off.
+- 🏷️ A new **Primary artist only in file names** setting keeps just a song's first artist in its file name, for shorter names.
+- ❤️ **My Tidal button** (Settings → Appearance) hides the My Tidal tab in the top bar if you don't use it.
+- 🩺 Diagnostic reports now list your processor, graphics card, memory and display so slowdowns can be matched to a machine, and with verbose diagnostics on they also record dropped frames and CPU use. **Also hide my hardware** (Settings → Diagnostics) leaves the hardware out.
+
+### 🔧 Changed
+
+- 🎨 Buttons across the app look more alike.
+- 📊 The **QUEUE** button shows the last 12 seconds of download speed as bars, with the percent and speed easy to read over them.
+- ⚡ Performance improvements make browsing and scrolling smoother overall.
+
+### 🐛 Fixed
+
+- 🏷️ With "Primary album artist for folders" turned on, file names now list every artist of the song instead of only the album's first artist, and songs on a compilation are no longer named "Various Artists"; files already downloaded keep their names and are not downloaded again ([issue #68](https://github.com/iamprivacy/Waves/issues/68)).
+- ⬇️ A downloading album or playlist row's progress bar now fills smoothly, instead of freezing and then jumping ahead.
+- ❤️ The filter chips on My Tidal stay on one line at every window width.
+
 ## 🗂️ v0.2.9 (2026-11-23)
 
 ### ✨ Added
