@@ -52,6 +52,11 @@ ApplicationWindow {
     // Settings > Appearance > "Player bar": the waveform in the bottom bar is
     // 200 px wide in full and 130 px in mini.
     property string playerSize: waves.wavesPref("player_size") === "mini" ? "mini" : "full"
+    // Settings > Appearance > "Logo equalizer": how the logo in the top bar
+    // moves with a playing preview. "water" bends its waves over the
+    // spectrum, "dots" shows bars of dots, "scroll" a scrolling history.
+    function logoEqLook(v) { return v === "dots" || v === "scroll" || v === "off" ? v : "water" }
+    property string logoEq: logoEqLook(waves.wavesPref("logo_eq"))
     // Settings > Appearance > "When the window is closed": what the close
     // button does. "ask" opens closeGate, "background" hides the window and
     // keeps Waves running, "exit" ends the app.
@@ -151,6 +156,9 @@ ApplicationWindow {
         function onPlayerSizeChanged() {
             root.playerSize = waves.wavesPref("player_size") === "mini" ? "mini" : "full"
         }
+        function onLogoEqChanged() {
+            root.logoEq = root.logoEqLook(waves.wavesPref("logo_eq"))
+        }
         function onCloseActionChanged() {
             root.closeAction = root._closeActionOf(waves.wavesPref("close_action"))
         }
@@ -161,6 +169,9 @@ ApplicationWindow {
         }
         function onArtistHoverCardsChanged() {
             root.artistCards = waves.wavesPref("artist_hover_cards") !== false
+        }
+        function onNavMyTidalChanged() {
+            root.navMyTidal = waves.wavesPref("nav_my_tidal") !== false
         }
         function onArtistBioFallbackChanged() {
             root.artistBioOn = waves.wavesPref("artist_bio_fallback") === true
@@ -715,86 +726,76 @@ ApplicationWindow {
         }
 
         // ---- rolodex roll ----------------------------------------------------
-        // Each row gets a Rotation bound to its own view (captured at creation,
-        // so rows on backgrounded pages keep working when the user returns).
+        // Rows tilt away as they pass through the top and bottom edge bands.
+        // Only the rows IN a band carry a live angle: each scrolled frame looks
+        // up the few rows under the two bands, sets their angle, and flattens
+        // the ones that left. Every row once carried its own binding on
+        // contentY (one script run per row per scrolled frame, 38 on a list,
+        // 114 on a large artist page): at 120 Hz that alone was ~80 frames
+        // over 20 ms in 10 s of scrolling My Tidal tracks, 10 without it.
         readonly property real rollMax: 9
         readonly property real rollBand: 56
-        // The tilt angle below reads row.mapToItem(fl), which is NOT reactive, so
-        // the binding only re-evaluates on its one live dependency: fl.contentY
-        // (a scroll). A tab switch or a filter change repositions rows without
-        // moving contentY, which would leave every angle frozen at its old value
-        // until the next scroll. Bumping rollTick on those events (see armRoll and
-        // onFlickChanged) is the dependency that forces a recompute on demand.
-        property int rollTick: 0
         Component {
             id: bttRollComp
             Rotation {
                 property Item row
-                property Item fl
                 origin.x: row ? row.width / 2 : 0
                 origin.y: row ? row.height / 2 : 0
                 axis { x: 1; y: 0; z: 0 }
-                angle: {
-                    var _t = btt.rollTick  // re-eval on tab switch / filter / reflow, not only scroll
-                    if (!row || !fl) return 0
-                    // Only row-sized items may tilt. Anything taller (a shelf
-                    // section, an expanded album panel) projects far outside
-                    // the edge band when rotated and shears the whole page.
-                    if (row.height > 160) return 0
-                    var cy = fl.contentY   // binding dependency: re-evaluate on scroll
+            }
+        }
+        // The rotations currently off flat, so a row that left the bands (or
+        // whose page went away) is flattened on the next pass.
+        property var _rolled: []
+        // The row at content point (x, y) of the view, or null. List views
+        // parent delegates directly to contentItem; the column-based pages
+        // nest rows one level down in a page-sized content column, which must
+        // not tilt as a whole. Only row-sized items tilt: anything taller (a
+        // shelf section, an expanded album panel) projects far outside the
+        // edge band when rotated and shears the whole page.
+        function rollRowAt(fl, x, y) {
+            var it = fl.contentItem.childAt(x, y)
+            if (!it || it.width < 100 || it.height < 25) return null
+            if (it.height <= 160) return it
+            if (it.height < fl.height * 0.9) return null
+            var row = it.childAt(x - it.x, y - it.y)
+            return row && row.width > 100 && row.height > 24 && row.height <= 160 ? row : null
+        }
+        function updateRoll() {
+            var fl = flick, next = []
+            if (fl && fl.contentItem) {
+                var vh = fl.height, x = fl.contentX + fl.width / 2
+                // Rows are at least 25 px tall, so 24 px steps miss none.
+                var ys = [0, 24, 48, rollBand, vh - rollBand, vh - 48, vh - 24, vh]
+                for (var i = 0; i < ys.length; i++) {
+                    var row = rollRowAt(fl, x, fl.contentY + ys[i])
+                    if (!row) continue
+                    if (row.transform.length === 0) row.transform = bttRollComp.createObject(row, { row: row })
+                    var r = row.transform[0]
+                    // One of the app's few bespoke transforms: leave it alone.
+                    if (r.row !== row) continue
                     var c = row.mapToItem(fl, 0, 0).y + row.height / 2
-                    if (c < btt.rollBand) return (1 - Math.max(0, c) / btt.rollBand) * btt.rollMax
-                    var vh = fl.height
-                    if (c > vh - btt.rollBand) return -Math.min(1, (c - (vh - btt.rollBand)) / btt.rollBand) * btt.rollMax
-                    return 0
+                    r.angle = c < rollBand ? (1 - Math.max(0, c) / rollBand) * rollMax
+                            : c > vh - rollBand ? -Math.min(1, (c - (vh - rollBand)) / rollBand) * rollMax : 0
+                    if (r.angle !== 0 && next.indexOf(r) < 0) next.push(r)
                 }
             }
+            for (var k = 0; k < _rolled.length; k++)
+                if (_rolled[k] && next.indexOf(_rolled[k]) < 0) _rolled[k].angle = 0
+            _rolled = next
         }
-        function armRow(row, fl) {
-            // Rows with an existing transform are either already armed or own
-            // one of the app's few bespoke transforms; leave both alone.
-            if (row.transform.length > 0) return
-            row.transform = bttRollComp.createObject(row, { row: row, fl: fl })
-        }
-        function armRoll() {
-            var fl = flick
-            if (!fl || !fl.contentItem) return
-            var ci = fl.contentItem
-            for (var i = 0; i < ci.children.length; i++) {
-                var it = ci.children[i]
-                if (it.width < 100 || it.height < 25) continue
-                // List views parent delegates directly to contentItem; the
-                // column-based pages nest rows one level down in a page-sized
-                // content column, which must not tilt as a whole. In both
-                // cases only row-sized items are armed: shelf sections and
-                // grid cells stay flat (the angle binding also re-checks the
-                // cap live, for rows that grow after arming).
-                if (it.height <= 160) { armRow(it, fl); continue }
-                if (it.height < fl.height * 0.9) continue
-                for (var j = 0; j < it.children.length; j++) {
-                    var row = it.children[j]
-                    if (row.width > 100 && row.height > 24 && row.height <= 160) armRow(row, fl)
-                }
-            }
-            // Rows may have moved (a fresh arm, a reflow, a returning tab), so
-            // force every armed angle to recompute now, not on the next scroll.
-            rollTick++
-        }
-        // Bump synchronously too: on a tab switch the returning pane is already
-        // laid out, so its rows can re-tilt correctly in the same frame it
-        // appears (no stale-then-correct flash); armRoll then re-checks post-layout.
-        onFlickChanged: { btt.rollTick++; Qt.callLater(armRoll) }
-        Component.onCompleted: Qt.callLater(armRoll)
-        // Delegates recycle and result columns repopulate; contentHeight moves
-        // in both cases, so it doubles as the re-arm signal.
-        // The angles re-tilt on every change (rollTick), cheap. The ARM walk
-        // (every child, a transform created per new row) waits for the height
-        // to settle: an expand animates contentHeight for ~280 ms, and walking
-        // per frame for its whole run bought nothing a walk at the end does not.
-        Timer { id: bttArmSettle; interval: 60; onTriggered: btt.armRoll() }
+        // Synchronously on a tab switch: the returning pane is already laid
+        // out, so its rows tilt in the same frame it appears (no flat-then-
+        // tilted flash); the deferred pass re-checks after the layout.
+        onFlickChanged: { updateRoll(); Qt.callLater(updateRoll) }
+        Component.onCompleted: Qt.callLater(updateRoll)
+        // Delegates recycle and result columns repopulate without a scroll;
+        // contentHeight moves in both cases.
         Connections {
             target: btt.flick
-            function onContentHeightChanged() { btt.rollTick++; bttArmSettle.restart() }
+            function onContentYChanged() { btt.updateRoll() }
+            function onContentHeightChanged() { btt.updateRoll() }
+            function onHeightChanged() { btt.updateRoll() }
         }
 
         // ---- the INLINE crest pill ------------------------------------------
@@ -1470,7 +1471,9 @@ ApplicationWindow {
         onTriggered: {
             if (root.libraryCategory === "home") {
                 waves.loadHome(root.homeSections.length > 0)
-            } else {
+            } else if (root.libraryCategory !== "history") {
+                // History is local and refreshes on historyChanged; TIDAL has
+                // no such category, so a revalidate there emptied the page.
                 var m = libModelFor(root.libraryCategory)
                 if (m && m.count > 0) {
                     libPinRefill = true
@@ -2942,7 +2945,7 @@ ApplicationWindow {
     function navSig(s) { return s.v + "|" + (s.key || "") + "|" + (s.id || "") + "|" + (s.cat || "") }
     function navSnapshot() {
         if (settingsOpen) return { v: "settings", label: "Settings" }
-        if (libraryOpen) return { v: "library", cat: libraryCategory, label: "My Tidal" }
+        if (libraryOpen) return { v: "library", cat: libraryCategory, label: libraryCategory === "history" ? "Download history" : "My Tidal" }
         if (releasesOpen) return { v: "releases", view: releasesView, label: "Releases" }
         if (artistOpen) return { v: "artist", id: artistData ? "" + artistData.id : "",
                                  label: artistData ? (artistData.name || "Artist") : "Artist",
@@ -3018,7 +3021,7 @@ ApplicationWindow {
     function _navRestore(s) {
         // Restore the snapshot's lit tab; older snapshots without one fall back
         // to the section the snapshot itself shows.
-        navOrigin = s.o || (s.v === "library" ? "library" : s.v === "browse" ? "browse"
+        navOrigin = s.o || (s.v === "library" ? (s.cat === "history" ? "history" : "library") : s.v === "browse" ? "browse"
                           : s.v === "releases" ? "releases"
                           : s.v === "search" ? "search" : navOrigin)
         _navRestoring = true
@@ -3123,7 +3126,7 @@ ApplicationWindow {
     // trail holds the crumb back rather than flash "Browse" and then swap in
     // the real name when the payload arrives (reported from livetesting).
     readonly property string currentNavLabel: settingsOpen ? "Settings"
-        : libraryOpen ? "My Tidal"
+        : libraryOpen ? (libraryCategory === "history" ? "Download history" : "My Tidal")
         : releasesOpen ? "Releases"
         : artistOpen ? (artistData ? (artistData.name || "Artist") : "Artist")
         : browseOpen ? (browsePageKey === "" ? "Browse"
@@ -3179,7 +3182,8 @@ ApplicationWindow {
         return !navIsRoot(navHistory[crumbBase])
     }
     readonly property string crumbSynthLabel:
-        navOrigin === "library" ? "My Tidal" : navOrigin === "releases" ? "Releases"
+        navOrigin === "library" ? "My Tidal" : navOrigin === "history" ? "Download history"
+        : navOrigin === "releases" ? "Releases"
         : navOrigin === "browse" ? "Browse" : "Search"
     function crumbSynthGo() {
         navPush()
@@ -3196,7 +3200,7 @@ ApplicationWindow {
             browsePageKey = ""
             artistOpen = false; settingsOpen = false; libraryOpen = false; releasesOpen = false
             browseOpen = true
-        } else if (navOrigin === "library") {
+        } else if (navOrigin === "library" || navOrigin === "history") {
             artistOpen = false; settingsOpen = false; browseOpen = false
             libraryOpen = true; releasesOpen = false
         } else if (navOrigin === "releases") {
@@ -3290,7 +3294,7 @@ ApplicationWindow {
         // RETURN to the category the user left, not always Home. loadLib is
         // keep-alive: a category whose rows are already on screen keeps them
         // (and its scroll) untouched and only revalidates quietly.
-        loadLib(libraryCategory)
+        loadLib(libraryCategory === "history" ? "home" : libraryCategory)
     }
 
     // ---- Releases ---------------------------------------------------------
@@ -3963,6 +3967,8 @@ ApplicationWindow {
     // artistSummaryReady lands (requestArtistCard builds the page silently
     // in the hover slot when it is not cached yet).
     property bool artistCards: waves.wavesPref("artist_hover_cards") !== false
+    // Settings > Appearance > My Tidal button: off hides the top bar's tab.
+    property bool navMyTidal: waves.wavesPref("nav_my_tidal") !== false
     readonly property bool ahcBlocked: !signedIn || !artistCards || nowCardOpen || videoNow !== null
                                        || peekNow !== null || followDialog.open || (importDialog.open && !ahcInReview)
                                        || root.noteUp
@@ -5881,6 +5887,10 @@ ApplicationWindow {
             waves.loadHome(root.homeSections.length > 0)
             return
         }
+        // Loaded once: after that the list follows each change as it happens
+        // (onHistoryChanged), so reopening it (Back from an album) keeps
+        // every row and its place with nothing to reread.
+        if (cat === "history") { if (!root.historyReady) { libCatHasMore[cat] = false; root.historyLoad(0) } return }
         // Every category pane is keep-alive: switching only changes which one
         // is visible, and each keeps its rows, expansion and scroll for its
         // whole life. A category that already has rows shows them as-is and
@@ -7760,12 +7770,6 @@ ApplicationWindow {
         if (drop > 0) warmArtModel.remove(0, drop)
     }
     ListModel { id: warmArtModel }
-    // Which scene graph is drawing, read once for every cover: on the
-    // Software backend (offscreen runs, a machine with no GPU) a ShaderEffect
-    // draws nothing, so Art paints its plain Images there instead of its
-    // rounded faces (see ArtFace).
-    Item { id: gfxProbe; readonly property bool software: GraphicsInfo.api === GraphicsInfo.Software }
-    readonly property bool roundFaces: !gfxProbe.software
     Item {
         visible: false
         Repeater {
@@ -7794,6 +7798,32 @@ ApplicationWindow {
             }
         }
     }
+
+    // Which scene graph is drawing, read once for every cover: on the
+    // Software backend (offscreen runs, a machine with no GPU) a ShaderEffect
+    // draws nothing, so Art paints its plain Images there instead of its
+    // rounded faces (see ArtFace).
+    Item {
+        id: gfxProbe
+        readonly property bool software: api === GraphicsInfo.Software
+        // One breadcrumb naming the graphics API the window ended up on, so
+        // a "the app is laggy" report shows a software fallback (a VM,
+        // Remote Desktop, a broken driver). The API name only: never the
+        // adapter, vendor or driver, which would identify the machine.
+        readonly property int api: GraphicsInfo.api
+        property bool logged: false
+        function note() {
+            var a = api, g = GraphicsInfo
+            if (logged || a === g.Unknown) return
+            logged = true
+            waves.uiLog("gfx", "api " + (a === g.Software ? "Software" : a === g.OpenGL ? "OpenGL"
+                : a === g.Direct3D11 ? "Direct3D11" : a === g.Direct3D12 ? "Direct3D12" : a === g.Vulkan ? "Vulkan"
+                : a === g.Metal ? "Metal" : a === g.Null ? "Null" : "other"), -1)
+        }
+        onApiChanged: note()
+        Component.onCompleted: note()
+    }
+    readonly property bool roundFaces: !gfxProbe.software
 
     // ====================================================================
     // Hover prefetch
@@ -12143,9 +12173,54 @@ ApplicationWindow {
                 if (!root.presentFresh()) return   // no step while unpresented (see the LED clock)
                 wm.t = (wm.t + 0.05 / wm.loopSecs) % 1
                 wm.idleT = (wm.idleT + 0.05 / wm.idleLoopSecs) % 1
+                wm.eqStep()
             }
         }
         property bool storm: false                    // hover -> ascii lightning strikes
+        // ---- Equalizer: while a preview plays, the logo moves with the music ----
+        // The mark that is handed the preview player (eqPlayer) asks the bridge
+        // for 16 band levels on each tick of the clock above, so nothing runs
+        // while the window is off screen or nothing plays. The bridge taps the
+        // player's audio the first time a preview plays (never at launch) and
+        // answers with an empty list until audio really arrives: eqOn then stays
+        // false and the logo keeps its normal look. root.logoEq picks the look:
+        // "water" bends the six layers over the spectrum (bass lifts the left,
+        // cymbals the right) under the usual lightning, "dots" is a grid of
+        // bars, "scroll" the same grid as a history scrolling left.
+        property var eqPlayer: null
+        readonly property string eqLook: root.logoEq
+        property var eqLv: []                         // band levels 0..1, bass first
+        property bool eqOn: false
+        property bool eqTapAsked: false
+        property bool eqTapOk: false
+        property real eqAmt: eqOn ? 1 : 0             // crossfade between the logo and its playing look
+        Behavior on eqAmt { NumberAnimation { duration: 450; easing.type: Easing.InOutQuad } }
+        function eqStep() {
+            if (eqPlayer === null || (!root.previewPlaying && !eqOn)) return
+            if (eqLook === "off") { eqOn = false; return }  // no tap is made while off
+            if (!eqTapAsked) { eqTapAsked = true; eqTapOk = waves.logoEqAttach(eqPlayer) === true }
+            if (!eqTapOk) return
+            var lv = waves.logoEqLevels()
+            eqOn = lv.length === 16
+            if (eqOn) eqLv = lv
+        }
+        // level at position i of n, interpolated across the bands
+        function eqAt(i, n) {
+            if (eqLv.length !== 16) return 0
+            var f = Math.max(0, Math.min(15, i * 15 / Math.max(1, n - 1))), a = Math.floor(f), b = Math.min(15, a + 1)
+            return eqLv[a] + (eqLv[b] - eqLv[a]) * (f - a)
+        }
+        // The six water layers, shared by the logo's own rows and the "water"
+        // look. amp = how many px (at the 34 px reference) a full level lifts
+        // that layer: the foam barely moves, the front swell the most.
+        readonly property var layers: [
+            { yf: 0.05, px: 3.5, op: 0.34, k: 1, ph: 0.00, amp: 2, pat: "   '    .     *   :   .   ", col: root.accentContTx },
+            { yf: 0.18, px: 4.0, op: 0.46, k: 1, ph: 0.42, amp: 4, pat: ".~-~..-~-.~..-~-.",          col: root.green },
+            { yf: 0.31, px: 4.0, op: 0.56, k: 2, ph: 0.75, amp: 5, pat: "-.~-..~.-~-..~.-",           col: root.green },
+            { yf: 0.45, px: 5.0, op: 0.70, k: 2, ph: 0.18, amp: 6, pat: "_.-~-._.,-~-._.-",           col: root.accent },
+            { yf: 0.59, px: 5.5, op: 0.84, k: 3, ph: 0.60, amp: 7, pat: ".-~^-._,.~-^._.-~",          col: root.accent },
+            { yf: 0.72, px: 6.5, op: 1.00, k: 3, ph: 0.10, amp: 8, pat: "_.-~^~-._.~^'~._",           col: root.accent }
+        ]
         // Content is clipped by an inner item inset past the rounded corners, so a
         // glyph (or bolt) can never poke out a corner, a clip on the rounded
         // Rectangle itself is rectangular and leaves the corner triangles exposed.
@@ -12163,17 +12238,13 @@ ApplicationWindow {
             // ph = initial offset (0..1 of a tile) so crests don't line up. px is
             // the GIF's glyph size normalized to the 34px box reference.
             Repeater {
-                model: [
-                    { yf: 0.05, px: 3.5, op: 0.34, k: 1, ph: 0.00, pat: "   '    .     *   :   .   ", col: root.accentContTx },
-                    { yf: 0.18, px: 4.0, op: 0.46, k: 1, ph: 0.42, pat: ".~-~..-~-.~..-~-.",          col: root.green },
-                    { yf: 0.31, px: 4.0, op: 0.56, k: 2, ph: 0.75, pat: "-.~-..~.-~-..~.-",           col: root.green },
-                    { yf: 0.45, px: 5.0, op: 0.70, k: 2, ph: 0.18, pat: "_.-~-._.,-~-._.-",           col: root.accent },
-                    { yf: 0.59, px: 5.5, op: 0.84, k: 3, ph: 0.60, pat: ".-~^-._,.~-^._.-~",          col: root.accent },
-                    { yf: 0.72, px: 6.5, op: 1.00, k: 3, ph: 0.10, pat: "_.-~^~-._.~^'~._",           col: root.accent }
-                ]
+                model: wm.layers
                 delegate: Row {
                     required property var modelData
                     readonly property int reps: 9
+                    // the "water" look draws these same layers itself (below)
+                    opacity: wm.eqLook === "water" ? 1 - wm.eqAmt : 1
+                    visible: opacity > 0
                     // One pattern-tile's width, NOT the full repeated strip: the
                     // (t x k + ph) fraction is in units of a single tile, exactly as
                     // in the GIF generator, so the drift speed matches the README.
@@ -12187,6 +12258,47 @@ ApplicationWindow {
                     x: tile.width > 0 ? -Math.round(((wm.t * modelData.k + modelData.ph) % 1) * tileW) : 0
                     Text { textFormat: Text.PlainText; id: tile; text: modelData.pat.repeat(reps); font.family: root.mono; font.pixelSize: Math.max(2, Math.round(modelData.px * wm.uscale)); color: modelData.col; opacity: modelData.op; font.letterSpacing: -0.5 }
                     Text { textFormat: Text.PlainText; text: modelData.pat.repeat(reps); font.family: root.mono; font.pixelSize: tile.font.pixelSize; color: modelData.col; opacity: modelData.op; font.letterSpacing: -0.5 }
+                }
+            }
+
+            // The "water" look: the same six layers, one glyph per Text, each
+            // glyph lifted by the level at its own x. Under the bolts, so the
+            // idle strikes and the hover storm draw over it as they always do.
+            // Built only while it shows (some 450 glyphs): never at launch.
+            Loader {
+                active: wm.eqAmt > 0 && wm.eqLook === "water"
+                opacity: wm.eqAmt
+                sourceComponent: Item {
+                    id: bed
+                    readonly property real iw: wm.boxW - 2 * wm.inset
+                    Repeater {
+                        model: wm.layers
+                        delegate: Item {
+                            id: lay
+                            required property var modelData
+                            readonly property int pxs: Math.max(2, Math.round(modelData.px * wm.uscale))
+                            // the step between glyphs, measured the way the rows above lay them out
+                            Text { id: probe; visible: false; textFormat: Text.PlainText; text: lay.modelData.pat.repeat(4); font.family: root.mono; font.pixelSize: lay.pxs; font.letterSpacing: -0.5 }
+                            readonly property real adv: Math.max(1, probe.implicitWidth / (4 * len))
+                            readonly property int len: modelData.pat.length
+                            readonly property real shift: ((wm.t * modelData.k + modelData.ph) % 1) * len * adv
+                            y: Math.round(wm.boxH * modelData.yf) - wm.inset
+                            Repeater {
+                                model: Math.ceil(bed.iw / lay.adv) + lay.len + 1
+                                delegate: Text {
+                                    required property int index
+                                    readonly property real gx: index * lay.adv - lay.shift
+                                    visible: gx > -lay.adv && gx < bed.iw
+                                    x: Math.round(gx)
+                                    y: -Math.round(wm.eqAt(gx, bed.iw) * lay.modelData.amp * wm.uscale)
+                                    textFormat: Text.PlainText
+                                    text: lay.modelData.pat[index % lay.len]
+                                    font.family: root.mono; font.pixelSize: lay.pxs
+                                    color: lay.modelData.col; opacity: lay.modelData.op
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -12296,6 +12408,86 @@ ApplicationWindow {
             }
         }
 
+        // The "dots" and "scroll" looks: a grid of 3 px cells, 2 px apart, one
+        // cell more than fits each way and centered, so every edge cuts its
+        // cells partway. It covers the water (and its lightning) while it shows.
+        // "dots" = bars rising from the bottom, bass on the left. "scroll" =
+        // each tick adds a column on the right (bass at the bottom) and the past
+        // moves left. Built only while it shows.
+        Loader {
+            anchors.fill: parent
+            active: wm.eqAmt > 0 && (wm.eqLook === "dots" || wm.eqLook === "scroll")
+            opacity: wm.eqAmt
+            sourceComponent: Item {
+                id: dg
+                readonly property bool scroll: wm.eqLook === "scroll"
+                readonly property real dot: Math.round(3 * wm.uscale)
+                readonly property real pitch: Math.round(5 * wm.uscale)
+                readonly property real pad: Math.round(2 * wm.uscale)     // one dark line inside the border
+                readonly property real iw: wm.boxW - 2 * pad
+                readonly property real ih: wm.boxH - 2 * pad
+                readonly property int cols: Math.floor((iw + pitch - dot) / pitch) + 1
+                readonly property int rows: Math.floor((ih + pitch - dot) / pitch) + 1
+                readonly property real x0: Math.floor((iw - (cols * pitch - pitch + dot)) / 2)
+                readonly property real y0: Math.floor((ih - (rows * pitch - pitch + dot)) / 2)
+                // scroll: one column of levels per tick, newest last
+                property var hist: []
+                Connections {
+                    target: wm
+                    enabled: dg.scroll
+                    function onEqLvChanged() {
+                        var c = [], h = dg.hist.slice(Math.max(0, dg.hist.length - dg.cols + 1))
+                        for (var r = 0; r < dg.rows; r++) c.push(wm.eqAt(r, dg.rows))
+                        h.push(c); dg.hist = h
+                    }
+                }
+                function lit(col, up) {   // brightness 0..1 of a cell, up = rows from the bottom
+                    if (scroll) {
+                        var k = hist.length - cols + col
+                        return k >= 0 ? Math.pow(hist[k][up], 1.3) : 0
+                    }
+                    return up < Math.round(wm.eqAt(col, cols) * rows) ? 1 : 0
+                }
+                Rectangle {
+                    anchors.fill: parent; anchors.margins: wm.border.width
+                    radius: wm.radius - wm.border.width; color: wm.color
+                }
+                Item {
+                    x: dg.pad; y: dg.pad; width: dg.iw; height: dg.ih
+                    // Item clip is square; mask the grid to the box's rounded
+                    // inside so a corner cell never pokes past the border.
+                    layer.enabled: true
+                    layer.effect: MultiEffect {
+                        maskEnabled: true
+                        maskSource: ShaderEffectSource { sourceItem: dgMask; hideSource: false }
+                    }
+                    Repeater {
+                        model: dg.cols * dg.rows
+                        delegate: Rectangle {
+                            required property int index
+                            readonly property int col: index % dg.cols
+                            readonly property int up: dg.rows - 1 - Math.floor(index / dg.cols)
+                            readonly property real v: dg.lit(col, up)
+                            readonly property bool cap: !dg.scroll && up === Math.round(wm.eqAt(col, dg.cols) * dg.rows) - 1
+                            x: dg.x0 + col * dg.pitch
+                            y: dg.y0 + (dg.rows - 1 - up) * dg.pitch
+                            width: dg.dot; height: dg.dot
+                            color: cap || (dg.scroll && v > 0.7) ? root.accentSoft : root.accent
+                            opacity: dg.scroll ? 0.16 + 0.84 * v : v > 0 ? 1.0 : 0.16
+                        }
+                    }
+                }
+                // NEVER visible: the white rounded shape the MultiEffect masks
+                // the grid with; a ShaderEffectSource reads it either way.
+                Rectangle {
+                    id: dgMask
+                    x: dg.pad; y: dg.pad; width: dg.iw; height: dg.ih
+                    radius: wm.radius - dg.pad
+                    visible: false
+                }
+            }
+        }
+
         // Hover -> storm (lightning). NoButton so it never eats clicks.
         MouseArea {
             anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton
@@ -12397,30 +12589,41 @@ ApplicationWindow {
                      : sbTxt.implicitWidth + (iconLed ? icoSize + icoGap : 0) + (compact ? 8 : root.btnPadH) * 2
         implicitHeight: sbTxt.implicitHeight + (compact ? 2 : root.btnPadV) * 2
         radius: compact ? 5 : root.btnRad
-        color: (sbMa.containsMouse && (sb.primary || sb.danger || sb.warn)) ? Qt.lighter(sb.bg, 1.35) : sb.bg
+        // Every button lifts on hover. Secondary has no fill to lighten, so it
+        // takes a faint green wash instead.
+        readonly property bool secondary: !primary && !danger && !warn
+        color: !sbMa.containsMouse ? sb.bg
+             : sb.secondary ? Qt.alpha(root.accentCont, 0.7) : Qt.lighter(sb.bg, 1.35)
         border.width: 1
         border.color: danger ? Qt.alpha(root.red, 0.55)
                     : warn ? Qt.alpha(root.yellow, 0.55)
-                    : (primary ? root.accentDim : root.border1)
+                    : (primary || sbMa.containsMouse ? root.accentDim : Qt.alpha(root.accentDim, 0.55))
         Behavior on color { ColorAnimation { duration: 110 } }
+        Behavior on border.color { ColorAnimation { duration: 110 } }
         Text {
             id: sbTxt; anchors.centerIn: parent
             anchors.horizontalCenterOffset: sb.iconLed ? (sb.icoSize + sb.icoGap) / 2 : 0
+            // Labels are all caps: center the cap height, not the line box, whose
+            // descender room otherwise sits the word high (most visibly at chip scale).
+            anchors.verticalCenterOffset: Math.round(implicitHeight / 2 - sbFm.ascent + sbFm.tightBoundingRect("H").height / 2)
             // Kept loaded while icon-only (empty, invisible): its line height is
             // what makes the square square, so it has to keep measuring.
             visible: !sb.iconOnly
             textFormat: Text.PlainText; text: sb.label
             color: sb.danger ? root.red
                  : sb.warn ? root.yellow
-                 : (sb.primary ? root.accent : (sbMa.containsMouse ? root.textHi : root.textLo))
+                 : root.accent   // primary and secondary alike: gray reads as "not selected"
             font.family: sb.compact ? root.mono : root.uiFont
             font.pixelSize: sb.compact ? 10 : 13; font.bold: true
             font.letterSpacing: sb.compact ? 1.4 : root.btnTrack
         }
+        FontMetrics { id: sbFm; font: sbTxt.font }
         Ico {
             visible: sb.icon !== ""
             anchors.centerIn: parent
             anchors.horizontalCenterOffset: sb.iconLed ? -(sbTxt.implicitWidth + sb.icoGap) / 2 : 0
+            // Beside a word, the glyph sits on the word's cap-height center.
+            anchors.verticalCenterOffset: sb.iconLed ? sbTxt.anchors.verticalCenterOffset : 0
             name: sb.icon; size: sb.icoSize; bold: 8
             color: sbTxt.color   // one recipe for the word and the glyph, hover included
         }
@@ -13561,8 +13764,11 @@ ApplicationWindow {
         // word), so neither the slot hugging the word nor the arrow folding
         // away while finishing ever moves the header.
         implicitWidth: 19 + qbMetric.implicitWidth + root.btnPadH * 2
-        radius: root.btnRad; color: "transparent"
-        border.color: qbMa.containsMouse ? root.outline : root.border1
+        // Lit like an active nav tab while Download history (reached from
+        // the drawer) is the page on screen.
+        property bool active: false
+        radius: root.btnRad; color: active ? root.accentCont : "transparent"
+        border.color: active ? root.accentDim : qbMa.containsMouse ? root.outline : root.border1
         Behavior on border.color { ColorAnimation { duration: 180 } }
 
         readonly property int running: root.activeQueueCount - root.queuedCount
@@ -13597,8 +13803,11 @@ ApplicationWindow {
 
         property string flash: ""
         readonly property string mode: flash !== "" ? flash : root.activeQueueCount > 0 ? "run" : "idle"
-        readonly property string word: mode === "run" ? Math.floor(qb.pct) + "%" : mode === "done" ? "DONE" : mode === "fail" ? "FAIL" : "QUEUE"
-        readonly property color tone: mode === "run" ? root.accent : mode === "done" ? root.green : mode === "fail" ? root.red : root.textLo
+        // Running tops out at 99%: the last row's finish steps still run at
+        // 100%, and DONE says the rest (100% would also not fit beside a
+        // three-digit speed).
+        readonly property string word: mode === "run" ? Math.min(99, Math.floor(qb.pct)) + "%" : mode === "done" ? "DONE" : mode === "fail" ? "FAIL" : "QUEUE"
+        readonly property color tone: mode === "run" ? root.accent : mode === "done" ? root.green : mode === "fail" ? root.red : qb.active ? root.accent : root.textLo
         property string _shownMode: ""
         property double _runLeft: 0
         function showWord() {
@@ -13633,17 +13842,57 @@ ApplicationWindow {
                 Text { id: qbMetric; visible: false; textFormat: Text.PlainText; text: "QUEUE"; font: qbWord.font }
                 DecryptText {
                     id: qbWord; objectName: "queueButtonWord"; anchors.centerIn: parent; color: qb.tone
-                    // The chart draws its own words while running; the word
-                    // still sizes the slot.
-                    opacity: qb.mode === "run" ? 0 : 1
+                    // Under the chart (which carries the percent) while
+                    // running, gone by the time the chart is half in, and
+                    // back only once it is half out, so the two never show
+                    // at once; the word still sizes the slot.
+                    opacity: Math.max(0, 1 - 2 * qbStart.opacity)
                     font.family: root.uiFont; font.pixelSize: 13; font.bold: true; font.letterSpacing: root.btnTrack
                     font.features: { "tnum": 1 }
                 }
             }
         }
-        // The speed chart, the batch along its floor, and the download speed
-        // in its bottom left corner.
+        // The speed chart, and over it the batch percent, its digits
+        // centered top to bottom, and the download speed in the bottom right
+        // corner (its number, then the unit smaller), fading with the chart.
         QueueStart { id: qbStart; z: -1; anchors.centerIn: parent; btn: qb }
+        Item {
+            id: qbWords
+            objectName: "queueButtonWords"
+            anchors.fill: parent
+            opacity: Math.max(0, 2 * qbStart.opacity - 1); visible: opacity > 0
+            // The percent as it last read while running, so it fades out as
+            // it was instead of turning into DONE or FAIL.
+            property string held: "0%"
+            readonly property string live: qb.mode === "run" ? qb.word : ""
+            onLiveChanged: if (live !== "") held = live
+            QueueWord {
+                id: qbPct
+                objectName: "queueButtonPercent"
+                text: qbWords.held; color: root.accent; font.pixelSize: 14
+                // The digits centered, not the line box (whose room for
+                // descenders would sit them high).
+                readonly property rect tight: qbPm.tightBoundingRect("100%")
+                FontMetrics { id: qbPm; font: qbPct.font }
+                x: 5; y: (qbWords.height - tight.height) / 2 - tight.y - baselineOffset
+            }
+            Item {
+                id: qbSpd
+                objectName: "queueButtonSpeed"
+                readonly property real m: waves.downloadMbps || 0
+                readonly property string num: m <= 0 ? "--" : m >= 1000 ? (m / 1000).toFixed(1) : m < 10 ? m.toFixed(1) : "" + Math.round(m)
+                readonly property color ink: m > 0 ? root.accentSoft : root.textDim
+                implicitWidth: qbSpdN.implicitWidth + 1 + qbSpdU.implicitWidth; implicitHeight: qbSpdN.implicitHeight
+                width: implicitWidth; height: implicitHeight
+                x: qbWords.width - 3 - width; y: qbWords.height - height
+                QueueWord { id: qbSpdN; text: qbSpd.num; color: qbSpd.ink; font.pixelSize: 11 }
+                QueueWord {
+                    id: qbSpdU
+                    x: qbSpdN.implicitWidth + 1; y: qbSpdN.baselineOffset - baselineOffset
+                    text: qbSpd.m >= 1000 ? "Gb/s" : "Mb/s"; color: qbSpd.ink; font.pixelSize: 8; font.bold: false
+                }
+            }
+        }
 
         // The count in LED dots on the page's own color, cut into the
         // corner, with digits that roll up when it grows and down when it
@@ -13767,21 +14016,15 @@ ApplicationWindow {
         MouseArea { id: qbMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; z: 10; onClicked: qb.clicked() }
     }
 
-    // The QUEUE button's inside while anything downloads (queue item lab,
-    // "T1 throughput + floor"). Built for long queues: a frame reads the
-    // batch's few totals (btn.agg, counted once a tick) and a speed trace
-    // sampled every 250 ms (at most two points a pixel), so it costs the
-    // same for 5 items or 5,000, and twenty landings in one beat move a
-    // number, not the picture. The speed is an area over the download's own
-    // time, from the batch's start at the left edge to its live tip (a
-    // bright dot), which keeps step with the download and reaches the right
-    // edge as its last bytes land, so a short album fills it as fully as a
-    // long queue; through the finish steps (merge, extract, tagging) and the
-    // landing the trace holds still. The batch runs along the floor by
-    // tracks (landed bright, in flight pale, the finish steps included); the
-    // download speed sits in the bottom left corner, just clear of the
-    // floor. Drawn edge to edge inside the button's border; paints only
-    // while it shows.
+    // The QUEUE button's inside while anything downloads (queue concepts
+    // lab, round 7, "G"): the batch's speed as bars, one per half second of
+    // the last 12 s, scrolling left as time passes and standing on the
+    // button's floor, at 60% so the words over them (QueueButton's qbWords)
+    // read. The newest bar grows at the right edge; the ceiling rises at once
+    // to a new peak and settles slowly. It keeps a sample every 100 ms of the
+    // last 12 s, so it costs the same for 5 items or 5,000. Drawn edge to
+    // edge inside the button's border; fades in over the QUEUE word and out
+    // under DONE; paints only while it shows.
     component QueueStart: Canvas {
         id: st
         objectName: "queueButtonChart"
@@ -13801,138 +14044,64 @@ ApplicationWindow {
             function onActiveQueueCountChanged() { if (root.activeQueueCount === 0) st.fresh = true }
         }
         opacity: on ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 380; easing.type: Easing.InOutQuad } }
         visible: opacity > 0
-        readonly property var agg: btn ? btn.agg : null
         readonly property real rate: waves.downloadMbps || 0
-        readonly property string spdText: root.queueSpeedText()
         property double bootT: 0
-        // What it draws from, kept between frames: the whole batch's trace
-        // (tr: a speed sample every 250 ms of wall time, over the download
-        // clock dc, which runs only while something is left to download),
-        // and the eased batch (P landed plus in flight, Pd downloaded,
-        // Lw landed, all 0 to 1) and speed ceiling (mx).
+        // What it draws from, kept between frames: the samples (hs, each
+        // {t: wall ms, v: Mb/s}, one every 100 ms of the last 12.5 s), the
+        // eased speed they sample (cur) and the eased ceiling (mx).
         property var es: ({})
-        // The look of the speed's words and of the speed itself: the words'
-        // ink alpha, the dark keyline round each glyph (alpha, width), their
-        // size, and the speed's fill and line alphas.
-        property real wordAlpha: 1
-        property real keyAlpha: 0.9
-        property real keyWidth: 2.5
-        property real wordPx: 9
-        property real areaAlpha: 0.22
-        property real lineAlpha: 0.8
+        readonly property real span: 12000
+        readonly property real slot: 500
+        property real barAlpha: 0.6
 
-        function say(ctx, str, x, y, px, al, col, dim) {
-            ctx.save(); ctx.globalCompositeOperation = "source-over"
-            keyed(ctx, str, x, y, px, al, col, dim)
-            ctx.restore()
-        }
         function draw(ctx, t, dim) {
             var B = box(), x0 = B[0], y0 = B[1], w = B[2], h = B[3], bot = y0 + h, i
-            var G = st.agg || { W: 0, L: 0, F: 0, D: 0 }, E = st.es
-            var wall = E.t > 0 ? Math.max(0, t - E.t) : 0, dt = Math.min(100, wall)
+            var E = st.es, dt = E.t > 0 ? Math.min(100, Math.max(0, t - E.t)) : 0
             E.t = t
             var ez = function (cur, to, tau) { return cur === undefined ? to : cur + (to - cur) * (1 - Math.exp(-dt / tau)) }
-            var W = Math.max(1, G.W), P = Math.min(1, (G.L + G.F) / W), Lw = Math.min(1, G.L / W)
-            // The download alone, 0 to 1: the speed's front, complete at the
-            // right edge when the last bytes land, whatever the finish steps
-            // still do. The download clock runs only while it is short of
-            // that, so the trace holds still through the finish steps.
-            var Pd = Math.min(1, (G.L + (G.D || 0)) / W), dl = Pd < 0.999
-            if (!(E.dc >= 0)) E.dc = 0
-            if (dl) E.dc += wall
-            // A sample every 250 ms of wall time, so a slow frame rate
-            // (settled, or the window away) keeps the clock.
-            if (!E.ht || t - E.ht > 60000) E.ht = t - 250
-            // The trace: the whole batch's speed over the download clock, the
-            // same samples while anything downloads, each entry the speed
-            // summed over its n samples at their mean time. Past two entries
-            // a pixel, neighbors merge in pairs, so a long batch costs the
-            // same as a short one and the line keeps one to two points a
-            // pixel.
-            var Tr = E.tr || (E.tr = []), C = 2 * Math.max(8, Math.floor(w))
-            while (t - E.ht >= 250) {
-                E.ht += 250
-                var mb = waves.paused ? 0 : st.rate
-                if (!dl) continue
-                Tr.push({ t: Math.max(0, E.dc - (t - E.ht)), sum: mb, n: 1 })
-                if (Tr.length > C) {
-                    var half = []
-                    for (i = 0; i + 1 < Tr.length; i += 2) {
-                        var u = Tr[i], v = Tr[i + 1], k = u.n + v.n
-                        half.push({ t: (u.t * u.n + v.t * v.n) / k, sum: u.sum + v.sum, n: k })
-                    }
-                    if (Tr.length % 2) half.push(Tr[Tr.length - 1])
-                    E.tr = Tr = half
-                }
-            }
-            E.P = ez(E.P, P, 250); E.Lw = ez(E.Lw, Lw, 300); E.Pd = ez(E.Pd, Pd, 250)
-            // The live tip: the speed right now, eased, so the line's front
-            // moves between samples instead of waiting for the next one.
-            E.cur = ez(E.cur, waves.paused ? 0 : st.rate, 300)
-            var N = Tr.length, mx = Math.max(1, E.cur)
-            for (i = 0; i < N; ++i) mx = Math.max(mx, Tr[i].sum / Tr[i].n)
-            E.mx = ez(E.mx, mx, 600)
-            // Settled: nothing arriving and nothing left to ease, so four
-            // frames a second draw the same picture.
-            st.calm = (waves.paused || st.rate <= 0) && t - st.bootT > 600
-                && Math.abs(E.P - P) < 0.002 && Math.abs(E.Lw - Lw) < 0.002 && Math.abs(E.Pd - Pd) < 0.002
-                && Math.abs(E.mx - mx) < 0.01 * mx
+            // The speed eased between the bridge's updates, sampled every
+            // 100 ms of wall time, so a slow frame rate (settled, or the
+            // window away) keeps the clock and the bars grow smoothly.
+            E.cur = ez(E.cur, waves.paused ? 0 : st.rate, 500)
+            var H = E.hs || (E.hs = [])
+            if (!E.ht || t - E.ht > 60000) E.ht = t - 100
+            while (t - E.ht >= 100) { E.ht += 100; H.push({ t: E.ht, v: E.cur }) }
+            while (H.length && H[0].t < t - st.span - st.slot) H.shift()
+            var top = Math.max(1, E.cur * 1.2)
+            for (i = 0; i < H.length; ++i) top = Math.max(top, H[i].v * 1.2)
+            E.mx = E.mx === undefined ? top : E.mx + (top - E.mx) * (1 - Math.exp(-dt / (top > E.mx ? 250 : 2500)))
+            // Settled: nothing arriving and nothing left on screen to scroll,
+            // so four frames a second draw the same (empty) picture.
+            var quiet = (waves.paused || st.rate <= 0) && E.cur < 0.05
+            for (i = 0; quiet && i < H.length; ++i) if (H[i].v >= 0.05) quiet = false
+            st.calm = quiet && t - st.bootT > 600
 
-            // The speed over the download clock, from the left edge (the
-            // batch's start) to its front, which keeps step with the download
-            // (eased the same) and reaches the right edge as its last bytes
-            // land. The clock is spread over that span, so a short album
-            // fills the button as fully as a long queue, and both stand
-            // still through the finish steps. While the batch has not moved
-            // yet (the first tracks still starting) it grows a pixel a sample.
-            var top = h - 3
-            var fx = x0 + w * E.P, lx = x0 + w * Math.min(E.P, E.Lw)
-            var R = Math.min(x0 + w, Math.max(x0 + w * E.Pd, x0 + Math.min(N, w * 0.12)))
-            var Tw = Math.max(1, E.dc)
-            var X = function (q) { return x0 + (R - x0) * Math.min(1, Tr[q].t / Tw) }
-            var Y = function (q) { return bot - top * (Tr[q].sum / Tr[q].n) / E.mx }
-            var yc = bot - top * E.cur / E.mx
-            if (N > 0) {
-                ctx.beginPath(); ctx.moveTo(x0, bot)
-                for (i = 0; i < N; ++i) ctx.lineTo(X(i), Y(i))
-                ctx.lineTo(R, yc); ctx.lineTo(R, bot); ctx.closePath()
-                ctx.fillStyle = rgba(st.areaAlpha * dim); ctx.fill()
-                ctx.beginPath(); ctx.moveTo(X(0), Y(0))
-                for (i = 1; i < N; ++i) ctx.lineTo(X(i), Y(i))
-                ctx.lineTo(R, yc)
-                ctx.strokeStyle = rgba(st.lineAlpha * dim, 0.15); ctx.lineWidth = 1; ctx.stroke()
+            // A bar per half second of the clock, its height the mean of its
+            // samples (the newest, still growing, takes the live speed too).
+            var ht = h - 4, bw = w * st.slot / st.span, b0 = Math.floor((t - st.span) / st.slot) * st.slot, k = 0
+            for (var bt = b0; bt < t; bt += st.slot) {
+                var sum = 0, n = 0
+                while (k < H.length && H[k].t < bt) ++k
+                for (var q = k; q < H.length && H[q].t < bt + st.slot; ++q) { sum += H[q].v; ++n }
+                if (bt + st.slot > t) { sum += E.cur; ++n }
+                if (!n || sum <= 0) continue
+                var bx = x0 + w - (t - bt) / st.span * w, by = bot - ht * Math.min(1, sum / n / E.mx)
+                ctx.fillStyle = rgba(0.22 * st.barAlpha * dim); ctx.fillRect(bx + 0.5, by, bw - 1.2, bot - by)
+                ctx.fillStyle = rgba(0.85 * st.barAlpha * dim); ctx.fillRect(bx + 0.5, by, bw - 1.2, 1)
             }
-            // The batch along the floor: landed bright, in flight pale.
-            ctx.fillStyle = rgba(0.1 * dim); ctx.fillRect(x0, bot - 1.5, w, 1.5)
-            ctx.fillStyle = ink(root.textHi, 0.75 * dim); ctx.fillRect(x0, bot - 1.5, lx - x0, 1.5)
-            ctx.fillStyle = ink(root.textHi, 0.3 * dim); ctx.fillRect(lx, bot - 1.5, fx - lx, 1.5)
-            // The dot on the speed line's live tip.
-            if (N > 0) { ctx.fillStyle = rgba(0.95 * dim, 0.4); ctx.fillRect(Math.min(R - 1, x0 + w - 2), yc - 1, 2, 2) }
-            // The download speed in the bottom left corner, its baseline far
-            // enough over the floor that the slash's tail and the glyphs'
-            // keyline (half its width below the baseline) end a clear pixel
-            // over the floor's line.
-            var spT = st.spdText, ty = bot - 1.5 - st.keyWidth / 2 - 2.5
-            say(ctx, spT || "-- Mb/s", x0 + 3, ty, st.wordPx, "left", rgba((spT ? 0.95 : 0.4) * dim, 0.35), dim)
+            // The oldest bars fade out at the left edge instead of being cut.
+            ctx.save(); ctx.globalCompositeOperation = "destination-out"
+            var f = ctx.createLinearGradient(x0, 0, x0 + 14, 0)
+            f.addColorStop(0, "rgba(0,0,0,1)"); f.addColorStop(1, "rgba(0,0,0,0)")
+            ctx.fillStyle = f; ctx.fillRect(x0, y0, 14, h); ctx.restore()
         }
-        // Mono text with a dark keyline round each glyph, so it reads where
-        // it crosses the chart's line or fill.
-        function keyed(ctx, str, x, y, px, al, col, dim) {
-            ctx.font = "bold " + px + "px \"" + root.mono + "\""; ctx.textAlign = al; ctx.textBaseline = "alphabetic"
-            if (st.keyWidth > 0 && st.keyAlpha > 0) {
-                ctx.lineJoin = "round"; ctx.lineWidth = st.keyWidth; ctx.strokeStyle = ink(root.bg, st.keyAlpha * dim)
-                ctx.strokeText(str, x, y)
-            }
-            ctx.globalAlpha = st.wordAlpha; ctx.fillStyle = col; ctx.fillText(str, x, y); ctx.globalAlpha = 1
+        // The accent at alpha a.
+        function rgba(a) {
+            var A = root.accent
+            return "rgba(" + Math.round(255 * A.r) + "," + Math.round(255 * A.g) + "," + Math.round(255 * A.b) + "," + Math.max(0, a) + ")"
         }
-        // The accent at alpha a, mixed c of the way to white.
-        function rgba(a, c) {
-            var k = c || 0, A = root.accent
-            return "rgba(" + Math.round(255 * (A.r + (1 - A.r) * k)) + "," + Math.round(255 * (A.g + (1 - A.g) * k)) + ","
-                + Math.round(255 * (A.b + (1 - A.b) * k)) + "," + Math.max(0, a) + ")"
-        }
-        function ink(c, a) { return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + Math.max(0, a) + ")" }
         // The inside of the border, read off the button itself.
         function box() {
             if (st.btn) { var a = st.btn.mapToItem(st, 0, 0); return [a.x / st.s + 1.5, a.y / st.s + 1.5, st.btn.width - 3, st.btn.height - 3] }
@@ -13946,10 +14115,10 @@ ApplicationWindow {
         }
         // Full rate only while something moves. A queue that is paused, or
         // waiting with nothing arriving (offline, a NAS that went away), has
-        // a chart that has settled once its numbers have eased in, and four
-        // frames a second keep its history ticking. A speed or a pause wakes
-        // it at once, and a hidden window draws nothing (the clocks are wall
-        // time, so it picks up where it is).
+        // a chart that has settled once its last bars have scrolled away,
+        // and four frames a second keep its clock ticking. A speed or a
+        // pause wakes it at once, and a hidden window draws nothing (the
+        // clocks are wall time, so it picks up where it is).
         property bool calm: false
         readonly property bool busy: !calm
         readonly property bool paused: waves.paused
@@ -13964,9 +14133,16 @@ ApplicationWindow {
             ctx.scale(st.s, st.s)
             var B = box(), r = root.btnRad - 1.5
             ctx.beginPath(); ctx.roundedRect(B[0], B[1], B[2], B[3], r, r); ctx.clip()
-            ctx.globalCompositeOperation = "lighter"
             draw(ctx, Date.now(), waves.paused ? 0.5 : 1)
         }
+    }
+    // The QUEUE button's words over its chart: the header buttons' UI face,
+    // bold, tabular digits, outlined in the page's color so they read over
+    // the bars.
+    component QueueWord: Text {
+        textFormat: Text.PlainText
+        style: Text.Outline; styleColor: root.bg
+        font.family: root.uiFont; font.bold: true; font.features: { "tnum": 1 }
     }
 
     // The QUEUE button's count in 3x5 LED dots, rolling a row at a time
@@ -14406,138 +14582,145 @@ ApplicationWindow {
             color: root.surface0
             border.color: root.border1
             radius: 10
-            Column {
+            // Built on the first expand, not with the row: a collapsed album
+            // carries its row only (3.8 ms a row to 2.2 ms, measured 2026-11-24).
+            Loader {
                 id: expandedCol
-                x: 16; y: 12; width: parent.width - 32; spacing: 12
-                Row {
-                    width: parent.width; spacing: 16
-                    Art { width: 116; height: 116; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
-                    Column {
-                        width: parent.width - 132 - abPanelMeta.width - 16; spacing: 6
-                        Text { text: "ALBUM"; color: root.textDim; font.pixelSize: 11 }
-                        Text {
-                            textFormat: Text.PlainText; text: title
-                            color: abPanelTitleMa.containsMouse ? "#ffffff" : root.textHi
-                            font.pixelSize: 21; font.bold: true; width: parent.width; elide: Text.ElideRight
-                            MouseArea {
-                                id: abPanelTitleMa
-                                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-                                width: Math.min(parent.width, parent.implicitWidth)
-                                enabled: !root.onAlbumPage(albumId)
-                                hoverEnabled: enabled
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: root.openAlbumPage(albumId, "", title, art)
-                            }
-                        }
-                        ArtistLinks {
-                            width: parent.width
-                            px: 14
-                            artists: ab.leadArtists
-                            suffix: root.dateText(listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
-                        }
-                        Row {
-                            spacing: 10; topPadding: 6
-                            // With the merge preference on the backend runs the
-                            // best-of-both scan behind this same button; no
-                            // separate action.
-                            DownloadButton {
-                                mediaId: albumId; label: "Download album"
-                                // null, not [], while the track list has not landed: an
-                                // empty list reads as a firm "not owned" and flashed
-                                // DOWNLOAD over an owned album until the tracks arrived.
-                                // Until then the button asks the store's remembered
-                                // members by album id (collectionCheck).
-                                collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : null
-                                collectionCheck: true
-                                libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec, explicitFlag: ab.explicit ? 1 : -1, lib: ab.libBaked, libStamp: ab.libStamp })
-                                onTap: function(){ waves.downloadAlbum(albumId) }
-                            }
+                x: 16; y: 12; width: parent.width - 32
+                active: ab.expanded || ab.folding
+                sourceComponent: Column {
+                    spacing: 12
+                    Row {
+                        width: parent.width; spacing: 16
+                        Art { width: 116; height: 116; hoverFx: true; fxKind: "album"; fxId: albumId; url: art }
+                        Column {
+                            width: parent.width - 132 - abPanelMeta.width - 16; spacing: 6
+                            Text { text: "ALBUM"; color: root.textDim; font.pixelSize: 11 }
                             Text {
-                                text: "Copy link"; color: root.textLo; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("album", albumId) }
-                            }
-                        }
-                    }
-                    // Quality + popularity stacked top-right, out of the action row.
-                    Column {
-                        id: abPanelMeta
-                        spacing: 8; topPadding: 4
-                        QualPick { anchors.right: parent.right; mediaId: ab.albumId; catalog: ab.quality; atmos: ab.atmos; mix: ab.qualMix }
-                        PopMeter { anchors.right: parent.right; value: popularity }
-                    }
-                }
-                Text {
-                    visible: !root.trackCache[albumId]
-                    text: root.trackCache[albumId] === null ? "No tracks to show, collapse and expand to try again" : "Loading tracks…"
-                    textFormat: Text.PlainText
-                    color: root.textLo; font.pixelSize: 13
-                }
-                Column {
-                    width: parent.width; spacing: 0
-                    // Select-all header
-                    RowLayout {
-                        visible: ab.trackList.length > 0
-                        width: parent.width; height: 40; spacing: 12
-                        Check { Layout.alignment: Qt.AlignVCenter; checked: ab.allSelected; onToggled: ab.toggleAll() }
-                        Text { text: "Select all"; color: root.textLo; font.pixelSize: 13 }
-                        Text { textFormat: Text.PlainText; text: "· " + ab.selCount + " of " + ab.trackList.length + " selected"; color: root.textDim; font.pixelSize: 12 }
-                        Item { Layout.fillWidth: true }
-                        Rectangle {
-                            Layout.alignment: Qt.AlignVCenter
-                            opacity: ab.selCount > 0 ? 1 : 0.4
-                            // Sized like DownloadButton so it matches DOWNLOAD ALBUM above.
-                            radius: root.btnRad; color: root.accentCont; border.color: root.accentDim; border.width: 1
-                            implicitHeight: dsRow.implicitHeight + root.btnPadV * 2; implicitWidth: dsRow.implicitWidth + root.btnPadH * 2
-                            Row { id: dsRow; anchors.centerIn: parent; spacing: 7
-                                Ico { name: "arrow-down"; color: root.accent; size: 14; bold: 10; anchors.verticalCenter: parent.verticalCenter }
-                                Text { text: "DOWNLOAD SELECTED"; color: root.accent; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
-                            }
-                            MouseArea { anchors.fill: parent; enabled: ab.selCount > 0; cursorShape: ab.selCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: ab.downloadSelected() }
-                        }
-                    }
-                    // Tracks
-                    Repeater {
-                        model: ab.trackList
-                        delegate: Rectangle {
-                            required property var modelData
-                            width: parent.width; height: 40; color: "transparent"
-                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
-                            RowLayout {
-                                anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 12
-                                Check { Layout.alignment: Qt.AlignVCenter; checked: ab.sel[modelData.id] === true; onToggled: ab.setSel(modelData.id, !(ab.sel[modelData.id] === true)) }
-                                Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 16; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
-                                TrackPreview { kind: "track"; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
-                                Text {
-                                    objectName: "trackTitle"
-                                    textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true
-                                    // The explicit mark rides inside the title's
-                                    // tail, as on TrackRow, so an inline expand
-                                    // tells a clean twin apart too.
-                                    rightPadding: modelData.explicit === true ? abExp.width + 6 : 0
-                                    ExplicitMark {
-                                        id: abExp
-                                        visible: modelData.explicit === true
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        x: Math.min(parent.contentWidth + 6, parent.width - parent.rightPadding + 6)
-                                    }
+                                textFormat: Text.PlainText; text: title
+                                color: abPanelTitleMa.containsMouse ? "#ffffff" : root.textHi
+                                font.pixelSize: 21; font.bold: true; width: parent.width; elide: Text.ElideRight
+                                MouseArea {
+                                    id: abPanelTitleMa
+                                    anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                    width: Math.min(parent.width, parent.implicitWidth)
+                                    enabled: !root.onAlbumPage(albumId)
+                                    hoverEnabled: enabled
+                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: root.openAlbumPage(albumId, "", title, art)
                                 }
-                                PopMeter { value: modelData.popularity }
-                                Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
-                                DownIcon {
-                                    mediaId: modelData.id
-                                    // The panel knows the release these rows
-                                    // belong to, so a match here can be PROVEN
-                                    // (green) rather than hedged by title alone.
-                                    // The row names the release itself (and
-                                    // arrives dressed, see _dress_panel_rows);
-                                    // the block's own strings stand in for a
-                                    // row that does not.
-                                    libTrack: ({ artist: modelData.artist || ab.artistName, title: modelData.title,
-                                                 album: modelData.album || ab.title, year: modelData.year || ab.year,
-                                                 duration_sec: modelData.duration_sec || 0,
-                                                 explicitFlag: modelData.explicit === true ? 1 : modelData.explicit === false ? 0 : -1,
-                                                 lib: modelData.lib, libStamp: modelData.libStamp })
-                                    onTap: function(){ waves.downloadTrack(modelData.id) }
+                            }
+                            ArtistLinks {
+                                width: parent.width
+                                px: 14
+                                artists: ab.leadArtists
+                                suffix: root.dateText(listedDate !== "" ? listedDate : releaseDate !== "" ? releaseDate : year) + (trackCount > 0 ? " · " + trackCount + " tracks" : "")
+                            }
+                            Row {
+                                spacing: 10; topPadding: 6
+                                // With the merge preference on the backend runs the
+                                // best-of-both scan behind this same button; no
+                                // separate action.
+                                DownloadButton {
+                                    mediaId: albumId; label: "Download album"
+                                    // null, not [], while the track list has not landed: an
+                                    // empty list reads as a firm "not owned" and flashed
+                                    // DOWNLOAD over an owned album until the tracks arrived.
+                                    // Until then the button asks the store's remembered
+                                    // members by album id (collectionCheck).
+                                    collectionIds: ab.trackList.length > 0 ? ab.trackList.map(function(t){ return t.id }) : null
+                                    collectionCheck: true
+                                    libAlbum: ({ artist: ab.artistName, title: ab.title, year: ab.year, tracks: ab.trackCount, duration_sec: ab.durationSec, explicitFlag: ab.explicit ? 1 : -1, lib: ab.libBaked, libStamp: ab.libStamp })
+                                    onTap: function(){ waves.downloadAlbum(albumId) }
+                                }
+                                Text {
+                                    text: "Copy link"; color: root.textLo; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: waves.copyShareUrl("album", albumId) }
+                                }
+                            }
+                        }
+                        // Quality + popularity stacked top-right, out of the action row.
+                        Column {
+                            id: abPanelMeta
+                            spacing: 8; topPadding: 4
+                            QualPick { anchors.right: parent.right; mediaId: ab.albumId; catalog: ab.quality; atmos: ab.atmos; mix: ab.qualMix }
+                            PopMeter { anchors.right: parent.right; value: popularity }
+                        }
+                    }
+                    Text {
+                        visible: !root.trackCache[albumId]
+                        text: root.trackCache[albumId] === null ? "No tracks to show, collapse and expand to try again" : "Loading tracks…"
+                        textFormat: Text.PlainText
+                        color: root.textLo; font.pixelSize: 13
+                    }
+                    Column {
+                        width: parent.width; spacing: 0
+                        // Select-all header
+                        RowLayout {
+                            visible: ab.trackList.length > 0
+                            width: parent.width; height: 40; spacing: 12
+                            Check { Layout.alignment: Qt.AlignVCenter; checked: ab.allSelected; onToggled: ab.toggleAll() }
+                            Text { text: "Select all"; color: root.textLo; font.pixelSize: 13 }
+                            Text { textFormat: Text.PlainText; text: "· " + ab.selCount + " of " + ab.trackList.length + " selected"; color: root.textDim; font.pixelSize: 12 }
+                            Item { Layout.fillWidth: true }
+                            Rectangle {
+                                Layout.alignment: Qt.AlignVCenter
+                                opacity: ab.selCount > 0 ? 1 : 0.4
+                                // Sized like DownloadButton so it matches DOWNLOAD ALBUM above.
+                                radius: root.btnRad; color: dsMa.containsMouse && ab.selCount > 0 ? Qt.lighter(root.accentCont, 1.35) : root.accentCont; border.color: root.accentDim; border.width: 1
+                                Behavior on color { ColorAnimation { duration: 110 } }
+                                implicitHeight: dsRow.implicitHeight + root.btnPadV * 2; implicitWidth: dsRow.implicitWidth + root.btnPadH * 2
+                                Row { id: dsRow; anchors.centerIn: parent; spacing: 7
+                                    Ico { name: "arrow-down"; color: root.accent; size: 14; bold: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "DOWNLOAD SELECTED"; color: root.accent; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
+                                }
+                                MouseArea { id: dsMa; anchors.fill: parent; hoverEnabled: true; enabled: ab.selCount > 0; cursorShape: ab.selCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: ab.downloadSelected() }
+                            }
+                        }
+                        // Tracks
+                        Repeater {
+                            model: ab.trackList
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: parent.width; height: 40; color: "transparent"
+                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 12
+                                    Check { Layout.alignment: Qt.AlignVCenter; checked: ab.sel[modelData.id] === true; onToggled: ab.setSel(modelData.id, !(ab.sel[modelData.id] === true)) }
+                                    Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 15; font.bold: true; Layout.preferredWidth: 16; Layout.leftMargin: -4; horizontalAlignment: Text.AlignLeft }
+                                    TrackPreview { kind: "track"; pid: modelData.id; Layout.alignment: Qt.AlignVCenter }
+                                    Text {
+                                        objectName: "trackTitle"
+                                        textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true
+                                        // The explicit mark rides inside the title's
+                                        // tail, as on TrackRow, so an inline expand
+                                        // tells a clean twin apart too.
+                                        rightPadding: modelData.explicit === true ? abExp.width + 6 : 0
+                                        ExplicitMark {
+                                            id: abExp
+                                            visible: modelData.explicit === true
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            x: Math.min(parent.contentWidth + 6, parent.width - parent.rightPadding + 6)
+                                        }
+                                    }
+                                    PopMeter { value: modelData.popularity }
+                                    Text { textFormat: Text.PlainText; text: modelData.duration; color: root.textLo; font.family: root.mono; font.pixelSize: 12; Layout.preferredWidth: 42 }
+                                    DownIcon {
+                                        mediaId: modelData.id
+                                        // The panel knows the release these rows
+                                        // belong to, so a match here can be PROVEN
+                                        // (green) rather than hedged by title alone.
+                                        // The row names the release itself (and
+                                        // arrives dressed, see _dress_panel_rows);
+                                        // the block's own strings stand in for a
+                                        // row that does not.
+                                        libTrack: ({ artist: modelData.artist || ab.artistName, title: modelData.title,
+                                                     album: modelData.album || ab.title, year: modelData.year || ab.year,
+                                                     duration_sec: modelData.duration_sec || 0,
+                                                     explicitFlag: modelData.explicit === true ? 1 : modelData.explicit === false ? 0 : -1,
+                                                     lib: modelData.lib, libStamp: modelData.libStamp })
+                                        onTap: function(){ waves.downloadTrack(modelData.id) }
+                                    }
                                 }
                             }
                         }
@@ -14736,13 +14919,14 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignVCenter
                             opacity: pb.selCount > 0 ? 1 : 0.4
                             // Sized like DownloadButton so it matches DOWNLOAD PLAYLIST above.
-                            radius: root.btnRad; color: root.accentCont; border.color: root.accentDim; border.width: 1
+                            radius: root.btnRad; color: pbDsMa.containsMouse && pb.selCount > 0 ? Qt.lighter(root.accentCont, 1.35) : root.accentCont; border.color: root.accentDim; border.width: 1
+                            Behavior on color { ColorAnimation { duration: 110 } }
                             implicitHeight: pbDsRow.implicitHeight + root.btnPadV * 2; implicitWidth: pbDsRow.implicitWidth + root.btnPadH * 2
                             Row { id: pbDsRow; anchors.centerIn: parent; spacing: 7
                                 Ico { name: "arrow-down"; color: root.accent; size: 14; bold: 10; anchors.verticalCenter: parent.verticalCenter }
                                 Text { text: "DOWNLOAD SELECTED"; color: root.accent; font.pixelSize: 11; font.family: root.uiFont; font.bold: true; font.letterSpacing: root.btnTrack; anchors.verticalCenter: parent.verticalCenter }
                             }
-                            MouseArea { anchors.fill: parent; enabled: pb.selCount > 0; cursorShape: pb.selCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: pb.downloadSelected() }
+                            MouseArea { id: pbDsMa; anchors.fill: parent; hoverEnabled: true; enabled: pb.selCount > 0; cursorShape: pb.selCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: pb.downloadSelected() }
                         }
                     }
                     // Tracks (playlist order; a video entry previews and
@@ -17590,6 +17774,13 @@ ApplicationWindow {
         readonly property int rowBandH: 10 * 62
         readonly property real rowAnchorY: pendingRestoreY >= 0
             ? pendingRestoreY : Math.floor(contentY / rowBandH) * rowBandH
+        // Whether something at y `top` of the content column, h tall, is
+        // within a screen of the view (same banding, see artistView.rowNear:
+        // what is farther is not drawn).
+        function rowNear(top, h) {
+            var t = (col ? col.y : 0) + top
+            return t + h > rowAnchorY - height && t < rowAnchorY + rowBandH + 2 * height
+        }
         // Arm the hold-in-place across an in-place content swap. Runs for a
         // hidden pane too: a landing revalidating behind an open page still
         // collapses its column, and the clamp does not care about
@@ -18515,6 +18706,162 @@ ApplicationWindow {
         }
     }
 
+    // One Download history entry (a queued album, playlist, mix, track or
+    // video that saved something), in the album row's look. It is a log: the
+    // panel lists what that run did with each track, not TIDAL's track list.
+    component HistoryRow: Column {
+        id: hr
+        property string entryId: ""
+        property string kind: ""
+        property string mediaId: ""
+        property string name: ""
+        property string artistName: ""
+        property string art: ""
+        property string status: ""
+        property string landed: ""
+        property string mixJson: "[]"
+        property string date: ""
+        property string timeText: ""
+        property int saved: 0
+        property int total: 0
+        property string tracksJson: "[]"
+        property bool expanded: false
+        onEntryIdChanged: expanded = false   // a recycled delegate starts folded
+        readonly property bool canExpand: total > 1 && tracksJson !== "[]"
+        readonly property var trackList: expanded ? JSON.parse(tracksJson || "[]") : []
+        readonly property string kindWord: kind === "album" ? "Album" : kind === "playlist" ? "Playlist"
+            : kind === "mix" ? "Mix" : kind === "video" ? "Video" : "Track"
+        spacing: 6
+
+        Rectangle {
+            width: parent.width; height: 64; radius: 10
+            color: hrMa.containsMouse && hr.canExpand ? root.surface2 : root.surface
+            border.color: hr.expanded ? root.outline : root.border1
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 14; spacing: 12
+                Text {
+                    text: "›"; rotation: hr.expanded ? 90 : 0; opacity: hr.canExpand ? 1 : 0
+                    color: hr.expanded ? root.accent : root.textDim; font.pixelSize: 16
+                    Layout.preferredWidth: 12; horizontalAlignment: Text.AlignHCenter
+                    Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                }
+                Art { width: root.albumRowArt; height: root.albumRowArt; url: hr.art }
+                ColumnLayout {
+                    Layout.fillWidth: true; spacing: 2
+                    Text {
+                        textFormat: Text.PlainText; text: hr.name
+                        color: hrTitleMa.containsMouse ? "#ffffff" : root.textHi
+                        font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true
+                        // An album entry's title opens the album page.
+                        MouseArea {
+                            id: hrTitleMa
+                            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                            width: Math.min(parent.width, parent.implicitWidth)
+                            enabled: hr.kind === "album" && hr.mediaId !== ""
+                            hoverEnabled: enabled
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: root.openAlbumPage(hr.mediaId, "", hr.name, hr.art)
+                        }
+                    }
+                    Text {
+                        textFormat: Text.PlainText; Layout.fillWidth: true; elide: Text.ElideRight
+                        color: root.textLo; font.pixelSize: 12
+                        text: [hr.artistName, hr.kindWord, (root.dateText(hr.date) + " " + hr.timeText).trim(),
+                               hr.total > 1 ? hr.saved + " of " + hr.total + " saved" : ""]
+                              .filter(function(x) { return x !== "" }).join(" · ")
+                    }
+                }
+                QualTag {
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: hr.landed !== "" || hr.mixJson !== "[]"
+                    q: hr.landed; mix: JSON.parse(hr.mixJson || "[]")
+                }
+            }
+            MouseArea {
+                id: hrMa; anchors.fill: parent; z: -1
+                hoverEnabled: true; enabled: hr.canExpand; cursorShape: Qt.PointingHandCursor
+                onClicked: hr.expanded = !hr.expanded
+            }
+        }
+        // The run's own log, one line per track.
+        Rectangle {
+            visible: hr.expanded
+            width: parent.width; height: visible ? hrTracks.height + 16 : 0
+            radius: 10; color: root.surface0; border.color: root.border1
+            Column {
+                id: hrTracks
+                x: 16; y: 8; width: parent.width - 32
+                Repeater {
+                    model: hr.trackList
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: hrTracks.width; height: 36; color: "transparent"
+                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.divider }
+                        RowLayout {
+                            anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 12
+                            Text { textFormat: Text.PlainText; text: modelData.num; color: root.textDim; font.family: root.mono; font.pixelSize: 13; font.bold: true; Layout.preferredWidth: 24 }
+                            Text { textFormat: Text.PlainText; text: modelData.title; color: root.textHi; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+                            QualTag { visible: modelData.status === "done" && (modelData.quality || "") !== ""; q: modelData.quality || "" }
+                            // When this track's file landed (older entries have none).
+                            Text {
+                                textFormat: Text.PlainText; visible: text !== ""
+                                text: modelData.savedDate ? root.dateText(modelData.savedDate) + " " + modelData.savedTime : ""
+                                color: root.textDim; font.family: root.mono; font.pixelSize: 12
+                            }
+                            Text {
+                                textFormat: Text.PlainText; text: root.historyTrackWord(modelData.status)
+                                color: modelData.status === "done" ? root.accent : root.textLo
+                                font.pixelSize: 12; Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    function historyTrackWord(st) {
+        return st === "done" ? "Saved" : st === "skipped" ? "Already had"
+             : st === "unavailable" ? "Not on TIDAL" : st === "failed" ? "Failed" : "Not saved"
+    }
+    // Download history: opened from the Queue drawer, shown as a hidden My
+    // Tidal category so it gets the pane's keep-alive, paging and Back.
+    property bool historyReady: false
+    // History lives in the My Tidal pane but belongs to the queue: the header
+    // lights QUEUE for it, not My Tidal, and the category chips stay away.
+    // The history page's own filter (the chips: "" is Home, all kinds) and
+    // order (newest first unless historyOldest).
+    property string historyKind: ""
+    property bool historyOldest: false
+    // The search box: every word must be in the entry's name, artist or a
+    // track title. Applied after a short pause in typing.
+    property string historyQuery: ""
+    Timer { id: historySearchDebounce; interval: 250; onTriggered: root.historyFilter(root.historyKind, root.historyOldest) }
+    function historySearch(text) {
+        if (text === historyQuery) return
+        historyQuery = text
+        // Emptied, the whole list is back at once; a word waits for the pause.
+        if (text.trim() === "") { historySearchDebounce.stop(); historyFilter(historyKind, historyOldest) }
+        else historySearchDebounce.restart()
+    }
+    // Whether the page has anything to sort or search: rows, or a search that
+    // hid them all (the box must stay to be emptied).
+    readonly property bool historyHasRows: libHistoryModel.count > 0 || historyQuery.trim() !== ""
+    function historyLoad(offset, limit) { waves.loadHistory(offset, historyKind, historyOldest, limit || 0, historyQuery.trim()) }
+    function historyFilter(kind, oldest) {
+        historyKind = kind; historyOldest = oldest
+        libPinRefill = false; libCatHasMore["history"] = false
+        libHistoryList.positionViewAtBeginning()
+        historyLoad(0)
+    }
+    readonly property bool historyShown: libraryOpen && libraryCategory === "history" && !artistOpen && !settingsOpen
+    property bool confirmHistoryClear: false
+    function openHistory() {
+        queueDrawer.close()
+        navPush(); markNav("history"); navOrigin = "history"
+        libraryOpen = true; releasesOpen = false; settingsOpen = false; artistOpen = false
+        loadLib("history")
+    }
+
     // ---- Models ---------------------------------------------------------
     ListModel { id: artistsModel }
     ListModel { id: albumsModel }
@@ -18534,6 +18881,7 @@ ApplicationWindow {
     ListModel { id: libPlaylistsModel }
     ListModel { id: libMixesModel }
     ListModel { id: libVideosModel }
+    ListModel { id: libHistoryModel }
     // Drilled-into playlist folder (issue #11). Its own model on purpose: a
     // background revalidate of the playlists tab clears the six lib models,
     // and must not wipe the folder the user is standing in.
@@ -18784,12 +19132,6 @@ ApplicationWindow {
     // How far the running rows' finish steps have come, 0 to 1 (the mean of
     // each row's queueItemFinish), for the QUEUE button's pour.
     property var queueFinish: ({})
-    // The batch's download speed for the QUEUE button's tag, "" while
-    // nothing streams.
-    function queueSpeedText() {
-        var m = waves.downloadMbps || 0
-        return m <= 0 ? "" : (m < 10 ? m.toFixed(1) : Math.round(m)) + " Mb/s"
-    }
     // The QUEUE button's batch in a few totals, weighed by tracks (a row
     // with no track count weighs one): W all of it, L landed (done or
     // failed), F the share in flight (a running row's download fills 85% of
@@ -19105,7 +19447,8 @@ ApplicationWindow {
     function libModelFor(cat) {
         return cat === "albums" ? libAlbumsModel : cat === "tracks" ? libTracksModel
              : cat === "artists" ? libArtistsModel : cat === "playlists" ? libPlaylistsModel
-             : cat === "mixes" ? libMixesModel : cat === "videos" ? libVideosModel : null
+             : cat === "mixes" ? libMixesModel : cat === "videos" ? libVideosModel
+             : cat === "history" ? libHistoryModel : null
     }
     // The keep-alive view pane for a category (for scroll pinning across a
     // revalidate refill). The playlists pane pins its ROOT list; the drilled
@@ -19113,7 +19456,8 @@ ApplicationWindow {
     function libViewFor(cat) {
         return cat === "albums" ? libAlbumsList : cat === "tracks" ? libTracksList
              : cat === "artists" ? libArtistsGrid : cat === "playlists" ? libPlaylistsList
-             : cat === "mixes" ? libMixesList : cat === "videos" ? libVideosList : null
+             : cat === "mixes" ? libMixesList : cat === "videos" ? libVideosList
+             : cat === "history" ? libHistoryList : null
     }
     // ---- My Tidal sort (per category) --------------------------------------
     // Options adapt to the category; every category shares a "Recently added"
@@ -19178,7 +19522,8 @@ ApplicationWindow {
         if (view.count === 0 || view.contentHeight <= 0) return
         if (view.contentY - view.originY + view.height > view.contentHeight - view.height * 1.5) {
             root.libLoadingMore = true
-            waves.loadMoreLibrary(cat)
+            if (cat === "history") root.historyLoad(view.count)
+            else waves.loadMoreLibrary(cat)
         }
     }
 
@@ -19215,6 +19560,40 @@ ApplicationWindow {
                 v.pendingY = -1
                 v.positionViewAtBeginning()
             }
+        }
+        function onHistoryLoaded(items, more, offset) {
+            root.libCatHasMore["history"] = more
+            if (root.libraryCategory === "history") root.libLoadingMore = false
+            if (offset === 0) root.reconcileById(libHistoryModel, items, false)
+            else if (offset === libHistoryModel.count) {
+                // A row that settled since the last page shifted this one down:
+                // its first rows are already the list's last ones.
+                var have = {}
+                for (var i = Math.max(0, libHistoryModel.count - items.length); i < libHistoryModel.count; ++i) have[libHistoryModel.get(i).id] = true
+                root.appendPlain(libHistoryModel, items.filter(function(it) { return !have[it.id] }))
+            }
+            root.historyReady = true
+        }
+        // One entry was written, or ("") the list was cleared. A loaded list
+        // follows along whether or not it is on screen, one row at a time: a
+        // history of thousands of rows is never reread for one download.
+        function onHistoryChanged(id) {
+            if (!root.historyReady) return
+            if (id === "") { root.libCatHasMore["history"] = false; root.historyLoad(0) }
+            else waves.loadHistoryEntry(id, root.historyKind, root.historyQuery.trim())
+        }
+        // That entry as the filters see it ([] when it does not pass them).
+        function onHistoryEntry(id, rows) {
+            var m = libHistoryModel, at = -1
+            for (var i = 0; i < m.count; ++i) if (m.get(i).id === id) { at = i; break }
+            if (rows.length === 0) { if (at >= 0) m.remove(at); return }
+            var row = rows[0]
+            // Same time: rewritten in place (a late track). A new time is a
+            // row that settled again, which goes where the order puts it.
+            if (at >= 0 && m.get(at).finished_at === row.finished_at) { m.set(at, row); return }
+            if (at >= 0) m.remove(at)
+            if (!root.historyOldest) m.insert(0, row)
+            else if (!root.libCatHasMore["history"]) m.append(row)
         }
         function onLibraryMore(cat, items, more) {
             if (cat !== root.libraryCategory) return
@@ -19930,7 +20309,7 @@ ApplicationWindow {
                 id: headerRow
                 anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
                 height: 56; anchors.leftMargin: 22; anchors.rightMargin: 22; spacing: 12
-                WaveMark { id: headerMark }
+                WaveMark { id: headerMark; eqPlayer: previewPlayer }
                 // Wordmark sized to fill the logo box height (sublabel removed).
                 Text {
                     text: "WAVES"; color: root.textHi; font.bold: true; font.letterSpacing: 2.6
@@ -19966,6 +20345,7 @@ ApplicationWindow {
                 }
                 NavTab {
                     label: "My Tidal"
+                    visible: root.navMyTidal
                     active: root.navOrigin === "library" && !root.settingsOpen
                     onClicked: root.openLibrary()
                 }
@@ -19974,7 +20354,8 @@ ApplicationWindow {
                     active: root.settingsOpen
                     onClicked: { root.navPush(); root.markNav("settings"); root.settingsOpen = true; root.artistOpen = false; root.libraryOpen = false; root.releasesOpen = false }
                 }
-                QueueButton { onClicked: queueDrawer.open() }
+                // Lit on Download history and on a page opened from one of its rows.
+                QueueButton { active: root.navOrigin === "history" && !root.settingsOpen; onClicked: queueDrawer.open() }
                 // connection pill
                 Rectangle {
                     implicitHeight: 26; implicitWidth: connRow.implicitWidth + 22; radius: 13
@@ -20349,14 +20730,14 @@ ApplicationWindow {
                             anchors.horizontalCenter: parent.horizontalCenter
                             implicitWidth: bLandRetryTxt.implicitWidth + root.btnPadH * 2
                             implicitHeight: bLandRetryTxt.implicitHeight + root.btnPadV * 2
-                            radius: root.btnRad; color: "transparent"; border.color: root.accentDim
+                            radius: root.btnRad; color: bLandRetryTxtMa.containsMouse ? Qt.alpha(root.accentCont, 0.7) : "transparent"; border.color: root.accentDim
                             Text {
                                 id: bLandRetryTxt; anchors.centerIn: parent; text: "RETRY"
                                 color: root.accent; font.family: root.uiFont; font.pixelSize: 12
                                 font.bold: true; font.letterSpacing: root.btnTrack
                             }
                             MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                id: bLandRetryTxtMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                 onClicked: { root.browseLoading = true; root.browseError = false; waves.loadBrowse() }
                             }
                         }
@@ -20457,8 +20838,16 @@ ApplicationWindow {
                             // and held back until the launch warm reaches its
                             // slot (see root.bootWarmShelves).
                             opacity: root.browseBuilding || bsecLd.slot >= root.bootWarmShelves ? 0 : 1
+                            // A shelf more than a screen from the view is not
+                            // drawn (its item is hidden, the Loader keeps the
+                            // height). Never during the launch: the warm paints
+                            // every shelf once, on purpose.
+                            readonly property bool near: root.bootContentShown < 1 || browseLanding.rowNear(y, height)
                             // A late section joined no count (see browseSecSlots).
-                            onLoaded: if (!late) root._browseBuildTick()
+                            onLoaded: {
+                                if (!late) root._browseBuildTick()
+                                item.visible = Qt.binding(function() { return bsecLd.near })
+                            }
                             sourceComponent: BrowseSection {
                                 sec: root.browseSections[bsecLd.slot] || root._browseSecHeld.prev[bsecLd.slot]
                                 secIndex: bsecLd.slot
@@ -20826,14 +21215,14 @@ ApplicationWindow {
                             anchors.horizontalCenter: parent.horizontalCenter
                             implicitWidth: bDrillRetryTxt.implicitWidth + root.btnPadH * 2
                             implicitHeight: bDrillRetryTxt.implicitHeight + root.btnPadV * 2
-                            radius: root.btnRad; color: "transparent"; border.color: root.accentDim
+                            radius: root.btnRad; color: bDrillRetryTxtMa.containsMouse ? Qt.alpha(root.accentCont, 0.7) : "transparent"; border.color: root.accentDim
                             Text {
                                 id: bDrillRetryTxt; anchors.centerIn: parent; text: "RETRY"
                                 color: root.accent; font.family: root.uiFont; font.pixelSize: 12
                                 font.bold: true; font.letterSpacing: root.btnTrack
                             }
                             MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                id: bDrillRetryTxtMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                 onClicked: root.retryBrowsePage()
                             }
                         }
@@ -21338,6 +21727,23 @@ ApplicationWindow {
                     ? Math.max(0, pendingRestoreY + height - realContentH) : 0
                 readonly property real realContentH: artistCol.height + 32
                 contentWidth: width; contentHeight: realContentH + restorePad
+                // Rows more than a screen away from the view are not drawn.
+                // Qt draws every item of a page however far off screen, and
+                // a row tilting at an edge re-uploaded the geometry of the
+                // WHOLE page with it: an 80-album artist delivered ~80 of 120
+                // frames a second while scrolling (2026-11-24), ~115 with the
+                // far rows hidden. Each row Loader hides its ITEM (never
+                // itself: the column would close up) once it has loaded, so
+                // a row is born visible and its cover fetch starts as before.
+                // Stepped in bands like BrowseScroll.rowAnchorY, so a scroll
+                // re-tests the rows once per band, not once per frame.
+                readonly property int rowBandH: 10 * 62
+                readonly property real rowAnchorY: Math.floor(contentY / rowBandH) * rowBandH
+                // top: the row's y in artistCol.
+                function rowNear(top, h) {
+                    var t = artistCol.y + top
+                    return t + h > rowAnchorY - height && t < rowAnchorY + rowBandH + 2 * height
+                }
                 ScrollBar.vertical: WavesScrollBar {}
                 boundsBehavior: Flickable.StopAtBounds
                 // A fresh artist page starts at the top (it used to inherit the
@@ -21700,7 +22106,8 @@ ApplicationWindow {
                         visible: shown
                         width: artistCol.width; height: 62
                         asynchronous: index < root._artistSyncFromTracks || index >= root._artistSyncTracks
-                        onLoaded: root._artistRowLanded("tracks")
+                        readonly property bool near: artistView.rowNear(y, height)
+                        onLoaded: { root._artistRowLanded("tracks"); item.visible = Qt.binding(function() { return near }) }
                         sourceComponent: TrackRow {
                             tId: model.id; title: model.title; artistName: model.artist; artistId: ""
                             album: model.album; art: model.art; year: model.year; date: model.date; duration: model.duration; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
@@ -21738,7 +22145,8 @@ ApplicationWindow {
                         // panel still grows the row.
                         height: item ? item.implicitHeight : 64
                         asynchronous: index < root._artistSyncFromAlbums || index >= root._artistSyncAlbums
-                        onLoaded: root._artistRowLanded("albums")
+                        readonly property bool near: artistView.rowNear(y, height)
+                        onLoaded: { root._artistRowLanded("albums"); item.visible = Qt.binding(function() { return near }) }
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                             art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
@@ -21772,7 +22180,8 @@ ApplicationWindow {
                         width: artistCol.width
                         height: item ? item.implicitHeight : 64
                         asynchronous: index < root._artistSyncFromEps || index >= root._artistSyncEps
-                        onLoaded: root._artistRowLanded("eps")
+                        readonly property bool near: artistView.rowNear(y, height)
+                        onLoaded: { root._artistRowLanded("eps"); item.visible = Qt.binding(function() { return near }) }
                         sourceComponent: AlbumBlock {
                             albumId: model.id; title: model.title; artistName: model.artist; artistId: ""
                             art: model.art; year: model.year; releaseDate: model.date; listedDate: model.listed || ""; trackCount: model.tracks; durationSec: model.duration_sec || 0; quality: model.quality; atmos: model.atmos === true; popularity: model.popularity
@@ -21832,7 +22241,8 @@ ApplicationWindow {
                             width: artistVideoGrid.cellW
                             height: Math.round(artistVideoGrid.cellW * 9 / 16) + 54
                             asynchronous: index < root._artistSyncFromVideos || index >= root._artistSyncVideos
-                            onLoaded: root._artistRowLanded("videos")
+                            readonly property bool near: artistView.rowNear(artistVideoGrid.y + y, height)
+                            onLoaded: { root._artistRowLanded("videos"); item.visible = Qt.binding(function() { return near }) }
                             sourceComponent: VideoCell {
                                 width: artistVideoGrid.cellW
                                 vid: model.id; vcTitle: model.title; vcArtist: model.artist
@@ -21977,7 +22387,8 @@ ApplicationWindow {
                     }
                 }
                 Rectangle { width: 1; height: 22; color: root.border1; Layout.alignment: Qt.AlignVCenter }
-                // A definite-width Flow inside a fillWidth Item (see libTabsFlow).
+                // A definite-width Flow inside a fillWidth Item: a Flow with
+                // Layout.fillWidth directly hits a stale-width loop and wraps.
                 // The page's chips on the left, its search box at the right
                 // end (relSearch), which opens into the room the chips leave.
                 Item {
@@ -23752,40 +24163,71 @@ ApplicationWindow {
             // right, all one row (like Settings). No separate back header (you
             // arrive here from the nav) and no separate sort row underneath.
             RowLayout {
+                id: libHeaderRow
                 Layout.fillWidth: true; Layout.leftMargin: 22; Layout.rightMargin: 22; Layout.topMargin: 2
                 spacing: 14
                 Text {
-                    textFormat: Text.PlainText; text: "My Tidal"; color: root.textHi
+                    id: libTitleText
+                    textFormat: Text.PlainText; text: root.libraryCategory === "history" ? "Download history" : "My Tidal"; color: root.textHi
                     font.pixelSize: 18; font.bold: true; Layout.alignment: Qt.AlignVCenter
                 }
-                // Wrap the tab strip in a plain Item that carries Layout.fillWidth,
-                // and flow against a DEFINITE width (parent.width). A Flow with
-                // Layout.fillWidth directly hits a stale-width feedback loop and
-                // wraps spuriously on narrower (but still valid) window sizes,
-                // leaving a dead band under the tabs. This is the pattern the other
-                // Flows in this file use.
+                // The chips are one Row: they never wrap to a second line.
+                // The slot takes whatever the row leaves (implicit width 0,
+                // so the chips never feed back into it); where that is less
+                // than the chips need, they go tight (no dot, less padding).
                 Item {
+                    objectName: "libTabsSlot"
+                    // A history search opened in a narrow window takes this
+                    // room until it closes (see historySearchBox).
+                    visible: !historySearchBox.overChips
                     Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
                     implicitHeight: libTabsFlow.implicitHeight
-                    Flow {
+                    clip: true   // last resort only: tight chips fit at the window's minimum width
+                    Row {
                         id: libTabsFlow
                         objectName: "libTabsFlow"
-                        width: parent.width; spacing: 8
+                        spacing: 8
+                        // The width the chips need on one line, full size and
+                        // tight. Asked of each chip's own `shown`, never
+                        // `visible`, which also reads false while the whole
+                        // strip is hidden.
+                        function lineWidth(tight) {
+                            var w = 0, n = 0
+                            for (var i = 0; i < children.length; ++i) {
+                                var c = children[i]
+                                if (c.shown === true) { w += tight ? c.tightWidth : c.fullWidth; n++ }
+                            }
+                            return w + Math.max(0, n - 1) * spacing
+                        }
+                        readonly property real oneLine: lineWidth(false)
+                        readonly property real tightLine: lineWidth(true)
+                        readonly property bool tight: parent.width < oneLine
+                        // On the history page the chips filter the list by kind
+                        // (Home shows every kind). An artist download logs as
+                        // its albums, so Artists has nothing to show there.
+                        readonly property bool forHistory: root.libraryCategory === "history"
                         Repeater {
-                            model: [["home", "Home"], ["albums", "Albums"], ["tracks", "Tracks"], ["artists", "Artists"], ["playlists", "Playlists"], ["mixes", "Mixes"], ["videos", "Videos"]]
+                            model: [["home", "Home", ""], ["albums", "Albums", "album"], ["tracks", "Tracks", "track"], ["artists", "Artists", "artist"], ["playlists", "Playlists", "playlist"], ["mixes", "Mixes", "mix"], ["videos", "Videos", "video"]]
                             delegate: Rectangle {
                                 id: lchip
                                 required property var modelData
-                                readonly property bool on: root.libraryCategory === modelData[0]
-                                radius: 8; implicitHeight: 30; implicitWidth: lcRow.implicitWidth + 26
+                                readonly property bool shown: !(libTabsFlow.forHistory && modelData[0] === "artists")
+                                visible: shown
+                                readonly property bool on: libTabsFlow.forHistory ? root.historyKind === modelData[2] : root.libraryCategory === modelData[0]
+                                readonly property real fullWidth: lcText.implicitWidth + 13 + 26
+                                readonly property real tightWidth: lcText.implicitWidth + 16
+                                radius: 8; implicitHeight: 30; implicitWidth: libTabsFlow.tight ? tightWidth : fullWidth
                                 color: on ? root.accentCont : "transparent"
                                 border.color: on ? root.accentDim : root.border1
                                 Row {
-                                    id: lcRow; anchors.centerIn: parent; spacing: 7
-                                    Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: lchip.on ? root.accent : root.textDim }
-                                    Text { textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: lchip.modelData[1]; color: lchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
+                                    anchors.centerIn: parent; spacing: 7
+                                    Rectangle { visible: !libTabsFlow.tight; width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: lchip.on ? root.accent : root.textDim }
+                                    Text { id: lcText; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: lchip.modelData[1]; color: lchip.on ? root.accent : root.textLo; font.pixelSize: 13 }
                                 }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.loadLib(lchip.modelData[0]) }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: libTabsFlow.forHistory ? root.historyFilter(lchip.modelData[2], root.historyOldest) : root.loadLib(lchip.modelData[0])
+                                }
                             }
                         }
                     }
@@ -23908,6 +24350,87 @@ ApplicationWindow {
                         st: favVideosBtn.st
                     }
                 }
+                // History page only: finds entries by name, artist or track
+                // title. Dressed like the sort box beside it.
+                Rectangle {
+                    id: historySearchBox
+                    objectName: "historySearchBox"
+                    visible: root.libraryCategory === "history" && root.historyHasRows
+                    Layout.alignment: Qt.AlignVCenter
+                    // The chips never wrap to make room for this box. Where
+                    // the row cannot hold both, it folds to its magnifier and
+                    // takes the chips' room only while it is being typed in.
+                    // Left with a search in it, it folds back with the
+                    // magnifier lit, so the chips can filter what was found.
+                    readonly property real fullWidth: 170
+                    readonly property real room: libHeaderRow.width - libTitleText.implicitWidth - libSortBox.implicitWidth
+                                                 - historyClearSlot.implicitWidth - 4 * libHeaderRow.spacing
+                    readonly property bool narrow: room < libTabsFlow.tightLine + fullWidth
+                    property bool asked: false
+                    readonly property bool open: asked || historySearchField.activeFocus
+                    readonly property bool holds: historySearchField.text !== ""
+                    readonly property bool folded: narrow && !open
+                    readonly property bool overChips: visible && narrow && open
+                    Layout.fillWidth: overChips
+                    implicitHeight: 40; implicitWidth: folded ? 40 : fullWidth; radius: 8
+                    color: root.surface2
+                    border.color: historySearchField.activeFocus ? root.accent
+                                : historySearchFoldMa.containsMouse || (folded && holds) ? root.accentDim : root.outline
+                    Ico {
+                        name: "search"; size: 15
+                        color: historySearchField.activeFocus || historySearchFoldMa.containsMouse
+                               || (historySearchBox.folded && historySearchBox.holds) ? root.accent : root.textLo
+                        x: 12.5; anchors.verticalCenter: parent.verticalCenter
+                    }
+                    MouseArea {
+                        id: historySearchFoldMa
+                        objectName: "historySearchFold"
+                        anchors.fill: parent; visible: historySearchBox.folded
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        Accessible.role: Accessible.Button
+                        Accessible.name: historySearchBox.holds ? "Search download history, a search is on" : "Search download history"
+                        onClicked: { historySearchBox.asked = true; historySearchField.forceActiveFocus() }
+                    }
+                    TextField {
+                        id: historySearchField
+                        objectName: "historySearchField"
+                        visible: !historySearchBox.folded
+                        onActiveFocusChanged: if (!activeFocus) historySearchBox.asked = false
+                        anchors.left: parent.left; anchors.leftMargin: 36
+                        anchors.right: historySearchClear.visible ? historySearchClear.left : parent.right
+                        anchors.rightMargin: historySearchClear.visible ? 2 : 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+                        background: Rectangle { color: "transparent" }
+                        color: root.textHi
+                        placeholderTextColor: root.textLo
+                        font.pixelSize: 14; selectByMouse: true
+                        placeholderText: "Search history…"
+                        Accessible.name: "Search download history"
+                        onTextChanged: root.historySearch(text)
+                        // Enter applies now rather than after the pause.
+                        onAccepted: { historySearchDebounce.stop(); root.historyFilter(root.historyKind, root.historyOldest) }
+                        Keys.onEscapePressed: { text = ""; focus = false }
+                        // Cleared from elsewhere (CLEAR HISTORY): show it.
+                        readonly property string needle: root.historyQuery
+                        onNeedleChanged: if (text !== needle) text = needle
+                    }
+                    Item {
+                        id: historySearchClear
+                        visible: !historySearchBox.folded && historySearchField.text !== ""
+                        anchors.right: parent.right; width: 30; height: parent.height
+                        Ico {
+                            name: "close"; size: 11
+                            color: historySearchClearMa.containsMouse ? root.textHi : root.textLo
+                            anchors.centerIn: parent
+                        }
+                        MouseArea {
+                            id: historySearchClearMa
+                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: { historySearchField.text = ""; historySearchField.forceActiveFocus() }
+                        }
+                    }
+                }
                 // Sort (mirrors the Search sort); hidden on the Recent strip,
                 // which is already newest-first and merged across kinds.
                 ComboBox {
@@ -23917,19 +24440,26 @@ ApplicationWindow {
                     // keep the same position on every tab. Toggling `visible`
                     // here dropped ~40px and shifted the whole pane vertically
                     // when switching to or from Home.
-                    opacity: root.libraryCategory === "home" ? 0 : 1
-                    enabled: root.libraryCategory !== "home"
+                    // On the history page it picks newest or oldest first.
+                    readonly property bool forHistory: root.libraryCategory === "history"
+                    // An empty history has nothing to order: hidden the same way.
+                    readonly property bool shown: root.libraryCategory !== "home" && !(forHistory && libHistoryModel.count === 0)
+                    opacity: shown ? 1 : 0
+                    enabled: shown
                     Layout.alignment: Qt.AlignVCenter
-                    implicitHeight: 40; implicitWidth: 160
-                    model: root.libSortLabels(root.libraryCategory)
+                    // Narrower on history (two short choices), so the search
+                    // box fits beside it without wrapping the chips.
+                    implicitHeight: 40; implicitWidth: forHistory ? 140 : 160
+                    model: forHistory ? ["Most recent", "Oldest first"] : root.libSortLabels(root.libraryCategory)
                     // A Binding element (not an inline currentIndex) so the value
                     // survives the control's own imperative write on selection.
                     Binding {
                         target: libSortBox; property: "currentIndex"
-                        value: root.libSortCurrentIndex(root.libraryCategory)
+                        value: libSortBox.forHistory ? (root.historyOldest ? 1 : 0) : root.libSortCurrentIndex(root.libraryCategory)
                         restoreMode: Binding.RestoreBindingOrValue
                     }
                     onActivated: {
+                        if (forHistory) { root.historyFilter(root.historyKind, currentIndex === 1); return }
                         var opts = root.libSortOptions(root.libraryCategory)
                         root.libApplySort(root.libraryCategory, opts[currentIndex][1], root.libSortGet(root.libraryCategory).asc)
                     }
@@ -23965,6 +24495,9 @@ ApplicationWindow {
                 Rectangle {
                     // Reserve its space on Home too, matching libSortBox above,
                     // so the header height and tab positions never shift.
+                    // Out of the row on the history page, where CLEAR HISTORY
+                    // takes the trailing edge (its 40px slot keeps the height).
+                    visible: root.libraryCategory !== "history"
                     opacity: root.libraryCategory === "home" ? 0 : 1
                     enabled: root.libraryCategory !== "home"
                     Layout.alignment: Qt.AlignVCenter
@@ -23978,6 +24511,23 @@ ApplicationWindow {
                     MouseArea {
                         anchors.fill: parent; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: { var g = root.libSortGet(root.libraryCategory); root.libApplySort(root.libraryCategory, g.key, !g.asc) }
+                    }
+                }
+                // History page only: empties the list (confirmed first). Sits in a
+                // 40px slot like the sort controls it replaces, so the header
+                // keeps its height.
+                Item {
+                    id: historyClearSlot
+                    visible: root.libraryCategory === "history"
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitHeight: 40; implicitWidth: historyClearBtn.implicitWidth
+                    SpecBtn {
+                        id: historyClearBtn
+                        objectName: "historyClearBtn"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: libHistoryModel.count > 0
+                        danger: true; label: "CLEAR HISTORY"
+                        onClicked: root.confirmHistoryClear = true
                     }
                 }
             }
@@ -23999,6 +24549,29 @@ ApplicationWindow {
                         explicit: model.explicit === true
                         libBaked: model.lib; libStamp: model.libStamp
                     }
+                }
+                LibList {
+                    id: libHistoryList
+                    objectName: "libHistoryList"
+                    cat: "history"; model: libHistoryModel
+                    delegate: HistoryRow {
+                        required property var model
+                        width: ListView.view.width
+                        entryId: model.id; kind: model.kind || ""; mediaId: model.media_id || ""
+                        name: model.name || ""; artistName: model.artist || ""; art: model.art || ""
+                        status: model.status || ""; landed: model.landed || ""; mixJson: model.mix || "[]"
+                        date: model.date || ""; timeText: model.time || ""; saved: model.saved || 0; total: model.total || 0
+                        tracksJson: model.tracksJson || "[]"
+                    }
+                }
+                Text {
+                    id: historyEmpty
+                    objectName: "historyEmpty"
+                    visible: root.libraryCategory === "history" && root.historyReady && libHistoryModel.count === 0
+                    anchors.horizontalCenter: parent.horizontalCenter; y: 40
+                    textFormat: Text.PlainText; text: root.historyQuery.trim() !== "" ? "Nothing in your history matches that search."
+                        : root.historyKind === "" ? "Downloads you finish from now on appear here." : "Nothing of this kind in your history yet."
+                    color: root.textLo; font.pixelSize: 14
                 }
                 LibList {
                     id: libTracksList
@@ -25616,6 +26189,7 @@ ApplicationWindow {
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                                     height: 15
                                     sourceComponent: DotMatrix {
+                                    id: qmx
                                     objectName: "queueRowMatrix"
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                                     rows: 4; dot: 3; gap: 1; maxCols: 0
@@ -25628,7 +26202,40 @@ ApplicationWindow {
                                     // rounds 2-4, 2026-08-17).
                                     edgeFadeW: 28; edgeSoft: 0.15
                                     pulse: qrow.st === "running"
-                                    pct: qrow.st === "done" ? 100 : model.progress
+                                    // The row hears its progress in steps (a
+                                    // collection's twice a second, off the
+                                    // track poll), and drawn as told the bar
+                                    // sat still and then lit a column and a
+                                    // half at once. A rise is filled LINEARLY
+                                    // over a little more than one poll, so the
+                                    // blocks light one by one at an even pace,
+                                    // and a long leap (owned tracks skipped in
+                                    // a burst) gets 22ms a point, 1.5s at most,
+                                    // like the download buttons (dlHolderComp).
+                                    // The leap is the REPORT's size, not the
+                                    // bar's distance behind: measured off the
+                                    // bar, a fast download's lag fed its own
+                                    // ramp and FINISHING began half filled.
+                                    // A fall, the first reading, a row that is
+                                    // no longer running (`pulse` is exactly
+                                    // that; a done bar reads full before it
+                                    // fades) and hover motion off all snap.
+                                    readonly property real told: qrow.st === "done" ? 100 : model.progress
+                                    property real heard: 0
+                                    property int glideMs: 0
+                                    function hear() {
+                                        var leap = Math.max(0, told - heard)
+                                        heard = told
+                                        glideMs = (root.hoverMotion && pulse && told > pct) ? Math.min(1500, 600 + leap * 22) : 0
+                                        pct = told
+                                    }
+                                    onToldChanged: hear()
+                                    onPulseChanged: hear()
+                                    Component.onCompleted: { heard = told; pct = told }
+                                    Behavior on pct {
+                                        enabled: qmx.glideMs > 0
+                                        NumberAnimation { duration: qmx.glideMs; easing.type: Easing.Linear }
+                                    }
                                     // 100% but still running = the final steps (merge,
                                     // tag) are in flight: twinkle, don't freeze.
                                     finishing: qrow.st === "running" && model.progress >= 99.9
@@ -26140,6 +26747,13 @@ ApplicationWindow {
                     label: root.queueExportLabel(-1, "MISSING REPORT")
                     onClicked: waves.exportMissingTracks(-1)
                 }
+                // Everything Waves has saved, on its own page.
+                SpecBtn {
+                    id: queueHistoryBtn
+                    objectName: "queueHistoryBtn"
+                    label: "HISTORY"
+                    onClicked: root.openHistory()
+                }
                 // Pushes the button to the trailing edge, under the section
                 // headers' own controls, so the three CLEARs line up vertically.
                 Item { Layout.fillWidth: true }
@@ -26552,11 +27166,7 @@ ApplicationWindow {
                     text: "Waves doesn't have a folder to save downloads to yet. Pick where your music should go, then start the download again."
                 }
                 SpecBtn { Layout.alignment: Qt.AlignHCenter; primary: true; label: "OPEN DOWNLOAD SETTINGS"; onClicked: { root.folderGateBlocking = false; root.openDownloadSetting() } }
-                Text {
-                    Layout.alignment: Qt.AlignHCenter
-                    textFormat: Text.PlainText; text: "Not now"; color: root.textLo; font.pixelSize: 13
-                    MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.folderGateBlocking = false }
-                }
+                SpecBtn { Layout.alignment: Qt.AlignHCenter; label: "NOT NOW"; onClicked: root.folderGateBlocking = false }
             }
         }
     }
@@ -26685,6 +27295,41 @@ ApplicationWindow {
                         }
                     }
                     SpecBtn { label: "CANCEL"; onClicked: root.catDlDismiss() }
+                }
+            }
+        }
+    }
+
+    // CLEAR HISTORY on the Download history page: the list only, never a file.
+    Rectangle {
+        id: historyClearGate
+        objectName: "historyClearGate"
+        anchors.fill: parent
+        visible: root.confirmHistoryClear
+        color: "#cc06070e"
+        MouseArea { anchors.fill: parent; onClicked: root.confirmHistoryClear = false }   // click-away cancels
+        Rectangle {
+            anchors.centerIn: parent; width: 460
+            implicitHeight: hcCol.implicitHeight + 40
+            radius: 14; color: root.surface2; border.color: root.outline
+            MouseArea { anchors.fill: parent }   // a click on the card must not dismiss
+            ColumnLayout {
+                id: hcCol; anchors.centerIn: parent; width: parent.width - 40; spacing: 14
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.textHi; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap; text: "Clear your download history?" }
+                Text {
+                    textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    color: root.textLo; font.pixelSize: 13; lineHeight: 1.3
+                    text: "This clears the list only. Your files stay where they are."
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 4; spacing: 12
+                    SpecBtn {
+                        id: historyClearConfirm
+                        objectName: "historyClearConfirm"
+                        primary: true; label: "CLEAR HISTORY"
+                        onClicked: { root.confirmHistoryClear = false; root.historyQuery = ""; waves.clearHistory() }
+                    }
+                    SpecBtn { label: "CANCEL"; onClicked: root.confirmHistoryClear = false }
                 }
             }
         }
@@ -28847,7 +29492,9 @@ ApplicationWindow {
                         }
                     }
                     CloseChoice {
+                        id: exTile
                         objectName: "exitGateExit"
+                        hoverTone: root.red
                         Layout.fillWidth: true; Layout.preferredWidth: 1
                         danger: exitGate.running > 0
                         label: exitGate.running > 0 ? "EXIT ANYWAY" : "EXIT"
@@ -28859,7 +29506,7 @@ ApplicationWindow {
                         }
                         PowerSign {
                             anchors.centerIn: parent
-                            ink: exitGate.running > 0 ? root.red : root.textHi
+                            ink: exitGate.running > 0 || exTile.hot ? root.red : root.textHi
                         }
                     }
                 }
@@ -28916,11 +29563,12 @@ ApplicationWindow {
         default property alias sign: ccSign.data
         readonly property bool hot: ccMa.containsMouse
         readonly property color tone: danger ? root.red : primary ? root.accent : root.textHi
+        property color hoverTone: tone
         implicitHeight: 84
         radius: 10
         color: hot ? root.surface3 : root.surface
         border.width: 1
-        border.color: hot ? tone : danger ? root.redDim : primary ? root.accentDim : root.outline
+        border.color: hot ? hoverTone : danger ? root.redDim : primary ? root.accentDim : root.outline
         Behavior on color { ColorAnimation { duration: 120 } }
         Behavior on border.color { ColorAnimation { duration: 120 } }
         Item {
@@ -28932,7 +29580,7 @@ ApplicationWindow {
             textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom; anchors.bottomMargin: 17
-            text: cc.label; color: cc.tone
+            text: cc.label; color: cc.hot ? cc.hoverTone : cc.tone
             font.pixelSize: 12; font.bold: true; font.letterSpacing: 0.3
         }
         MouseArea {
@@ -29010,7 +29658,9 @@ ApplicationWindow {
                         }
                     }
                     CloseChoice {
+                        id: clTile
                         objectName: "closeGateExit"
+                        hoverTone: root.red
                         Layout.fillWidth: true; Layout.preferredWidth: 1
                         danger: closeGate.warnDl
                         label: closeGate.warnDl ? "EXIT ANYWAY" : "EXIT"
@@ -29025,7 +29675,7 @@ ApplicationWindow {
                         }
                         PowerSign {
                             anchors.centerIn: parent
-                            ink: closeGate.warnDl ? root.red : root.textHi
+                            ink: closeGate.warnDl || clTile.hot ? root.red : root.textHi
                         }
                     }
                 }
