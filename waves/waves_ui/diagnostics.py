@@ -39,6 +39,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import faulthandler
+import functools
 import getpass
 import hashlib
 import logging
@@ -511,6 +512,26 @@ class _PerfSampler:
         self._probe_busy = 0.0
         self._probe_wall = 0.0
         self._probe_max_stall = 0.0
+        # Presented-frame accounting (note_frame) and process CPU between samples.
+        self._running = False
+        self._last_frame = 0.0
+        self._frames = 0
+        self._slow_frames = 0
+        self._cpu_last = (0.0, 0.0)
+
+    def note_frame(self) -> None:
+        """One frame was presented. A gap over 0.5s is the window sitting idle,
+        not a dropped frame, so only gaps inside continuous drawing count. Over
+        50ms is late: the 30fps background video alone leaves 33-45ms gaps."""
+        if not self._running:
+            return
+        now = time.monotonic()
+        gap = now - self._last_frame
+        self._last_frame = now
+        if gap < 0.5:
+            self._frames += 1
+            if gap > 0.05:
+                self._slow_frames += 1
 
     def register_pool(self, name: str, pool) -> None:
         self._pools.append((name, pool))
@@ -522,6 +543,8 @@ class _PerfSampler:
             from PySide6.QtCore import QTimer
         except Exception:
             return
+        self._running = True
+        self._cpu_last = (time.process_time(), time.monotonic())
         self._timer = QTimer()
         self._timer.setInterval(_SAMPLER_INTERVAL_MS)
         self._timer.timeout.connect(self._sample)
@@ -533,6 +556,7 @@ class _PerfSampler:
         self._probe_timer.start()
 
     def stop(self) -> None:
+        self._running = False
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
@@ -588,6 +612,15 @@ class _PerfSampler:
             rss = self._rss_mb()
             if rss is not None:
                 parts.append(f"peak_rss={rss:.0f}MB")
+            cpu_now, wall_now = time.process_time(), time.monotonic()
+            cpu_prev, wall_prev = self._cpu_last
+            self._cpu_last = (cpu_now, wall_now)
+            if wall_now > wall_prev:
+                # This process only (all threads, not ffmpeg children): 100% is one full core.
+                parts.append(f"waves_cpu={100 * (cpu_now - cpu_prev) / (wall_now - wall_prev):.0f}%")
+            if self._frames:
+                parts.append(f"frames_slow={self._slow_frames}/{self._frames}")
+                self._frames = self._slow_frames = 0
             fds = self._open_fds()
             if fds is not None:
                 parts.append(f"fds={fds}")
@@ -654,6 +687,11 @@ def set_crash_file(handle) -> None:
     so freeze tracebacks land next to crash tracebacks."""
     global _crash_file
     _crash_file = handle
+
+
+def note_frame() -> None:
+    """The window presented a frame (a cheap no-op unless verbose is on)."""
+    _sampler.note_frame()
 
 
 def register_pool(name: str, pool) -> None:
@@ -859,6 +897,119 @@ def _qt_version() -> str:
         return "?"
 
 
+# --------------------------------------------------------------------------
+# Hardware description (export header). One switch hides all of it.
+# --------------------------------------------------------------------------
+
+_graphics_note = ""
+
+
+def note_graphics(win) -> None:
+    """Remember the window's graphics backend and display (size, refresh rate,
+    scale) once the window is up; read later by the export on any thread. Best
+    effort: the packaged app trims QtQuick, so the backend may be unavailable
+    and is then left out. Never a screen name, only numbers."""
+    global _graphics_note
+    parts: list[str] = []
+    with contextlib.suppress(Exception):
+        parts.append(f"backend={win.rendererInterface().graphicsApi().name}")
+    with contextlib.suppress(Exception):
+        scr = win.screen()
+        size = scr.size()
+        parts.append(
+            f"display={size.width()}x{size.height()}@{scr.refreshRate():.0f}Hz scale={scr.devicePixelRatio():g}"
+        )
+    _graphics_note = " ".join(parts)
+
+
+def _run_text(cmd: list[str]) -> str:
+    """Stdout of a short read-only system query, "" on any failure."""
+    import subprocess
+
+    with contextlib.suppress(Exception):
+        # fixed argv, no shell
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False).stdout  # noqa: S603
+    return ""
+
+
+def _cpu_model() -> str:
+    with contextlib.suppress(Exception):
+        if sys.platform == "darwin":
+            name = _run_text(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+        elif os.name == "nt":
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                name = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+        else:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+                name = next((ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name")), "")
+        if name:
+            return f"{name} ({os.cpu_count()} threads)"
+    return f"{platform.machine()} ({os.cpu_count()} threads)"
+
+
+def _ram_gb() -> str:
+    with contextlib.suppress(Exception):
+        if sys.platform == "darwin":
+            total = int(_run_text(["sysctl", "-n", "hw.memsize"]).strip())
+        elif os.name == "nt":
+            import ctypes
+
+            class _Mem(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (n, ctypes.c_ulonglong) for n in ("total", "avail", "ptot", "pavail", "vtot", "vavail", "ext")
+                ]
+
+            mem = _Mem()
+            mem.len = ctypes.sizeof(_Mem)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem))
+            total = int(mem.total)
+        else:
+            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        return f"{total / 2**30:.0f}GB"
+    return "?"
+
+
+def _gpu_names() -> str:
+    names: list[str] = []
+    with contextlib.suppress(Exception):
+        if sys.platform == "darwin":
+            import json
+
+            data = json.loads(_run_text(["system_profiler", "SPDisplaysDataType", "-json"]) or "{}")
+            names = [str(d.get("sppci_model", "")) for d in data.get("SPDisplaysDataType", [])]
+        elif os.name == "nt":
+            import winreg
+
+            base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            for i in range(8):
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f"{base}\\{i:04d}") as key:
+                        names.append(str(winreg.QueryValueEx(key, "DriverDesc")[0]))
+                except OSError:
+                    continue
+        else:
+            names = [
+                ln.split(": ", 1)[-1]
+                for ln in _run_text(["lspci"]).splitlines()
+                if any(t in ln for t in ("VGA compatible", "3D controller", "Display controller"))
+            ]
+    return "; ".join(n.strip() for n in names if n.strip()) or "?"
+
+
+@functools.cache
+def _machine_parts() -> str:
+    """CPU, graphics card and RAM: fixed for the session, so read once."""
+    return f"cpu={_cpu_model()} gpu={_gpu_names()} ram={_ram_gb()}"
+
+
+def hardware_line() -> str:
+    """CPU, graphics card, RAM and display, one line, for the export header.
+    Component names and numbers only; no serials, no identifiers."""
+    return f"hardware: {_machine_parts()} {_graphics_note}".rstrip()
+
+
 def _read_tail(path: Path, max_bytes: int) -> str:
     try:
         size = path.stat().st_size
@@ -871,7 +1022,7 @@ def _read_tail(path: Path, max_bytes: int) -> str:
         return ""
 
 
-def export_bundle(redact_content: bool = False) -> str:
+def export_bundle(redact_content: bool = False, hide_hardware: bool = False) -> str:
     """Build one redacted, shareable diagnostic file; returns its path ("" on
     failure). Every line is re-scrubbed on the way out (the final pass), and
     content spans are hashed when the user asked for that too."""
@@ -891,6 +1042,7 @@ def export_bundle(redact_content: bool = False) -> str:
             f"Waves diagnostic bundle  ·  {datetime.now().isoformat(timespec='seconds')}",
             f"app={_app_version()} qt={_qt_version()} python={platform.python_version()}",
             f"os={platform.system()} {platform.release()} ({platform.machine()})",
+            "hardware: hidden by the user" if hide_hardware else hardware_line(),
             f"session={SESSION_ID} verbose={_verbose} content_redacted={bool(redact_content)}",
             "identity PII (usernames, paths, addresses, tokens, account ids) is always scrubbed",
         ]

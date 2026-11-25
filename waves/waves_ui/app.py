@@ -10,6 +10,7 @@ or import :func:`waves_activate` and call it (optionally passing an existing
 
 from __future__ import annotations
 
+import contextlib
 import faulthandler
 import gc
 import logging
@@ -346,6 +347,10 @@ class _BootPacedIncubation(QQmlIncubationController):
             return
         self._released = True
         self._boot = False
+        diagnostics.note_graphics(self._win)
+        # Re-read on a move to another monitor, so a report names the screen in use.
+        with contextlib.suppress(Exception):
+            self._win.screenChanged.connect(lambda _screen: diagnostics.note_graphics(self._win))
         try:
             self._hook_frames()
         except Exception:
@@ -364,6 +369,7 @@ class _FrameRelay(QObject):
 
     @Slot()
     def frame(self) -> None:
+        diagnostics.note_frame()
         self._pacer._frame()
 
 
