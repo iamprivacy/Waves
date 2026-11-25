@@ -65,6 +65,7 @@ class _SettingsData:
     filename_illegal_replacement = ""
     filename_illegal_map = None
     use_primary_album_artist = False
+    filename_primary_artist_only = False
     download_dolby_atmos = False
     extract_flac = False
     video_convert_mp4 = False

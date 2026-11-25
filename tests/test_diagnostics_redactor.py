@@ -143,6 +143,9 @@ KEEP_CORPUS = [
     # cooldown length and a refusal over disk space, neither naming a path.
     ("Next download will start in 3.5 seconds.", ["3.5 seconds"]),
     ("Finishing seat refused: low disk space on the temp volume.", ["low disk space"]),
+    # The renderer breadcrumb: the graphics API name only, nothing to scrub.
+    ("[gfx] api Direct3D11", ["api Direct3D11"]),
+    ("[gfx] api Software", ["api Software"]),
 ]
 
 

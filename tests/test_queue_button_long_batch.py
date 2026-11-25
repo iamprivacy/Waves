@@ -92,12 +92,12 @@ def _scenario() -> int:
 
     # Let the chart gather history, then fail rows back to back for 3.5 s.
     settle(2500)
-    hist = js("return (chart().es.hist || []).length")
+    hist = js("return (chart().es.hs || []).length")
     for _ in range(4):
         js("qb().say('fail', 1200); return 0")
         settle(950)
     settle(1500)
-    after = js("return chart().on ? (chart().es.hist || []).length : -1")
+    after = js("return chart().on ? (chart().es.hs || []).length : -1")
     if after < hist:
         failures.append(f"a run of FAIL flashes threw the chart's history away ({hist} samples, then {after})")
     failures.extend(f"QML error in the queue button: {e}" for e in errors[:5])

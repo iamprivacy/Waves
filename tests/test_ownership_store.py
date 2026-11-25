@@ -329,3 +329,109 @@ def test_folder_names_under_respects_its_limit(tmp_path):
         open(path, "w").close()
         store.record(str(i), path, "LOSSLESS")
     assert len(store.folder_names_under(base, limit=3)) == 3
+
+
+# ----- download history ------------------------------------------------------
+
+
+def _entry(name, saved=1, total=1, **kw):
+    tracks = [{"id": str(i), "num": i, "title": f"t{i}", "status": "done", "quality": "LOSSLESS"} for i in range(total)]
+    return {
+        "kind": "album",
+        "media_id": "9",
+        "name": name,
+        "artist": "A",
+        "art": "",
+        "status": "done",
+        "landed": "LOSSLESS",
+        "mix": "[]",
+        "saved": saved,
+        "total": total,
+        "tracks": tracks,
+        **kw,
+    }
+
+
+def test_history_records_newest_first_with_its_track_log(tmp_path):
+    store = _store(tmp_path)
+    store.record_history("L1", 1, _entry("first", total=2, saved=2))
+    store.record_history("L1", 2, _entry("second"))
+    rows, more = store.history_page(0, 50)
+    assert [r["name"] for r in rows] == ["second", "first"]
+    assert more is False
+    assert rows[1]["tracks"][1]["title"] == "t1" and rows[1]["saved"] == 2
+
+
+def test_history_same_launch_and_qid_replaces_the_entry(tmp_path):
+    # A row retried in place (or a late track) settles again: one entry, not two.
+    store = _store(tmp_path)
+    store.record_history("L1", 1, _entry("album", saved=1, total=3))
+    store.record_history("L1", 1, _entry("album", saved=3, total=3))
+    store.record_history("L2", 1, _entry("next launch"))
+    rows, _ = store.history_page(0, 50)
+    assert [(r["name"], r["saved"]) for r in rows] == [("next launch", 1), ("album", 3)]
+
+
+def test_history_search_reads_name_artist_and_track_titles_only(tmp_path):
+    store = _store(tmp_path)
+    store.record_history("L", 1, _entry("Björk Sessions", artist="Some Band"))
+    store.record_history("L", 2, _entry("100% Pure_Love", total=2, saved=2))
+
+    def found(query, **kw):
+        return [r["name"] for r in store.history_page(0, 50, query=query, **kw)[0]]
+
+    assert found("BJÖRK") == ["Björk Sessions"]  # any case, past ASCII too
+    assert found("band some") == ["Björk Sessions"]  # every word, any order
+    assert found("t1") == ["100% Pure_Love"]  # a track title
+    assert found("100% pure_") == ["100% Pure_Love"] and found("1_0") == []  # % and _ are plain characters
+    assert found("title") == [] and found("done") == [] and found("lossless") == []  # never the log's own words
+    assert found("love", kind="track") == [] and found("") == ["100% Pure_Love", "Björk Sessions"]
+    assert [r["name"] for r in store.history_page(0, 1, only=("L", 1))[0]] == ["Björk Sessions"]
+    assert store.history_page(0, 1, query="love", only=("L", 1))[0] == []
+
+
+def test_history_keep_time_rewrites_an_entry_where_it_stands(tmp_path):
+    store = _store(tmp_path)
+    store.record_history("L", 1, _entry("first"))
+    with store._lock:
+        store._conn.execute("UPDATE history SET finished_at = 100")
+        store._conn.commit()
+    store.record_history("L", 1, _entry("first", saved=2, total=2), keep_time=True)
+    (row,) = store.history_page(0, 50)[0]
+    assert (row["finished_at"], row["saved"]) == (100, 2)
+    store.record_history("L", 1, _entry("first"))  # settled again: a new time
+    assert store.history_page(0, 50)[0][0]["finished_at"] > 100
+
+
+def test_history_written_before_the_search_column_is_searchable(tmp_path):
+    store = _store(tmp_path)
+    store.record_history("L", 1, _entry("Old Entry"))
+    with store._lock:
+        store._conn.execute("UPDATE history SET search = NULL")
+        store._ensure_history_search()
+        store._conn.commit()
+    assert [r["name"] for r in store.history_page(0, 50, query="old t0")[0]] == ["Old Entry"]
+
+
+def test_history_pages_and_clear(tmp_path):
+    store = _store(tmp_path)
+    for q in range(5):
+        store.record_history("L", q, _entry(f"e{q}"))
+    first, more = store.history_page(0, 3)
+    rest, more2 = store.history_page(3, 3)
+    assert len(first) == 3 and more is True
+    assert len(rest) == 2 and more2 is False
+    assert {r["name"] for r in first + rest} == {f"e{q}" for q in range(5)}
+    store.clear_history()
+    assert store.history_page(0, 50) == ([], False)
+
+
+def test_history_filters_by_kind_and_reads_oldest_first(tmp_path):
+    store = _store(tmp_path)
+    store.record_history("L", 1, _entry("a1"))
+    store.record_history("L", 2, _entry("t1", kind="track"))
+    store.record_history("L", 3, _entry("a2"))
+    assert [r["name"] for r in store.history_page(0, 50, "album")[0]] == ["a2", "a1"]
+    assert [r["name"] for r in store.history_page(0, 50, "album", oldest=True)[0]] == ["a1", "a2"]
+    assert [r["name"] for r in store.history_page(0, 50, oldest=True)[0]] == ["a1", "t1", "a2"]
+    assert store.history_page(0, 50, "video") == ([], False)

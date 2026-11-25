@@ -1,12 +1,12 @@
-"""The QUEUE button draws the whole batch by tracks and lands it quietly.
+"""The QUEUE button weighs the whole batch by tracks and lands it quietly.
 
 WHAT THIS FENCES OFF
 --------------------
-While anything is active the button's inside is the batch's throughput chart
-(queue item lab, T1): the batch's speed over time, the batch along the floor by
-tracks (landed bright, in flight pale), the download speed in its bottom
-left corner. The word hides under it and the arrow folds away. It reads a few totals counted
-once a tick, so a thousand-item queue costs a frame what five do.
+While anything is active the button's inside is the batch's speed chart
+(queue concepts lab, round 7, G: the last 12 s as bars, the percent and the
+speed over them). The word fades under it and the arrow folds away. The
+button counts a few totals once a tick, so a thousand-item queue costs a
+frame what five do.
 
 The totals weigh rows by tracks: an album lands as more of the batch than a
 single, a running row's download fills 85% of its weight and its finish
@@ -25,8 +25,8 @@ HOW THIS STAYS FIXED
 Boot the real Main.qml offscreen and drive a 10-track album and a single:
 
 * album at 40%, single queued: the chart is on, the word hidden, the arrow
-  folded; the totals read 11 tracks with 3.4 in flight and the floor eases to
-  that share; with nothing arriving it settles off the full frame rate;
+  folded; the totals read 11 tracks with 3.4 in flight; with nothing
+  arriving it settles off the full frame rate;
 * album at 100% with half its finish steps in: 9.25 in flight, one building;
 * album done: 10 tracks landed, no DONE word, the chart still on, the count's
   mid batch sparks play (not the shatter);
@@ -154,10 +154,9 @@ def _scenario() -> int:
         got = js(
             "var b = qb(), c = walk(b, 'queueButtonChart'), w = walk(b, 'queueButtonWord'), g = b.agg;"
             " return [c.on ? 1 : 0, w.opacity, w.target, b.fz, b.width, g.W, g.L, g.F, g.D, g.nb,"
-            "  c.es.P === undefined ? -1 : c.es.P, c.es.Lw === undefined ? -1 : c.es.Lw,"
-            "  (c.es.tr || []).length].join('|')"
+            "  (c.es.hs || []).length].join('|')"
         )
-        on, op, word, fz, width, W, L, F, D, nb, P, Lw, hist = str(got).split("|")
+        on, op, word, fz, width, W, L, F, D, nb, hist = str(got).split("|")
         return {
             "on": on == "1",
             "op": float(op),
@@ -169,8 +168,6 @@ def _scenario() -> int:
             "F": float(F),
             "D": float(D),
             "nb": int(nb),
-            "P": float(P),
-            "Lw": float(Lw),
             "hist": int(hist),
         }
 
@@ -192,8 +189,6 @@ def _scenario() -> int:
         failures.append("while running the arrow still shows next to the chart")
     if abs(s["W"] - 11) > 1e-6 or s["L"] != 0 or abs(s["F"] - 3.4) > 0.01:
         failures.append(f"album at 40% and a queued single: wanted 11 tracks, 0 landed, 3.4 in flight: {s}")
-    if abs(s["P"] - 3.4 / 11) > 0.01:
-        failures.append(f"the floor did not ease to the batch's share in flight ({s['P']:.3f})")
     # Nothing arrives in this scenario, so once eased the chart has settled
     # and must stop drawing at full rate.
     settle(400)
@@ -223,8 +218,6 @@ def _scenario() -> int:
     widths.add(s["width"])
     if abs(s["L"] - 10) > 1e-6 or abs(s["W"] - 11) > 1e-6:
         failures.append(f"the album landed and the totals did not keep its 10 tracks: {s}")
-    if abs(s["Lw"] - 10 / 11) > 0.01:
-        failures.append(f"the floor's landed part did not ease to the album's share ({s['Lw']:.3f})")
     if "DONE" in words:
         failures.append("a landing mid batch flashed DONE")
     if not s["on"]:
@@ -278,7 +271,7 @@ def _scenario() -> int:
     bridge._set_queue_progress(c, 10)
     settle(300)
     s = state()
-    if not s["on"] or s["hist"] > 4:
+    if not s["on"] or s["hist"] > 8:
         failures.append(f"the next batch did not open on a fresh history: {s}")
     if s["L"] != 0 or abs(s["W"] - 1) > 1e-6:
         failures.append(f"the next batch kept the last one's totals: {s}")

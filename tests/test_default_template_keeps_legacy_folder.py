@@ -91,6 +91,7 @@ def _make_download(base: pathlib.Path, template: str) -> Download:
     dl.settings.data.filename_delimiter_artist = ", "
     dl.settings.data.filename_delimiter_album_artist = ", "
     dl.settings.data.use_primary_album_artist = False
+    dl.settings.data.filename_primary_artist_only = False
     dl.settings.data.album_track_num_pad_min = 2
     dl.settings.data.format_album = template
     dl.event_abort = threading.Event()

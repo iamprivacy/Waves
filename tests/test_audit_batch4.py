@@ -41,6 +41,7 @@ def _downloader(tmp_path: pathlib.Path) -> Download:
             filename_delimiter_artist=", ",
             filename_delimiter_album_artist=", ",
             use_primary_album_artist=False,
+            filename_primary_artist_only=False,
             symlink_to_track=True,
         )
     )

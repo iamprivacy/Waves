@@ -75,6 +75,7 @@ def _make_download(base: pathlib.Path, replacement: str = "", mapping: dict | No
     dl.settings.data.filename_delimiter_artist = ", "
     dl.settings.data.filename_delimiter_album_artist = ", "
     dl.settings.data.use_primary_album_artist = False
+    dl.settings.data.filename_primary_artist_only = False
     dl.settings.data.album_track_num_pad_min = 1
     dl.settings.data.symlink_to_track = False
     dl.event_abort = threading.Event()

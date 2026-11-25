@@ -174,3 +174,37 @@ def test_no_log_line_in_the_engine_builds_a_path_bare():
         for name in _unmarked_paths(node)
     ]
     assert not offenders, f"unmarked paths reach the log: {offenders}"
+
+
+def test_the_export_lists_hardware_unless_the_user_hid_it(tmp_path, monkeypatch):
+    """One switch covers every hardware part: shown by default, one marker line when hidden."""
+    import re
+
+    monkeypatch.setattr(diagnostics, "_log_dir", tmp_path)
+    monkeypatch.setattr(diagnostics, "hardware_line", lambda: "hardware: cpu=Test CPU gpu=Test GPU ram=8GB")
+
+    shown = Path(diagnostics.export_bundle()).read_text(encoding="utf-8")
+    assert "cpu=Test CPU" in shown
+
+    hidden = Path(diagnostics.export_bundle(hide_hardware=True)).read_text(encoding="utf-8")
+    assert "Test CPU" not in hidden and "Test GPU" not in hidden
+    assert re.search(r"^hardware: hidden by the user$", hidden, re.M)
+
+
+def test_the_perf_line_counts_slow_frames_but_not_idle_pauses(monkeypatch, caplog):
+    """Over 50ms inside continuous drawing is slow (the 30fps water video leaves 33-45ms gaps); a pause over 0.5s is the window idle."""
+    clock = iter([100.0, 100.016, 100.056, 100.116, 102.116, 102.132])
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: next(clock))
+    sampler = diagnostics._PerfSampler()
+    sampler._running = True
+    for _ in range(6):
+        sampler.note_frame()  # gaps: first (idle), 16ms, 40ms (video cadence), 60ms (slow), 2s (idle), 16ms
+
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(diagnostics.time, "process_time", lambda: 2.5)
+    sampler._cpu_last = (0.0, 5.0)
+    with caplog.at_level("DEBUG", logger="waves.diag"):
+        sampler._sample()
+    line = caplog.records[-1].getMessage()
+    assert "frames_slow=1/4" in line
+    assert "waves_cpu=50%" in line

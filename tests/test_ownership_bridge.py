@@ -15,6 +15,7 @@ present), like tests/test_audit_backend.py. Two layers are covered:
 from __future__ import annotations
 
 import os
+import time
 from threading import Event, Lock, local
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -955,3 +956,150 @@ def test_a_stereo_choice_on_an_atmos_copy_offers_the_stereo_download(tmp_path):
     stub._quality_overrides = {"t1": "DEFAULT"}
     stub.expire("t1")
     assert stub.own("t1")["up_to_date"] is True
+
+
+# ----- download history (a settled queue row is logged) ----------------------
+
+
+def _history_stub(tmp_path, kind="album"):
+    """The ownership stub plus one queue row and the history wiring. The
+    queued _historySettle is recorded, and the test delivers it by hand."""
+    stub = _BridgeStub(tmp_path)
+    stub._queue_index = {
+        1: {
+            "qid": 1,
+            "status": "running",
+            "reason": "",
+            "type": kind,
+            "media_id": "77",
+            "name": "N",
+            "artist": "A",
+            "art": "",
+            "landed": "",
+            "mixJson": "[]",
+            "tracks": 3,
+        }
+    }
+    stub._queue_mark_changed = lambda qid: None
+    stub._historySettle = _Signal()
+    stub.historyChanged = _Signal()
+    stub.historyLoaded = _Signal()
+    stub._history_pool = _SyncPool()
+    stub._history_launch = "L"
+    stub._history_settled = set()
+    for name in ("_set_queue_status", "_history_settle", "loadHistory", "clearHistory"):
+        setattr(stub, name, getattr(WavesBridge, name).__get__(stub, _BridgeStub))
+    return stub
+
+
+def _settle(stub, status):
+    stub._set_queue_status(1, status)
+    for qid in stub._historySettle.emits:
+        stub._history_settle(qid)
+    stub._historySettle.emits.clear()
+
+
+def _history(stub):
+    rows, _more = stub._ownership.history_page(0, 50)
+    return rows
+
+
+def test_a_done_row_logs_its_tracks(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub._job_tracks[1] = {
+        "a": {"id": "a", "num": 2, "title": "two", "status": "done", "quality": "LOSSLESS"},
+        "b": {"id": "b", "num": 1, "title": "one", "status": "skipped", "quality": ""},
+    }
+    _settle(stub, "done")
+    (row,) = _history(stub)
+    assert (row["name"], row["kind"], row["saved"], row["total"]) == ("N", "album", 1, 2)
+    assert [t["title"] for t in row["tracks"]] == ["one", "two"]  # album order
+    assert stub.historyChanged.emits
+
+
+def test_a_row_that_saved_nothing_is_not_logged(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub._job_tracks[1] = {"a": {"id": "a", "num": 1, "title": "x", "status": "failed"}}
+    _settle(stub, "failed")
+    stub._job_tracks[1] = {"a": {"id": "a", "num": 1, "title": "x", "status": "skipped"}}
+    _settle(stub, "done")
+    assert _history(stub) == []
+
+
+def test_a_stopped_row_with_saved_tracks_is_logged_and_a_late_track_updates_it(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub._job_tracks[1] = {
+        "a": {"id": "a", "num": 1, "title": "x", "status": "done", "quality": "LOSSLESS"},
+        "b": {"id": "b", "num": 2, "title": "y", "status": "running"},
+    }
+    _settle(stub, "cancelled")
+    assert [(r["status"], r["saved"]) for r in _history(stub)] == [("cancelled", 1)]
+    # The second track finishes writing after STOP: the same entry is rewritten.
+    f = _make_file(tmp_path)
+    stub._track_lifecycle(1, {"id": "b", "status": "done", "path": str(f), "quality": {"tier": "LOSSLESS"}})
+    assert [(r["status"], r["saved"]) for r in _history(stub)] == [("cancelled", 2)]
+    # The late track carries the moment its file landed.
+    late = next(t for t in _history(stub)[0]["tracks"] if t["id"] == "b")
+    assert late["saved_at"] > 0
+
+
+def test_load_history_reads_locally_and_clear_empties_it(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub._logged_in = False  # signed out: still answers, never asks TIDAL
+    stub._job_tracks[1] = {"a": {"id": "a", "num": 1, "title": "x", "status": "done"}}
+    _settle(stub, "done")
+    stub.loadHistory(0)
+    rows, more, offset = stub.historyLoaded.emits[-1]
+    assert (len(rows), more, offset) == (1, False, 0)
+    assert rows[0]["id"] == "L:1" and '"x"' in rows[0]["tracksJson"] and "tracks" not in rows[0]
+    assert len(rows[0]["date"]) == 10 and rows[0]["time"][-2:] in ("AM", "PM")
+    stub.clearHistory()
+    assert _history(stub) == []
+
+
+def test_a_refresh_rereads_every_row_already_shown(tmp_path):
+    stub = _history_stub(tmp_path)
+    for qid in range(1, 63):
+        stub._ownership.record_history("L", qid, {"kind": "track", "saved": 1, "total": 1, "tracks": []})
+    stub.loadHistory(0)
+    rows, more, _ = stub.historyLoaded.emits[-1]
+    assert (len(rows), more) == (50, True)
+    stub.loadHistory(0, "", False, 62)
+    rows, more, _ = stub.historyLoaded.emits[-1]
+    assert (len(rows), more) == (62, False)
+
+
+def test_a_late_track_after_clear_does_not_bring_the_entry_back(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub._job_tracks[1] = {
+        "a": {"id": "a", "num": 1, "title": "x", "status": "done"},
+        "b": {"id": "b", "num": 2, "title": "y", "status": "running"},
+    }
+    _settle(stub, "cancelled")
+    stub.clearHistory()
+    assert stub.historyChanged.emits[-1] == ""
+    f = _make_file(tmp_path)
+    stub._track_lifecycle(1, {"id": "b", "status": "done", "path": str(f), "quality": {"tier": "LOSSLESS"}})
+    assert _history(stub) == []
+
+
+def test_one_entry_is_read_as_the_filters_see_it(tmp_path):
+    stub = _history_stub(tmp_path)
+    stub.historyEntry = _Signal()
+    stub.loadHistoryEntry = WavesBridge.loadHistoryEntry.__get__(stub, _BridgeStub)
+    stub._job_tracks[1] = {"a": {"id": "a", "num": 1, "title": "Blue Song", "status": "done"}}
+    _settle(stub, "done")
+    assert stub.historyChanged.emits[-1] == "L:1"
+    stub.loadHistoryEntry("L:1", "album", "blue")
+    entry_id, rows = stub.historyEntry.emits[-1]
+    assert entry_id == "L:1" and [r["id"] for r in rows] == ["L:1"] and "tracksJson" in rows[0]
+    stub.loadHistoryEntry("L:1", "track", "")  # not that kind: nothing to show
+    assert stub.historyEntry.emits[-1] == ("L:1", [])
+    stub.loadHistoryEntry("L:1", "", "red")  # not in the search: nothing to show
+    assert stub.historyEntry.emits[-1] == ("L:1", [])
+
+
+def test_history_stamp_is_a_day_and_a_12_hour_time():
+    ts = time.mktime((2026, 11, 24, 0, 5, 0, 0, 0, -1))
+    assert backend._history_stamp(ts) == ("2026-11-24", "12:05 AM")
+    assert backend._history_stamp(ts + 15 * 3600) == ("2026-11-24", "3:05 PM")

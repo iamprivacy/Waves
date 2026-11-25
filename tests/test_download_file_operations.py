@@ -181,6 +181,7 @@ def test_media_move_and_symlink_skips_symlink_when_unlink_fails(
             format_track="Tracks/{artist_name} - {track_title}",
             album_track_num_pad_min=1,
             use_primary_album_artist=False,
+            filename_primary_artist_only=False,
         ),
     )
 

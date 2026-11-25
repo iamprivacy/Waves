@@ -30,7 +30,7 @@ from pathlib import Path
 
 QML = Path(__file__).resolve().parent.parent / "waves" / "waves_ui" / "qml" / "SettingsPage.qml"
 
-_DIAG_PREFS = ("verbose_diagnostics", "diagnostics_redact_content")
+_DIAG_PREFS = ("verbose_diagnostics", "diagnostics_redact_content", "diagnostics_hide_hardware")
 
 
 def _source() -> str:

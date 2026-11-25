@@ -643,6 +643,7 @@ class _GateSettingsData:
     filename_delimiter_album_artist = ", "
     filename_illegal_replacement = ""
     use_primary_album_artist = False
+    filename_primary_artist_only = False
     download_dolby_atmos = False
 
 

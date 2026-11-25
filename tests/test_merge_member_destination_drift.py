@@ -94,6 +94,7 @@ def _engine(base: pathlib.Path) -> Download:
     dl.settings.data.filename_delimiter_artist = ", "
     dl.settings.data.filename_delimiter_album_artist = ", "
     dl.settings.data.use_primary_album_artist = False
+    dl.settings.data.filename_primary_artist_only = False
     dl.settings.data.filename_illegal_replacement = ""
     dl.settings.data.filename_illegal_map = None
     dl.settings.data.symlink_to_track = False

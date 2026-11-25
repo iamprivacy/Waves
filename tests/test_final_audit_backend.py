@@ -567,6 +567,8 @@ def test_the_perf_line_carries_a_gauges_peak():
     sampler._probe_wall = 0.0
     sampler._probe_busy = 0.0
     sampler._probe_max_stall = 0.0
+    sampler._cpu_last = (0.0, 0.0)
+    sampler._frames = sampler._slow_frames = 0
     sampler._rss_mb = lambda: None
     real_debug = diagnostics.logger.debug
     diagnostics.logger.debug = lambda msg, *a, **kw: lines.append(msg % a if a else msg)
@@ -593,6 +595,8 @@ def test_the_perf_line_carries_the_open_descriptor_count():
     sampler._probe_wall = 0.0
     sampler._probe_busy = 0.0
     sampler._probe_max_stall = 0.0
+    sampler._cpu_last = (0.0, 0.0)
+    sampler._frames = sampler._slow_frames = 0
     sampler._rss_mb = lambda: None
     sampler._open_fds = lambda: 37
     real_debug = diagnostics.logger.debug

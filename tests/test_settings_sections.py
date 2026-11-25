@@ -97,6 +97,7 @@ _KEYS = {
         "filename_delimiter_artist",
         "filename_delimiter_album_artist",
         "use_primary_album_artist",
+        "filename_primary_artist_only",
         "symlink_to_track",
         "playlist_create",
     ],
@@ -138,7 +139,9 @@ _KEYS = {
         "video_hover_peek",
         "artist_hover_cards",
         "artist_bio_fallback",
+        "nav_my_tidal",
         "player_size",
+        "logo_eq",
         "close_action",
         "queue_ledger_rows",
     ],
@@ -166,7 +169,7 @@ _KEYS = {
         "notify_in_front",
     ],
     "updates": ["auto_update", "update_cadence"],
-    "diagnostics": ["verbose_diagnostics", "diagnostics_redact_content"],
+    "diagnostics": ["verbose_diagnostics", "diagnostics_redact_content", "diagnostics_hide_hardware"],
 }
 
 

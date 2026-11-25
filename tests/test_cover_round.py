@@ -85,7 +85,8 @@ def test_art_keeps_its_images_and_shows_two_faces() -> None:
 
 def test_the_scene_graph_is_read_once_for_every_cover() -> None:
     src = _src()
-    assert "readonly property bool software: GraphicsInfo.api === GraphicsInfo.Software" in src
+    assert "readonly property int api: GraphicsInfo.api" in src
+    assert "readonly property bool software: api === GraphicsInfo.Software" in src
     assert "readonly property bool roundFaces: !gfxProbe.software" in src
     assert src.count("GraphicsInfo.api") == 1, "one probe, not one attached object per cover"
 

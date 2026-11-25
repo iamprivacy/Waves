@@ -53,8 +53,9 @@ def test_the_crowded_sections_fill_rows_of_three(schema):
     # The Genre switch is a row among the tag-field rows, not a tenth tile.
     assert counts["metadata"] == 9
     assert counts["discography"] == 6
-    assert counts["downloads"] == counts["files"] == counts["processing"] == 3
-    assert counts["appearance"] == 4
+    assert counts["downloads"] == counts["processing"] == 3
+    # The folder-artist and file-name-artist switches sit side by side.
+    assert counts["appearance"] == counts["files"] == 4
 
 
 def test_every_help_fits_its_tile(schema):

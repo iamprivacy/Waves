@@ -47,7 +47,7 @@ def test_back_into_the_open_category_still_revalidates():
 
 def test_live_diagnostics_toggles_never_mark_the_page_dirty():
     assert "function setLive(key, v)" in SETTINGS
-    for key in ("verbose_diagnostics", "diagnostics_redact_content"):
+    for key in ("verbose_diagnostics", "diagnostics_redact_content", "diagnostics_hide_hardware"):
         assert f'page.setLive("{key}", v)' in SETTINGS
         assert f'page.setv("{key}", v)' not in SETTINGS
 
@@ -128,9 +128,30 @@ def test_the_hidden_artist_grid_is_not_built_on_a_type_chip():
     ), "no code line may read the Flow's effective visibility"
 
 
-def test_the_roll_arm_walk_waits_for_the_height_to_settle():
-    assert "Timer { id: bttArmSettle; interval: 60; onTriggered: btt.armRoll() }" in MAIN
-    assert "function onContentHeightChanged() { btt.rollTick++; bttArmSettle.restart() }" in MAIN
+def test_no_row_carries_a_scroll_bound_tilt_binding():
+    """The tilt is set for the rows under the edge bands only, from one pass
+    per scrolled frame. A Rotation per row bound to contentY ran one script
+    per row per frame and dropped frames on every long page."""
+    roll = MAIN.split("id: bttRollComp", 1)[1].split("property var _rolled", 1)[0]
+    assert "contentY" not in roll and "angle:" not in roll
+    assert "function onContentYChanged() { btt.updateRoll() }" in MAIN
+
+
+def test_far_landing_shelves_are_hidden_only_after_the_launch():
+    """The launch warm paints every shelf once; hiding far ones before it
+    would move that first paint into the user's first scroll."""
+    ld = _block(MAIN, "id: bsecLd\n", "sourceComponent: BrowseSection")
+    assert "readonly property bool near: root.bootContentShown < 1 || browseLanding.rowNear(y, height)" in ld
+    assert "item.visible = Qt.binding(function() { return bsecLd.near })" in ld
+
+
+def test_the_renderer_breadcrumb_names_the_api_only():
+    probe = _block(MAIN, "id: gfxProbe\n", "\n    }\n")
+    assert 'waves.uiLog("gfx", "api "' in probe
+    for word in ("Software", "OpenGL", "Direct3D11", "Direct3D12", "Vulkan", "Metal"):
+        assert f'"{word}"' in probe
+    for leak in ("vendor", "driver", "adapter", "deviceName", "renderer"):
+        assert leak not in probe.split("function note()", 1)[1].lower(), leak
 
 
 def test_metric_rows_hold_no_vector_shapes():
@@ -248,3 +269,13 @@ def test_the_download_button_measures_both_done_words():
     assert "dbMetricDone.implicitWidth" in width and "dbMetricDoneLib.implicitWidth" in width
     assert '+ "DOWNLOADED"' in _block(MAIN, "id: dbMetricDone\n", "        }\n")
     assert '+ "IN LIBRARY"' in _block(MAIN, "id: dbMetricDoneLib\n", "        }\n")
+
+
+def test_a_collapsed_album_does_not_build_its_panel():
+    # The expanded panel (a second cover, download button and quality picker)
+    # was built with every album row and hidden: 3.8 ms a row against 2.2 ms.
+    block = MAIN[MAIN.index("component AlbumBlock") : MAIN.index("component PlaylistBlock")]
+    assert (
+        "id: expandedCol\n                x: 16; y: 12; width: parent.width - 32\n                active: ab.expanded || ab.folding"
+        in block
+    )

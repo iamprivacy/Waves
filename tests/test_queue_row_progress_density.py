@@ -80,6 +80,19 @@ def test_a_queue_row_that_is_not_running_builds_no_bar():
     assert code == _EXIT_OK, f"a queue row is building its bar with nothing to show:\n{tail}"
 
 
+def test_a_running_queue_row_bar_fills_evenly_between_reports():
+    """The bar glides to each new reading, it does not sit and jump.
+
+    A collection's row hears its progress twice a second (the track poll), and
+    drawn as told the bar held still for half a second and then lit a column
+    and a half of blocks at once, over and over, for the whole download. A rise
+    is now filled linearly over a little more than one poll. What must still
+    land at once: the first reading (a drawer opened mid-run), a fall (a
+    retry), and a row turning done (its bar reads full before it fades)."""
+    code, tail = _run_here("--run-queue-row-glide-scenario")
+    assert code == _EXIT_OK, f"the queue row's bar is jumping between progress reports again:\n{tail}"
+
+
 def _run_here(flag: str = "--run-queue-row-scenario") -> tuple[int, str]:
     """The sibling runner points at ITS file; run this file's scenario the same way."""
     import os
@@ -201,8 +214,57 @@ def _idle_scenario() -> int:
     return _EXIT_REGRESSED if failures else _EXIT_OK
 
 
+def _glide_scenario() -> int:
+    booted = _boot()
+    if not isinstance(booted, tuple):
+        return booted
+    _root, q, settle, bridge = booted
+    qid = bridge._enqueue("Glide Row", "album", media_id="lab-glide", artist="Lab", tracks=10)
+    bridge._set_queue_status(qid, "running")
+    bridge._set_queue_progress(qid, 30)
+    settle(120)
+    q("queueDrawer.open()")
+    settle(900)
+
+    def shown() -> float:
+        got = q("(function(){" + _WALK + " var m = mx(); return m ? m.pct : -1 })()")
+        return float(got)
+
+    failures = []
+    if abs(shown() - 30) > 0.01:
+        failures.append(f"the first reading did not land at once: {shown()}, wanted 30")
+    bridge._set_queue_progress(qid, 34)
+    settle(250)
+    mid = shown()
+    if not 30.2 < mid < 33.8:
+        failures.append(f"250ms after a 30 -> 34 report the bar shows {mid}: it snapped or never moved")
+    settle(900)
+    if abs(shown() - 34) > 0.01:
+        failures.append(f"the bar never arrived at 34: {shown()}")
+    bridge._set_queue_progress(qid, 10)
+    settle(60)
+    if abs(shown() - 10) > 0.01:
+        failures.append(f"a fall to 10 did not snap: {shown()}")
+    # The real finish: the reading reaches 100 while the row still runs (the
+    # final steps), and only then does the row turn done.
+    bridge._set_queue_progress(qid, 100)
+    settle(100)
+    if not 10 < shown() < 99:
+        failures.append(f"100ms after a 10 -> 100 report the bar shows {shown()}")
+    bridge._set_queue_status(qid, "done")
+    settle(60)
+    if abs(shown() - 100) > 0.01:
+        failures.append(f"a row that turned done mid-fill shows {shown()}, not a full bar")
+    for f in failures:
+        print(f, file=sys.stderr)
+    return _EXIT_REGRESSED if failures else _EXIT_OK
+
+
 if __name__ == "__main__" and "--run-queue-row-scenario" in sys.argv:
     sys.exit(_scenario())
 
 if __name__ == "__main__" and "--run-queue-row-idle-scenario" in sys.argv:
     sys.exit(_idle_scenario())
+
+if __name__ == "__main__" and "--run-queue-row-glide-scenario" in sys.argv:
+    sys.exit(_glide_scenario())
