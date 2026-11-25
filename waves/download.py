@@ -2104,6 +2104,40 @@ class Download:
                 return directory / old.name
         return directory / tidied.name
 
+    def _keep_album_artist_file_name(
+        self, chosen: pathlib.Path, media: Track | Video, *legacy: pathlib.Path
+    ) -> pathlib.Path:
+        """Keep a track where a release up to 0.2.9 filed it.
+
+        "Primary album artist for folders" used to reach into the file name as
+        well, so a library built with it on holds "SG Lewis - All We Have" for
+        a track that is now named "SG Lewis, Lastlings - All We Have" (issue
+        #68). Nothing on disk is renamed, so the old name has to stay findable
+        or every such track would be fetched again beside itself.
+
+        This name is much coarser than an older spelling: on a compilation
+        every track's artist read "Various Artists", so the old name is often
+        some OTHER song's. It is therefore taken only where the file sitting
+        there is this item by the ids (_existing_same_item_at, the answer
+        skip_existing itself goes by); a stranger keeps its file and this
+        track gets the name it is owed. A file already at the new name wins
+        outright.
+
+        ``legacy`` are the old-style destinations; only their names are used,
+        inside the folder already chosen.
+        """
+        if check_file_exists(chosen, extension_ignore=False):
+            return chosen
+        for name in dict.fromkeys(path.name for path in legacy):
+            candidate = chosen.parent / name
+            if (
+                name != chosen.name
+                and check_file_exists(candidate, extension_ignore=False)
+                and self._existing_same_item_at(candidate, media) is not None
+            ):
+                return candidate
+        return chosen
+
     def _existing_same_item_at(self, path_media_dst: pathlib.Path, media: Track | Video) -> pathlib.Path | None:
         """WHERE this item already lives at this destination, or None.
 
@@ -2524,7 +2558,9 @@ class Download:
             is_video=isinstance(media, Video),
         )
 
-        def build(tidy: bool, replacement: str = "", mapping: dict[str, str] | None = None) -> pathlib.Path:
+        def build(
+            tidy: bool, replacement: str = "", mapping: dict[str, str] | None = None, legacy_artist: bool = False
+        ) -> pathlib.Path:
             relative = format_path_media(
                 file_template,
                 media,
@@ -2537,6 +2573,8 @@ class Download:
                 tidy_spacing=tidy,
                 illegal_replacement=replacement,
                 illegal_map=mapping,
+                primary_artist_only_in_filename=self.settings.data.filename_primary_artist_only,
+                legacy_filename_artist=legacy_artist,
             )
             candidate = (pathlib.Path(self.path_base).expanduser() / (relative + file_extension_dummy)).absolute()
             # Sanitize final path_file to fit into OS boundaries.
@@ -2547,12 +2585,17 @@ class Download:
         # keeps its folders when overrides are added later); the two before it
         # predate the stand-in setting entirely, so they build with "" and
         # reproduce history exactly.
-        path_media_dst: pathlib.Path = self._keep_existing_layout(
-            build(True, self._illegal_replacement(), self._illegal_map()),
-            build(True, self._illegal_replacement()),
-            build(True),
-            build(False),
-        )
+        spellings: list[tuple[bool, str, dict[str, str] | None]] = [
+            (True, self._illegal_replacement(), self._illegal_map()),
+            (True, self._illegal_replacement(), None),
+            (True, "", None),
+            (False, "", None),
+        ]
+        path_media_dst: pathlib.Path = self._keep_existing_layout(*(build(*spelling) for spelling in spellings))
+        if self.settings.data.use_primary_album_artist:
+            path_media_dst = self._keep_album_artist_file_name(
+                path_media_dst, media, *(build(*spelling, legacy_artist=True) for spelling in spellings)
+            )
         return path_media_dst, file_extension_dummy
 
     def _prepare_file_paths_and_skip_logic(
@@ -3515,7 +3558,7 @@ class Download:
         "3. ..." where "03. ..." is asked for keeps its file instead of being
         fetched again beside it."""
 
-        def build(pad: int) -> pathlib.Path:
+        def build(pad: int, legacy_artist: bool = False) -> pathlib.Path:
             relative: str = format_path_media(
                 self.settings.data.format_track,
                 media,
@@ -3525,6 +3568,8 @@ class Download:
                 use_primary_album_artist=self.settings.data.use_primary_album_artist,
                 illegal_replacement=self._illegal_replacement(),
                 illegal_map=self._illegal_map(),
+                primary_artist_only_in_filename=self.settings.data.filename_primary_artist_only,
+                legacy_filename_artist=legacy_artist,
             )
             path = (pathlib.Path(self.path_base).expanduser() / (relative + file_extension)).absolute()
             return pathlib.Path(path_file_sanitize(path, adapt=True))
@@ -3538,6 +3583,9 @@ class Download:
             and self._existing_same_item_at(unpadded, media) is not None
         ):
             return unpadded
+        if self.settings.data.use_primary_album_artist:
+            pad_min: int = self.settings.data.album_track_num_pad_min
+            return self._keep_album_artist_file_name(padded, media, build(pad_min, True), build(0, True))
         return padded
 
     def media_move_and_symlink(

@@ -20,6 +20,7 @@ tests without the GUI stack and never couples the download engine to the UI.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -228,8 +229,55 @@ class OwnershipStore:
                        recorded_at   INTEGER NOT NULL DEFAULT 0,
                        PRIMARY KEY (collection_id, track_id)
                    )""")
+            # The download history page: one row per settled queue item (an
+            # album, playlist, mix, track or video), with the per-track log as
+            # JSON. A log of what was saved, read only by that page; it never
+            # answers ownership. Keyed by (launch, qid) because qids restart
+            # every launch and a row retried in place settles again.
+            self._conn.execute("""CREATE TABLE IF NOT EXISTS history (
+                       launch      TEXT    NOT NULL,
+                       qid         INTEGER NOT NULL,
+                       finished_at INTEGER NOT NULL DEFAULT 0,
+                       kind        TEXT,
+                       media_id    TEXT,
+                       name        TEXT,
+                       artist      TEXT,
+                       art         TEXT,
+                       status      TEXT,
+                       landed      TEXT,
+                       mix         TEXT,
+                       saved       INTEGER NOT NULL DEFAULT 0,
+                       total       INTEGER NOT NULL DEFAULT 0,
+                       tracks      TEXT,
+                       search      TEXT,
+                       PRIMARY KEY (launch, qid)
+                   )""")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_history_finished ON history(finished_at)")
+            self._ensure_history_search()
             self._ensure_columns()
             self._conn.commit()
+
+    def _ensure_history_search(self) -> None:
+        """Give a history table written before the search column its column,
+        and every entry without search text its text. Caller holds the lock."""
+        if "search" not in {row[1] for row in self._conn.execute("PRAGMA table_info(history)")}:
+            try:
+                self._conn.execute("ALTER TABLE history ADD COLUMN search TEXT")
+            except sqlite3.OperationalError:
+                # A second copy of Waves added it first (see _ensure_columns).
+                if "search" not in {row[1] for row in self._conn.execute("PRAGMA table_info(history)")}:
+                    raise
+        for rowid, name, artist, tracks in self._conn.execute(
+            "SELECT rowid, name, artist, tracks FROM history WHERE search IS NULL"
+        ).fetchall():
+            try:
+                track_list = json.loads(tracks or "[]")
+            except ValueError:
+                track_list = []
+            self._conn.execute(
+                "UPDATE history SET search = ? WHERE rowid = ?",
+                (self._history_search_text(name, artist, track_list if isinstance(track_list, list) else []), rowid),
+            )
 
     def _ensure_columns(self) -> None:
         """Add any expected column missing from an older DB. A no-op once the DB
@@ -529,6 +577,94 @@ class OwnershipStore:
                 "INSERT OR IGNORE INTO collection_members (collection_id, track_id, recorded_at) VALUES (?, ?, ?)",
                 [(cid, tid, now) for tid in ids],
             )
+            self._conn.commit()
+
+    # ----- download history -------------------------------------------------
+
+    _HISTORY_COLS = ("kind", "media_id", "name", "artist", "art", "status", "landed", "mix", "saved", "total")
+
+    @staticmethod
+    def _history_fold(text: str) -> str:
+        """Text as the history search compares it: case folded by Python, since
+        SQLite's LIKE folds ASCII only ("björk" would miss "BJÖRK")."""
+        return str(text or "").casefold()
+
+    def _history_search_text(self, name: object, artist: object, tracks: list) -> str:
+        """What a history search looks in: the entry's name, its artist and
+        its track titles."""
+        titles = (t.get("title", "") for t in tracks if isinstance(t, dict))
+        return self._history_fold("\n".join(str(x or "") for x in (name, artist, *titles)))
+
+    def record_history(self, launch: str, qid: int, entry: dict, keep_time: bool = False) -> None:
+        """Write (or rewrite) the history entry of one settled queue item.
+        ``entry`` holds the columns above plus ``tracks``, a list of per-track
+        dicts. Upserts on (launch, qid): a retry or a late track replaces it.
+        ``keep_time`` (a late track) keeps the time the entry first settled,
+        so it stays where it is in the list."""
+        cols = self._HISTORY_COLS
+        values = [entry.get(c) for c in cols]
+        track_list = list(entry.get("tracks") or [])
+        tracks = json.dumps(track_list, ensure_ascii=False)
+        search = self._history_search_text(entry.get("name"), entry.get("artist"), track_list)
+        with self._lock:
+            now = int(time.time())
+            if keep_time:
+                row = self._conn.execute(
+                    "SELECT finished_at FROM history WHERE launch = ? AND qid = ?", (str(launch), int(qid))
+                ).fetchone()
+                now = int(row[0]) if row else now
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO history (launch, qid, finished_at, {', '.join(cols)}, tracks, search)"  # noqa: S608 (fixed columns)
+                f" VALUES (?, ?, ?, {', '.join('?' * len(cols))}, ?, ?)",
+                (str(launch), int(qid), now, *values, tracks, search),
+            )
+            self._conn.commit()
+
+    def history_page(
+        self,
+        offset: int = 0,
+        limit: int = 50,
+        kind: str = "",
+        oldest: bool = False,
+        query: str = "",
+        only: tuple[str, int] | None = None,
+    ) -> tuple[list[dict], bool]:
+        """One page of history entries, newest first (``oldest``: oldest
+        first), only ``kind`` entries when given, only entries whose name,
+        artist or a track title holds every word of ``query``, and whether
+        more follow. ``only`` (launch, qid) asks for that one entry, which
+        comes back only if it passes the same filters."""
+        cols = ("launch", "qid", "finished_at", *self._HISTORY_COLS, "tracks")
+        clauses, args = [], []
+        if kind:
+            clauses.append("kind = ?")
+            args.append(str(kind))
+        if only is not None:
+            clauses.append("launch = ? AND qid = ?")
+            args += [str(only[0]), int(only[1])]
+        for word in self._history_fold(query).split():
+            clauses.append("search LIKE ? ESCAPE '\\'")
+            args.append("%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        order = "ASC" if oldest else "DESC"
+        rows = self._read(
+            f"SELECT {', '.join(cols)} FROM history {where}ORDER BY finished_at {order}, rowid {order} LIMIT ? OFFSET ?",  # noqa: S608 (fixed columns and clauses, values bound)
+            (*args, int(limit) + 1, max(0, int(offset))),
+        )
+        out = []
+        for r in rows[: int(limit)]:
+            d = dict(zip(cols, r, strict=True))
+            try:
+                d["tracks"] = json.loads(d["tracks"] or "[]")
+            except ValueError:
+                d["tracks"] = []
+            out.append(d)
+        return out, len(rows) > int(limit)
+
+    def clear_history(self) -> None:
+        """Empty the history list. Only the list: no file is touched."""
+        with self._lock:
+            self._conn.execute("DELETE FROM history")
             self._conn.commit()
 
     def members_of(self, collection_id: str) -> list[str] | None:

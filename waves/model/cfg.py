@@ -53,6 +53,9 @@ class Settings:
     use_primary_album_artist: bool = (
         False  # When True, uses first album artist instead of track artists for folder paths
     )
+    # File names list every track artist unless this is on (then the track's
+    # first artist only). Folders are the setting above, never this one.
+    filename_primary_artist_only: bool = False
     # TODO: Implement API KEY selection.
     # api_key_index: bool = 0
     # TODO: Implement album info download to separate file.
@@ -223,7 +226,12 @@ class HelpSettings:
         "When MusicBrainz does not list the release yet, write the artist's genres instead of none."
     )
     metadata_delimiter_genre: str = "Joins several genres in the Genre tag. Default: '; '"
-    use_primary_album_artist: str = "Use only the primary album artist for folder paths instead of track artists."
+    use_primary_album_artist: str = (
+        "Use only the primary album artist for folders instead of track artists. File names are not affected."
+    )
+    filename_primary_artist_only: str = (
+        "Use only the track's first artist in file names instead of every track artist. Folders are not affected."
+    )
     lyrics_file: str = "Save lyrics next to the track: timed lyrics as a *.lrc file, untimed ones as *.txt."
     lyrics_file_synced_only: str = (
         "Only save a lyrics file when timed (synced) lyrics exist; untimed lyrics " "then produce no *.txt file."

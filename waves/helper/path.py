@@ -509,6 +509,8 @@ def format_path_media(
     tidy_spacing: bool = True,
     illegal_replacement: str = "",
     illegal_map: dict[str, str] | None = None,
+    primary_artist_only_in_filename: bool = False,
+    legacy_filename_artist: bool = False,
 ) -> str:
     """Formats a media path string using a template and media attributes.
 
@@ -522,7 +524,9 @@ def format_path_media(
         list_total (int, optional): Total items in a list. Defaults to 0.
         delimiter_artist (str, optional): Delimiter for artist names. Defaults to ", ".
         delimiter_album_artist (str, optional): Delimiter for album artist names. Defaults to ", ".
-        use_primary_album_artist (bool, optional): If True, uses first album artist for folder paths. Defaults to False.
+        use_primary_album_artist (bool, optional): If True, {artist_name} in a FOLDER is the
+            first album artist. The file name (everything after the last separator) is
+            not a folder and always answers with the track's own artists. Defaults to False.
         tidy_spacing (bool, optional): Collapse the whitespace a stripped illegal
             character leaves behind. Defaults to True. Pass False to reproduce the
             names releases before 0.1.17 produced, which is how the download engine
@@ -537,48 +541,65 @@ def format_path_media(
             before the general one, so ":" can become " · " while everything
             else follows illegal_replacement. Defaults to None, no overrides.
             Callers pass values through safe_filename_replacement_map first.
+        primary_artist_only_in_filename (bool, optional): If True, {artist_name} in the
+            file name is the track's first artist only. Defaults to False, every
+            credited track artist.
+        legacy_filename_artist (bool, optional): Reproduce the file names releases up
+            to 0.2.9 wrote, where use_primary_album_artist reached into the file name
+            too ("Various Artists - Song"). Only for recognizing a file already on
+            disk under that name; nothing new is named this way. Defaults to False.
 
     Returns:
         str: The formatted and sanitized media path string.
     """
-    result = fmt_template
+    # A token after the last separator names the file, not a folder, and the
+    # album-artist setting is a folder setting: a track by two artists keeps
+    # its one artist folder and still carries both names in its file name
+    # (issue #68; a compilation track was being filed as "Various Artists -
+    # Song").
+    filename_start = max(fmt_template.rfind("/"), fmt_template.rfind("\\"))
 
-    # Search track format template for placeholder.
-    regex = r"\{(.+?)\}"
-    matches = re.finditer(regex, fmt_template, re.MULTILINE)
-
-    for _matchNum, match in enumerate(matches, start=1):
-        template_str = match.group()
+    # Each occurrence is answered on its own, so the same token can read one
+    # way in a folder and another in the file name.
+    def substitute(match: re.Match[str]) -> str:
+        placeholder = match.group(1)
+        in_filename = match.start() > filename_start and not legacy_filename_artist
+        name = (
+            "artist_name_primary"
+            if in_filename and primary_artist_only_in_filename and placeholder == "artist_name"
+            else placeholder
+        )
         result_fmt = format_str_media(
-            match.group(1),
+            name,
             media,
             album_track_num_pad_min,
             list_pos,
             list_total,
             delimiter_artist=delimiter_artist,
             delimiter_album_artist=delimiter_album_artist,
-            use_primary_album_artist=use_primary_album_artist,
+            use_primary_album_artist=use_primary_album_artist and not in_filename,
         )
 
-        if result_fmt != match.group(1):
-            # Sanitize here, in case of the filename has slashes or something, which will be recognized later as a directory separator.
-            # Do not sanitize if value is the FORMAT_TEMPLATE_EXPLICIT placeholder, since it has a leading whitespace which otherwise gets removed.
-            if result_fmt == FORMAT_TEMPLATE_EXPLICIT:
-                value = FORMAT_TEMPLATE_EXPLICIT
-            else:
-                value = _neutralize_tokens(
-                    sanitize_name_component(result_fmt, illegal_replacement, illegal_map, tidy_spacing)
-                )
-            # Self-dressing tokens carry their own separator space
-            # ("[2026] "); sanitize_filename trims edge whitespace, which
-            # would weld the year prefix straight onto the title. Scoped to
-            # the known tokens so an ordinary value that happens to end in a
-            # space keeps today's trimmed behavior.
-            if match.group(1) in _SELF_DRESSING_TOKENS and result_fmt.endswith(" ") and value:
-                value += " "
-            result = result.replace(template_str, value)
+        if result_fmt == name:
+            return match.group()
+        # Sanitize here, in case of the filename has slashes or something, which will be recognized later as a directory separator.
+        # Do not sanitize if value is the FORMAT_TEMPLATE_EXPLICIT placeholder, since it has a leading whitespace which otherwise gets removed.
+        if result_fmt == FORMAT_TEMPLATE_EXPLICIT:
+            value = FORMAT_TEMPLATE_EXPLICIT
+        else:
+            value = _neutralize_tokens(
+                sanitize_name_component(result_fmt, illegal_replacement, illegal_map, tidy_spacing)
+            )
+        # Self-dressing tokens carry their own separator space
+        # ("[2026] "); sanitize_filename trims edge whitespace, which
+        # would weld the year prefix straight onto the title. Scoped to
+        # the known tokens so an ordinary value that happens to end in a
+        # space keeps today's trimmed behavior.
+        if placeholder in _SELF_DRESSING_TOKENS and result_fmt.endswith(" ") and value:
+            value += " "
+        return value
 
-    return _drop_empty_segments(result)
+    return _drop_empty_segments(re.sub(r"\{(.+?)\}", substitute, fmt_template))
 
 
 def _drop_empty_segments(path_relative: str) -> str:
