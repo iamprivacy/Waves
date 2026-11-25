@@ -120,12 +120,13 @@ Waves opens on TIDAL's editorial front page (New Arrivals, TIDAL Rising, every g
 
 ### ❤️ My TIDAL, however large it grows
 
-Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and smooth at any size, opening on a **Home** tab of your newest additions. Every category can be saved in one go, playlist folders drill in like a file manager and mirror on disk, and any playlist can save the **full albums** its songs come from.
+Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and smooth at any size, opening on a **Home** tab of your newest additions. Every category can be saved in one go, playlist folders drill in like a file manager and mirror on disk, and any playlist can save the **full albums** its songs come from. Don't use it? Turn off **My Tidal button** (Settings → Appearance) to hide the tab.
 
 ### 🏷️ Tagged and filed for your player
 
 - A real library layout by default, `Artist/[Year] Album/Disc-Track. Artist - Title`, the structure Plex reads natively. Paths stay customizable, with a live example as you type and a reference of every token.
 - Names are fitted to what your system allows, without mangling Japanese, Cyrillic or emoji titles.
+- **Primary artist only in file names** (Settings → Files & Naming, off by default) names each file after the song's first artist instead of all of them. Folders stay as they are.
 - **Primary album artist in tags** (on by default) writes only the primary artist to the album-artist tag, so Plex won't split multi-artist albums. ReplayGain tags are written by default too, so supporting players level volume without touching the audio.
 - **Genre from MusicBrainz** (off by default) writes every genre [MusicBrainz](https://musicbrainz.org) lists for the release into the files a download creates, joined by the **Genre separator** (`; ` by default). For a release it does not list yet, **Artist genres for unlisted releases** (on by default) uses the artist's. Files already in your library are never retagged.
 - **Cover file name** (Settings → Tags & Artwork, `cover` by default) names the cover saved beside the tracks, such as `folder` for Windows Explorer; Waves adds the `.jpg`.
@@ -143,7 +144,8 @@ Your favorite albums, tracks, artists, videos, playlists and mixes, sortable and
 ### 🧾 A queue that tells you the truth
 
 - Completed, Failed, Stopped, Downloading and Queued sections, with live progress and per-album and per-artist roll-ups.
-- The **QUEUE** button in the header is a live speed chart across the whole button with the download speed in its bottom left corner, a line along its bottom fills as the batch lands, and its count rolls as downloads land.
+- The **QUEUE** button in the header draws the last 12 seconds of download speed as bars behind the percent done and the current speed, and its count rolls as downloads land.
+- **HISTORY**, at the bottom of the queue, lists everything Waves has saved and when. Search it, filter it by kind, and open any album or playlist to see its tracks. **CLEAR HISTORY** empties the list, never your files.
 - Everything runs in the order you queued it, and every row shows the quality it asked for next to the quality that actually arrived.
 - **RETRY ALL** retries every failure in one click. An open row shows up to 12 tracks before it scrolls (**Tracks shown in an open queue row**, Settings → Appearance), can list just the ones that did not arrive, and its **REPORT** button saves those as a CSV. **MISSING REPORT** does the same for the whole queue.
 - Tracks are tagged and filed in the background while the next ones download, so the speed stays up between tracks (**Tracks finishing in the background**, Settings → Speed & Pacing, 3 by default).
@@ -176,7 +178,7 @@ A rail down the side groups every setting into short sections under Music, Files
 
 - Pages and cover art you've already seen render instantly from a local cache and refresh quietly in the background. Back and Forward land on a finished page with the scroll position and expanded albums intact, tabs reopen where you left them, and a breadcrumb trail jumps back to any step.
 - A calm, dark console theme in CRT phosphor green, drawn in Qt Quick.
-- A cinematic open-water launch, an ASCII wave logo that weathers the occasional lightning storm, rounded cover art that tilts toward your cursor (the playing one glows in its own colors), a back-to-top pill on every page, a player bar that can shrink to a Mini (Settings → Appearance), and a window that reopens at the size and place you left it.
+- A cinematic open-water launch, an ASCII wave logo that weathers the occasional lightning storm and moves to the music while a preview plays (**Logo equalizer**, Settings → Appearance), rounded cover art that tilts toward your cursor (the playing one glows in its own colors), a back-to-top pill on every page, a player bar that can shrink to a Mini (Settings → Appearance), and a window that reopens at the size and place you left it.
 - On Windows, every FFmpeg job (FLAC extraction, video conversion, previews) runs hidden, so no console window flashes up and steals focus while you type.
 
 ---
@@ -311,6 +313,7 @@ Most apps make a bug report cost you your privacy: either describe the problem b
 - **Redacted at the source, not the export.** Every log handler shares the same filter: your user name and home folder (inside file paths too, in every OS's form), the names of the network shares and drives your music folders sit on, hostnames, IP and MAC addresses, emails, session tokens and your TIDAL account id are replaced with placeholders the instant they would otherwise be written, verbose mode or not. The one exception is a native crash or freeze dump, which the system's fault handler writes straight into `crash.log`; **Export report** redacts that too, so attach the report rather than the raw file.
 - **A breadcrumb trail, always on.** Waves keeps the last ~250 activity events in memory at no disk cost. The moment something goes wrong, that trail is written to the log automatically, so even a first-time crash arrives with the events that led up to it.
 - **An optional second layer.** "Also hide titles and searches" also hashes what you searched for and any track, album or artist names in the export, for anyone who'd rather not share that either.
+- **The machine, so slowdowns make sense.** A report names your processor, graphics card, memory and display, and verbose mode adds dropped frames and CPU use. "Also hide my hardware" leaves the machine out.
 
 The log lives at `waves_dev.log`, next to `crash.log`, in the Waves config folder (`~/Library/Application Support/Waves` on macOS, `%APPDATA%\Waves` on Windows, `~/.config/Waves` on Linux). It's plain text, so read it yourself any time you like. **Export report** doesn't send anything anywhere: it writes a separate, timestamped copy of that redacted data into the same folder, and **Show file** opens it in your file manager so you can attach it or send it yourself, wherever you want.
 
