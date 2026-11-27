@@ -98,6 +98,7 @@ from waves.helper.tidal import (
 )
 from waves.http_pool import IdleDropAdapter
 from waves.lyrics import fetch_lrclib_lyrics, lyrics_file_choice
+from waves.lyrics_lavender import fetch_lavender_lyrics
 from waves.metadata import Metadata, MetadataUnreadable, carry_over_tags, join_genres, read_item_id
 from waves.model.downloader import DownloadSegmentResult, TrackStreamInfo
 from waves.model.gui_data import ProgressBars
@@ -4364,6 +4365,9 @@ class Download:
     def _retrieve_lyrics(self, track: Track) -> tuple[str, str, str]:
         """Fetch lyrics for a track, LRCLIB first, TIDAL as the fallback.
 
+        With "Ask Lavender" on and Lavender installed, the LRCLIB step goes
+        through Lavender instead, so its own settings pick the source.
+
         TIDAL serves machine-transcribed lyrics for track IDs without
         human-submitted text (recent re-recordings especially), while LRCLIB
         carries community-synced lyrics, so LRCLIB wins when the preference is
@@ -4381,7 +4385,27 @@ class Download:
         lyrics_synced: str = ""
         lyrics_unsynced: str = ""
 
-        if getattr(self.settings.data, "lyrics_prefer_lrclib", True):
+        prefer_lrclib = getattr(self.settings.data, "lyrics_prefer_lrclib", True)
+        asked_lrclib = False
+        if prefer_lrclib and getattr(self.settings.data, "lyrics_use_lavender", False):
+            # Lavender answers with its own settings (local dump, tolerant
+            # matching, extra sources). A miss still falls back to TIDAL, an
+            # instrumental is final, and an unavailable Lavender hands over
+            # to Waves' own LRCLIB lookup below.
+            answer = fetch_lavender_lyrics(
+                artist=track.artist.name if track.artist else "",
+                title=name_builder_title(track),
+                album=track.album.name if track.album else "",
+                duration=track.duration or 0,
+                title_bare=track.name,
+            )
+            if answer.found and answer.instrumental:
+                return "", "", ""
+            if answer.status != "unavailable":
+                asked_lrclib = True
+                lyrics_synced, lyrics_unsynced = answer.synced, answer.plain
+
+        if prefer_lrclib and not asked_lrclib:
             lyrics_synced, lyrics_unsynced = fetch_lrclib_lyrics(
                 self._shared_http(),
                 artist=track.artist.name if track.artist else "",

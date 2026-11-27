@@ -11,6 +11,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 
+from waves.library_index import SCAN_OK
 from waves.waves_ui import smb_relist
 
 logger = logging.getLogger("waves.library")
@@ -45,7 +46,16 @@ def recover_untrusted(
     ``on_progress`` is the scan's own progress sink: a share's worth of
     recovered artists is minutes of reading, and the bar must keep moving
     through it."""
+    # A mount point a crashed or canceled run left behind (a SIGKILL skips
+    # its unmount) is cleaned up on every scan, flagged or not: rather here
+    # than at startup, which has better things to do. A no-op off macOS.
+    with contextlib.suppress(Exception):
+        smb_relist.sweep_stale(config_dir)
     if not bool(getattr(lib, "last_scan_partial", False)):
+        return 0
+    # A scan that gave up (root missing, share not answering) never cleared
+    # the flag, and mounting a share that is not answering can hang.
+    if getattr(lib, "last_scan_status", SCAN_OK) != SCAN_OK:
         return 0
     if not alive():
         return 0
@@ -53,11 +63,6 @@ def recover_untrusted(
         targets = list(lib.unreliable_dirs())
         if not targets:
             return 0
-        # A mount point a crashed run left behind is cleaned up here rather
-        # than at startup: this is the first moment one could get in the way,
-        # and boot has better things to do than stat a directory for a case
-        # almost nobody is in.
-        smb_relist.sweep_stale(config_dir)
         recovered = smb_relist.relist_folders(
             targets,
             config_dir=config_dir,

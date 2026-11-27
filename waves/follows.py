@@ -759,7 +759,9 @@ class FollowStore:
                 entry["kind"] = "video"
             if len(kept) < FOLLOW_SHELF:
                 kept.append(entry)
-            first = str(rel["date"] or rel["listed"])[:10]
+            # The earlier of the two: a lift is later than the date, a
+            # MusicBrainz first-release day earlier.
+            first = min((str(d)[:10] for d in (rel["date"], rel["listed"]) if d), default="")
             if not video:
                 years.append(first[:4])
             if len(first) == 10:
@@ -1674,6 +1676,39 @@ class FollowStore:
             {"rgid": r[0], "title": r[1] or "", "date": r[2] or "", "rtype": r[3], "release_id": r[4] or ""}
             for r in rows
         ]
+
+    def listed_ids(self) -> set[str]:
+        """The releases on record under a listed day (a proven reissue)."""
+        with self._lock:
+            # A first-release day (see first_days) sits before the date, a lift after it.
+            return {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT DISTINCT release_id FROM releases WHERE listed != '' AND listed > date"
+                )
+            }
+
+    def first_days(self) -> dict[str, str]:
+        """The day each release on record first came out, where the
+        MusicBrainz check matched it to a release group of the same kind
+        and title whose full first-release date is earlier than TIDAL's."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT m.release_id, MIN(m.date) FROM mb_releases m JOIN releases r"
+                " ON r.artist_id = m.artist_id AND r.release_id = m.release_id"
+                " WHERE length(m.date) = 10 AND m.rtype = r.rtype AND m.date < r.date"
+                # The match forgives "(Deluxe Edition)"; a day must not: an edition has its own.
+                " AND m.title = r.title COLLATE NOCASE GROUP BY m.release_id"
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def clear_first_days(self) -> None:
+        """Drop the MusicBrainz first-release days stored as listed days (the
+        check was switched off). A reissue's lifted day is later than its
+        date, so only the earlier, MusicBrainz ones go."""
+        with self._lock:
+            self._conn.execute("UPDATE releases SET listed = '' WHERE listed != '' AND listed < date")
+            self._conn.commit()
 
     def record_failure(self, artist_id: str) -> None:
         """A step that could not fetch anything: counted, and the artist moves

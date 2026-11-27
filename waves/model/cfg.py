@@ -39,6 +39,10 @@ class Settings:
     # lyrics, which are machine-transcribed for tracks nobody has submitted
     # text for yet. TIDAL remains the fallback when LRCLIB has no match.
     lyrics_prefer_lrclib: bool = True
+    # Ask an installed Lavender (a separate app) for the LRCLIB step instead,
+    # so its own settings (local dump, tolerant matching, extra sources) pick
+    # the lyrics. Waves' own LRCLIB lookup steps in when Lavender is missing.
+    lyrics_use_lavender: bool = False
     # The Genre tag from MusicBrainz, for new downloads: every genre it lists
     # for the release, the artist's when the release has none (waves/genres.py).
     # Opt-in, off by default: it sends the release's barcode, or its title and
@@ -237,7 +241,10 @@ class HelpSettings:
         "Only save a lyrics file when timed (synced) lyrics exist; untimed lyrics " "then produce no *.txt file."
     )
     lyrics_prefer_lrclib: str = (
-        "Gets lyrics from the community LRCLIB database first, then TIDAL's, which are often machine-made and wrong."
+        "Gets lyrics from the community LRCLIB database first, then TIDAL's, often machine-made and wrong."
+    )
+    lyrics_use_lavender: str = (
+        "Asks the Lavender app, if installed, with its own lyrics settings. Otherwise Waves asks LRCLIB."
     )
     api_key_index: str = "Set the device API KEY."
     album_info_save: str = "Save album info to track?"

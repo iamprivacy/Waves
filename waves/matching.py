@@ -1073,6 +1073,11 @@ def decide_presence(title, artist, year, tracks, index, duration=0, explicit=Non
     lone_disc = best is chosen and _as_int(best.get("disc_no")) > 0 and _as_int(best.get("disc_total")) > 1
     if local_tracks <= 0:
         return hidden
+    # A copy holding every track its own files declare, fewer than the release
+    # on screen has, is a different and smaller release (a same-titled single
+    # or EP, the standard edition under a deluxe), not part of this one.
+    if 0 < declared < tt and local_tracks >= declared and not lone_disc:
+        return hidden
     by = to_year_int(best.get("year"))
     # The duration witness. Only a copy holding EXACTLY the tracks on screen
     # can testify: a superset (a deluxe copy of the standard album) naturally

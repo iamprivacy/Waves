@@ -285,6 +285,13 @@ def _name_key(name: str) -> str:
     return unicodedata.normalize("NFC", str(name or "")).casefold()
 
 
+def _folder_key(path) -> str:
+    """A whole folder path folded the way _name_key folds one name: the
+    JoinedLibrary's test for "one folder", which two caches may spell apart
+    (a share handing a name back decomposed). FOR COMPARISON ONLY."""
+    return _name_key(str(path or ""))
+
+
 def _is_one_folder(stored: str, listed: str) -> bool:
     """True when two spellings name ONE folder on disk.
 
@@ -2008,6 +2015,7 @@ class LibraryIndex:
             with self._lock:
                 stamped = self._meta_get("scan_gen")
             if stamped is None or not self.matches_scan_root(root):
+                logger.info("library landed: refused, this cache holds no finished scan of its folder")
                 return 0
             gen = int(stamped)
             alive = should_continue or (lambda: True)
@@ -2016,7 +2024,9 @@ class LibraryIndex:
             targets: list[str] = []
             for folder in wanted:
                 path = self._stored_spelling(root, folder, known, children)
-                if path is not None and path not in targets:
+                if path is None:
+                    logger.info("library landed: a folder outside the walked tree was skipped")
+                elif path not in targets:
                     targets.append(path)
             found: list[_Candidate] = []
             for path in targets:
@@ -2024,8 +2034,10 @@ class LibraryIndex:
                     return 0
                 try:
                     if not stat_mod.S_ISDIR(os.stat(path).st_mode):
+                        logger.info("library landed: a landed path is not a folder, skipped")
                         continue
-                except OSError:
+                except OSError as e:
+                    logger.info("library landed: a landed folder could not be read (errno %s), skipped", e.errno)
                     continue
                 walked = self._walk_album_dirs(path, alive, emit, gen, force_full=True, subtree=True)
                 if walked is not None:
@@ -2041,6 +2053,35 @@ class LibraryIndex:
             return len(to_read)
         finally:
             self._scan_busy.release()
+
+    def landed_overlay(self, root: str) -> LibraryIndex:
+        """A small in-memory cache for ``root`` that takes index_folders while
+        a scan holds this one: downloads that just landed show their badges
+        from it until this cache has read them (see JoinedLibrary). It reads
+        tags the way this cache does, and is stamped as scanned so
+        index_folders accepts it; nothing ever walks or prunes it."""
+        overlay = LibraryIndex(":memory:", read_tags=self._read_tags, is_audio=self._is_audio)
+        overlay._meta_set("scan_root", os.path.expanduser(str(root or "")).rstrip(os.sep))
+        overlay._meta_set("scan_gen", "1")
+        return overlay
+
+    def forget_folders(self, root: str, folders: Iterable[str]) -> int:
+        """Drop these folders and everything under them (a landed_overlay
+        handing a folder over to the scan cache). Returns the albums dropped."""
+        root = os.path.expanduser(str(root or "")).rstrip(os.sep)
+        with self._scan_busy:
+            known, children = self._load_dir_tree()
+            tops = [self._stored_spelling(root, str(f), known, children) for f in folders if str(f or "").strip()]
+            doomed = [p for p in known if any(p == t or p.startswith(t + os.sep) for t in tops if t)]
+            if not doomed:
+                return 0
+            marks = [(p,) for p in doomed]
+            with self._lock:
+                dropped = self._conn.executemany("DELETE FROM albums WHERE folder_path = ?", marks).rowcount
+                for table, column in (("tracks", "folder_path"), ("file_tags", "folder_path"), ("dirs", "path")):
+                    self._conn.executemany(f"DELETE FROM {table} WHERE {column} = ?", marks)  # noqa: S608 (fixed names)
+                self._conn.commit()
+            return int(dropped or 0)
 
     @staticmethod
     def _stored_spelling(root: str, folder: str, known: dict[str, tuple], children: dict[str, list[str]]) -> str | None:
@@ -2952,17 +2993,23 @@ class LibraryIndex:
         files) never reach here: their artist half is empty by design."""
         return self.named_artists(self.artist_entries())
 
-    def artist_entries(self, by_key: dict[str, dict] | None = None) -> dict[str, dict]:
+    def artist_entries(self, by_key: dict[str, dict] | None = None, seen: set[str] | None = None) -> dict[str, dict]:
         """distinct_artists before the naming: per artist key, how often each
         spelling is tagged, the album and track counts and up to three
         folders. Adds into ``by_key`` when given, so two caches tally one
-        artist as one (see JoinedLibrary)."""
+        artist as one (see JoinedLibrary), and skips a folder already in
+        ``seen`` (by _folder_key), so one folder two caches hold counts once."""
         rows = self._read(
             "SELECT pkey_artist, artist, folder_path, track_count FROM albums"
             " WHERE pkey_artist IS NOT NULL AND pkey_artist != '' ORDER BY folder_path"
         )
         by_key = {} if by_key is None else by_key
         for key, artist, folder, count in rows:
+            if seen is not None:
+                fk = _folder_key(folder)
+                if fk in seen:
+                    continue
+                seen.add(fk)
             entry = by_key.setdefault(str(key), {"spellings": {}, "albums": 0, "tracks": 0, "folders": []})
             name = str(artist or "").strip()
             if name:
@@ -3674,21 +3721,38 @@ class JoinedLibrary:
                 continue
             yield c
 
+    @staticmethod
+    def _pooled(per_cache: Iterable[list[dict]]) -> list[dict]:
+        """Every cache's facts, minus those for a folder an EARLIER cache
+        already answered for: one folder on disk is one copy, even while the
+        download index (landed_overlay) and the scan cache both hold it. The
+        bridge lists the download index first: its read is the newer one."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for facts in per_cache:
+            fresh = [f for f in facts if _folder_key(f.get("id")) not in seen]
+            seen.update(_folder_key(f.get("id")) for f in fresh)
+            out.extend(fresh)
+        return out
+
     def presence_facts(self, key) -> list[dict]:
-        return [f for c in self._each() for f in c.presence_facts(key)]
+        return self._pooled(c.presence_facts(key) for c in self._each())
 
     def track_facts(self, key) -> list[dict]:
-        return [f for c in self._each() for f in c.track_facts(key)]
+        return self._pooled(c.track_facts(key) for c in self._each())
 
     def has_presence_rows(self) -> bool:
         return any(c.has_presence_rows() for c in self._each())
 
     def artist_bucket_map(self, artist_key: str) -> dict[str, list[dict]]:
         out: dict[str, list[dict]] = {}
+        seen: set[str] = set()  # one folder is one copy, as in _pooled
         for c in self._each():
-            for title, facts in c.artist_bucket_map(artist_key).items():
-                out.setdefault(title, []).extend(facts)
-        return out
+            mine = c.artist_bucket_map(artist_key)
+            for title, facts in mine.items():
+                out.setdefault(title, []).extend(f for f in facts if _folder_key(f.get("id")) not in seen)
+            seen.update(_folder_key(f.get("id")) for facts in mine.values() for f in facts)
+        return {title: facts for title, facts in out.items() if facts}
 
     def artist_buckets(self, artist_key: str) -> list[list[dict]]:
         return list(self.artist_bucket_map(artist_key).values())
@@ -3698,8 +3762,9 @@ class JoinedLibrary:
 
     def distinct_artists(self) -> list[dict]:
         by_key: dict[str, dict] = {}
+        seen: set[str] = set()
         for c in self._each():
-            c.artist_entries(by_key)
+            c.artist_entries(by_key, seen)
         return LibraryIndex.named_artists(by_key)
 
     def artist_tag_ids(self) -> dict[str, str]:
@@ -3742,10 +3807,20 @@ class JoinedLibrary:
 
     first_audio_file = staticmethod(LibraryIndex.first_audio_file)
 
-    def iter_albums(self) -> Iterator[dict]:
+    def _once(self, rows_of) -> Iterator[dict]:
+        """Every cache's rows, minus those of a folder an earlier cache held."""
+        seen: set[str] = set()
         for c in self._each():
-            yield from c.iter_albums()
+            mine: set[str] = set()
+            for row in rows_of(c):
+                fk = _folder_key(row.get("id"))
+                if fk not in seen:
+                    mine.add(fk)
+                    yield row
+            seen |= mine
+
+    def iter_albums(self) -> Iterator[dict]:
+        return self._once(lambda c: c.iter_albums())
 
     def iter_tracks(self) -> Iterator[dict]:
-        for c in self._each():
-            yield from c.iter_tracks()
+        return self._once(lambda c: c.iter_tracks())
