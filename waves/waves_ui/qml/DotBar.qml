@@ -2,8 +2,8 @@ import QtQuick
 
 // The download buttons' rising dot matrix (Main.qml's inline DotMatrix), as a
 // standalone file so surfaces outside Main.qml (the Settings library scan) can
-// draw the exact same bar. Kept a copy rather than the shared definition for
-// the same reason LedBar is: Main's inline component breathes off root's
+// draw the exact same bar. Kept a copy rather than the shared definition
+// because Main's inline component breathes off root's
 // shared 20 Hz clocks (ledPulse, shimmerPhase) so hundreds of instances cost
 // one timer, while a lone Settings bar can afford its own. Cells brighten
 // column-major, bottom-up, and the next unlit cell pulses while work runs.
@@ -24,8 +24,8 @@ Item {
     readonly property int litCount: Math.round(Math.max(0, Math.min(100, pct)) / 100 * total)
     implicitHeight: rows * dot + (rows - 1) * gap
 
-    // Own 20 Hz breathe clock (see LedBar for why not a per-cell animation):
-    // only ticks while the bar is visible and still filling.
+    // Own 20 Hz breathe clock rather than a per-cell animation, which would
+    // repaint the window every vsync; only ticks while visible and filling.
     property real pulseLevel: 0.85
     Timer {
         running: dm.visible && dm.pulse && dm.pct < 100

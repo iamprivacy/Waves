@@ -56,6 +56,12 @@ Item {
     readonly property color cyan:         "#56c8d8"
     readonly property color red:          "#ff5a52"
     readonly property color redCont:      "#2a0e0c"
+    // The Lavender app's own colors, only on the "Ask Lavender first" key.
+    readonly property color lavender:     "#b9a2ea"
+    readonly property color lavenderCont: "#1d1530"
+    readonly property color lavenderTx:   "#d6c8f7"
+    readonly property color lavenderStem: "#4f8f5c"
+    readonly property color lavenderDim:  "#6f5fa0"
     readonly property string mono:        monoFont
     // Console button spec (Button Lab verdict, 2026-07-02), mirrors Main.qml.
     readonly property string uiFont:   uiFontFamily
@@ -100,6 +106,36 @@ Item {
     // laggy. `needsRefresh` forces a one-time rebuild after a save so the
     // controls reflect the freshly-saved values on the next open.
     property bool needsRefresh: false
+    // Bumped when the Lavender key should ask again whether Lavender can
+    // answer: the page comes on show, the key is clicked.
+    property int lavTick: 0
+    // The drawer's DOWNLOAD fetches Lavender's installer from its latest
+    // release: lavGet is "" (idle), "downloading", "ready" (saved and
+    // opened) or "failed". On the page, so a reopened Settings keeps it.
+    property string lavGet: ""
+    property real lavGetPct: 0
+    property string lavGetFile: ""
+    property string lavGetError: ""
+    property double lavGetAt: 0   // when DOWNLOAD was last clicked (the drawer holds its bar a moment)
+    function getLavender() {
+        if (lavGet === "ready" && lavGetFile !== "") { Qt.openUrlExternally(lavGetFile); return }
+        if (typeof waves.getLavender !== "function") { Qt.openUrlExternally("https://getlavender.dev"); return }
+        lavGetPct = 0; lavGetError = ""; lavGetAt = Date.now(); lavGet = "downloading"
+        waves.getLavender()
+    }
+    Connections {
+        target: waves; ignoreUnknownSignals: true
+        function onLavenderGetProgress(pct) { page.lavGetPct = pct }
+        function onLavenderGetState(state, text) {
+            // No installer for this computer: its site instead.
+            if (state === "unsupported") { page.lavGet = ""; Qt.openUrlExternally("https://getlavender.dev"); return }
+            page.lavGet = state === "canceled" ? "" : state
+            if (state === "ready") { page.lavGetFile = text; Qt.openUrlExternally(text) }
+            if (state === "failed") page.lavGetError = text
+        }
+    }
+    // While the installer is open, look for the new Lavender (no restart).
+    Timer { interval: 3000; repeat: true; running: page.lavGet === "ready" && page.visible; onTriggered: page.lavTick++ }
 
     // ---- Shared FFmpeg manager ----
     // Injected from Main as the single app-wide FfmpegManager instance (the same
@@ -689,6 +725,14 @@ Item {
     readonly property int openMs: 260
     readonly property int keyMs: 160
     function mix(a, b, k) { return Qt.rgba(a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k, a.a + (b.a - a.a) * k) }
+    // Easing on a 0..1 clock, for marks that ease their parts off one clock.
+    function clamp01(t) { return Math.max(0, Math.min(1, t)) }
+    function segK(k, a, b) { return clamp01((k - a) / (b - a)) }
+    function easeOutCubic(t) { var u = 1 - t; return 1 - u * u * u }
+    function easeOutBack(t) { var c = 1.7, u = t - 1; return 1 + (c + 1) * u * u * u + c * u * u }
+    // The Lavender key's sprout (notes/lavender_morph_lab, B2): the circle
+    // drops into a seed, the stem rises, leaves unfurl, buds pop bottom up.
+    readonly property int lavenderMs: 380
     FontMetrics { id: tileTitleFm; font.pixelSize: 14; font.weight: Font.Medium }
     FontMetrics { id: tileHelpFm; font.pixelSize: 12 }
     readonly property real tileTitleLineH: Math.ceil(tileTitleFm.height)
@@ -836,6 +880,7 @@ Item {
             unsaved = ({})
             dirty = false
             if (needsRefresh) refreshSchema()
+            lavTick++
             // Refresh local status only (no network). Update checks are
             // user-initiated via the "Check for updates" button.
             if (page.ff) page.ff.refresh()
@@ -986,6 +1031,8 @@ Item {
         property string title: ""
         property string help: ""
         property bool helpShown: help !== ""
+        // A tile that lays something over its help fades it with this.
+        property real helpOpacity: 1
         property bool checked: false
         property bool compact: false
         property int helpLines: 3
@@ -1020,7 +1067,8 @@ Item {
                 Layout.preferredHeight: tb.compact ? Math.max(page.switchH - page.tileTitleNudge, implicitHeight) : implicitHeight
             }
             Text {
-                visible: tb.helpShown
+                visible: tb.helpShown && tb.helpOpacity > 0.001
+                opacity: tb.helpOpacity
                 textFormat: Text.PlainText
                 text: tb.help; color: page.textDim; font.pixelSize: 12; lineHeight: 1.15
                 wrapMode: Text.WordWrap; maximumLineCount: Math.max(1, tb.helpLines)
@@ -1055,6 +1103,79 @@ Item {
         color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, k)
         border.width: 1; border.color: page.mix(page.textLo, page.accent, k)
         Ico { anchors.centerIn: parent; opacity: rck.k; scale: 0.6 + 0.4 * rck.k; name: "check"; color: page.accentText; size: 9; bold: 14 }
+    }
+
+    // A lavender sprig in a 24 px box: a green stem with two leaves under a
+    // spike of buds, drawn as vectors so it tints and scales like Ico.
+    // Growth handles (all 1 draws the whole sprig): grow raises the stem from
+    // its base, leaves unfurl both leaves from the stem, buds pops the bud
+    // rows in from the bottom, budStep apart.
+    component LavenderSprig: Item {
+        id: spr
+        property real size: 16
+        property color bud: page.lavender
+        property color stem: page.lavenderStem
+        property real grow: 1
+        property real leaves: 1
+        property real buds: 1
+        property real budStep: 0.12
+        implicitWidth: size; implicitHeight: size
+        // Bud centers (cx, cy) along the spike, widest in the middle, and
+        // each bud's row from the tip.
+        readonly property var budList: [[12, 2.6], [10.3, 5.0], [13.7, 5.0], [12, 7.3], [10.2, 9.7], [13.8, 9.7], [12, 12.0]]
+        readonly property var budRow: [0, 1, 1, 2, 3, 3, 4]
+        function budScale(i) {
+            var r = 4 - budRow[i]
+            return Math.max(0, page.easeOutBack(page.clamp01((spr.buds - r * spr.budStep) / (1 - 4 * spr.budStep))))
+        }
+        Item {
+            width: 24; height: 24
+            anchors.centerIn: parent
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: spr.size / 24; yScale: spr.size / 24 }
+            Shape {
+                anchors.fill: parent
+                visible: spr.grow > 0.001
+                antialiasing: true; preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    fillColor: "transparent"; strokeColor: spr.stem; strokeWidth: 1.5
+                    capStyle: ShapePath.RoundCap
+                    PathSvg { path: "M12 23L12 " + (23 - 10.5 * spr.grow) }
+                }
+            }
+            Shape {
+                anchors.fill: parent
+                antialiasing: true; preferredRendererType: Shape.CurveRenderer
+                transform: Scale { origin.x: 12; origin.y: 20.5; xScale: spr.leaves; yScale: spr.leaves }
+                ShapePath {
+                    fillColor: spr.stem; strokeColor: "transparent"
+                    PathSvg { path: "M12 20.5Q7.6 19.4 7 15.6Q10.8 16.8 12 19.4Z" }
+                }
+            }
+            Shape {
+                anchors.fill: parent
+                antialiasing: true; preferredRendererType: Shape.CurveRenderer
+                transform: Scale { origin.x: 12; origin.y: 17.6; xScale: spr.leaves; yScale: spr.leaves }
+                ShapePath {
+                    fillColor: spr.stem; strokeColor: "transparent"
+                    PathSvg { path: "M12 17.6Q16.4 16.6 17 12.9Q13.2 14 12 16.5Z" }
+                }
+            }
+            Repeater {
+                model: 7
+                Shape {
+                    required property int index
+                    readonly property var b: spr.budList[index]
+                    width: 3.8; height: 4.8
+                    x: b[0] - 1.9; y: b[1] - 2.4
+                    scale: spr.budScale(index)
+                    antialiasing: true; preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        fillColor: spr.bud; strokeColor: "transparent"
+                        PathSvg { path: "M0 2.4a1.9 2.4 0 1 0 3.8 0a1.9 2.4 0 1 0 -3.8 0Z" }
+                    }
+                }
+            }
+        }
     }
 
     // The audio output pick: a one-of list under the words, rows in the
@@ -2202,8 +2323,8 @@ Item {
                             color: page.textDim; font.pixelSize: 12
                         }
 
-                        // Progress (while downloading/installing): the same LED
-                        // dot-matrix pill the updater card uses.
+                        // Progress (while downloading/installing): the same
+                        // progress pill the updater card uses.
                         LedBar {
                             visible: page.ff.busy; Layout.fillWidth: true; Layout.topMargin: 2
                             radius: page.btnRad; mono: page.mono
@@ -2550,8 +2671,7 @@ Item {
                             }
 
                             // Progress (while downloading/installing): the shared
-                            // LED dot-matrix pill (LedBar.qml, extracted from the
-                            // DownIcon running style via the Progress Lab).
+                            // progress pill (LedBar.qml).
                             LedBar {
                                 visible: page.auBusy; Layout.fillWidth: true
                                 radius: page.btnRad; mono: page.mono
@@ -4960,6 +5080,7 @@ Item {
                                         // the room along the tile's bottom edge while the parent flag
                                         // is on, so the tile never grows or shifts its neighbors.
                                         readonly property bool hasChild: modelData.child_key !== undefined
+                                        readonly property bool lavenderKey: hasChild && modelData.child_style === "lavender"
                                         // While a prerequisite is missing (ffmpeg, or a required flag)
                                         // the feature can't run, so the switch reads OFF (grayed)
                                         // regardless of the saved value; it animates back to the real
@@ -4971,13 +5092,59 @@ Item {
                                             : depBlocked ? (modelData.requires_hint !== undefined ? modelData.requires_hint : "Requires another option") : ""
                                         readonly property bool dirtyHere: page.fieldDirty(modelData)
                                         function flip() { page.setv(modelData.key, !(page.val(modelData) === true)) }
-                                        function flipChild() { page.setv(modelData.child_key, !childVal) }
+                                        // Lavender as its key sees it: "ok", "missing" (not installed)
+                                        // or "old" (no lyrics worker). Asked when the page comes on show
+                                        // and on each click of the key, so an install is seen without a restart.
+                                        function lavRead(tick) { return lavenderKey ? waves.lavenderState() : "ok" }
+                                        readonly property string lavState: lavRead(page.lavTick)
+                                        // The key was clicked while Lavender is missing: it stays off.
+                                        property bool lavAsked: false
+                                        // The drawer's x drops it back to the key until the next click.
+                                        property bool lavShut: false
+                                        // Lavender missing (after a click) or too old (key saved on):
+                                        // the key lifts into a lavender drawer over the help.
+                                        readonly property bool lavDrawer: lavenderKey && childOn && lavState !== "ok" && (childVal || lavAsked) && !lavShut
+                                        // The drawer rises out of the key and folds back into it: in
+                                        // decelerating, out easing in and out so it never jolts or creeps.
+                                        property real drawerK: lavDrawer && !blocked ? 1 : 0
+                                        Behavior on drawerK { id: drawerBeh
+                                            NumberAnimation { duration: 420; easing.type: drawerBeh.targetValue > 0.5 ? Easing.OutCubic : Easing.InOutCubic } }
+                                        // The key's tag fades under the rising drawer instead of vanishing.
+                                        readonly property real tagOpacity: 1 - page.segK(drawerK, 0, 0.3)
+                                        readonly property string lavTag: !lavenderKey || lavState === "ok" ? ""
+                                            : lavState === "missing" ? "NOT INSTALLED" : "UPDATE NEEDED"
+                                        // The installer finished: the key the user asked for comes on.
+                                        onLavStateChanged: {
+                                            if (!lavenderKey || lavState !== "ok" || page.lavGet !== "ready") return
+                                            page.lavGet = ""
+                                            if (lavAsked && !childVal) {
+                                                // Saved at once: nobody is at the SAVE button when an installer finishes.
+                                                lavAsked = false; page.setv(modelData.child_key, true)
+                                                var one = {}; one[modelData.child_key] = true
+                                                waves.applySettings(one); page.needsRefresh = true
+                                            }
+                                        }
+                                        function flipChild() {
+                                            if (lavenderKey) {
+                                                lavShut = false
+                                                page.lavTick++
+                                                // Only a click that asks for the key: turning it off never opens the drawer.
+                                                lavAsked = lavState === "missing" && !childVal
+                                                if (lavAsked) return
+                                            }
+                                            page.setv(modelData.child_key, !childVal)
+                                        }
                                         // The strip's two clocks: `stripOpen` on the switch's,
                                         // `stripK` on the key's.
                                         property real stripOpen: childOn ? 1 : 0
                                         Behavior on stripOpen { NumberAnimation { duration: page.openMs; easing.type: Easing.OutCubic } }
-                                        property real stripK: childVal ? 1 : 0
-                                        Behavior on stripK { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+                                        property real keyK: childVal ? 1 : 0
+                                        Behavior on keyK { NumberAnimation { duration: page.keyMs; easing.type: Easing.OutCubic } }
+                                        // The Lavender key runs on its sprout's clock and
+                                        // fades as the plant grows.
+                                        property real sproutK: childVal ? 1 : 0
+                                        Behavior on sproutK { enabled: flagTile.lavenderKey; NumberAnimation { duration: page.lavenderMs } }
+                                        readonly property real stripK: lavenderKey ? page.easeOutCubic(page.segK(sproutK, 0.15, 1)) : keyK
                                         // Every tile the same width, never one stretched
                                         // over a row of its own: each section's switch
                                         // count divides into full rows (a test checks).
@@ -5029,6 +5196,8 @@ Item {
                                             compact: flagTile.compact
                                             help: flagTile.modelData.help
                                             helpShown: flagTile.modelData.help !== "" && !flagTile.blocked
+                                            // The help fades as the rising sheet reaches it.
+                                            helpOpacity: 1 - page.segK(flagTile.drawerK, 0.15, 0.5)
                                             helpLines: page.tileHelpLines(flagFlow.cols === 3, flagTile.compact)
                                             Text { visible: flagTile.hint !== ""; textFormat: Text.PlainText; text: flagTile.hint; color: page.gold; font.pixelSize: 11; Layout.fillWidth: true }
                                         }
@@ -5045,21 +5214,63 @@ Item {
                                                 id: stripFace
                                                 width: parent.width; height: parent.height; radius: 9
                                                 y: 8 * (1 - flagTile.stripOpen)
-                                                color: page.mix(page.surface0, page.accentCont, flagTile.stripK)
+                                                // The Lavender key fades to the Lavender app's
+                                                // color instead of the accent green.
+                                                color: page.mix(page.surface0, flagTile.lavenderKey ? page.lavenderCont : page.accentCont, flagTile.stripK)
                                                 // Square top corners: the strip runs into the card.
                                                 Rectangle { width: parent.width; height: 9; color: parent.color }
                                                 Row {
                                                     x: flagTile.compact ? 13 : 15; spacing: 8
                                                     anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: 1
-                                                    RoundCheck { anchors.verticalCenter: parent.verticalCenter; k: flagTile.stripK }
+                                                    RoundCheck { visible: !flagTile.lavenderKey; anchors.verticalCenter: parent.verticalCenter; k: flagTile.stripK }
+                                                    // Lavender's key: the circle drops into a seed
+                                                    // and a lavender sprig sprouts in its place.
+                                                    Item {
+                                                        id: sprout
+                                                        objectName: "lavenderCheck"
+                                                        visible: flagTile.lavenderKey
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: 13; height: 13
+                                                        readonly property real k: flagTile.sproutK
+                                                        readonly property real seed: page.easeOutCubic(page.segK(k, 0, 0.25))
+                                                        Rectangle {
+                                                            anchors.centerIn: parent
+                                                            anchors.verticalCenterOffset: 8 * sprout.seed
+                                                            width: 13; height: 13; radius: 6.5
+                                                            border.width: 1
+                                                            border.color: page.mix(page.mix(page.textLo, page.lavender, page.easeOutCubic(sprout.k)), page.lavenderStem, sprout.seed)
+                                                            color: Qt.rgba(page.lavenderStem.r, page.lavenderStem.g, page.lavenderStem.b, sprout.seed)
+                                                            opacity: 1 - page.segK(sprout.k, 0.22, 0.36)
+                                                            scale: 1 - 0.78 * sprout.seed
+                                                        }
+                                                        LavenderSprig {
+                                                            anchors.centerIn: parent
+                                                            size: 18
+                                                            grow: page.easeOutCubic(page.segK(sprout.k, 0.15, 0.5))
+                                                            leaves: page.easeOutBack(page.segK(sprout.k, 0.35, 0.65))
+                                                            buds: page.segK(sprout.k, 0.45, 1)
+                                                        }
+                                                    }
                                                     Text {
                                                         anchors.verticalCenter: parent.verticalCenter
-                                                        width: stripFace.width - (flagTile.compact ? 26 : 30) - 21
+                                                        width: stripFace.width - (flagTile.compact ? 26 : 30) - 21 - (keyTag.visible ? keyTag.width + 10 : 0)
                                                         textFormat: Text.PlainText; elide: Text.ElideRight
                                                         text: flagTile.modelData.child_label !== undefined ? flagTile.modelData.child_label : ""
-                                                        color: page.mix(page.textLo, page.accentContTx, flagTile.stripK)
+                                                        color: page.mix(page.textLo, flagTile.lavenderKey ? page.lavenderTx : page.accentContTx, flagTile.stripK)
                                                         font.pixelSize: 12; font.weight: Font.Medium
                                                     }
+                                                }
+                                                // Lavender missing or too old, said quietly at the key's far end.
+                                                Text {
+                                                    id: keyTag
+                                                    objectName: "lavenderTag"
+                                                    visible: flagTile.lavTag !== "" && opacity > 0.001
+                                                    opacity: flagTile.tagOpacity
+                                                    anchors.right: parent.right; anchors.rightMargin: flagTile.compact ? 12 : 14
+                                                    anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: 1
+                                                    textFormat: Text.PlainText; text: flagTile.lavTag
+                                                    color: flagTile.lavState === "old" ? page.gold : page.textDim
+                                                    font.family: page.mono; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.4
                                                 }
                                             }
                                             // The card's soft shade on the strip, right under its edge.
@@ -5075,6 +5286,162 @@ Item {
                                                 enabled: flagTile.childOn
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: flagTile.flipChild()
+                                            }
+                                        }
+                                        // The Lavender drawer: the key lifted over the help (title
+                                        // and switch stay), a centered sprig, two lines and one
+                                        // button that fetches Lavender's installer. Its x drops it back to the key.
+                                        Item {
+                                            id: lavBox
+                                            objectName: "lavenderDrawer"
+                                            visible: flagTile.drawerK > 0.001
+                                            readonly property real k: flagTile.drawerK
+                                            // What the drawer shows: page.lavGet, one crossfade per change.
+                                            // After DOWNLOAD the bar stays on show for a moment, so a
+                                            // refusal that comes back at once never just blinks it.
+                                            property string face: page.lavGet
+                                            property string faceError: page.lavGetError
+                                            property string faceNext: ""
+                                            property real faceK: 1
+                                            readonly property string want: page.lavGet
+                                            function swapTo(next) { faceNext = next; faceSwap.restart() }
+                                            onWantChanged: {
+                                                var wait = want === "downloading" ? 0 : 1200 - (Date.now() - page.lavGetAt)
+                                                if (wait <= 0) { faceHold.stop(); swapTo(want) }
+                                                else { faceHold.interval = wait; faceHold.restart() }
+                                            }
+                                            Timer { id: faceHold; onTriggered: lavBox.swapTo(lavBox.want) }
+                                            SequentialAnimation {
+                                                id: faceSwap
+                                                NumberAnimation { target: lavBox; property: "faceK"; to: 0; duration: 200; easing.type: Easing.InCubic }
+                                                ScriptAction { script: { lavBox.face = lavBox.faceNext; lavBox.faceError = page.lavGetError } }
+                                                NumberAnimation { target: lavBox; property: "faceK"; to: 1; duration: 300; easing.type: Easing.OutCubic }
+                                            }
+                                            x: 1; width: parent.width - 2
+                                            y: page.tilePadT + Math.max(flagTile.compact ? page.switchH : 0, page.tileTitleNudge + flBody.titleLines * page.tileTitleLineH) + 7
+                                            height: parent.height - 1 - y
+                                            // Faded in and out over the strip it starts and ends as, so the hand-over has no seam.
+                                            opacity: flagTile.stripOpen * page.segK(k, 0, 0.15)
+                                            // Clicks here never reach the tile's own switch.
+                                            MouseArea { anchors.fill: parent }
+                                            // The sheet starts as the key's strip, in its color, and
+                                            // grows up to full height; its bottom never moves.
+                                            Item {
+                                                width: parent.width
+                                                y: (1 - lavBox.k) * (lavBox.height - page.tileStripH)
+                                                height: parent.height - y
+                                                Rectangle {
+                                                    anchors.fill: parent; radius: 9
+                                                    color: page.mix(page.mix(page.surface0, page.lavenderCont, flagTile.stripK), page.lavenderCont, page.easeOutCubic(page.segK(lavBox.k, 0, 0.5)))
+                                                    Rectangle { width: parent.width; height: 9; color: parent.color }
+                                                }
+                                                Rectangle {
+                                                    width: parent.width; height: 8
+                                                    opacity: page.segK(lavBox.k, 0, 0.4)
+                                                    gradient: Gradient {
+                                                        GradientStop { position: 0; color: "#80000000" }
+                                                        GradientStop { position: 1; color: "#00000000" }
+                                                    }
+                                                }
+                                            }
+                                            // The words follow the sheet's top edge up and show once it has passed them.
+                                            Item {
+                                                anchors.fill: parent
+                                                opacity: page.segK(lavBox.k, 0.55, 1)
+                                                transform: Translate { y: (1 - lavBox.k) * 16 }
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: flagTile.compact ? 11 : 13; anchors.rightMargin: flagTile.compact ? 10 : 12
+                                                    anchors.topMargin: 6
+                                                    spacing: flagTile.compact ? 8 : 10
+                                                    LavenderSprig { Layout.alignment: Qt.AlignVCenter; size: flagTile.compact ? 24 : 28 }
+                                                    ColumnLayout {
+                                                        opacity: lavBox.faceK
+                                                        Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; spacing: 3
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            textFormat: Text.PlainText; elide: Text.ElideRight
+                                                            text: lavBox.face === "downloading" ? "Getting Lavender"
+                                                                : lavBox.face === "ready" ? "Lavender is ready"
+                                                                : flagTile.lavState === "missing" ? "Lavender is missing" : "Lavender is too old"
+                                                            color: page.lavenderTx; font.pixelSize: 13; font.weight: Font.Medium
+                                                        }
+                                                        Text {
+                                                            visible: lavBox.face !== "downloading"
+                                                            Layout.fillWidth: true
+                                                            textFormat: Text.PlainText; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                                                            text: lavBox.face === "failed" ? lavBox.faceError
+                                                                : lavBox.face === "ready" ? (flagTile.compact ? "Open it to finish." : "Open the installer to finish. No restart needed.")
+                                                                : flagTile.lavState === "missing"
+                                                                ? (flagTile.compact ? "A free lyrics app." : "A free lyrics app. Its own settings pick your lyrics.")
+                                                                : (flagTile.compact ? "Update to use it." : "Waves needs a newer one.")
+                                                            color: lavBox.face === "failed" ? page.red : page.textLo; font.pixelSize: 12; lineHeight: 1.15
+                                                        }
+                                                        // Downloading: one bar, a small round red x on its end cancels.
+                                                        Item {
+                                                            objectName: "lavenderBar"
+                                                            visible: lavBox.face === "downloading"
+                                                            Layout.fillWidth: true; Layout.preferredHeight: lavGetTxt.implicitHeight + page.btnPadV * 2; Layout.topMargin: 2
+                                                            LedBar {
+                                                                objectName: "lavenderLed"
+                                                                anchors.fill: parent
+                                                                radius: page.btnRad; mono: page.mono
+                                                                accent: page.lavender; accentCont: Qt.darker(page.lavenderCont, 1.25); accentDim: page.lavenderDim
+                                                                pct: page.lavGetPct; label: "Downloading · " + Math.round(page.lavGetPct) + "%"
+                                                                endInset: parent.height   // the red x's room
+                                                            }
+                                                            Rectangle {
+                                                                anchors.right: parent.right; anchors.rightMargin: 4
+                                                                anchors.verticalCenter: parent.verticalCenter
+                                                                width: parent.height - 8; height: width; radius: width / 2
+                                                                color: lavCancelArea.containsMouse ? Qt.lighter(page.redCont, 1.35) : page.redCont
+                                                                border.width: 1; border.color: lavCancelArea.containsMouse ? page.red : Qt.alpha(page.red, 0.55)
+                                                                Ico {
+                                                                    anchors.centerIn: parent; name: "close"; size: 8; bold: 9
+                                                                    color: page.red
+                                                                }
+                                                                MouseArea {
+                                                                    id: lavCancelArea; objectName: "lavenderCancel"
+                                                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                                    onClicked: waves.cancelLavenderGet()
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    LiftRect {
+                                                        objectName: "lavenderGet"
+                                                        opacity: lavBox.faceK
+                                                        visible: lavBox.face !== "downloading"
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        implicitWidth: lavGetTxt.implicitWidth + page.btnPadH * 2; implicitHeight: lavGetTxt.implicitHeight + page.btnPadV * 2
+                                                        radius: page.btnRad; border.width: 1
+                                                        // A step lighter than the drawer, so it still reads as raised.
+                                                        fill: Qt.lighter(page.lavenderCont, 1.55); edge: page.lavenderDim
+                                                        Text {
+                                                            id: lavGetTxt; anchors.centerIn: parent; textFormat: Text.PlainText
+                                                            text: lavBox.face === "ready" ? "INSTALL" : flagTile.lavState === "missing" ? (flagTile.compact ? "GET" : "DOWNLOAD") : "UPDATE"
+                                                            color: page.lavender; font.pixelSize: 13; font.family: page.uiFont; font.bold: true; font.letterSpacing: page.btnTrack
+                                                        }
+                                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.getLavender() }
+                                                    }
+                                                }
+                                                Item {
+                                                    visible: lavBox.face !== "downloading"
+                                                    opacity: lavBox.faceK
+                                                    anchors.top: parent.top; anchors.right: parent.right
+                                                    anchors.topMargin: 3; anchors.rightMargin: 3
+                                                    width: 18; height: 18
+                                                    Ico {
+                                                        anchors.centerIn: parent; name: "close"; size: 8; bold: 9
+                                                        color: lavShutArea.containsMouse ? page.lavenderTx : page.lavender
+                                                    }
+                                                    MouseArea {
+                                                        id: lavShutArea; objectName: "lavenderShut"
+                                                        anchors.fill: parent; hoverEnabled: true
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: flagTile.lavShut = true
+                                                    }
+                                                }
                                             }
                                         }
                                     }

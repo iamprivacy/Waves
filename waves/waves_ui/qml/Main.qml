@@ -15922,7 +15922,9 @@ ApplicationWindow {
                 // prefetch, and a pointer on the caption is not asking).
                 HoverHandler { id: bcArtHover }
                 CoverMarks {
-                    libState: bc.libState
+                    // A download finished this session under the library is
+                    // in it now (ArtCard.coverLibState), not after the scan.
+                    libState: bc.dlSt === "done" && root.libraryOn && root.dlInLibrary ? "proven" : bc.libState
                     albumId: bc.libPresence ? (bc.libPresence.local_album_id || "") : ""
                     qclass: bc.libPresence ? (bc.libPresence.local_class || "") : ""
                     qualWord: (bc.kind === "album" || bc.kind === "track") ? root.releaseQualWord(bc.card) : ""
@@ -17249,6 +17251,16 @@ ApplicationWindow {
         // the match, name the folder, leave Download anyway one click away. A
         // tag match must never be the end of the conversation.
         readonly property bool libClaim: ac.libState === "proven" || ac.libState === "maybe"
+        // Session state OR the ownership rollup (see acRiser.dlDone).
+        readonly property bool dlDoneHere: {
+            var st = root.dlSt(ac.card.id || "")
+            return st === "done" || (st === "" && ac.owned)
+        }
+        // The cover reads a finished download the way the strip's done word
+        // does: Waves wrote every track under the library, so it is in the
+        // library now, not once the scan has found the folder.
+        readonly property string coverLibState: ac.dlDoneHere && root.libraryOn
+                                                && (ac.owned ? ac.ownInLibrary : root.dlInLibrary) ? "proven" : ac.libState
         Art {
             id: acArt
             width: ac.artSize; height: ac.artSize
@@ -17318,7 +17330,7 @@ ApplicationWindow {
             // question a second time per card. A child of the art, so they
             // ride the hover tilt with the cover.
             CoverMarks {
-                libState: ac.libState
+                libState: ac.coverLibState
                 albumId: ac.libPresence ? (ac.libPresence.local_album_id || "") : ""
                 qclass: ac.libPresence ? (ac.libPresence.local_class || "") : ""
                 qualWord: ac.qualWord
@@ -17387,7 +17399,7 @@ ApplicationWindow {
                 // and last week's download must wear the same word. A LIVE
                 // state (queued, running, failed) outranks the rollup, so a
                 // re-download of an owned album still shows its progress.
-                readonly property bool dlDone: acDlSt === "done" || (acDlSt === "" && ac.owned)
+                readonly property bool dlDone: ac.dlDoneHere
             // Idle strip and live controls are the same pill: it rolls its
             // contents over and stretches to the arriving side's size, in both
             // directions, for a preview and for a download alike.
@@ -27602,8 +27614,8 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                 }
 
-                // Progress (while downloading/installing): the same LED
-                // dot-matrix pill the Settings updater card uses.
+                // Progress (while downloading/installing): the same
+                // progress pill the Settings updater card uses.
                 LedBar {
                     visible: appFfmpeg.busy; Layout.fillWidth: true
                     radius: root.btnRad; mono: root.mono
@@ -27848,7 +27860,7 @@ ApplicationWindow {
                 Layout.maximumWidth: root.width - 300
             }
 
-            // the LED pill while installing (same bar as the Settings card)
+            // the progress pill while installing (same bar as the Settings card)
             LedBar {
                 visible: updateToast.face === "installing"
                 Layout.fillWidth: true; Layout.preferredHeight: 22
