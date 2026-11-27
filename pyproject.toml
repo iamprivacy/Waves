@@ -4,7 +4,7 @@ authors = [{ name = "iamprivacy" }]
 # Kept equal to waves.waves_ui.__version__, which is the version the app and
 # the updater actually report; tests/test_package_version.py fails the build if
 # the two drift. Bump both in the same commit that cuts a release.
-version = "0.2.10"
+version = "0.2.11"
 description = "Waves: a native desktop app for saving music from your own TIDAL account for offline listening"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -284,6 +284,7 @@ ignore = [
 "tests/test_hover_prefetch_scenario.py" = ["S603", "C901"]
 "tests/test_playing_glow_scenario.py" = ["S603", "C901"]
 "tests/test_releases_auto_kinds_qml.py" = ["S603", "C901"]
+"tests/test_settings_lavender_key.py" = ["S603", "C901"]
 "tests/test_releases_quality_badge.py" = ["S603", "C901"]
 "tests/test_offscreen_qt_is_usable.py" = ["S603"]
 # Runs the bundle size report for real, on a root wide enough to fill the pipe
