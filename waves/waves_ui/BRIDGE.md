@@ -283,12 +283,18 @@ in the file manager, with the newest report selected on macOS, also during a
 run). One run at a time; any
 other slot called during a run is a no-op.
 
-## FFmpeg manager and self-updater
+## FFmpeg manager, self-updater and Lavender installer
 
 | Signal                                                                                                              | Fires when                                                      |
 | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `ffmpegStatusChanged` / `ffmpegProgress(pct)` / `ffmpegStateChanged(state, msg)` / `ffmpegUpdateChecked(...)`       | The managed-FFmpeg install/update lifecycle (ffmpeg_manager.py) |
 | `appUpdateStatusChanged` / `appUpdateProgress(pct)` / `appUpdateStateChanged(state, msg)` / `appUpdateChecked(...)` | The self-updater lifecycle (updater.py)                         |
+| `lavenderGetProgress(pct)` / `lavenderGetState(state, detail)`                                                      | The Lavender installer fetch (lavender_get.py)                  |
+
+Slots: `lavenderState()` (`ok`, `missing` or `old`: whether **Ask Lavender first**
+can work), `getLavender()` (fetch the signed installer; the state goes
+`downloading`, then `ready` with the file URL, `failed`, `canceled` or
+`unsupported`), `cancelLavenderGet()`.
 
 ## Internal signals (thread hops)
 

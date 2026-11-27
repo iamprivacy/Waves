@@ -63,7 +63,8 @@ after the deep read's turn, every other remaining beat takes the follow
 whose check is the oldest (none within a month), resolves it to a
 MusicBrainz artist and pages its release groups at MusicBrainz's own one
 request a second (``waves.musicbrainz``), and records which groups TIDAL
-has no row for: the red marks on the Artists timeline. Switching the
+has no row for (the red marks on the Artists timeline) and the day each
+matched release first came out (FollowStore.first_days). Switching the
 setting off stops the checks and hides the marks; the rows stay.
 
 The fresh-releases hint (``releases_fresh_hints``, on by default: the
@@ -1088,7 +1089,14 @@ class ReleasesMixin:
         artist, failures, limited = self._releases_artist_obj(artist_id)
         if artist is None:
             return [], failures, limited
-        out: list = []
+        sections: list = []
+
+        def rows() -> list:
+            # Copied dates are noted over both sections before any row is
+            # built: an album can wear an EP's date, and the EPs come second.
+            self._note_copied_dates([a for raw in sections for a in raw])
+            return [r for raw in sections for r in self._releases_section_rows(raw)]
+
         for getter in ("get_albums", "get_ep_singles"):
             fn = getattr(artist, getter, None)
             if not callable(fn):
@@ -1097,13 +1105,14 @@ class ReleasesMixin:
                 raw = list(fn(limit=_REL_FETCH_LIMIT) or [])
             except Exception as exc:
                 if _is_rate_limit(exc):
-                    return out, [*failures, getter], True
+                    return rows(), [*failures, getter], True
                 logger.info("releases: %s failed (%s)", getter, type(exc).__name__)
                 failures.append(getter)
                 continue
             if len(raw) >= _REL_FETCH_LIMIT:
                 self._rel_head_full.append(getter)
-            out.extend(self._releases_section_rows(raw))
+            sections.append(raw)
+        out = rows()
         # An Atmos twin folds into its stereo edition here, before the store
         # sees it: the feed shows one card, and a fresh album is one banner
         # and one download rather than two of the same record.
@@ -1174,6 +1183,7 @@ class ReleasesMixin:
         check, and only the check announces it."""
         head = {str(getattr(a, "id", "") or "") for a in raw[:_REL_FETCH_LIMIT]} - {""}
         out = []
+        self._note_copied_dates(raw)
         for r in self._releases_section_rows(raw):
             ids = {str(r.get("id") or ""), *(str(i) for i in r.get("sibling_ids") or [])}
             if not ids & head:
@@ -1457,6 +1467,9 @@ class ReleasesMixin:
             logger.info("MusicBrainz check: %d release(s) not on TIDAL for %s", int(result.get("missing") or 0), name)
         else:
             logger.info("MusicBrainz check: no sure match for %s", name)
+        reload = getattr(self, "_first_days_reload", None)
+        if reload is not None and not result.get("failed"):
+            reload()
         if result.get("changed") and self._waves_pref_bool("releases_musicbrainz"):
             self.releasesChanged.emit()
         self._releases_extra_rearm()
@@ -1926,6 +1939,15 @@ class ReleasesMixin:
         on the next beat."""
         self._rel_extra_spent = False
         logger.info("MusicBrainz check switched %s", "on" if on else "off")
+        reload = getattr(self, "_first_days_reload", None)
+        if reload is not None:
+            reload()
+        if not on:
+            # The sweep stored those days with each row; they hide now, not
+            # once each artist is swept again.
+            store = getattr(self, "_releases", None)
+            if store is not None:
+                store.clear_first_days()
         self.releasesChanged.emit()
         if on:
             self._releases_rearm(0)

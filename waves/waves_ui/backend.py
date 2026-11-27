@@ -534,6 +534,7 @@ _FLAG_FIELDS = [
     "lyrics_file",
     "lyrics_file_synced_only",
     "lyrics_prefer_lrclib",
+    "lyrics_use_lavender",
     "download_delay",
     "extract_flac",
     "metadata_cover_embed",
@@ -729,6 +730,7 @@ class _SingleFlightWriter:
         self._cond = Condition()
         self._pending: dict[str, Callable] = {}
         self._writing = False
+        self._writing_key = ""
         self._thread = Thread(target=self._run, name="config-writer", daemon=True)
         self._thread.start()
 
@@ -745,6 +747,7 @@ class _SingleFlightWriter:
                 key = next(iter(self._pending))
                 fn = self._pending.pop(key)
                 self._writing = True
+                self._writing_key = key
             try:
                 fn()
             except Exception:
@@ -759,11 +762,18 @@ class _SingleFlightWriter:
         with self._cond:
             while (self._pending or self._writing) and time.monotonic() < deadline:
                 self._cond.wait(timeout=0.05)
-            leftovers = list(self._pending.values())
+            leftovers = list(self._pending.items())
             self._pending.clear()
+            # The thread may still be inside an older write of the same file
+            # (a slow disk); its replace would land after the inline one
+            # below. Queued again, the newest snapshot is rewritten after it.
+            busy = self._writing_key if self._writing else None
+            for key, fn in leftovers:
+                if key == busy:
+                    self._pending[key] = fn
         # Past the deadline with work still queued (a wedged disk, a dead
         # thread): write inline rather than lose a pref on quit.
-        for fn in leftovers:
+        for _key, fn in leftovers:
             try:
                 fn()
             except Exception:
@@ -789,6 +799,7 @@ _FACTORY_WIPE_FILES = (
     "token.json.bak",
     "token.json.tmp",
     "waves.json",
+    "waves.json.bak",
     "waves.json.tmp",
     # Every store file (sqlite and JSON) and its sidecars, from the one list
     # in waves.db: the library scan cache (a listing of the whole music
@@ -818,6 +829,10 @@ _FACTORY_WIPE_LOG_PATTERNS = (
     # file Waves named.
     *_db.wipe_patterns(),
     re.compile(r"waves-diagnostics-\d{8}-\d{6}-\d{3}\.txt\Z"),
+    # Rescue copies of a config file that could not be read (config.py and
+    # the waves.json loader move it aside); a token copy holds the session.
+    re.compile(r"(settings|token|waves)\.json\.\d+\.bak\Z"),
+    re.compile(r"waves\.json\.bak-\d{8}-\d{6}\Z"),
     # Per-write staging leftovers: BaseConfig.save and _write_text_atomic both
     # stage through tempfile.mkstemp names of the shape "<name>.<random>.tmp".
     # A hard kill or power cut mid-save strands one, and for token.json the
@@ -1238,6 +1253,7 @@ _FIELD_LABELS = {
     "lyrics_file": "Save lyrics file",
     "lyrics_file_synced_only": "Only synced lyrics files",
     "lyrics_prefer_lrclib": "Prefer LRCLIB lyrics",
+    "lyrics_use_lavender": "Ask Lavender first",
     "mark_explicit": "Mark explicit in title",
     # FFmpeg & FLAC, Speed & Pacing, Tags & Artwork
     "path_binary_ffmpeg": "FFmpeg binary path",
@@ -2937,10 +2953,11 @@ def _listed_date(obj):
     """The day a release was really listed, when the row proves it is a
     reissue, else None.
 
-    Three tests, all on the row itself: the stream start is more than a year
-    after the release date (same-cycle listing lags of days or weeks, and
-    negative lags, never lift); the title or TIDAL's ``version`` marks it a
-    distinct edition (the same keep-words the edition collapse honors); and
+    Three tests: the stream start is more than a year after the release date
+    (same-cycle listing lags of days or weeks, and negative lags, never
+    lift); the title or TIDAL's ``version`` marks it a distinct edition (the
+    same keep-words the edition collapse honors), or a listing showed it
+    wearing another album's date (see _note_copied_dates); and
     the ℗ year, when the copyright line carries one, is the stream-start
     year. A ℗ year equal to the ORIGINAL release year is the re-ingest
     signature: the master was published back then and only the listing
@@ -2959,7 +2976,11 @@ def _listed_date(obj):
     # lets through ("Live", a language edition) are caught by the copyright
     # year below, which is where that work belongs. Both halves are measured
     # against the live corpus in tests/test_listed_date.py.
-    if not version and not _EDITION_KEEP_RE.search(name_builder_title(obj) or ""):
+    if (
+        not version
+        and not _EDITION_KEEP_RE.search(name_builder_title(obj) or "")
+        and str(getattr(obj, "id", "") or "") not in _COPIED_DATE_IDS
+    ):
         return None
     year = _copyright_year(obj)
     if year is not None and year != listed.year:
@@ -2967,9 +2988,57 @@ def _listed_date(obj):
     return listed
 
 
+# Releases a listing proved wear another album's date (_note_copied_dates),
+# by id. Seeded at startup from the rows the Releases store holds lifted.
+_COPIED_DATE_IDS: set[str] = set()
+
+
+def _note_copied_dates(albums) -> None:
+    """Remember the releases in one listing that wear another album's date.
+
+    TIDAL dates some new releases as the album they rework ("All Things Set
+    Aside XX": 2007-01-01, listed 2026-11-25), and a re-listed original can
+    carry the very same facts (its own ℗ and ISRCs renewed), so no row tells
+    the two apart alone. Side by side they do: the same artist and release
+    date, a title that extends the other's, listed after it and more than a
+    year past that date, with a ℗ year naming the listing year. _listed_date
+    then lifts the release wherever its row is built."""
+    facts = []
+    for a in albums or []:
+        title = " ".join(str(getattr(a, "name", "") or "").casefold().split())
+        released = _as_date(getattr(a, "release_date", None))
+        if title and released is not None and _artist_id(a) and getattr(a, "id", None):
+            facts.append((a, _artist_id(a), released, _as_date(getattr(a, "tidal_release_date", None)), title))
+    for a, artist, released, listed, title in facts:
+        if listed is None or (listed - released).days <= _LISTED_MIN_LAG_DAYS or _copyright_year(a) != listed.year:
+            continue
+        for _o, o_artist, o_released, o_listed, o_title in facts:
+            if (o_artist, o_released) != (artist, released) or (o_listed is not None and o_listed >= listed):
+                continue
+            if len(title) > len(o_title) and title.startswith(o_title) and not title[len(o_title)].isalnum():
+                _COPIED_DATE_IDS.add(str(getattr(a, "id", "") or ""))
+                break
+
+
+# The day a release first came out, by id, where MusicBrainz knows an
+# earlier one than TIDAL's date (FollowStore.first_days); empty unless the
+# opt-in MusicBrainz check is on.
+_FIRST_DAYS: dict[str, str] = {}
+
+
+def _set_first_days(days: dict[str, str]) -> None:
+    global _FIRST_DAYS
+    _FIRST_DAYS = days
+
+
 def _listed_date_str(obj) -> str:
+    """The day the UI shows over TIDAL's date: a reissue's listed day, else
+    the MusicBrainz first-release day of a release already out."""
     listed = _listed_date(obj)
-    return listed.strftime("%Y-%m-%d") if listed is not None else ""
+    if listed is not None:
+        return listed.strftime("%Y-%m-%d")
+    first = _FIRST_DAYS.get(str(getattr(obj, "id", "") or ""), "")
+    return first if first and first < _release_date(obj) <= time.strftime("%Y-%m-%d") else ""
 
 
 def _place_by_listed(rows: list) -> list:
@@ -4756,6 +4825,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
     ffmpegProgress = Signal(float)
     ffmpegStateChanged = Signal(str, str)  # state, message
     ffmpegUpdateChecked = Signal(bool, str, str)  # available, current, latest
+    lavenderGetProgress = Signal(float)
+    # state, text: "downloading", "ready" (text is the installer's file URL),
+    # "failed" (text is for the user), "canceled", "unsupported" (no build here)
+    lavenderGetState = Signal(str, str)
     appUpdateStatusChanged = Signal()
     appUpdateProgress = Signal(float)
     appUpdateStateChanged = Signal(str, str)  # state, message
@@ -4963,6 +5036,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._app_update_abort = Event()
         self._app_update_inflight = False
         self._ffmpeg_install_inflight = False
+        self._lavender_get_abort = Event()
+        self._lavender_get_inflight = False
         # Pristine (on-disk) values of the ffmpeg-dependent flags, captured before
         # any Download init can disable them in-memory when ffmpeg is absent; we
         # restore these once ffmpeg gets installed (see _restore_ffmpeg_flags).
@@ -5453,6 +5528,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         _rel_file = os.path.join(os.path.dirname(self.settings.file_path), "releases.sqlite3")
         try:
             self._releases = FollowStore(_rel_file)
+            # A release proven to wear another album's date keeps its real
+            # day on surfaces that build its row alone (see _listed_date).
+            _COPIED_DATE_IDS.update(self._releases.listed_ids())
+            self._first_days_reload()
         except Exception as exc:
             logger.warning(
                 "Could not open the follows store (%s); this session will not remember followed artists",
@@ -5697,6 +5776,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._library_landed_timer.setSingleShot(True)
         self._library_landed_timer.setInterval(_LIBRARY_LANDED_SETTLE_MS)
         self._library_landed_timer.timeout.connect(self._library_landed_settled)
+        self._libraryLandedHeld.connect(self._library_landed_retry)
         # (2) Hourly full incremental sweep: stats every folder incl. album leaves.
         self._library_rescan_timer = QtCore.QTimer(self)
         self._library_rescan_timer.setInterval(60 * 60 * 1000)
@@ -6854,6 +6934,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                         }
                     )
 
+                _note_copied_dates(results.get("albums"))
                 albums = [self._album_dict(a) for a in self._dedup_albums((results.get("albums") or [])[:60])[:40]]
                 tracks = [self._track_dict(t) for t in self._dedup_tracks((results.get("tracks") or [])[:80])[:60]]
 
@@ -7755,6 +7836,7 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     # A reissue sits where the day it was really listed
                     # belongs, not in the original album's year (see
                     # _listed_date).
+                    _note_copied_dates(albums + eps)
                     lifted = sum(1 for a in albums + eps if _listed_date(a) is not None)
                     if lifted:
                         albums = _place_by_listed(albums)
@@ -13409,6 +13491,13 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         cap = self._max_quality_rank() if quality is None else _QUALITY_RANK.get(getattr(quality, "name", ""), 4)
         return lambda obj: min(_quality_rank(obj), cap)
 
+    # For the mixins, which never import this module.
+    _note_copied_dates = staticmethod(_note_copied_dates)
+
+    def _first_days_reload(self) -> None:
+        """Take the first-release days on record, or none with the MusicBrainz check off."""
+        _set_first_days(self._releases.first_days() if self._waves_pref_bool("releases_musicbrainz") else {})
+
     def _dedup_albums(self, albums: list) -> list:
         mode = self._waves_prefs.get("explicit_mode", "explicit")
         out = _dedup_versions(albums, self._album_key, mode, self._max_quality_rank())
@@ -14770,27 +14859,32 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
             ask_atmos = self._ask_atmos_for(obj, type_media, media_id)
         if media_id:
             with self._queue_lock:
-                dup = any(
-                    it.get("media_id") == media_id
-                    and it.get("type") == type_media
-                    and it.get("status") in ("queued", "running")
-                    and it.get("template") == file_template
-                    and it.get("askQuality") == ask
-                    # The Atmos answer tells two rows apart only where the
-                    # item has Atmos to give (a dual-mode track or album, or
-                    # a playlist or mix, whose members may). For a stereo-only
-                    # item both rows fetch the identical file: toggling the
-                    # setting and clicking again must not queue it twice.
-                    and (
-                        bool(it.get("askAtmos")) == ask_atmos
-                        or not (type_media in ("playlist", "mix") or _carries_atmos(obj))
-                    )
-                    for it in self._queue
+                dup = next(
+                    (
+                        it
+                        for it in self._queue
+                        if it.get("media_id") == media_id
+                        and it.get("type") == type_media
+                        and it.get("status") in ("queued", "running")
+                        and it.get("template") == file_template
+                        and it.get("askQuality") == ask
+                        # The Atmos answer tells two rows apart only where the
+                        # item has Atmos to give (a dual-mode track or album, or
+                        # a playlist or mix, whose members may). For a stereo-only
+                        # item both rows fetch the identical file: toggling the
+                        # setting and clicking again must not queue it twice.
+                        and (
+                            bool(it.get("askAtmos")) == ask_atmos
+                            or not (type_media in ("playlist", "mix") or _carries_atmos(obj))
+                        )
+                    ),
+                    None,
                 )
-            if dup:
-                # Acknowledge the click the same way a fresh row would: the
+            if dup is not None:
+                # Acknowledge the click with the matching row's own state: the
                 # work it asked for is already on its way, at this very tier.
-                self.downloadState.emit(media_id, "queued")
+                # A running row reported "queued" got a cancel that found nothing.
+                self.downloadState.emit(media_id, "running" if dup.get("status") == "running" else "queued")
                 return
         # Artist + total track count for the queue row label. Collections report
         # their track total; a single track/video counts as one.
@@ -15613,11 +15707,14 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         # the plan is only dropped on success, every retry replayed it and failed
         # identically (issue #25, in the merge path). item() returns ok=False for
         # a refusal too, so subtract them before judging.
-        # Bounded by the slots still empty: a borrowed slot whose fallback
-        # was refused too was refused twice, and must not count as two songs.
-        # A rescued slot's refusal is spent: its file landed, so it may not
-        # stand in for a different slot that really failed.
-        refused = min(max(0, int(dl.unavailable_count or 0) - rescued), failures)
+        # Counted per slot, not per engine refusal: a borrowed slot whose
+        # fallback was refused too was refused twice, and must not hide a
+        # different slot that really failed. A rescued slot's file landed, so
+        # it is not refused at all.
+        refused = max(0, len(refused_slots.intersection(lost)) - rescued)
+        # The finish line reads this count: rescued slots are on disk, not
+        # "no longer on TIDAL".
+        dl.unavailable_count = refused
         hard = max(0, failures - refused)
         if hard and not job_abort.is_set():
             _raise_download_incomplete(f"{hard} of {total} tracks failed")
@@ -18694,6 +18791,18 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                 self._ffmpeg_abort.set()
         except Exception:
             logger.debug("shutdown: no ffmpeg abort event", exc_info=True)
+        # The Lavender installer download and its lyrics worker: the exit
+        # skips atexit, and a lookup in flight would sit out the pool's wait.
+        with contextlib.suppress(Exception):
+            self._lavender_get_abort.set()
+        # An app update download too: the exit skips its cleanup, so a partial
+        # payload would stay in updates/. The apply step refuses to stop mid-swap.
+        with contextlib.suppress(Exception):
+            self._app_update_abort.set()
+        with contextlib.suppress(Exception):
+            from waves.lyrics_lavender import close_shared
+
+            close_shared()
         # The scanner process: a scan in flight is killed (its worker thread
         # is released by the generation bump above), an idle one is asked to
         # quit; either way no child outlives the app.
@@ -18838,6 +18947,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         before the caller re-injects the transient ffmpeg values, the write
         that lands later can never leak them to disk, however the timing
         falls; consecutive saves coalesce to the newest snapshot."""
+        # A worker saving after "Erase everything" would bring settings.json
+        # (download path, share origins) back on the quit flush.
+        if getattr(self, "_factory_reset", False):
+            return
         data_json = self.settings.data.to_json()
         settings = self.settings
         self._config_writer.submit("settings", lambda: settings.write_serialized(data_json))
@@ -20212,8 +20325,8 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "key": "releases_musicbrainz",
                     "label": "Also check MusicBrainz",
                     "help": (
-                        "Marks releases TIDAL does not carry on the Artists timeline. The names of "
-                        "artists you follow are sent to musicbrainz.org."
+                        "Marks releases TIDAL lacks on the Artists timeline and shows first release days. "
+                        "Sends the names of artists you follow to musicbrainz.org."
                     ),
                     "type": "bool",
                     "value": self._waves_pref_bool("releases_musicbrainz"),
@@ -20374,6 +20487,15 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
                     "lyrics_file": bool(getattr(d, "lyrics_file", False)),
                 }
                 f["requires_hint"] = "Turn on a lyrics option first"
+                # Asking an installed Lavender only replaces the LRCLIB step,
+                # so it rides inside this tile as its nested check (the
+                # lyrics_file pattern) instead of a fourth lyrics tile.
+                f["child_key"] = "lyrics_use_lavender"
+                f["child_value"] = bool(getattr(d, "lyrics_use_lavender", False))
+                f["child_label"] = "Ask Lavender first"
+                f["child_help"] = self._help_for("lyrics_use_lavender")
+                # Its strip fades to the Lavender app's color, the check a lavender sprig.
+                f["child_style"] = "lavender"
             if key in ("auto_update", "update_cadence", "ffmpeg_auto_update", "ffmpeg_update_cadence"):
                 # Rendered inside the updater / FFmpeg cards (toggle + cadence
                 # segment), not as the generic tile/row controls.
@@ -20760,6 +20882,65 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         self._tpl_tokens_cache = result
         return result
 
+    @Slot(result=str)
+    def lavenderState(self) -> str:
+        """Whether the "Ask Lavender first" key can work right now.
+
+        ``ok``, ``missing`` (Lavender is not installed) or ``old`` (it is, but
+        has no lyrics worker; an update is seen once its files change).
+        """
+        from waves.lyrics_lavender import shared_client
+
+        return shared_client().state()
+
+    @Slot()
+    def getLavender(self) -> None:
+        """Fetch the Lavender installer for this computer (the drawer's DOWNLOAD)."""
+        from waves import lavender_get
+
+        if lavender_get.installer_pattern() is None:
+            self.lavenderGetState.emit("unsupported", "")
+            return
+        if self._lavender_get_inflight:
+            # Settings reopened mid-download: show the bar again.
+            self.lavenderGetState.emit("downloading", "")
+            return
+        self._lavender_get_inflight = True
+        # Cleared here, not in the worker: a cancel while the job is still
+        # queued must not be wiped.
+        self._lavender_get_abort.clear()
+        folder = pathlib.Path(os.path.dirname(self.settings.file_path)) / "lavender"
+
+        def work() -> None:
+            self.lavenderGetState.emit("downloading", "")
+            try:
+                path = lavender_get.fetch(
+                    folder,
+                    lavender_get.session(),
+                    progress_cb=lambda p: self.lavenderGetProgress.emit(float(p)),
+                    abort=self._lavender_get_abort,
+                )
+            except lavender_get.LavenderGetCanceled:
+                self.lavenderGetState.emit("canceled", "")
+            except lavender_get.LavenderGetError as exc:
+                logger.info("lavender installer refused: %s", exc)
+                self.lavenderGetState.emit("failed", str(exc))
+            except Exception as exc:
+                logger.warning("lavender installer download failed", exc_info=True)
+                self.lavenderGetState.emit(
+                    "failed", _user_error(exc, "Download failed", server="GitHub", folder="its Lavender folder")
+                )
+            else:
+                self.lavenderGetState.emit("ready", QtCore.QUrl.fromLocalFile(str(path)).toString())
+            finally:
+                self._lavender_get_inflight = False
+
+        self.threadpool.start(Worker(work))
+
+    @Slot()
+    def cancelLavenderGet(self) -> None:
+        self._lavender_get_abort.set()
+
     @Slot("QVariant")
     def applySettings(self, values) -> None:
         """Apply only the changed keys from the settings page, then persist."""
@@ -21046,6 +21227,10 @@ class WavesBridge(LibraryMixin, FlacCheckMixin, ReleasesMixin, QObject):
         worst a leftover crash.log on Windows."""
         self._factory_reset = True
         logger.info("factory reset requested; wiping the config directory")
+        # A save queued before the flag flipped lands now, ahead of the wipe,
+        # not on the quit flush after it.
+        with contextlib.suppress(Exception):
+            self._config_writer.flush()
         # The catalog first: it refuses new readers and waits for the ones in
         # use, so no catalog handle keeps a store file from being deleted.
         with contextlib.suppress(Exception):

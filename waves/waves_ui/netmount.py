@@ -24,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+import unicodedata
 import urllib.parse
 from threading import Lock, Thread
 from typing import ClassVar
@@ -115,7 +116,14 @@ def is_mounted(mount_point: str) -> bool | None:
     points = mount_points()
     if points is None:
         return None
-    return (mount_point.rstrip("/") or "/") in points
+    # APFS and smbfs fold case and unicode form, so a saved path in another
+    # spelling still names the live mount.
+    keys = {_point_key(p) for p in points}
+    return _point_key(mount_point.rstrip("/") or "/") in keys
+
+
+def _point_key(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
 
 
 def mount_info(path: str) -> tuple[str, str, str]:

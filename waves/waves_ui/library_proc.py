@@ -128,7 +128,7 @@ class LibraryWorker:
             self._results = queue.Queue()
             self._stopping = False
             self._reader = threading.Thread(
-                target=self._read, args=(self._proc,), name="waves-library-worker", daemon=True
+                target=self._read, args=(self._proc, self._results), name="waves-library-worker", daemon=True
             )
             self._reader.start()
             threading.Thread(
@@ -165,7 +165,9 @@ class LibraryWorker:
             with contextlib.suppress(Exception):
                 stream.close()
 
-    def _read(self, process: subprocess.Popen) -> None:
+    def _read(self, process: subprocess.Popen, results: queue.Queue) -> None:
+        # ``results`` is this child's own queue: a canceled child's late
+        # "exit" must not land in the queue of the child that replaced it.
         import json
 
         stream = process.stdout
@@ -189,14 +191,14 @@ class LibraryWorker:
                     # write and the scan waited for the app. The thread that
                     # asked for the scan is parked on the queue below with
                     # nothing else to do, which is where the work belongs.
-                    self._results.put(msg)
+                    results.put(msg)
                 # "ready" and anything unknown: nothing to do
         except (OSError, ValueError):
             pass
         finally:
             # The stream closed: the child is gone. Whatever job was waiting
             # gets told.
-            self._results.put({"ev": "exit"})
+            results.put({"ev": "exit"})
 
     @staticmethod
     def _mirror_gauges(gauges) -> None:

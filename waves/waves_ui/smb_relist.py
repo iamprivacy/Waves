@@ -178,7 +178,9 @@ def plan_for(path: str) -> tuple[str, str]:
     if fstype not in RELIST_FSTYPES:
         return ("", "")
     url = share_url(from_name)
-    sub = subpath_within(path, point)
+    # statfs follows a symlink to the real mount point, so the path is
+    # compared in the same resolved form.
+    sub = subpath_within(os.path.realpath(path), point)
     if not url or sub is None:
         return ("", "")
     above = share_subpath(from_name)
@@ -244,7 +246,9 @@ def trusted_names(entries: Iterable[str]) -> list[str] | None:
         if not name or name.startswith("."):
             continue
         raw += 1
-        names.setdefault(_key(name), name)
+        # Case kept: a case-sensitive share can hold "Blur" and "blur" as two
+        # real folders. Unicode form folded: no share holds both forms of a name.
+        names.setdefault(unicodedata.normalize("NFC", name), name)
     if raw != len(names):
         logger.info(
             "a listing repeats itself (%d handed over, %d distinct): not trusted",
