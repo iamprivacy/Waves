@@ -22,6 +22,30 @@ A bullet that closes a reported issue names it in full and links to it:
 package managers), where a bare number is neither a link nor obviously an
 issue. A test enforces it.
 
+## 🗂️ v0.2.11 (2026-11-27)
+
+### ✨ Added
+
+- 🪻 **Ask Lavender first** (in the **Prefer LRCLIB lyrics** tile) lets the [Lavender](https://getlavender.dev) app find your lyrics with its own settings, and can download Lavender for you. Off by default, needs Lavender v0.1.5 or newer, and not yet tested on Windows and Linux.
+
+### 🔧 Changed
+
+- 🧭 With Also check MusicBrainz on (Settings, Releases), a release from an artist you follow shows the day it first came out when TIDAL only has a later one.
+- 📶 The progress bar for app updates, FFmpeg and Lavender downloads is prettier and smoother.
+
+### 🐛 Fixed
+
+- 🔔 A new version of an older album that TIDAL dates as the original now shows the day it really came out, in Releases and everywhere else.
+- 🏷️ An album no longer says it is partly in your library when you only have a single, an EP or another edition of it.
+- 📥 An album you download shows its IN LIBRARY badge as soon as it finishes, even when your library is on a network share.
+- 💿 An album saved with "best of both" no longer shows as done when a song was lost to a dropped connection, and its rescued songs are no longer called "no longer on TIDAL".
+- 🖱️ Clicking download again on an album that is already downloading no longer shows it as queued.
+- 🧹 Reset application now clears everything, even when a settings change was still being saved.
+- 💾 A settings change made right before quitting is no longer lost.
+- 🗄️ A library on a network share that stopped answering is no longer reconnected over and over, and a canceled library scan is no longer reported as a crash.
+- 🔗 A library on a network share is recognized when its folder is a link or its path is spelled with different capitals.
+- ⏹️ Quitting during an app update download now stops the download.
+
 ## 🗂️ v0.2.10 (2026-11-25)
 
 ### ✨ Added
