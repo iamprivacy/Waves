@@ -44,6 +44,11 @@ for _m in (
     "_library_index_landed",
     "_library_landed_rearm",
     "_library_index_landed_in",
+    "_library_landed_hold",
+    "_library_landed_group",
+    "_library_overlay_index",
+    "_library_overlay_retire",
+    "_library_landed_requeue",
     "_library_index_landed_one",
     "_library_worker_index",
 ):
@@ -278,16 +283,214 @@ def test_a_burst_of_tracks_is_one_publish(tmp_path):
     assert s.libraryStamp() == stamp + 1
 
 
-def test_a_busy_cache_keeps_the_folder_for_the_next_publish(tmp_path):
+def _main_titles(s):
+    return sorted(a["title"] for a in s._library.iter_albums())
+
+
+def _beta_copies(s):
+    return len(s._library_index.cache.presence_facts(("beta", "b")))
+
+
+def test_a_held_folder_shows_from_the_download_index(tmp_path):
+    """A scan (or a probe by name) holds the cache, on a share for minutes.
+    The landed folder is read into the small download index instead, which no
+    scan ever holds, so every badge answers now: track, album and artist."""
     s, dl, tags = _bridge(tmp_path, separate=False)
     s._library_note_landed(_land(dl, tags))
     with s._library._scan_busy:
         s._library_index_landed()
-    assert not _beta(s)["present"]
-    assert "libraryPresenceChanged" not in s.emitted
+        assert _beta(s)["present"]
+        assert s.libraryAlbumPresence("B", "Beta", "2021", 1)["present"]
+        assert s.artistLibraryPresence("B")["present"]
+    assert "libraryPresenceChanged" in s.emitted
+    assert "_libraryLandedHeld" in s.emitted, "the scan cache must still get the folder later"
+    assert _main_titles(s) == ["Alpha"], "nothing may be written into a cache a scan holds"
+
+
+def test_a_track_added_to_a_known_album_counts_while_the_cache_is_held(tmp_path):
+    """The scan cache already holds the album, one track short. The download
+    index read it after the landing, so its row is the one that answers."""
+    s, dl, _tags = _bridge(tmp_path, separate=False)
+    alpha = os.path.join(dl, "A", "[2020] Alpha")
+    open(os.path.join(alpha, "2.flac"), "w").close()
+    s._library_note_landed(os.path.join(alpha, "2.flac"))
+    with s._library._scan_busy:
+        s._library_index_landed()
+        assert [f["tracks"] for f in s._library_index.cache.presence_facts(("alpha", "a"))] == [2]
+    _rearm(s)
+    assert [f["tracks"] for f in s._library_index.cache.presence_facts(("alpha", "a"))] == [2]
+
+
+def test_the_scan_cache_takes_the_folder_over_as_one_copy(tmp_path):
+    s, dl, tags = _bridge(tmp_path, separate=False)
+    s._library_note_landed(_land(dl, tags))
+    with s._library._scan_busy:
+        s._library_index_landed()
     # The scan that held the cache publishes; the re-arm asks again.
     _rearm(s)
     assert _beta(s)["present"]
+    assert _main_titles(s) == ["Alpha", "Beta"]
+    assert _beta_copies(s) == 1
+    assert [list(o.iter_albums()) for o in s._library_overlays.values()] == [[]]
+
+
+def test_the_timer_hands_a_held_folder_over_without_a_publish(tmp_path):
+    """A probe that finds nothing publishes nothing, so the handover must not
+    wait for a publish: the landed timer's next drain does it."""
+    s, dl, tags = _bridge(tmp_path, separate=False)
+    s._library_note_landed(_land(dl, tags))
+    with s._library._scan_busy:
+        s._library_index_landed()
+    s._library_landed_settled()  # the timer fired; no publish happened in between
+    assert _beta(s)["present"]
+    assert _main_titles(s) == ["Alpha", "Beta"]
+    assert _beta_copies(s) == 1
+
+
+def test_a_retry_under_the_same_hold_reads_nothing_again(tmp_path):
+    s, dl, tags = _bridge(tmp_path, separate=False)
+    s._library_note_landed(_land(dl, tags))
+    with s._library._scan_busy:
+        s._library_index_landed()
+        (overlay,) = s._library_overlays.values()
+        calls = []
+        real = overlay.index_folders
+        overlay.index_folders = lambda *a, **k: calls.append(a) or real(*a, **k)
+        s.emitted.clear()
+        s._library_landed_settled()
+        assert calls == [], "the retry re-read a folder nothing new landed in"
+        assert "libraryPresenceChanged" not in s.emitted
+        # A second track lands in the same album: that IS read.
+        s._library_note_landed(_land(dl, tags, name="2.flac"))
+        s._library_landed_settled()
+        assert len(calls) == 1
+    assert _beta(s)["present"]
+
+
+def test_a_track_landing_during_the_cache_read_still_shows_when_a_scan_follows(tmp_path):
+    """The scan cache reads the album; a second track lands while that read
+    runs, too late for it. A scan then holds the cache. The second track must
+    still be read into the download index: its landing is news."""
+    s, dl, _tags = _bridge(tmp_path, separate=False)
+    alpha = os.path.join(dl, "A", "[2020] Alpha")
+    real = s._library_index_landed_one
+
+    def read_then_land(*a, **k):
+        out = real(*a, **k)
+        open(os.path.join(alpha, "2.flac"), "w").close()
+        s._library_note_landed(os.path.join(alpha, "2.flac"))
+        return out
+
+    s._library_note_landed(os.path.join(alpha, "1.flac"))
+    s._library_index_landed_one = read_then_land
+    s._library_index_landed_in([alpha])
+    s._library_index_landed_one = real
+    with s._library._scan_busy:
+        s._library_index_landed()
+        assert [f["tracks"] for f in s._library_index.cache.presence_facts(("alpha", "a"))] == [2]
+
+
+def test_the_held_signal_is_wired_to_the_retry():
+    """The retry tests call the slot directly; this is the one line that makes
+    the app call it."""
+    import pathlib
+
+    from waves.waves_ui import backend
+
+    src = pathlib.Path(backend.__file__).read_text()
+    assert "self._libraryLandedHeld.connect(self._library_landed_retry)" in src
+
+
+def test_an_album_deleted_before_the_handover_goes_dark(tmp_path):
+    """The download index is a stand-in, never the last word: once the scan
+    cache has had its say on the folder, the stand-in row is gone."""
+    import shutil
+
+    s, dl, tags = _bridge(tmp_path, separate=False)
+    path = _land(dl, tags)
+    s._library_note_landed(path)
+    with s._library._scan_busy:
+        s._library_index_landed()
+    assert _beta(s)["present"]
+    shutil.rmtree(os.path.dirname(path))
+    s.emitted.clear()
+    s._library_landed_settled()
+    assert not _beta(s)["present"]
+    assert "libraryPresenceChanged" in s.emitted
+
+
+def test_a_held_download_folder_beside_a_library_shows_too(tmp_path):
+    s, dl, tags = _bridge(tmp_path, separate=True)
+    s._library_note_landed(_land(dl, tags))
+    with s._library_extra._scan_busy:
+        s._library_index_landed()
+        assert _beta(s)["present"]
+    _rearm(s)
+    assert _beta(s)["present"] and _beta_copies(s) == 1
+
+
+def test_a_library_change_drops_the_download_index(tmp_path):
+    s, dl, tags = _bridge(tmp_path, separate=False)
+    s._library_note_landed(_land(dl, tags))
+    with s._library._scan_busy:
+        s._library_index_landed()
+    assert s._library_overlays
+    s._teardown_library_watch = lambda: None
+    WavesBridge._invalidate_library_index(s)
+    assert not s._library_overlays
+
+
+# ---- the download index (the cache side) ------------------------------------
+
+
+def test_the_download_index_reads_a_folder_no_scan_has_met(tmp_path):
+    lib, _a, tags, idx, _reads = _scanned(tmp_path)
+    b = _mk(tmp_path, "lib/B/[2021] Beta", ["01.flac"])
+    tags[b] = {"album": "Beta", "artist": "B", "date": "2021"}
+    overlay = idx.landed_overlay(lib)
+    with idx._scan_busy:
+        assert overlay.index_folders(lib, [b], timeout=0.0) == 1
+    assert [x["title"] for x in overlay.iter_albums()] == ["Beta"]
+    assert [x["title"] for x in idx.iter_albums()] == ["Alpha"]
+
+
+def test_forget_folders_drops_a_folder_and_what_sits_under_it(tmp_path):
+    lib, _a, tags, idx, _reads = _scanned(tmp_path)
+    b = _mk(tmp_path, "lib/B/[2021] Beta", [])
+    cd1 = _mk(tmp_path, "lib/B/[2021] Beta/CD1", ["01.flac"])
+    c = _mk(tmp_path, "lib/B/[2021] Beta Two", ["01.flac"])
+    tags[cd1] = {"album": "Beta", "artist": "B", "date": "2021"}
+    tags[c] = {"album": "Beta Two", "artist": "B", "date": "2021"}
+    overlay = idx.landed_overlay(lib)
+    assert overlay.index_folders(lib, [b, c]) == 2
+    assert overlay.forget_folders(lib, [b]) == 1
+    assert [x["title"] for x in overlay.iter_albums()] == ["Beta Two"], "a sibling sharing the name's start was dropped"
+    assert all("Beta Two" in t["id"] for t in overlay.iter_tracks())
+    assert overlay.forget_folders(lib, [b]) == 0
+
+
+def test_the_held_signal_restarts_the_landed_timer_after_the_gap(tmp_path):
+    from waves.waves_ui import bridge_library
+
+    s, _dl, _tags = _bridge(tmp_path, separate=False)
+
+    class _Timer:
+        def __init__(self, active=False):
+            self.active = active
+            self.started: list[int] = []
+
+        def isActive(self):
+            return self.active
+
+        def start(self, ms=None):
+            self.started.append(ms)
+
+    s._library_landed_timer = _Timer()
+    WavesBridge._library_landed_retry(s)
+    assert s._library_landed_timer.started == [int(bridge_library._LIBRARY_LANDED_MIN_GAP_S * 1000)]
+    s._library_landed_timer = _Timer(active=True)
+    WavesBridge._library_landed_retry(s)
+    assert s._library_landed_timer.started == [], "a running timer already covers it"
 
 
 def test_sidecars_and_strangers_are_ignored(tmp_path):

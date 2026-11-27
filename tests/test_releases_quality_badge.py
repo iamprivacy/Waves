@@ -443,6 +443,41 @@ def _run_scenario() -> int:
     q('delete dlHolders["high"]; dlHoldersGen++')
     settle(400)
 
+    # 9. A download that finished under the library lights the cover's library
+    # mark at once, with no scan answer at all: the scan finds the folder
+    # later, and the card must not wait for it. With the library off it stays
+    # dark (there is no library to be in).
+    lib_mark = """(function() {
+        var m = null
+        ;(function walk(it) {
+            if (m || !it) return
+            if (it.upcoming !== undefined && it.card !== undefined && "" + it.card.id === "high") {
+                ;(function inner(k) {
+                    if (m || !k) return
+                    if (k.libState !== undefined && k.qualWord !== undefined && k.open !== undefined) { m = k; return }
+                    for (var i = 0; i < k.children.length; i++) inner(k.children[i])
+                })(it)
+                return
+            }
+            var k = it.children || []
+            for (var i = 0; i < k.length; i++) walk(k[i])
+        })(relFeedList.contentItem)
+        return m ? m.libState : null
+    })()"""
+    q("libraryOn = true; dlInLibrary = true")
+    if q(lib_mark) != "":
+        failures.append(f"card high wears a library mark before any download: {q(lib_mark)!r}")
+    q('dlHolders["high"] = { st: "done" }; dlHoldersGen++')
+    settle(200)
+    if q(lib_mark) != "proven":
+        failures.append(f"a finished download into the library left the cover's mark at {q(lib_mark)!r}")
+    q("libraryOn = false")
+    settle(100)
+    if q(lib_mark) != "":
+        failures.append(f"with the library off a finished download still wears {q(lib_mark)!r}")
+    q('delete dlHolders["high"]; dlHoldersGen++')
+    settle(200)
+
     shots = os.environ.get("WAVES_SHOT_DIR", "")
     if shots:
         settle(300)

@@ -529,14 +529,21 @@ def test_a_copy_short_of_its_own_declared_count_is_not_complete():
     assert r["full"] is False and r["partial"] is True
 
 
-def test_a_release_declaring_fewer_tracks_is_not_the_edition_on_screen():
-    # Title and year agree perfectly, so identity used to be proven. The local
-    # release says it holds 10 tracks and the one being viewed has 11: these are
-    # different releases, and the badge wears its "?" again.
+def test_a_complete_smaller_release_is_not_part_of_the_one_on_screen():
+    # Title and year agree perfectly. The local release says it holds 10
+    # tracks, holds all 10, and the one being viewed has 11: a different
+    # release, not a partial copy, so no badge at all.
     idx = _shaped(("Album", "A", "2017", 10, "/m/A/Album", {"declared": 10}))
-    r = _decide_presence("Album", "A", "2017", 11, idx)
-    assert r["present"] is True
-    assert r["sure"] is False and r["full"] is False
+    assert _decide_presence("Album", "A", "2017", 11, idx)["present"] is False
+    # A title-track single beside its album, and the standard edition under
+    # the deluxe (Blessthefall's GALLOWS, 10 of 10, beside the 12-track Deluxe).
+    single = _shaped(("Album", "A", "2025", 1, "/m/A/Album", {"declared": 1}))
+    assert _decide_presence("Album", "A", "2025", 10, single)["present"] is False
+    std = _shaped(("GALLOWS", "Blessthefall", "2025", 10, "/m/B/GALLOWS", {"declared": 10}))
+    assert _decide_presence("GALLOWS (Deluxe)", "Blessthefall", "2026", 12, std)["present"] is False
+    # A copy short of its OWN count is still a partial copy of this album.
+    short = _shaped(("Album", "A", "2025", 3, "/m/A/Album", {"declared": 10}))
+    assert _decide_presence("Album", "A", "2025", 10, short)["partial"] is True
 
 
 def test_a_richer_release_still_proves_the_one_on_screen():

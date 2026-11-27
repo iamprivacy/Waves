@@ -95,6 +95,9 @@ class _WritingDownload(Download):
         self.folder = folder
         self.pause = pause or {}
         self.outcomes: dict[int, tuple[bool, str]] = {}
+        # Positions TIDAL refuses: the refusal counter moves across that call,
+        # which is how the fan-out tells a refused slot from a failed one.
+        self.refuse: set[int] = set()
         self._lock = threading.Lock()
         # The engine's own record of the directories a run put a file into,
         # which decides where the m3u writer is allowed to write. Built here
@@ -109,6 +112,9 @@ class _WritingDownload(Download):
         if event_stop is not None and event_stop.is_set():
             return False, ""
         time.sleep(self.pause.get(list_position, 0.0))
+        if list_position in self.refuse:
+            with self._lock:
+                self.unavailable_count += 1
         ok, name = self.outcomes.get(list_position, (True, media.name))
         if not name:
             return ok, ""
@@ -417,7 +423,8 @@ def _merge_outcome(tmp_path, plan_names, *, refused=0, outcomes=None):
     folder.mkdir()
     dl = _WritingDownload(folder, _Settings())
     dl.outcomes = dict(outcomes or {})
-    dl.unavailable_count = refused
+    # The first `refused` failing members are TIDAL refusals.
+    dl.refuse = set(sorted(p for p, (ok, _n) in dl.outcomes.items() if not ok)[:refused])
     try:
         _run_merge(dl, _plan(*plan_names))
     except Exception as exc:

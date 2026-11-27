@@ -102,6 +102,54 @@ def test_each_witness_is_necessary():
     )
 
 
+# Live TIDAL data for Veil Of Maya, read 2026-11-26. The 2007 album was
+# re-listed in February with a new ℗ year (and new ISRCs), then a 7-track
+# rework came out in November wearing the album's date: no row-only fact
+# separates the two. (title, releaseDate, streamStartDate, expected listed)
+VEIL_OF_MAYA = [
+    ("All Things Set Aside XX (instrumental)", "2026-11-25", "2026-11-25", ""),
+    ("All Things Set Aside", "2007-01-01", "2026-02-17", ""),
+    ("All Things Set Aside XX", "2007-01-01", "2026-11-25", "2026-11-25"),
+]
+
+
+def _listing(rows, artist="a1"):
+    out = []
+    for i, (title, released, listed, *rest) in enumerate(rows):
+        version, notice = (rest[0], rest[1]) if len(rest) > 2 else ("", "2026 Veil of Maya")
+        album = _album(title, released, listed, version, notice, ident=f"{artist}-{i}")
+        album.artist = SimpleNamespace(id=artist)
+        out.append(album)
+    return out
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_a_release_wearing_another_albums_date_shows_its_own_day(flip):
+    rows = _listing(VEIL_OF_MAYA)
+    backend._note_copied_dates(rows[::-1] if flip else rows)
+    assert [backend._listed_date_str(a) for a in rows] == [r[3] for r in VEIL_OF_MAYA]
+
+
+def test_a_copied_date_needs_the_album_it_copies_beside_it():
+    # Alone the rework is indistinguishable from a re-listed original, so it
+    # keeps TIDAL's date; so does a same-dated title of another artist.
+    lone = _listing(VEIL_OF_MAYA[2:])
+    backend._note_copied_dates(lone)
+    assert backend._listed_date_str(lone[0]) == ""
+    other = _listing(VEIL_OF_MAYA[1:2], artist="a2") + lone
+    backend._note_copied_dates(other)
+    assert backend._listed_date_str(lone[0]) == ""
+    # Once proven, the row lifts wherever it is built, alone included.
+    backend._note_copied_dates(_listing(VEIL_OF_MAYA))
+    lone[0].id = "a1-2"  # the id the full listing proved
+    assert backend._listed_date_str(lone[0]) == "2026-11-25"
+
+
+def test_the_measured_corpus_has_no_copied_dates():
+    backend._note_copied_dates(_listing(SABATON))
+    assert not backend._COPIED_DATE_IDS
+
+
 def test_missing_dates_never_lift_and_mixed_tz_never_raises():
     assert backend._listed_date(_album("X (Remaster)", "", "2026-09-11")) is None
     assert backend._listed_date(_album("X (Remaster)", "2016-08-19", "")) is None
@@ -275,3 +323,16 @@ def test_a_snapshot_from_before_listed_dates_is_discarded(tmp_path):
     stub = _CacheStub(path)
     stub._load_page_cache()
     assert stub._artist_cache == {"3616281": page}
+
+
+def test_a_first_release_day_shows_for_a_release_already_out():
+    _instrumental, orig, xx = _listing(VEIL_OF_MAYA)
+    backend._note_copied_dates([orig, xx])
+    backend._set_first_days({str(orig.id): "2006-11-07", str(xx.id): "2006-11-07"})
+    assert backend._listed_date_str(orig) == "2006-11-07"
+    assert backend._listed_date_str(xx) == "2026-11-25"  # a listed day wins
+    backend._set_first_days({str(orig.id): "2008-01-01"})  # never a later day
+    assert backend._listed_date_str(orig) == ""
+    ahead = _listing([("Next", "2999-01-02", "2999-01-02")])[0]
+    backend._set_first_days({str(ahead.id): "2999-01-01"})  # not out yet: TIDAL's day stands
+    assert backend._listed_date_str(ahead) == ""

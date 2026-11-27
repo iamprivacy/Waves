@@ -1223,3 +1223,43 @@ def test_new_releases_and_videos_can_wait_in_the_save_that_marks_them_seen(tmp_p
     got = {(r["id"], r["kind"]) for r in s.pending_auto_downloads("2026-12-31")}
     assert got == {("b", "album"), ("8", "video")}, "c came without wait and stays out of line"
     s.close()
+
+
+def test_a_row_on_record_takes_the_listed_day_it_gains(tmp_path):
+    # A release absorbed under its original date (and so outside the feed's
+    # window) shows on the day it is later proven to have been listed, and
+    # is among the ids the app remembers as lifted.
+    s = _store(tmp_path)
+    s.follow("1", "Artist", "")
+    s.record_check("1", [_rel("xx", date="2007-01-01")], keep_from="2026-06-01")
+    assert s.feed("2026-06-01") == [] and s.listed_ids() == set()
+    s.record_check("1", [_rel("xx", date="2007-01-01", listed="2026-11-25")], keep_from="2026-06-01")
+    assert [r["id"] for r in s.feed("2026-06-01")] == ["xx"]
+    assert s.listed_ids() == {"xx"}
+
+
+def test_first_days_are_the_earlier_musicbrainz_days_of_matched_releases(tmp_path):
+    # Veil Of Maya, 2026-11-26: TIDAL dates the album 2007-01-01, MusicBrainz 2006-11-07.
+    s = _store(tmp_path)
+    s.follow("1", "Artist", "")
+    s.record_check("1", [_rel("orig", date="2007-01-01"), _rel("ep", date="2010-05-01", rtype="ep")])
+    s.record_mb(
+        "1",
+        "m1",
+        [
+            _mbg("g1", "Album", "2006-11-07", release_id="orig"),
+            _mbg("g2", "Album", "2006", release_id="orig"),  # no full day
+            _mbg("g3", "Album", "2009-01-01", "single", release_id="ep"),  # another kind
+            _mbg("g4", "Album", "2011-01-01", "ep", release_id="ep"),  # later than TIDAL's
+        ],
+    )
+    assert s.first_days() == {"orig": "2006-11-07"}
+    # An edition matched to the original's group keeps its own day.
+    s.record_check("1", [_rel("dlx", date="2026-03-01", title="Album (Deluxe Edition)")])
+    s.record_mb("1", "m1", [_mbg("g1", "Album", "2025-06-01", release_id="dlx")])
+    assert s.first_days() == {}
+    s.record_mb("1", "m1", [_mbg("g1", "Album", "2006-11-07", release_id="orig")])
+    # Recorded as the shown day, it places the career and never reads as a lift.
+    s.record_check("1", [_rel("orig", date="2007-01-01", listed="2006-11-07")])
+    assert s.listed_ids() == set()
+    assert [e["day"] for e in s.career_rows("1")] == ["2010-05-01", "2006-11-07"]

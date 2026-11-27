@@ -119,6 +119,7 @@ _KEYS = {
         "lyrics_file",
         "lyrics_file_synced_only",
         "lyrics_prefer_lrclib",
+        "lyrics_use_lavender",
         "clean_album_artist",
         "metadata_replay_gain",
         "metadata_write_url",

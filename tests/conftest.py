@@ -91,6 +91,17 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _copied_date_ids_start_empty():
+    """The copied-date verdicts live on the backend module for the session,
+    so one test's proven ids must not lift another test's rows."""
+    mod = sys.modules.get("waves.waves_ui.backend")
+    if mod is not None:
+        mod._COPIED_DATE_IDS.clear()
+        mod._set_first_days({})
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _download_name_claims_start_empty():
     """Download keeps its claimed names on the class (shared by every job), so
     a test that leaves one held must not leak it into the next."""

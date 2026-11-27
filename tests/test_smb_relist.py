@@ -86,9 +86,10 @@ def test_a_listing_that_repeats_a_name_is_refused():
     assert smb_relist.trusted_names(["A", "B", "C"]) == ["A", "B", "C"]
     # The shape the broken mount hands over: one page, over and over.
     assert smb_relist.trusted_names(["A", "B", "A", "B"]) is None
-    # Case and unicode composition are the same folder to the server.
-    assert smb_relist.trusted_names(["Bjork", "bjork"]) is None
+    # Two unicode compositions are one folder (this pair is NFC then NFD);
+    # two cases can be two real folders on a case-sensitive share.
     assert smb_relist.trusted_names(["Björk", "Björk"]) is None
+    assert smb_relist.trusted_names(["Bjork", "bjork"]) == ["Bjork", "bjork"]
     # Dot entries never count, so they cannot fake a repeat either.
     assert smb_relist.trusted_names([".DS_Store", "A", ".hidden"]) == ["A"]
 

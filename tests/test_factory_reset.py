@@ -184,6 +184,11 @@ def test_factory_reset_wipes_waves_files_and_keeps_install_channel(tmp_path, mon
         "token.json",
         "waves.json",
         "waves.json.tmp",
+        # Rescue copies of an unreadable config file; a token copy holds the session.
+        "token.json.1764200000.bak",
+        "settings.json.1764200000.bak",
+        "waves.json.bak",
+        "waves.json.bak-20261127-101500",
         "page_cache.json",
         "browse_tile_art.json",
         "ownership.sqlite3",

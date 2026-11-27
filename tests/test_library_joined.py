@@ -75,3 +75,57 @@ def test_tidal_ids_must_agree_across_both_folders(tmp_path):
             idx._conn.commit()
     assert lib.artist_tidal_ids() == {"adept": "34868882"}
     assert JoinedLibrary(lib, dl).artist_tidal_ids() == {}
+
+
+def test_one_folder_held_by_two_caches_is_one_copy(tmp_path):
+    """The download index and the scan cache can both hold a folder for a
+    moment (the scan met it before the handover). That is one copy on disk."""
+    root = str(tmp_path / "lib")
+    d = os.path.join(root, "Air", "Moon Safari")
+    os.makedirs(d)
+    open(os.path.join(d, "1.flac"), "w").close()
+    tags = {"album": "Moon Safari", "artist": "Air", "date": "1998", "title": "Sexy Boy"}
+    lib = LibraryIndex(str(tmp_path / "lib.db"), read_tags=lambda p: tags)
+    lib.refresh(root)
+    overlay = lib.landed_overlay(root)
+    assert overlay.index_folders(root, [d]) == 1
+    joined = JoinedLibrary(lib, overlay)
+    key = joined.distinct_artists()[0]["key"]
+    assert [len(b) for b in joined.artist_buckets(key)] == [1]
+    assert len(joined.presence_facts(("moon safari", key))) == 1
+    (tkey,) = lib._read("SELECT tkey_title, tkey_artist FROM tracks")
+    assert tkey[0] and len(lib.track_facts(tuple(tkey))) == 1
+    assert len(joined.track_facts(tuple(tkey))) == 1
+
+
+def _held_twice(tmp_path, spell=lambda p: p):
+    root = str(tmp_path / "lib")
+    d = os.path.join(root, "Air", "Moon Safari")
+    os.makedirs(d)
+    for n in ("1.flac", "2.flac"):
+        open(os.path.join(d, n), "w").close()
+    tags = {"album": "Moon Safari", "artist": "Air", "date": "1998", "title": "Sexy Boy"}
+    lib = LibraryIndex(str(tmp_path / "lib.db"), read_tags=lambda p: tags)
+    lib.refresh(root)
+    overlay = lib.landed_overlay(root)
+    assert overlay.index_folders(spell(root), [spell(d)]) == 1
+    return JoinedLibrary(overlay, lib)
+
+
+def test_artist_totals_count_a_folder_both_caches_hold_once(tmp_path):
+    joined = _held_twice(tmp_path)
+    (row,) = joined.distinct_artists()
+    assert (row["albums"], row["tracks"]) == (1, 2)
+    assert len(list(joined.iter_albums())) == 1
+    assert len(list(joined.iter_tracks())) == 2
+
+
+def test_a_folder_spelled_two_ways_is_one_copy(tmp_path):
+    """A share hands the folder back decomposed (NFD) while the scan stored it
+    composed: still one folder."""
+    import unicodedata
+
+    joined = _held_twice(tmp_path / "Bj\u00f6rk", spell=lambda p: unicodedata.normalize("NFD", p))
+    key = joined.distinct_artists()[0]["key"]
+    assert len(joined.presence_facts(("moon safari", key))) == 1
+    assert [len(b) for b in joined.artist_buckets(key)] == [1]

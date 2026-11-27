@@ -880,6 +880,41 @@ def test_a_short_download_batch_still_coalesces(tmp_path, monkeypatch):
     assert s._library_dl_debounce.isActive()  # the settle timer will do it
 
 
+def test_the_poll_starts_no_scan_while_downloads_are_landing(tmp_path):
+    """A full scan holds the cache, and the landed index of an album finishing
+    during it waits for that scan to end (minutes on a share). Downloads move
+    the container folders' mtimes, so the five-minute poll saw them and started
+    exactly that scan mid-download. While the download debounce is armed the
+    poll stands down: the debounce's own rebuild reconciles the same change."""
+    s = _make(tmp_path, library_source="download", download_base=str(tmp_path / "dl"))
+    rebuilds: list[int] = []
+    s._rebuild_library_index = lambda **kw: rebuilds.append(1)
+
+    class _Timer:
+        def __init__(self, active):
+            self.active = active
+
+        def isActive(self):
+            return self.active
+
+    s._library_dl_debounce = _Timer(active=True)
+    WavesBridge._on_library_poll_done(s, s._library_gen, True)
+    assert rebuilds == []
+    s._library_dl_debounce = _Timer(active=False)
+    WavesBridge._on_library_poll_done(s, s._library_gen, True)
+    assert rebuilds == [1]
+
+
+def test_the_download_ceiling_leaves_room_for_an_album(tmp_path):
+    """The ceiling forces a full scan mid-batch, and one that starts while an
+    album is still downloading holds its badge until the scan ends. The landed
+    index carries the badges during a batch now, so the ceiling is only the
+    backstop for a queue that never pauses, and it must outlast a long album."""
+    from waves.waves_ui import bridge_library
+
+    assert bridge_library._LIBRARY_DL_MAX_DEBOUNCE_S >= 600
+
+
 def test_the_watcher_sync_slot_never_touches_the_disk(tmp_path):
     """The GUI-thread half of the watcher realignment cannot block the window.
 

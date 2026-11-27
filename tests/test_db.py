@@ -115,6 +115,8 @@ def test_the_factory_wipe_takes_exactly_what_it_took_before_the_list_moved():
     by_hand |= {"app.log", "crash.log", "waves_dev.log"}
     # Added since: the page store that replaced the two JSON snapshots.
     by_hand |= {"page_cache.sqlite3", "page_cache.sqlite3-wal", "page_cache.sqlite3-shm"}
+    # Added since: the rescue copy of an unreadable waves.json.
+    by_hand |= {"waves.json.bak"}
     assert set(_FACTORY_WIPE_FILES) == by_hand
 
     def wiped(name: str) -> bool:

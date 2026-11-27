@@ -135,8 +135,9 @@ def test_a_slot_refused_both_ways_counts_once_and_stays_a_refusal():
     engine = _Engine()
     plan = [_PlanEntry(_track("std-1"), 1, 1, "101"), _PlanEntry(_track("dlx-2"), 2, 1, "102")]
     bridge._download_merge_plan(engine, SimpleNamespace(list_item=_Signal()), Event(), object(), "t", plan)
-    assert engine.unavailable_count == 2, "two refusals were counted by the engine"
-    # and neither raised: one song of two is a refusal, not a failure
+    # Not raised: one song of two is a refusal, not a failure. Two refusals,
+    # one song: the finish line says one.
+    assert engine.unavailable_count == 1, "the slot refused twice counts as one song"
 
 
 def test_a_slot_that_was_not_borrowed_has_no_fallback():

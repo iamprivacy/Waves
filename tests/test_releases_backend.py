@@ -374,6 +374,7 @@ raise_on_exc: Exception = RuntimeError("boom")
 def _releases_stub(s, artist):
     s._objs["artist"]["A"] = artist
     s._dedup_albums = lambda xs: [a for a in xs if not getattr(a, "dup", False)]
+    s._note_copied_dates = WavesBridge._note_copied_dates
     s._album_key = lambda a: a.title
     s._album_dict = lambda a: {
         "id": a.id,
@@ -2634,3 +2635,39 @@ def test_a_new_featured_release_waits_in_the_same_save_that_marks_it_seen(tmp_pa
     _bind(s, "_releases_auto_download_guests")(fresh)
     _bind(s, "_releases_drain_auto_downloads")()
     assert s.queued_tracks == ["g2:A"]
+
+
+def test_the_sweep_gives_a_release_wearing_another_albums_date_its_own_day(tmp_path):
+    # Live TIDAL facts for Veil Of Maya (2026-11-26): the rework is dated as
+    # the 2007 album it sits beside, and only the listing tells them apart.
+    import datetime as dt
+
+    from waves.waves_ui import backend
+
+    def album(rid, title, released, listed):
+        return _Album(
+            id=rid,
+            title=title,
+            name=title,
+            version=None,
+            copyright="2026 Veil of Maya",
+            artist=SimpleNamespace(id="A"),
+            release_date=dt.datetime.fromisoformat(released),
+            tidal_release_date=dt.datetime.fromisoformat(listed).replace(tzinfo=dt.UTC),
+        )
+
+    s = _stub(tmp_path)
+    _releases_stub(
+        s,
+        _fake_artist(
+            albums=[
+                album("orig", "All Things Set Aside", "2007-01-01", "2026-02-17"),
+                album("xx", "All Things Set Aside XX", "2007-01-01", "2026-11-25"),
+            ]
+        ),
+    )
+    plain = s._album_dict
+    s._album_dict = lambda a: {**plain(a), "listed": backend._listed_date_str(a)}
+    rows, failures, limited = s._artist_recent_releases("A")
+    assert not failures and not limited
+    assert {r["id"]: r["listed"] for r in rows} == {"orig": "", "xx": "2026-11-25"}
