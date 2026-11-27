@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 
 from Crypto.PublicKey import ECC
 from Crypto.Signature import eddsa
@@ -93,6 +94,34 @@ def verify(message: bytes, signature_b64: str, public_key_b64: str = UPDATE_PUBL
         verifier = eddsa.new(eddsa.import_public_key(raw_pub), "rfc8032")
         verifier.verify(message, signature)
     except (ValueError, TypeError, binascii.Error):
+        return False
+    return True
+
+
+def verify_minisign(message: bytes, signature_b64: str, public_key_b64: str) -> bool:
+    """Return ``True`` only if a Tauri ``.sig`` (base64 of a minisign file) signs ``message``.
+
+    Lavender signs its SHA256SUMS this way; ``public_key_b64`` is the
+    ``plugins.updater.pubkey`` value from its tauri.conf.json. Only the
+    prehashed ``ED`` form is accepted, the key ids must match, and the global
+    signature over the trusted comment must hold too. Fail-closed like
+    :func:`verify`: anything malformed returns ``False``.
+    """
+    try:
+        key_lines = base64.b64decode(public_key_b64, validate=True).decode("utf-8").splitlines()
+        sig_lines = base64.b64decode(signature_b64, validate=True).decode("utf-8").splitlines()
+        key = base64.b64decode(key_lines[1], validate=True)
+        sig = base64.b64decode(sig_lines[1], validate=True)
+        comment = sig_lines[2]
+        global_sig = base64.b64decode(sig_lines[3], validate=True)
+        if len(key) != 42 or key[:2] != b"Ed" or len(sig) != 74 or sig[:2] != b"ED" or sig[2:10] != key[2:10]:
+            return False
+        if not comment.startswith("trusted comment: "):
+            return False
+        verifier = eddsa.new(eddsa.import_public_key(key[10:]), "rfc8032")
+        verifier.verify(hashlib.blake2b(message).digest(), sig[10:])
+        verifier.verify(sig[10:] + comment[len("trusted comment: ") :].encode("utf-8"), global_sig)
+    except (ValueError, TypeError, IndexError, binascii.Error, UnicodeDecodeError):
         return False
     return True
 
