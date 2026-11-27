@@ -310,27 +310,34 @@ jobs:
               zip -9 -ry ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               bash ../tools/build_appimage.sh Waves ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}.AppImage &&
               cd ..
+          # Windows legs zip with Python, and only fetch make when the runner
+          # lacks it: Chocolatey's feed went down during the v0.2.11 build,
+          # installed nothing, still exited 0, and the leg died 18 minutes later
+          # at "zip: command not found". The in-app updater reads this zip with
+          # the same zipfile module.
           - os: "windows-2022"
             TARGET: "windows-2022"
             OS_ARCH: ${{needs.compute.outputs.ARCH_WINDOWS_X64}}
             CMD_BUILD: >
-              choco install zip make -y &&
+              for try in 1 2 3; do command -v make && break; choco install make -y; sleep 15; done &&
+              command -v make &&
               source $VENV &&
               poetry run make gui-waves-windows &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -9 -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              python -c "import sys, zipfile, pathlib; root = pathlib.Path(sys.argv[2]); z = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=9); [z.write(p, p.as_posix()) for p in [root, *sorted(root.rglob('*'))]]; z.close()" ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               cd ..
           - os: "windows-11-arm"
             TARGET: "windows-11-arm"
             OS_ARCH: ${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}
             CMD_BUILD: >
-              choco install zip make -y &&
+              for try in 1 2 3; do command -v make && break; choco install make -y; sleep 15; done &&
+              command -v make &&
               source $VENV &&
               poetry run make gui-waves-windows &&
               cd dist &&
               mv waves.dist Waves &&
-              zip -9 -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
+              python -c "import sys, zipfile, pathlib; root = pathlib.Path(sys.argv[2]); z = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=9); [z.write(p, p.as_posix()) for p in [root, *sorted(root.rglob('*'))]]; z.close()" ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} Waves &&
               cd ..
     runs-on: ${{ matrix.os }}
     steps:
